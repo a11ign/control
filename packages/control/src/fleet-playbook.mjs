@@ -257,10 +257,15 @@ async function guardProtocolChange(chosen) {
   // machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
   const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(
     readFileSync(resolve(workerSourceDir(), "capture-core.mjs"), "utf8"))?.[1] ?? null;
-  // `{ urls, source }`, and the SOURCE is reported: "the fleet agrees" means nothing until you know
-  // which fleet was asked. `workerUrls` prefers A11Y_WORKER(S), then the local UTM pool, then
-  // inventory.yml — so an env var left set points this guard at machines that are not the ones about to
-  // be deployed to.
+  // THE INVENTORY, DIRECTLY — deliberately not `resolveWorkerPool`, and this is the one place that is
+  // right. That resolver answers "which workers should I use", and honours `A11Y_WORKER(S)` first because
+  // naming workers means you are managing them. This guard asks a different question: "am I about to
+  // change the protocol on the machines THIS DEPLOY WILL TOUCH", and Ansible takes its hosts from
+  // inventory.yml regardless of anything in the environment. An env var left set would point the guard at
+  // machines the deploy is not going to reach, and pass.
+  //
+  // The SOURCE is still reported, because "the fleet agrees" means nothing until you know which fleet was
+  // asked. It is a literal here precisely because there is no choice being made.
   const urls = inventoryWorkerUrls();
   const source = "inventory.yml";
   const verdict = protocolVerdict({
