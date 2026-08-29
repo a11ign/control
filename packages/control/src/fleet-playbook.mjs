@@ -37,6 +37,8 @@
  * during one afternoon".
  */
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 // RELATIVE, NEVER `@a11y-witness/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
@@ -45,6 +47,12 @@ import { pathToFileURL } from "node:url";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
+import { workerUrls } from "../../worker-fleet/src/check-worker-code.mjs";
+// BY PATH, never by package name. The control plane has no `node_modules` — that is ADR 0012's boundary,
+// and `control-has-no-dependencies.test.ts` enforces it. `deploy.yml` imports this same module by path for
+// exactly this reason. Caught here by that test on the first run.
+import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
 
 /**
  * `--serial=` and `--limit=` decide how many of twelve machines an operation touches at once, and
@@ -53,7 +61,8 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
  *
  * An unrecognised flag is otherwise IGNORED, so it runs the default and reports success.
  */
-refuseUnknownFlags(["--playbook=", "--ref=", "--limit=", "--serial="], { entry: import.meta.url, command: "npm run fleet:deploy" });
+refuseUnknownFlags(["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change"],
+  { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
 const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST || "REDACTED-INTERNAL-ADDRESS";
@@ -191,8 +200,44 @@ function parseArgs() {
   return { chosen, limitFlag, serialFlag, ref };
 }
 
-function main() {
+/**
+ * Would this deploy change the protocol the fleet is serving? — asked BEFORE anything is pushed.
+ *
+ * Only `deploy.yml` ships worker code. `sleep.yml` and `provision-role.yml` cannot move
+ * `CAPTURE_PROTOCOL_VERSION`, so gating them would be a guard that fires where the risk is not.
+ *
+ * Imported from the worker package rather than restated here: the version lives beside the capture code,
+ * and a second copy of "what the current protocol is" is precisely the fact-stated-twice shape.
+ *
+ * @param {string} chosen the playbook about to run
+ * @returns {Promise<void>} resolves if the deploy may proceed; exits the process if not
+ */
+async function guardProtocolChange(chosen) {
+  if (chosen !== "deploy.yml") return;
+  // READ AS TEXT, NEVER IMPORTED. `capture-core.mjs` imports guidepup, which throws
+  // `No available supported screen readers` at import on any host without one — and on a Mac VoiceOver
+  // makes that throw invisible, which is exactly why `deploy-worker.mjs` carries the same warning and why
+  // `no-win32-imports.test.ts` had to find it. A control-plane script must not depend on the operator's
+  // machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
+  const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(
+    readFileSync(resolve(workerSourceDir(), "capture-core.mjs"), "utf8"))?.[1] ?? null;
+  // `{ urls, source }`, and the SOURCE is reported: "the fleet agrees" means nothing until you know
+  // which fleet was asked. `workerUrls` prefers A11Y_WORKER(S), then the local UTM pool, then
+  // inventory.yml — so an env var left set points this guard at machines that are not the ones about to
+  // be deployed to.
+  const { urls, source } = workerUrls({});
+  const verdict = protocolVerdict({
+    local,
+    served: await servedProtocols(urls),
+    allowed: process.argv.includes("--allow-protocol-change"),
+  });
+  if (verdict.message) process.stdout.write(`${verdict.message}  asked ${urls.length} worker(s) from ${source}.\n`);
+  if (verdict.refuse) process.exit(3);
+}
+
+async function main() {
   const { chosen, limitFlag, serialFlag, ref } = parseArgs();
+  await guardProtocolChange(chosen);
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
   // to a commit is the only comparison that settles "is it running my code?" — the first version compared
@@ -247,7 +292,7 @@ function main() {
   process.stdout.write(`\n  ${chosen} completed; the PLAY RECAP above is the per-host result.\n`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
 
 export { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS,
   DEFAULT_PLAYBOOK_TIMEOUT_MS };
