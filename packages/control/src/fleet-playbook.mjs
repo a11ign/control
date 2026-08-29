@@ -48,11 +48,18 @@ import { pathToFileURL } from "node:url";
 // machines it described.
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
-import { workerUrls } from "../../worker-fleet/src/check-worker-code.mjs";
-// BY PATH, never by package name. The control plane has no `node_modules` — that is ADR 0012's boundary,
-// and `control-has-no-dependencies.test.ts` enforces it. `deploy.yml` imports this same module by path for
-// exactly this reason. Caught here by that test on the first run.
+// BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
+// 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
+// The first version of this reached `workerUrls` in `check-worker-code.mjs`, which imports
+// `@a11y-witness/nvda-worker` by package name, and `fleet:deploy` died on the control plane with
+// ERR_MODULE_NOT_FOUND while passing on a laptop that has node_modules. A gate that does not exercise
+// what ships, for the fifth time in this repo.
+//
+// `fleet-env.mjs` imports only node builtins and its own siblings. And the inventory is the RIGHT source
+// here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
+// that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
+import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
 
 /**
  * `--serial=` and `--limit=` decide how many of twelve machines an operation touches at once, and
@@ -225,7 +232,8 @@ async function guardProtocolChange(chosen) {
   // which fleet was asked. `workerUrls` prefers A11Y_WORKER(S), then the local UTM pool, then
   // inventory.yml — so an env var left set points this guard at machines that are not the ones about to
   // be deployed to.
-  const { urls, source } = workerUrls({});
+  const urls = inventoryWorkerUrls();
+  const source = "inventory.yml";
   const verdict = protocolVerdict({
     local,
     served: await servedProtocols(urls),

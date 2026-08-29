@@ -40,21 +40,42 @@ test("NO THIRD-PARTY DEPENDENCIES ARE DECLARED — the whole reason this package
   }
 });
 
-test("NOTHING IS IMPORTED BY PACKAGE NAME, because that needs node_modules and there is none", () => {
+test("NOTHING IS IMPORTED BY PACKAGE NAME, TRANSITIVELY — one hop is not a boundary", () => {
   // The failure prose would miss: a package-name import works on a laptop and CRASHES on the control
   // plane. `../../worker-fleet/src/cli-flags.mjs` resolves from a raw checkout; the export path does not.
+  //
+  // TRANSITIVE, and that was learned by breaking it. This test checked only `packages/control`'s OWN
+  // imports, so when `fleet-playbook.mjs` began importing `check-worker-code.mjs` BY PATH — which passes
+  // a one-hop check — it dragged in that file's `@a11y-witness/nvda-worker` import and `fleet:deploy`
+  // died on the control plane with ERR_MODULE_NOT_FOUND. It passed here the whole time, because a laptop
+  // has node_modules. A gate that does not exercise what ships is not a gate, for the fifth time in this
+  // repo; the honest fix is to follow the graph, not to check the first hop and trust the rest.
+  const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const offenders: string[] = [];
-  for (const file of modules()) {
-    const source = readFileSync(new URL(file, import.meta.url), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const seen = new Set<string>();
+  /** Every module reachable from packages/control, following relative imports across package boundaries. */
+  const walk = (fileUrl: URL, via: string[]): void => {
+    const key = fileUrl.pathname;
+    if (seen.has(key)) return;
+    seen.add(key);
+    let source: string;
+    try { source = strip(readFileSync(fileUrl, "utf8")); } catch { return; }
     for (const [, spec] of source.matchAll(/\bfrom\s+"([^"]+)"/g)) {
-      if (spec.startsWith("node:") || spec.startsWith(".")) continue;
-      offenders.push(`${file} imports "${spec}"`);
+      if (spec.startsWith("node:")) continue;
+      if (!spec.startsWith(".")) {
+        offenders.push(`${[...via, key.split("/").slice(-1)[0]].join(" -> ")} imports "${spec}"`);
+        continue;
+      }
+      walk(new URL(spec, fileUrl), [...via, key.split("/").slice(-1)[0]]);
     }
-  }
+  };
+  for (const file of modules()) walk(new URL(file, import.meta.url), []);
   assert.deepEqual(offenders, [],
-    "the control plane runs from a raw git checkout with no `npm install`, so every import must resolve "
-    + "without one: node: builtins and RELATIVE paths only");
+    "the control plane runs from a raw git checkout with no `npm install`, so every import REACHABLE from "
+    + "it must resolve without one: node: builtins and relative paths only. The chain is shown.");
+  assert.ok(seen.size > modules().length,
+    `the walk followed no imports at all (${seen.size} files from ${modules().length} entry points), so it `
+    + "is examining only the entry modules and the transitive claim is unproven");
 });
 
 test("the discovery is real, so this cannot pass having examined nothing", () => {
