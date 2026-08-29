@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS }
+import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
+  onTheControlPlane }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -138,4 +139,32 @@ test("the provision stamp is the ENVIRONMENT, not the moment it was applied", ()
   // Still RECORDED, because losing it would trade one problem for a diagnostic gap.
   assert.match(code, /provision-commit\.txt/,
     "the commit must still be written somewhere for diagnosis, just not into the key");
+});
+
+/**
+ * A MACHINE MUST NOT SSH TO ITSELF — and this is how a fleet-bearing pipeline broke.
+ *
+ * `lab:pipeline` dispatches itself to the control plane as a systemd unit and re-runs there with
+ * `--local`, so every stage of a fleet-bearing pipeline executes ON the box this script otherwise SSHes
+ * to. Root-to-root over the lab key is not authorised there, and the failure reads `Permission denied
+ * (publickey,password)` — which looks like a broken key rather than a machine talking to itself.
+ *
+ * Measured 2026-08-29: `--pipeline=verify` died at stage 1 of 4 with exactly that, twice, and the second
+ * time only because the first failure (a package-name import) had masked it.
+ */
+test("running ON the control plane is detected, so commands go to a shell and not through ssh", () => {
+  const here = { en0: [{ address: "REDACTED-INTERNAL-ADDRESS" }], lo0: [{ address: "127.0.0.1" }] };
+  assert.equal(onTheControlPlane(here, "REDACTED-INTERNAL-ADDRESS"), true);
+});
+
+test("a laptop on the same LAN is NOT the control plane", () => {
+  // The failure that would matter more: deciding we are the control plane when we are not sends every
+  // deploy command to the wrong filesystem, silently, and it would look like a checkout that never moved.
+  const laptop = { en0: [{ address: "REDACTED-INTERNAL-ADDRESS" }], lo0: [{ address: "127.0.0.1" }] };
+  assert.equal(onTheControlPlane(laptop, "REDACTED-INTERNAL-ADDRESS"), false);
+});
+
+test("an interface with no address does not throw or match", () => {
+  // `networkInterfaces()` returns undefined for an interface in some states, and `.flat()` keeps the hole.
+  assert.equal(onTheControlPlane({ en0: undefined, lo0: [{ }] }, "REDACTED-INTERNAL-ADDRESS"), false);
 });

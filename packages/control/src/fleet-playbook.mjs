@@ -40,6 +40,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { networkInterfaces } from "node:os";
 // RELATIVE, NEVER `@a11y-witness/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -138,10 +139,38 @@ const PLAYBOOK_TIMEOUT_MS = { "provision-role.yml": 4 * 60 * 60 * 1000 };
 const DEFAULT_PLAYBOOK_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
+ * ARE WE ALREADY ON THE CONTROL PLANE?
+ *
+ * `lab:pipeline` dispatches itself to the control plane as a systemd unit and re-runs there with
+ * `--local`, so every stage of a fleet-bearing pipeline executes ON the box this script otherwise SSHes
+ * to. Root-to-root over the lab key is not authorised there — nor should it be — and the failure reads
+ * `Permission denied (publickey,password)`, which looks like a broken key rather than a machine talking
+ * to itself.
+ *
+ * Detected from the interfaces rather than the hostname: `A11Y_CONTROL_HOST` is an address, a hostname
+ * may not resolve to it, and the question being asked is literally "is that address mine".
+ *
+ * @param {Record<string, {address?: string}[] | undefined>} [interfaces] injectable, so this is testable
+ *        off the control plane — the alternative is a function whose only test is running it there
+ * @param {string} [host]
+ * @returns {boolean}
+ */
+function onTheControlPlane(interfaces = networkInterfaces(), host = CONTROL_PLANE) {
+  return Object.values(interfaces).flat().some((iface) => iface?.address === host);
+}
+
+/**
  * @param {string} command
  * @param {{ capture?: boolean, timeoutMs?: number }} [options]
  */
 function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS } = {}) {
+  // Locally when this IS the control plane. `sh -c` and not the ssh path, because ssh to yourself needs a
+  // key you should not have to install to talk to your own filesystem.
+  if (onTheControlPlane()) {
+    return execFileSync("sh", ["-c", `cd /root && ${command}`], {
+      encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
+    });
+  }
   const args = ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
     // The connection must survive a long silent stretch: an NVDA install prints nothing for minutes and a
     // dropped SSH would read as a failed provision. Keepalives are cheap and the alternative is a
@@ -303,4 +332,4 @@ async function main() {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
 
 export { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS,
-  DEFAULT_PLAYBOOK_TIMEOUT_MS };
+  DEFAULT_PLAYBOOK_TIMEOUT_MS, onTheControlPlane };
