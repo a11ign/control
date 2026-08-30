@@ -490,6 +490,14 @@
       applicability-audit:
         argv: ["{{ lab_python }}", "packages/scorer/python/audit_applicability.py"]
         timeout: 900
+      # HOW MANY FEATURE ZEROS ARE CAPTURE ARTEFACTS? Every structured feature is `float(bool(channel))`
+      # and `any([])` is False, so a 0 means both "the page has none" and "nothing looked". `landmark_present`
+      # was DELETED because 16 of its 16 zeros were truncated sweeps; no other channel has ever been measured.
+      # A job because it needs the AUTHORITATIVE captures -- a laptop's copy answers `unknown` everywhere,
+      # which is honest and says nothing about the pages. Reports, never blocks.
+      observation-ambiguity:
+        argv: ["/usr/bin/npm", "run", "--silent", "corpus:observation-ambiguity"]
+        timeout: 900
       rules-coverage:
         argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
         timeout: 900
