@@ -403,10 +403,25 @@ function dispatchToControlUnlessLocal() {
   // exactly how the first attempt failed, with `cd: a11y-witness: No such file or directory`.
   const remote = `cd ${CONTROL_CHECKOUT} && git fetch --quiet origin && git checkout --quiet ${ref} `
     + `&& git merge --quiet --ff-only origin/${ref} `
-    + `&& systemctl reset-failed ${unit} 2>/dev/null; `
-    // The unit name is the LOCK, exactly as it is for a lab job: a second operator dispatching the same
+    // THE LOCK IS "RUNNING", NOT "LOADED", and reading it wrong makes every pipeline single-use.
+    //
+    // The unit name is the lock, exactly as it is for a lab job: a second operator dispatching the same
     // pipeline is REFUSED rather than silently running it twice against one fleet. That property is why
-    // this belongs on one host and not on N laptops.
+    // this belongs on one host and not on N laptops -- and it is about a unit that is RUNNING.
+    //
+    // `--remain-after-exit` leaves a SUCCESSFUL unit `active (exited)`, which is loaded and not failed, so
+    // `reset-failed` alone never cleared it and `systemd-run --unit=` refused the name for ever after.
+    // Measured 2026-08-30, the second `--pipeline=verify` of the day: `Failed to start transient service
+    // unit: Unit a11y-pipeline-verify.service was already loaded or has a fragment file` -- which reads as
+    // a broken pipeline and means the previous one SUCCEEDED. CLAUDE.md states the remedy outright,
+    // "systemctl stop + systemctl reset-failed before re-running a unit name", and this had half of it.
+    //
+    // So: refuse a RUNNING unit by name, and reap an exited one. Those are the two states its own comment
+    // said the launcher must distinguish.
+    + `&& if [ "$(systemctl show -p SubState --value ${unit} 2>/dev/null)" = "running" ]; then `
+    + `echo "REFUSING: ${unit} is already running on this host. \`lab:pipeline\` is locked by unit name so `
+    + `one fleet is never driven by two pipelines. Watch it with: journalctl -fu ${unit}"; exit 3; fi `
+    + `&& systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
     + `cd ${CONTROL_CHECKOUT} && systemd-run --unit=${unit} --remain-after-exit `
     + `--working-directory=${CONTROL_CHECKOUT} `
     // PATH IS SET EXPLICITLY, and this is not defensive. A systemd unit gets a minimal PATH --
