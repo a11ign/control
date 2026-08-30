@@ -62,7 +62,7 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
  * An unrecognised flag is otherwise IGNORED — every CLI here parses argv by looking for the flags it
  * knows — so it runs the default and reports success. See `cli-flags.mjs`.
  */
-refuseUnknownFlags(["--pipeline=", "--ref=", "--only=", "--list", "--local"],
+refuseUnknownFlags(["--pipeline=", "--ref=", "--only=", "--list", "--local", "--status", "--log"],
   { entry: import.meta.url, command: "npm run lab:pipeline" });
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -384,7 +384,94 @@ const CONTROL_CHECKOUT = "/root/a11y-witness";
  *
  * `--local` remains for a working tree, and the friction of a pushed ref is the correct friction.
  */
+/**
+ * WHAT IS THE PIPELINE DOING RIGHT NOW — and why this is a command rather than a printed instruction.
+ *
+ * Every other moving part in this project answers that with one command: `fleet:status` for the boxes,
+ * `lab:status` for a job, `doctor` for the local environment, `worker:code` for what the guests run,
+ * `lab:inventory` for the corpus. The PIPELINE -- the thing that sequences all of them -- printed two
+ * `ssh root@...` lines and left the operator to type them.
+ *
+ * That is this repo's own rule about housekeeping applied to observation: a step somebody has to hand-roll
+ * is a step that gets hand-rolled differently each time, and improvising around a tool the repo already has
+ * is itself a defect source -- the three `journalctl` misreads that cost a run each are the record.
+ *
+ * SubState is read FIRST and alone decides. `Result` and `ExecMainStatus` are populated WHILE a unit runs,
+ * so quoting them next to a running job reports success for work in flight -- and under
+ * `--remain-after-exit` an exited unit reads `active` for ever, so `is-active` can never be the question.
+ */
+/** Ask the control plane for one unit's state, as NAMED properties. @returns {Record<string,string>} */
+function unitProperties(/** @type {string} */ unit) {
+  // `Property=Value` lines, NEVER `--value`. `systemctl show` emits properties in ITS OWN alphabetical
+  // order rather than the order asked for, so positional reading is wrong in a way that looks right:
+  // measured 2026-08-30, the first version of this printed `SUCCESS -- Result=0` for a pipeline whose
+  // SubState was `running`, because it had read Description into subState and the command line into
+  // ExecMainStatus. That is the precise defect this whole file warns about -- "Result and ExecMainStatus
+  // are populated WHILE a unit runs" -- committed by the tool written to prevent it.
+  const seen = spawnSync("ssh", ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no",
+    "-o", "ConnectTimeout=10", `root@${CONTROL_PLANE}`,
+    `systemctl show -p SubState -p Result -p ExecMainStatus -p Description ${unit}`], { encoding: "utf8" });
+  if (seen.status !== 0) {
+    process.stdout.write(`could not reach ${CONTROL_PLANE}: ${(seen.stderr || "").trim()}\n`);
+    process.exit(2);
+  }
+  return Object.fromEntries(seen.stdout.trim().split("\n")
+    .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+}
+
+/** The journal for one unit, printed as bytes rather than through Ansible's YAML wrapping. */
+function printUnitLog(/** @type {string} */ unit) {
+  const seen = spawnSync("ssh", ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no",
+    "-o", "ConnectTimeout=10", `root@${CONTROL_PLANE}`,
+    `journalctl -u ${unit} --no-pager -n 300`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  process.stdout.write(seen.stdout || "");
+  process.exit(seen.status ?? 0);
+}
+
+/**
+ * WHAT IS THE PIPELINE DOING RIGHT NOW — and why this is a command rather than a printed instruction.
+ *
+ * Every other moving part answers that with one command: `fleet:status` for the boxes, `lab:status` for a
+ * job, `doctor` for the local environment, `worker:code` for what the guests run, `lab:inventory` for the
+ * corpus. The PIPELINE -- the thing that sequences all of them -- printed two `ssh root@...` lines and
+ * left the operator to type them.
+ *
+ * That is this repo's housekeeping rule applied to observation: a step somebody hand-rolls is one they
+ * hand-roll differently each time, and improvising around a tool the repo already has is itself a defect
+ * source -- the three `journalctl` misreads that cost a run each are the record.
+ */
+function reportPipelineState() {
+  const named = process.argv.find((a) => a.startsWith("--pipeline="))?.slice("--pipeline=".length);
+  const unit = `a11y-pipeline-${(named || "run").replace(/[^a-z0-9-]/gi, "")}`;
+  if (process.argv.includes("--log")) return printUnitLog(unit);
+
+  const shown = unitProperties(unit);
+  process.stdout.write(`${unit} on ${CONTROL_PLANE}\n  ${shown.Description || "(no description)"}\n`);
+
+  // SubState alone decides, and it is read before anything else is even printed. Under
+  // `--remain-after-exit` an exited unit reads `active` for ever, so `ActiveState` and `is-active` can
+  // never be the question.
+  if (!shown.SubState || shown.SubState === "dead") {
+    // NEVER STARTED and FINISHED-THEN-REAPED are different answers and this cannot tell them apart, so it
+    // says which claim it is making rather than inventing the other.
+    process.stdout.write("  NOT LOADED — no pipeline of this name has run since the last reap.\n"
+      + `  Start one with: npm run lab:pipeline -- --pipeline=${named || "<name>"}\n`);
+    process.exit(3);
+  }
+  if (shown.SubState === "running") {
+    process.stdout.write("  RUNNING — Result and ExecMainStatus are populated already and mean nothing "
+      + "yet, so they are deliberately not shown.\n"
+      + `  Output so far: npm run lab:pipeline -- --status --log --pipeline=${named || "<name>"}\n`);
+    process.exit(0);
+  }
+  const ok = shown.Result === "success" && shown.ExecMainStatus === "0";
+  process.stdout.write(`  ${ok ? "SUCCEEDED" : "FAILED"} — SubState=${shown.SubState} `
+    + `Result=${shown.Result} ExecMainStatus=${shown.ExecMainStatus}\n`);
+  process.exit(ok ? 0 : 1);
+}
+
 function dispatchToControlUnlessLocal() {
+  if (process.argv.includes("--status")) return reportPipelineState();
   if (process.argv.includes("--local")) {
     process.stdout.write("running the sequence HERE (--local) — a dropped connection ends it; "
       + "each dispatched stage still survives on its own host\n");
@@ -397,8 +484,9 @@ function dispatchToControlUnlessLocal() {
   // the ssh after 100 s: the sequence died with it, which is the same "the orchestration did not survive
   // while every unit did" that made this item necessary. `--remain-after-exit` so the exit code is
   // readable afterwards; `--collect` would unload the unit and discard it at the moment it matters.
-  const unit = `a11y-pipeline-${(args.find((a) => a.startsWith("--pipeline="))
-    ?.slice("--pipeline=".length) || "run").replace(/[^a-z0-9-]/gi, "")}`;
+  const pipelineName = (args.find((a) => a.startsWith("--pipeline="))
+    ?.slice("--pipeline=".length) || "run").replace(/[^a-z0-9-]/gi, "");
+  const unit = `a11y-pipeline-${pipelineName}`;
   // ABSOLUTE, because the second `cd` below runs from inside the first when they are relative — which is
   // exactly how the first attempt failed, with `cd: a11y-witness: No such file or directory`.
   const remote = `cd ${CONTROL_CHECKOUT} && git fetch --quiet origin && git checkout --quiet ${ref} `
@@ -436,8 +524,8 @@ function dispatchToControlUnlessLocal() {
     "-o", "ConnectTimeout=10", `root@${CONTROL_PLANE}`, remote], { stdio: "inherit" });
   if (started.status !== 0) process.exit(started.status ?? 2);
   process.stdout.write(`\nstarted as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
-    + `  follow:  ssh root@${CONTROL_PLANE} journalctl -fu ${unit}\n`
-    + `  state:   ssh root@${CONTROL_PLANE} systemctl show -p SubState -p Result ${unit}\n`
+    + `  state:   npm run lab:pipeline -- --status --pipeline=${pipelineName}\n`
+    + `  output:  npm run lab:pipeline -- --status --log --pipeline=${pipelineName}\n`
     + "  SubState is the authoritative field: Result and ExecMainStatus are populated WHILE a unit runs "
     + "and mean nothing until SubState leaves 'running'.\n");
   // Following the journal is the OPERATOR's choice, and killing the follow must never kill the run --
