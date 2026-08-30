@@ -119,10 +119,15 @@
       # RECORD the veto baseline, against the SHIPPED weights. A separate job from `shortcuts` because it
       # WRITES a claim that every veto it records is understood and accepted -- the same reason
       # `rules-real-pages-update` is separate from `rules-real-pages`. Never a side effect of auditing.
+      # THROUGH THE NPM SCRIPT, because the classification it records is DERIVED and this job was the one
+      # place that skipped deriving it. `scorer:shortcuts` emits `runs/unclosable-vetoes.json` first; this
+      # called the Python directly, so the authoritative baseline -- tracked, and a release gate -- was
+      # written against whatever map happened to be on the lab's disk. The audit refuses an ABSENT map and
+      # cannot see a STALE one, so the failure is silent by construction. Measured 2026-08-30: an entry
+      # extended from 5 features to 10 landed in git, the baseline was re-recorded, and the recorded
+      # classification did not move. Same rule as `corpus:grants-audit`: the chain lives in the npm script.
       shortcuts-baseline:
-        argv: ["{{ lab_python }}", "packages/lab/scripts/audit-scorer-shortcuts.py",
-               "--data", "runs/screenreader-dataset/with-realism.jsonl",
-               "--update-baseline"]
+        argv: ["/usr/bin/npm", "run", "--silent", "scorer:shortcuts:baseline"]
         timeout: 900
       acceptance:
         params: {out: optional}
