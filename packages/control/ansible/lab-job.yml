@@ -347,7 +347,7 @@
       # PIPELINE is deterministic, and a second guest is a second variable.
       stability:
         params: {worker: required}
-        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
         setenv: ["A11Y_WORKER={{ lab_named_worker }}"]
         timeout: 5400
       # SCORE THE SHIPPED MODEL FROM A COPY, which is what `release:gate` needs and could not do.
@@ -429,10 +429,16 @@
       # cold-start NVDA costs ~25 s more. The unit name is the lock, so a second dispatch is refused rather
       # than queued -- see lab-stop.yml if one must be ended.
       gate-stability:
-        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
         timeout: 3600
+      # `--local` IS MANDATORY HERE AND IS NOT AN ESCAPE HATCH. `dispatchUnlessLocal` makes the control
+      # plane the DEFAULT, which is right for an operator running the gate from a laptop -- but this entry
+      # IS the control plane's dispatch, so without the flag the script dispatches again from inside the
+      # job it was dispatched into. Measured 2026-08-30: `sh: 1: ansible-playbook: not found`, exit 127,
+      # which reads like a broken lab rather than a job wired to call itself. Both dispatching gates need
+      # it; `lab-job.test.ts` now discovers them rather than trusting this comment.
       gate-probe-order:
-        argv: ["/usr/bin/node", "packages/lab/scripts/gate-probe-order.mjs"]
+        argv: ["/usr/bin/node", "packages/lab/scripts/gate-probe-order.mjs", "--local"]
         timeout: 3600
       rules-real-pages:
         argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages"]
