@@ -41,7 +41,7 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, role, shard, model, worker, sample]
+    lab_caller_params: [only, out, role, shard, model, worker, sample, subtype, feature]
     # A parameter that reaches its command through a DERIVED FACT rather than by its own name. The
     # derivation below reads the job's own command, and a command saying `{{ lab_named_worker }}` cannot
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
@@ -508,6 +508,16 @@
       # which is honest and says nothing about the pages. Reports, never blocks.
       observation-ambiguity:
         argv: ["/usr/bin/npm", "run", "--silent", "corpus:observation-ambiguity"]
+        timeout: 900
+      # WHY does a feature read what it reads on a subtype's positives? `scorer:shortcuts` says a head
+      # vetoed one and `corpus:starvation` says one will be constant; NEITHER says why, and the three
+      # possible answers -- definitional, a probe that never ran, a thin corpus -- need opposite work.
+      # A job because it needs the AUTHORITATIVE export: a laptop's copy predates the parse and the
+      # featurizer refuses it by name.
+      explain-feature:
+        params: {subtype: required, feature: required}
+        argv: ["/usr/bin/npm", "run", "--silent", "scorer:explain-feature", "--",
+               "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]
         timeout: 900
       rules-coverage:
         argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
