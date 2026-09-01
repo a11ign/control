@@ -81,6 +81,11 @@
       # Same lesson as `grants-audit`, one report along: "a report that exists only as stdout is one a job
       # runner can lose. Write it to runs/ and make it fetchable."
       unclosable-vetoes: "runs/unclosable-vetoes.json"
+      # THE CLOSABLE ones, which is the half `promote` refuses on and the half nothing could show. The
+      # audit printed only the worst veto per subtype and wrote no report at all; the pairs existed solely
+      # in a truncated transcript. Same remedy as `grants-audit`, and the reason it was needed twice is
+      # that "write it to runs/" is a habit rather than a mechanism.
+      shortcuts: "runs/scorer-shortcuts.json"
       # THE PROMOTED WEIGHTS THEMSELVES. `promote:gated` runs on the lab, because that is the only place
       # the candidate and the code both exist -- and it deliberately does not commit, since promoting is a
       # MAJOR release of @a11y-witness/scorer and a job that can push is a job that can release by
