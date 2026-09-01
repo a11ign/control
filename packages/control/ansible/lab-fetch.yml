@@ -68,6 +68,19 @@
       # committed here — the same trap the promoted weights spring, and the reason `lab:reset` exists.
       # Fetchable so the round trip is a CLI operation rather than an ssh one.
       shortcuts-baseline: "packages/lab/scripts/scorer-shortcuts.baseline.json"
+      # THE VETO DETAIL, and it was unreachable at the moment it mattered. `promote` refuses on a veto
+      # REGRESSION and names only the worst one per subtype; the pairs go to `runs/unclosable-vetoes.json`
+      # and the transcript truncates the closable list at "... and 13 more".
+      #
+      # Measured 2026-09-01: `2.4.2:route-title-stale` went 1 -> 5 closable vetoes with its positives
+      # unchanged at 14 and its worst veto the same feature at the same weight — so the corpus did not move
+      # and the retrain did. Deciding whether those four are genuinely closable, or belong in the unclosable
+      # map beside the identical ones already classified for 2.1.1 and 2.1.2, needs the LIST. There was no
+      # way to get it without an ssh shell, which is what this file exists to remove.
+      #
+      # Same lesson as `grants-audit`, one report along: "a report that exists only as stdout is one a job
+      # runner can lose. Write it to runs/ and make it fetchable."
+      unclosable-vetoes: "runs/unclosable-vetoes.json"
       # THE PROMOTED WEIGHTS THEMSELVES. `promote:gated` runs on the lab, because that is the only place
       # the candidate and the code both exist -- and it deliberately does not commit, since promoting is a
       # MAJOR release of @a11y-witness/scorer and a job that can push is a job that can release by
