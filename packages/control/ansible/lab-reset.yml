@@ -230,10 +230,24 @@
         # trap `lab-log.yml` hit an hour earlier with a pipeline. Multi-line shell needs `|`.
         cmd: |
           rc=0
-          printf '%s\n' "$LAB_REMOVALS" | while IFS= read -r path; do
+          # FED BY A HEREDOC, NOT A PIPE. `... | while` runs the loop in a SUBSHELL, so `rc=1` set inside
+          # it is discarded and `exit $rc` was unconditionally 0 -- dead code that read as live. It never
+          # showed because `failed_when: false` means the assert below decides the play, so the only
+          # symptom was a status nobody consumed. Measured by running it; the pipe form is the shape.
+          while IFS= read -r path; do
             [ -n "$path" ] || continue
             before=$(printf '%s\n' "$LAB_DIRTY_BEFORE" | grep -F -- " $path" | head -1 | cut -c1-2)
-            if git status --porcelain -- "$path" | grep -q '^??'; then
+            # ALREADY GONE, AND IT WAS UNTRACKED. The task above ("Remove untracked files that ORIGIN
+            # already carries") deletes exactly this class the moment origin has a copy -- which is what
+            # the operator does to make the removal safe. So the ordinary success path for a pushed
+            # changeset is that this task finds nothing left, and the first version called that
+            # "neither untracked nor a tracked modification" and failed the play. Measured 2026-09-01:
+            # the file WAS removed, the play reported "Nothing was changed" and exited 2, and a caller
+            # using this as a precondition would have concluded the lab was still blocked. Doing the work
+            # and then denying it is worse than refusing, because the next step taken is the wrong one.
+            if [ ! -e "$path" ] && [ "$before" = "??" ]; then
+              echo "already removed $path (the origin-carries sweep took it first — nothing left to do)"
+            elif git status --porcelain -- "$path" | grep -q '^??'; then
               rm -f -- "$path" && echo "removed $path"
             elif [ -n "$before" ] && [ "$before" != "??" ]; then
               echo "restored $path (a TRACKED modification, discarded by the checkout above)"
@@ -241,7 +255,9 @@
               echo "REFUSED: $path was neither untracked nor a tracked modification"
               rc=1
             fi
-          done
+          done <<LAB_REMOVALS_EOF
+          $LAB_REMOVALS
+          LAB_REMOVALS_EOF
           exit $rc
         chdir: "{{ lab_repo_path }}"
         # THE PRE-CHECKOUT PORCELAIN, handed to the shell rather than parsed in Jinja.
@@ -260,7 +276,9 @@
         LAB_DIRTY_BEFORE: "{{ dirty.stdout | default('') }}"
         LAB_REMOVALS: "{{ lab_removals | join('\n') }}"
       register: removed_named
-      changed_when: "'removed ' in (removed_named.stdout | default('')) or 'restored ' in (removed_named.stdout | default(''))"
+      changed_when: >-
+        {{ ('removed ' in (removed_named.stdout | default('')) or 'restored ' in (removed_named.stdout | default('')))
+           and 'already removed ' not in (removed_named.stdout | default('')) }}
       # A refusal must REPORT, not abort. `exit 1` failed the play before the reporting tasks below, so
       # the operator saw an Ansible module error and no reason — three times on 2026-08-26 I read
       # "STILL DIRTY" about a file the play had just declined to explain. The task's own stdout carries
