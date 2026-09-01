@@ -199,7 +199,23 @@
         # cheaply, and ADDING a case is the corpus change most worth proving before paying for the whole
         # corpus. The `capture` job has always used `:fresh`; this one was the odd one out, against this
         # repo's own rule that "capturing without regenerating is testing the previous commit".
-        argv: ["/usr/bin/npm", "run", "training:capture:fresh", "--", "--only={{ only }}"]
+        # `--no-cache`, and WITHOUT it this job could not do the thing it exists for.
+        #
+        # Captures are cached, so `training:capture --only=<case>` on a case that already has one returns
+        # the STORED capture and reports success. A job whose stated purpose is "prove a corpus change
+        # cheaply" then proves nothing: it re-serves the evidence from before the change.
+        #
+        # Found 2026-09-01 chasing a `grants-audit` failure. One capture of
+        # `headings-none-refunds+also-filename-alt` was pathological -- 330 s and every sweep silent -- and
+        # this job "reproduced" it twice, which read as a page defect and sent me hunting one. It was the
+        # cache both times. Captured with `--no-cache` against the same fleet the same minute: 22 s,
+        # 31 lines, `graphics 1/1`, `observed.graphics.complete: true`. The page was always fine.
+        #
+        # Cheap, because this job is bounded to a handful of cases by `--only`; the corpus-wide runs keep
+        # their cache. Same rule the acceptance runs already follow -- `DATASET_KIND=acceptance` refuses
+        # the cache outright, "because those runs exist to test whether NVDA's output is still stable",
+        # which is exactly what this one is for.
+        argv: ["/usr/bin/npm", "run", "training:capture:fresh", "--", "--only={{ only }}", "--no-cache"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
         # Minutes, not hours: this exists precisely because it is small.
         timeout: 3600
