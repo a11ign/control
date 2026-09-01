@@ -204,6 +204,18 @@
         mode: "0644"
       delegate_to: localhost
 
+    # AND WHERE IT CAME FROM, which for a GLOBBED artifact is the only place its real name survives.
+    #
+    # `promoted-changeset` is `.changeset/promote-*.md` and the local copy is flattened to
+    # `candidate.promoted-changeset.md`, so the name `promote:model` chose is discarded at exactly the
+    # moment it matters. CLAUDE.md already records why that name is load-bearing: commit the file under
+    # any other name and the lab's copy stays untracked at a path origin does not have, so `run-job.yml`
+    # refuses every later job. Measured 2026-08-30 at three round trips, and again 2026-09-01 at four —
+    # the second time by me, working around this playbook because it would not tell me one string it had
+    # already computed. A tool that withholds what it knows gets improvised around, which is this file's
+    # own definition of a defect.
     - name: Where it landed
       ansible.builtin.debug:
-        msg: "{{ lab_fetch_dest | regex_replace('^.*/runs/', 'runs/') }}"
+        msg:
+          - "{{ lab_fetch_dest | regex_replace('^.*/runs/', 'runs/') }}"
+          - "from {{ lab_fetch_src | regex_replace('^' ~ lab_repo_path ~ '/', '') }} on the lab"
