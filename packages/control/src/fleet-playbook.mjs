@@ -82,7 +82,7 @@ const CHECKOUT = "a11y-witness";
  * command a remote shell interprets, on the box holding the fleet SSH key. Same containment as
  * `-e out=<name>` in `lab-job.yml`, for the same reason.
  */
-const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml"];
+const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml"];
 
 /**
  * Ansible host patterns this may target, by SHAPE. Same containment as the playbook list, and needed for

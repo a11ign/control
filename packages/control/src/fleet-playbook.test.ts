@@ -48,7 +48,12 @@ test("only the named playbooks are runnable, and they are names rather than path
   // The same containment as `-e out=<name>` in lab-job.yml. This value reaches a shell on the box that
   // holds the fleet SSH key, so an arbitrary path here is an arbitrary playbook run against twelve
   // Windows machines.
-  assert.deepEqual(PLAYBOOKS, ["deploy.yml", "sleep.yml", "provision-role.yml"]);
+  // `recover.yml` joined on 2026-09-02 and the addition is deliberate rather than convenient: it kills a
+  // node process and REBOOTS, which is the most destructive thing this allowlist permits. It earns that
+  // because the fault it exists for cannot be reached any other way — a worker wedged inside a capture
+  // does not respond to `Stop-ScheduledTask`, keeps the port, and goes on serving a matching
+  // `/health.code` from files the deploy has just updated, so `verify-code.yml`'s reboot never fires.
+  assert.deepEqual(PLAYBOOKS, ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml"]);
   // `provision.yml` stays REFUSED and that is not an oversight: it is the UTM/PowerShell provisioning
   // playbook, a different file from `provision-role.yml`, and only the role one should be reachable from
   // a laptop. Two files one character apart, one allowed and one not, is exactly what an allowlist is for.

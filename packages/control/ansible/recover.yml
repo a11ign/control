@@ -1,0 +1,94 @@
+---
+# Recover a worker that is UP, ANSWERING and not working.
+#
+# The fault this exists for, measured on a11y-worker-6 on 2026-09-02: a capture began at 03:00 and was
+# still `current` at 06:32. `/health` answered throughout with every readiness check green — screen reader
+# up, browser resolvable, no blocking dialog — and `busy: true` for three and a half hours. From the run's
+# side that is indistinguishable from a slow page, so the host waited and the corpus recapture made no
+# progress at all.
+#
+# ## Why `deploy.yml` did not fix it, which is the part worth understanding
+#
+# `restart-worker.yml` stops the scheduled task and waits for node to exit. A node process wedged inside a
+# capture does not exit, so the stop times out, the start races a port that is still held, and the OLD
+# process keeps serving. Its `/health.code` is read from the files on disk, which the deploy has just
+# updated — so the code check PASSES while the running process is days old. `verify-code.yml` reboots only
+# on a code MISMATCH, so the one remedy that always works was never reached.
+#
+# That is this repo's oldest rule pointed at a machine instead of a value: a correct version after a deploy
+# proves the files moved and vouches for nothing about the process serving them.
+#
+# ## So this does not ask nicely
+#
+# Kill node outright, then reboot. A reboot is an acceptable remedy on this fleet because auto-logon plus
+# the at-logon task bring the worker back with no console visit — the same argument `verify-code.yml`
+# makes for its own reboot. It also clears the desktop, which matters: the box was holding a
+# `ShellExperienceHost` notification toast in the foreground, and a foreground that is not Edge is a
+# capture measuring something else.
+#
+# ## The proof is UPTIME, not a return code
+#
+# `vitals.uptimeMinutes` is the one field that can tell a restart that happened from one that was
+# reported. It is read before and after, and the play fails if it did not fall.
+- name: Recover wedged workers
+  hosts: "{{ target | default('a11y_workers') }}"
+  gather_facts: false
+  tasks:
+    - name: How long has the worker been up BEFORE we touch it
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:8765/health"
+        method: GET
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: health_before
+      failed_when: false
+
+    - name: Say what we found
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} uptime {{ (health_before.json.vitals.uptimeMinutes | default('?')) }}m,
+          busy={{ health_before.json.busy | default('?') }},
+          captures={{ health_before.json.vitals.captures | default('?') }}
+
+    - name: Kill the worker process outright
+      # NOT Stop-ScheduledTask. That is what failed: it cannot end a node process wedged inside a capture,
+      # and it returns success either way.
+      ansible.windows.win_shell: |
+        Stop-ScheduledTask -TaskName '{{ a11y_task_name }}' -ErrorAction SilentlyContinue
+        Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        'killed'
+      changed_when: true
+
+    - name: Reboot, which always works
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+        post_reboot_delay: 20
+
+    - name: Wait for the worker to serve /health again
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:8765/health"
+        method: GET
+        return_content: true
+        status_code: 200
+        timeout: 10
+      delegate_to: localhost
+      register: health_after
+      retries: 40
+      delay: 10
+      until: health_after.status is defined and health_after.status == 200
+
+    - name: PROVE it restarted — uptime must have fallen
+      # The whole point. A worker that answers is not a worker that restarted, and this fault presented as
+      # a worker answering perfectly for six days.
+      ansible.builtin.assert:
+        that:
+          - health_after.json.vitals.uptimeMinutes is defined
+          - health_after.json.vitals.uptimeMinutes | int < 30
+        fail_msg: >-
+          {{ inventory_hostname }} answers /health but reports
+          {{ health_after.json.vitals.uptimeMinutes | default('?') }}m of uptime, so it did not restart.
+          The reboot did not take effect; this box needs a look rather than another command.
+        success_msg: >-
+          {{ inventory_hostname }} restarted — uptime
+          {{ health_after.json.vitals.uptimeMinutes }}m, busy={{ health_after.json.busy }}
