@@ -129,6 +129,20 @@
       shortcuts-baseline:
         argv: ["/usr/bin/npm", "run", "--silent", "scorer:shortcuts:baseline"]
         timeout: 900
+      # THE SAME DELIBERATE ACT, against the CANDIDATE, and without it a new head can never be promoted.
+      #
+      # `candidate:gate` blocks any head missing from the baseline — deliberately: "it still blocks, and
+      # the day ownership moves the veto is waiting". The only route to writing the baseline was
+      # `shortcuts-baseline`, which reads the SHIPPED weights, and a new head is by definition not in
+      # them. So the two requirements were circular and the first new head in a long time (3.3.3, added
+      # 2026-09-02) could not get past promote in either direction.
+      #
+      # Kept as a SEPARATE job rather than a flag on the other, because the difference is which model's
+      # vetoes you are asserting you have read and accepted, and that is exactly the thing a reader of the
+      # job list should not have to infer.
+      shortcuts-baseline-candidate:
+        argv: ["/usr/bin/npm", "run", "--silent", "scorer:shortcuts:baseline:candidate"]
+        timeout: 900
       acceptance:
         params: {out: optional}
         argv: ["{{ lab_python }}", "packages/lab/scripts/evaluate-screenreader-acceptance.py",
