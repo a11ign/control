@@ -255,6 +255,35 @@
          else 'This job therefore runs ' ~ lab_behind_count ~ ' COMMIT(S) BEHIND origin/main. Whatever it
                produces is stamped with that commit, not with the code you just pushed.' }}
 
+- name: "Install dependencies, BEFORE building anything with them"
+  # THE SIBLING OF THE BUILD BELOW, and it cost two pipeline dispatches on 2026-09-02.
+  #
+  # This checkout pulled and rebuilt and never INSTALLED, so a dependency added in the commit it just
+  # pulled was described by `package.json` and absent from `node_modules`. `packages/cli` declared `yaml`
+  # for the forms config (ADR 0024) and the pipeline died at stage 2 of 7 with
+  # `error TS2307: Cannot find module 'yaml'` -- twice, because the second dispatch fixed the LOCKFILE and
+  # the lab still had no way to act on it.
+  #
+  # The comment below says a pull that succeeded and a build that never happened is "harder to notice:
+  # `git log` says exactly what you expect". This is one layer further down and quieter still, because the
+  # BUILD is what fails and it names a module rather than a missing install -- so it reads as a broken
+  # import in somebody's source.
+  #
+  # `npm ci` rather than `npm install`, deliberately: it reads the lockfile as the SPECIFICATION and
+  # refuses a lockfile that disagrees with `package.json`, which is exactly the drift that produced this.
+  # `npm install` would quietly reconcile them and leave the lab's tree describing something no other
+  # machine has.
+  #
+  # Unconditional on a changed pull rather than gated on the lockfile having moved: detecting that needs a
+  # diff against the pre-pull ref, which is one more thing to get subtly wrong, and this runs in under a
+  # minute against jobs measured in hours. A cheap step that is always right beats a cheaper one that is
+  # usually right -- and "usually" here means the corpus is trained by code nobody has the dependencies for.
+  when: lab_pull is defined and lab_pull is changed
+  ansible.builtin.command:
+    argv: [/usr/bin/npm, ci]
+    chdir: "{{ lab_repo_path }}"
+  changed_when: true
+
 - name: "Rebuild the compiled packages"
   # THE GATE SCORED CODE THAT WAS NOT THE CODE. `@a11y-witness/judge/rules` resolves to `dist/rules.js`,
   # so `rules:gate` runs COMPILED output — and a pull updates the source without touching it. Measured
