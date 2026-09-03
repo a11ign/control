@@ -290,3 +290,49 @@ test("the real-pages pipeline captures every role the corpus scores", async () =
       + "the stage names no role, so it takes capture-real-pages' default of training)"}`);
   }
 });
+
+/**
+ * `capture-real-pages` must come BEFORE any stage that rebuilds the realism tier.
+ *
+ * `retrain` ends with `build-realism`, which assembles the real-page tier from the captures ON DISK. Run
+ * the other way round, that tier is built from the PREVIOUS run's real captures — so a change to what a
+ * real capture carries is absent from the very dataset the gates then score, and the run reports success
+ * having answered about the wrong corpus.
+ *
+ * It is a live risk rather than a theoretical one: `4.1.3: 0 of 37` moves only when a configured
+ * real-page capture reaches `postSubmitFields`, and `build-realism` masks 4.1.3 on exactly that field. A
+ * pipeline that trained before capturing would report the mask still in place and look like a refutation.
+ *
+ * Pinned as a PROPERTY over every pipeline rather than as a fact about one, so a future chain that
+ * combines these stages inherits the ordering instead of rediscovering it.
+ */
+test("no pipeline rebuilds the realism tier before capturing the real pages it reads", () => {
+  /** Stages that run `build-realism` — from the job catalogue's chain, not from a guess. */
+  const REBUILDS_REALISM = ["retrain", "full", "everything"];
+  const nameOf = (entry: string | { job: string }) => (typeof entry === "string" ? entry : entry.job);
+
+  for (const [name, pipeline] of Object.entries(PIPELINES)) {
+    const jobs = (pipeline.jobs as Array<string | { job: string }>).map(nameOf);
+    const firstCapture = jobs.indexOf("capture-real-pages");
+    if (firstCapture === -1) continue;
+    const rebuild = jobs.findIndex((job) => REBUILDS_REALISM.includes(job));
+    if (rebuild === -1) continue;
+    assert.ok(firstCapture < rebuild,
+      `pipeline '${name}' runs '${jobs[rebuild]}' at position ${rebuild} and captures the real pages at `
+      + `${firstCapture}. \`build-realism\` reads the captures on disk, so the realism tier would be built `
+      + "from the PREVIOUS run's — the gates then score a dataset that does not contain the change being "
+      + "tested, and report success about the wrong corpus.");
+  }
+});
+
+test("the migration-verdict pipeline does not promote", () => {
+  // It ANSWERS a question; it does not act on the answer. A migration that fails its gates is REVERTED,
+  // and a chain that promoted on the way past would make "the gates said no" and "the weights shipped"
+  // reachable in a single dispatch. `candidate` is the pipeline that promotes, and choosing it is
+  // choosing to.
+  const jobs = (PIPELINES["migration-verdict"].jobs as Array<string | { job: string }>)
+    .map((entry) => (typeof entry === "string" ? entry : entry.job));
+  assert.ok(!jobs.includes("promote"),
+    "migration-verdict promotes. The pipeline that decides whether a schema change is sound must not be "
+    + "able to ship it in the same run — use `candidate` when promotion is the intent.");
+});

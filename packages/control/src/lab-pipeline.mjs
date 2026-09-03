@@ -198,6 +198,41 @@ export const PIPELINES = {
            "grants-audit", "applicability-audit", "rules-gate", "rules-coverage", "rules-real-pages",
            "release-gate"],
   },
+  // DECIDE AN OPEN `FEATURE_SCHEMA_VERSION` MIGRATION — the four questions, in the only order that works.
+  //
+  // A schema change is not decided by a train. It is decided by four gates, and until 2026-09-03 running
+  // them meant assembling `retrain`, `train`, `shortcuts`, `acceptance` and `rules-real-pages` by hand and
+  // remembering which order they depend on — the ORDER LIVING IN SOMEBODY'S HEAD, which is the defect this
+  // whole file was written to close, still present for the one decision that gates a release.
+  //
+  // **`capture-real-pages` COMES FIRST, and that is not cosmetic.** `retrain` ends with `build-realism`,
+  // which builds the real-page tier from the captures ON DISK. Run the other way round, the realism tier
+  // is assembled from the PREVIOUS run's real captures, so a change to what a real capture carries — a
+  // configured form reaching `postSubmitFields`, say — is absent from the very dataset the gates then
+  // score. The run reports success and answers about the wrong corpus.
+  //
+  // **`promote` is deliberately absent.** This pipeline ANSWERS a question; it does not act on the answer.
+  // A migration that fails its gates is REVERTED, and a chain that promoted on the way past would make
+  // "the gates said no" and "the weights shipped" reachable in one dispatch. `candidate` is the pipeline
+  // that promotes, and choosing it is choosing to.
+  //
+  // `rules-coverage` last, because it reports which criteria gained real-page grounding — the second
+  // question a real-page capture is run to answer, and the one that says whether `4.1.3: 0 of 37` moved.
+  "migration-verdict": {
+    fleet: true,
+    what: "decide an open FEATURE_SCHEMA_VERSION migration: the four gates, in dependency order, no promote",
+    jobs: [
+      { job: "capture-real-pages", vars: { role: "calibration" } },
+      { job: "capture-real-pages", vars: { role: "training" } },
+      "retrain",
+      "export-acceptance",
+      "train",
+      "shortcuts",
+      "acceptance",
+      "rules-real-pages",
+      "rules-coverage",
+    ],
+  },
   // No capture, so no fleet, so it can run while the boxes are doing something else. This is the cheap
   // pipeline to run after a rule change: everything reads from disk and the venv.
   gates: {
