@@ -225,6 +225,25 @@ export const PIPELINES = {
       { job: "capture-real-pages", vars: { role: "calibration" } },
       { job: "capture-real-pages", vars: { role: "training" } },
       "retrain",
+      // THE HELD-OUT SET IS REGENERATED AND RECAPTURED, not merely re-exported — and leaving that out
+      // cost stage 8 of 10 on 2026-09-03.
+      //
+      // `export-acceptance` exports whatever acceptance captures are already on disk. It cannot notice
+      // that the CORPUS gained a subtype since they were taken, so a run that adds one trains a head the
+      // held-out set has no examples of, and `acceptance` refuses the model it cannot evaluate:
+      // *"3.1.2: fewer than 3 acceptance positives"*. Correct, and unfixable from inside the pipeline as
+      // it stood — no chain here ran `generate-acceptance` or `capture-acceptance`, so closing it meant
+      // remembering two jobs by hand, which is this repo's definition of a step that does not happen.
+      //
+      // A schema or corpus change is EXACTLY when the held-out set goes stale, so this pipeline is the
+      // one that must not assume otherwise. Measured: regenerating took the set from 42 pairs to 61.
+      //
+      // Both repeats, deliberately. They are what measure whether NVDA's output is still stable, and
+      // `training:evaluate-acceptance` reads every repeat — capturing one and exporting both is how a
+      // held-out score comes to be computed half on each.
+      "generate-acceptance",
+      "capture-acceptance",
+      "capture-acceptance-2",
       "export-acceptance",
       "train",
       "shortcuts",

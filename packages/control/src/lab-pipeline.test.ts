@@ -336,3 +336,61 @@ test("the migration-verdict pipeline does not promote", () => {
     "migration-verdict promotes. The pipeline that decides whether a schema change is sound must not be "
     + "able to ship it in the same run — use `candidate` when promotion is the intent.");
 });
+
+/**
+ * A pipeline that TRAINS and then gates on held-out acceptance must first REBUILD that held-out set.
+ *
+ * `export-acceptance` exports whatever acceptance captures are on disk. It cannot notice that the corpus
+ * gained a subtype since they were taken — so a run that adds one trains a head the held-out set has no
+ * examples of, and the `acceptance` gate refuses the model it cannot evaluate. Measured 2026-09-03:
+ * `migration-verdict` died at stage 8 of 10 with *"3.1.2: fewer than 3 acceptance positives"*, after the
+ * 29 language cases entered the corpus. Regenerating took the set from 42 pairs to 61.
+ *
+ * It was unfixable from inside the pipeline as it stood: NO chain ran `generate-acceptance` or
+ * `capture-acceptance`, though both exist as jobs. Closing it meant an operator remembering two commands,
+ * which is this repo's own definition of a step that does not happen.
+ *
+ * Both repeats are required, not one. They are what measure whether NVDA's output is still stable, and
+ * the evaluator reads every repeat — capturing one while exporting both is how a held-out score comes to
+ * be computed half on each, which `training:export-acceptance:all` exists to prevent.
+ */
+test("a pipeline that gates on acceptance rebuilds the held-out set first", () => {
+  const nameOf = (entry: string | { job: string }) => (typeof entry === "string" ? entry : entry.job);
+
+  /**
+   * Pipelines that gate on acceptance WITHOUT rebuilding the set, each with the reason.
+   *
+   * Classified rather than exempted by pattern, because "this one need not" and "somebody forgot" must
+   * stay different states. The cost is real on both sides: rebuilding is ~45 minutes of fleet time on
+   * every run, and NOT rebuilding risks a run that dies at the acceptance gate. It dies LOUDLY — measured
+   * — so the trade is a failed run against a slower one, never a bad model.
+   */
+  const REBUILDS_NOTHING: Readonly<Record<string, string>> = {
+    recalibrate: "its entire contract is 're-derive and re-gate the model from the dataset already on "
+      + "disk — no capture, no export'. Adding capture stages would make it need the fleet, which is the "
+      + "one thing it exists not to need.",
+    candidate: "the routine promote path, run when the corpus has NOT changed. When it has, the "
+      + "acceptance gate refuses rather than passing on a stale set — verified 2026-09-03 — so the cost "
+      + "of the omission is a failed dispatch, and `migration-verdict` is the chain to use instead.",
+    full: "same trade as `candidate`, and it already carries thirteen stages. A corpus change goes "
+      + "through `migration-verdict`, which rebuilds.",
+  };
+
+  for (const [name, pipeline] of Object.entries(PIPELINES)) {
+    const jobs = (pipeline.jobs as Array<string | { job: string }>).map(nameOf);
+    if (!jobs.includes("acceptance") || !jobs.includes("train")) continue;
+    if (name in REBUILDS_NOTHING) continue;
+
+    for (const required of ["generate-acceptance", "capture-acceptance", "capture-acceptance-2"]) {
+      assert.ok(jobs.includes(required),
+        `pipeline '${name}' trains and then gates on 'acceptance', but never runs '${required}'. The `
+        + "held-out set would be whatever is on disk — and if the corpus gained a subtype since, the gate "
+        + "refuses a model it cannot evaluate, with no stage in this chain able to fix it.");
+    }
+    const rebuilt = Math.max(...["generate-acceptance", "capture-acceptance", "capture-acceptance-2",
+      "export-acceptance"].map((job) => jobs.indexOf(job)));
+    assert.ok(rebuilt < jobs.indexOf("train"),
+      `pipeline '${name}' rebuilds the held-out set AFTER training, so the model is gated against a set `
+      + "it was not evaluated on. The rebuild must finish before `train`.");
+  }
+});
