@@ -83,8 +83,19 @@
   failed_when: false   # "not found" is success here; the verify at the end is the judge
   changed_when: true
 
-- name: Refuse a DOWNGRADE, and say which of the two remedies applies
-  # EDGE CANNOT BE DOWNGRADED ON THIS FLEET, and pretending otherwise cost two runs to establish.
+- name: Refuse a DOWNGRADE unless it was explicitly authorised, and say which remedy applies
+  # THIS COMMENT USED TO OPEN "EDGE CANNOT BE DOWNGRADED ON THIS FLEET", AND IT CONTRADICTED THE REMEDY
+  # LISTED TWELVE LINES BELOW IT. Read what was actually measured: the 2026-08-25 run installed the MSI
+  # with `/quiet /norestart` and NO `ALLOWDOWNGRADE`. That establishes a PLAIN install will not go
+  # backwards -- which is the precise case the flag exists to override -- and says nothing whatever about
+  # the flag. A measurement that did not exercise the remedy cannot rule the remedy out.
+  #
+  # `--force-uninstall` failing is a separate and genuine finding, and it is why REMOVING Edge is not a
+  # route. Rolling back over the top is a different operation.
+  #
+  # So the refusal stands by DEFAULT and is now liftable: `-e worker_edge_allow_downgrade=true` performs
+  # remedy (2) through this role instead of leaving it as a shell command for a human to type on the box.
+  #
   # Measured on a11y-worker-5, 2026-08-25, in this order:
   #
   #   Edge had auto-updated to .107 against a pin of .101
@@ -107,21 +118,27 @@
   when:
     - (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
     - (edge_installed.output | default([]) | first | default('0', true)) is version(worker_edge_version, '>')
+    - not (worker_edge_allow_downgrade | bool)
   ansible.builtin.fail:
     msg: >-
       {{ inventory_hostname }} is on Edge {{ edge_installed.output | default([]) | first | default('?', true) }},
       NEWER than the pinned {{ worker_edge_version }}, and Chromium will not install over a newer build.
       THREE remedies, cheapest first — and this message used to name the most expensive one first, which
       sent an operator to reimage a machine that one flag fixes.
-      (1) FOLLOW IT. Move `worker_edge_version`, `worker_edge_msi_url` and `worker_edge_msi_sha256` to the
-      newer build from https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
-      the WHOLE fleet. This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
+      (1) FOLLOW IT — BUT CHECK THE BUILD EXISTS THERE FIRST. Move `worker_edge_version`,
+      `worker_edge_msi_url` and `worker_edge_msi_sha256` to the newer build from
+      https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
+      the WHOLE fleet. That channel does NOT publish every build a box can reach on its own: measured
+      2026-09-04, a box self-updated to 152.0.4191.66 while the newest enterprise Stable x64 was .62, so
+      this remedy did not exist and recommending it first sent the operator to a dead end. This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
       that drifts forward has exactly two ways back ... following it is one download against a reimage."
       Check the cache cost rather than assuming it: if corpus captures record `browserVersion: ABSENT`
       their key already reads `.../unknown` and matches no live guest, so following costs nothing.
-      (2) ROLL IT BACK. `msiexec /I <the pinned MSI> /qn ALLOWDOWNGRADE=1` is Microsoft's supported
-      enterprise rollback, with the updater disabled first — which this role has already done by the time
-      you read this. It is documented as a temporary fix that "risks exposure to known security issues",
+      (2) ROLL IT BACK, WITH THIS ROLE: re-run it against this host with
+      `-e worker_edge_allow_downgrade=true`, which installs the pinned MSI with Microsoft's supported
+      `ALLOWDOWNGRADE=1` and the updater already stopped — both of which this role has done by the time
+      you read this. It is opt-in rather than automatic because it moves a working box to an OLDER
+      browser; see `worker_edge_allow_downgrade` in defaults/main.yml. It is documented as a temporary fix that "risks exposure to known security issues",
       so prefer (1) unless the newer build is what broke you.
       (3) Reimage the guest. Last, not first.
       Until one of them, a capture run will refuse to use this fleet, which is the behaviour you want.
@@ -132,7 +149,14 @@
   ansible.windows.win_package:
     path: "{{ worker_edge_msi_path }}"
     state: present
-    arguments: /quiet /norestart
+    # ALLOWDOWNGRADE ONLY WHEN GOING BACKWARDS, never unconditionally. Passing it always would work today
+    # and would erase the distinction between a fresh install and a rollback, so nothing downstream --
+    # this role's own output included -- could say which happened. Two faults must not print the same word.
+    arguments: >-
+      /quiet /norestart
+      {{ 'ALLOWDOWNGRADE=1'
+         if ((edge_installed.output | default([]) | first | default('0', true)) is version(worker_edge_version, '>'))
+         else '' }}
   register: edge_installed_now
 
 - name: Complete the launcher rename, which is what actually makes the new build the running one

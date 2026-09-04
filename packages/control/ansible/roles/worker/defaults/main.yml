@@ -110,6 +110,28 @@ worker_edge_dir: 'C:\Program Files (x86)\Microsoft\Edge\Application'
 worker_edge_exe: 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 worker_edge_msi_path: 'C:\Windows\Temp\MicrosoftEdgeEnterpriseX64-{{ worker_edge_version }}.msi'
 
+# ROLLING A BOX BACK TO THE PIN IS OPT-IN, AND MUST STAY OPT-IN.
+#
+# `msiexec ... ALLOWDOWNGRADE=1` is Microsoft's documented enterprise rollback, and `edge-version.yml`'s
+# refusal has named it as remedy (2) since that refusal was corrected. What it did NOT have was a way to
+# perform it: the remedy was a shell command for a human to type on the box, which is the hand-cranking
+# this fleet is built to avoid -- and the only path left when remedy (1) is unavailable, as it was on
+# 2026-09-04 when a box came up on 152.0.4191.66 and the enterprise channel published no such build.
+#
+# Default false, and NOT because the flag is unreliable. A rollback is documented as "a temporary fix
+# that risks exposure to known security issues", so which build a working box runs is a decision a person
+# makes; the pin says what the fleet WANTS, not what may be silently forced onto a machine that is
+# already serving. Turning this on fleet-wide by default would make every forward drift self-healing in
+# the direction of the OLDER browser, which is the wrong default for a security update and would also
+# hide the drift itself.
+#
+# UNTESTED ON THIS FLEET AS OF 2026-09-04. The 2026-08-25 measurement recorded in `edge-version.yml`
+# established that a PLAIN install will not go backwards -- it ran `/quiet /norestart` with no such flag,
+# which is exactly the case ALLOWDOWNGRADE exists to override -- so it says nothing about this path. The
+# first box to use it is a11y-worker-11, which carries no corpus captures and is therefore the cheapest
+# possible place to find out. Record the result here either way.
+worker_edge_allow_downgrade: false
+
 # The updater's tasks and services, stopped and disabled BECAUSE the policy cannot do it here. Blunt, and
 # the only lever that actually holds on a non-domain-joined box. Provisioning never touched these: they were
 # found `Ready` on every guest while the policy that was supposed to make them inert sat unhonoured.
