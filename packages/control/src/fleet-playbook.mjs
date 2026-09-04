@@ -69,7 +69,8 @@ import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
  *
  * An unrecognised flag is otherwise IGNORED, so it runs the default and reports success.
  */
-refuseUnknownFlags(["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change"],
+refuseUnknownFlags(
+  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade"],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
@@ -204,7 +205,8 @@ const argOf = (/** @type {string} */ name) =>
  * right: dispatching a playbook and deciding whether the arguments are safe are two things, and each of
  * these refusals exists because the value reaches a shell on the box holding the fleet SSH key.
  *
- * @returns {{chosen: string, limitFlag: string|undefined, serialFlag: string|undefined, ref: string}}
+ * @returns {{chosen: string, limitFlag: string|undefined, serialFlag: string|undefined, ref: string,
+ *            allowEdgeDowngrade: boolean}}
  */
 function parseArgs() {
   const refuse = (/** @type {string} */ message) => {
@@ -224,6 +226,16 @@ function parseArgs() {
   if (serialFlag !== undefined && !SERIAL_PATTERN.test(serialFlag)) {
     refuse(`refusing --serial=${serialFlag}: 0 (all at once) or 1-99.`);
   }
+
+  // Lifts `edge-version.yml`'s refusal for a box that has drifted PAST the pin, installing the pinned MSI
+  // with Microsoft's supported ALLOWDOWNGRADE=1. Opt-in because it moves a working box to an older browser.
+  const allowEdgeDowngrade = process.argv.includes("--allow-edge-downgrade");
+  // The same refusal `--serial=` makes, for the same reason: the operator asked for something, watched a
+  // different thing happen, and nothing said so. Only the role can act on this.
+  if (allowEdgeDowngrade && chosen !== "provision-role.yml") {
+    refuse("refusing --allow-edge-downgrade: only provision-role.yml installs Edge. "
+      + "Use `npm run fleet:provision -- --allow-edge-downgrade`.");
+  }
   // Silently ignoring it would be worse than refusing: the operator asked for a batch size, watched
   // something else happen, and nothing said so.
   if (serialFlag !== undefined && chosen !== "provision-role.yml") {
@@ -233,7 +245,7 @@ function parseArgs() {
   const ref = argOf("ref") ?? localBranch();
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
 
-  return { chosen, limitFlag, serialFlag, ref };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade };
 }
 
 /**
@@ -278,7 +290,7 @@ async function guardProtocolChange(chosen) {
 }
 
 async function main() {
-  const { chosen, limitFlag, serialFlag, ref } = parseArgs();
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade } = parseArgs();
   await guardProtocolChange(chosen);
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
@@ -321,7 +333,13 @@ async function main() {
       // the guests fetch; this catches the fetch silently not taking.
       + ` -e a11y_expected_commit=${expected}`
       + (limitFlag ? ` -l ${limitFlag}` : "")
-      + (serialFlag !== undefined ? ` -e worker_provision_serial=${serialFlag}` : ""),
+      + (serialFlag !== undefined ? ` -e worker_provision_serial=${serialFlag}` : "")
+      // A NAMED FLAG, because the obvious spelling silently did nothing. `-e worker_edge_allow_downgrade=true`
+      // typed on this command is not forwarded — this wrapper builds ansible's argv itself and passes on
+      // only what it recognises — and `refuseUnknownFlags` inspected only `--` arguments, so the whole
+      // fleet was provisioned believing an authorisation had been given that never arrived. Both halves
+      // are fixed; this is the half that gives the operator something real to type.
+      + (allowEdgeDowngrade ? " -e worker_edge_allow_downgrade=true" : ""),
     { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
   } catch (cause) {
     // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
