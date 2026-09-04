@@ -45,6 +45,20 @@
       # `../../etc/passwd` is inexpressible rather than rejected -- the shape `isValidCaptureId` uses, whose
       # test says "path traversal is the reason this check exists".
       capture: "runs/screenreader-dataset/captures/{{ capture | default('') }}.json"
+      # THE REAL-PAGE CAPTURES, added 2026-09-04 because there was no way to read one.
+      #
+      # `rules-real-pages` refused a run with a new 1.1.1 finding on cqc.org.uk and its own output said
+      # "Read the evidence for each before doing anything else" -- and the evidence was on the lab with
+      # nothing able to fetch it. The `capture` entry above points at the SYNTHETIC corpus only, so the
+      # alternative was loading the live site, which answers a different question: these are pages their
+      # publishers keep editing, so the page today is not the page captured. That distinction is one of
+      # the three causes the rule asks you to separate, and it was unanswerable.
+      #
+      # The name is the URL slugged: `capture-real-pages` writes `${slug(page.url)}.json`, where slug
+      # strips the scheme and replaces every non-alphanumeric run with a hyphen. So
+      # `https://www.cqc.org.uk/search/all?query=hospital` is
+      # `www-cqc-org-uk-search-all-query-hospital`.
+      real-page-capture: "runs/real-page-corpus/{{ capture | default('') }}.json"
       # THE HELD-OUT RECORDS THEMSELVES. Added 2026-08-25, when an acceptance false positive named a page
       # and nothing could show what the model SAW on it -- which is this file's own reason for existing,
       # one artifact further in: "a job interface that can start a 4-hour training run and cannot return
