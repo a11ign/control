@@ -128,9 +128,12 @@
       (1) FOLLOW IT — BUT CHECK THE BUILD EXISTS THERE FIRST. Move `worker_edge_version`,
       `worker_edge_msi_url` and `worker_edge_msi_sha256` to the newer build from
       https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
-      the WHOLE fleet. That channel does NOT publish every build a box can reach on its own: measured
-      2026-09-04, a box self-updated to 152.0.4191.66 while the newest enterprise Stable x64 was .62, so
-      this remedy did not exist and recommending it first sent the operator to a dead end. This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
+      the WHOLE fleet. RE-QUERY THAT API NOW rather than trusting an earlier look, because a box can run
+      AHEAD of the enterprise channel for hours: measured 2026-09-04, a box self-updated to 152.0.4191.66
+      while the newest enterprise Stable x64 was .62 — and .66 was published at 22:28 UTC that same day,
+      minutes after that check, while the rollback it appeared to justify was already running. An
+      availability check against a moving index expires, so redo it first rather than assuming it.
+      This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
       that drifts forward has exactly two ways back ... following it is one download against a reimage."
       Check the cache cost rather than assuming it: if corpus captures record `browserVersion: ABSENT`
       their key already reads `.../unknown` and matches no live guest, so following costs nothing.

@@ -100,9 +100,9 @@ worker_edge_policy:
 # the 2026-09-04 recapture reads `browserVersion: ABSENT`, so its key already resolves to `.../unknown`
 # and already fails to match any live guest. The corpus was cache-invalid before this change and is no
 # more invalid after it -- the same reason the 151 bump cost nothing.
-worker_edge_version: "152.0.4191.62"
-worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/c4921788-0a24-453a-a265-f0499bb3135b/MicrosoftEdgeEnterpriseX64.msi"
-worker_edge_msi_sha256: "093d7cbe7019c7504446599632dd984dce567dcb96604f14e4384c2c1420239b"
+worker_edge_version: "152.0.4191.66"
+worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/2757513f-2ec6-4bb1-b23a-5738a92d7a56/MicrosoftEdgeEnterpriseX64.msi"
+worker_edge_msi_sha256: "5bcf8cd57351ddaa94419f800f8d90b8cbaf2b485b49d9ddb07d055b76a518df"
 # The binary is the source of truth for "which Edge is installed", not the registry's recorded version.
 # Same rule the worker itself now follows: it reported a version it was not running for five days because
 # the value was read once and cached, and the file on disk had moved underneath it.
@@ -125,11 +125,19 @@ worker_edge_msi_path: 'C:\Windows\Temp\MicrosoftEdgeEnterpriseX64-{{ worker_edge
 # the direction of the OLDER browser, which is the wrong default for a security update and would also
 # hide the drift itself.
 #
-# UNTESTED ON THIS FLEET AS OF 2026-09-04. The 2026-08-25 measurement recorded in `edge-version.yml`
-# established that a PLAIN install will not go backwards -- it ran `/quiet /norestart` with no such flag,
-# which is exactly the case ALLOWDOWNGRADE exists to override -- so it says nothing about this path. The
-# first box to use it is a11y-worker-11, which carries no corpus captures and is therefore the cheapest
-# possible place to find out. Record the result here either way.
+# UNTESTED ON THIS FLEET, AND IT HAS NOW SURVIVED ITS FIRST INTENDED USE BY BEING THE WRONG ANSWER.
+# The 2026-08-25 measurement recorded in `edge-version.yml` established that a PLAIN install will not go
+# backwards -- it ran `/quiet /norestart` with no such flag, which is exactly the case ALLOWDOWNGRADE
+# exists to override -- so it says nothing about this path, and nothing since has exercised it.
+#
+# BEFORE REACHING FOR THIS, RE-QUERY THE ENTERPRISE CHANNEL. On 2026-09-04 a box self-updated to
+# 152.0.4191.66 while the API's newest Stable x64 was .62, and the honest conclusion at that moment was
+# that following forward was impossible. It was published at 22:28 UTC the same day -- roughly the minute
+# that conclusion was drawn. So a box can be AHEAD OF THE ENTERPRISE CHANNEL BY HOURS, not for ever, and
+# a measurement of a moving index expires. The remedy was already running when the re-query refuted it.
+#
+# That is the shape to remember: the fleet's policy is to FOLLOW FORWARD, and the only thing that had ever
+# argued against it here was an availability check that was simply early.
 worker_edge_allow_downgrade: false
 
 # The updater's tasks and services, stopped and disabled BECAUSE the policy cannot do it here. Blunt, and
