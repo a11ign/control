@@ -86,9 +86,23 @@ worker_edge_policy:
 # URL and hash come from Microsoft's own enterprise release API
 # (https://edgeupdates.microsoft.com/api/products?view=enterprise), which publishes the SHA256 — so the
 # pin is a fact about the bytes rather than a claim about a hostname.
-worker_edge_version: "151.0.4129.107"
-worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/998bcf3d-e044-426d-9e9b-61da81399306/MicrosoftEdgeEnterpriseX64.msi"
-worker_edge_msi_sha256: "b75f03b87dfb0cbc85ba2c0858c632511b17355f42563a43fca5368100ffe0fe"
+# FOLLOWED FORWARD to 152.0.4191.62 on 2026-09-04, which is this pin's documented behaviour rather than an
+# exception to it: "a fleet that drifts forward has exactly two ways back -- reimage the guest, or follow
+# it -- and following it is one download against a reimage."
+#
+# a11y-worker-7 arrived on 152 because first boot had no Edge step at all (now fixed). Rolling it back is
+# possible -- `msiexec /I ... ALLOWDOWNGRADE=1` is Microsoft's supported enterprise rollback, and the
+# refusal below saying otherwise was wrong -- but following costs one download per box against a rollback
+# on one, and rollback is documented as "a temporary fix ... risks exposure to known security issues".
+# This build fixes 21 CVEs at Critical severity.
+#
+# STILL NO CACHE COST, and it was checked rather than assumed this time: a synthetic corpus capture from
+# the 2026-09-04 recapture reads `browserVersion: ABSENT`, so its key already resolves to `.../unknown`
+# and already fails to match any live guest. The corpus was cache-invalid before this change and is no
+# more invalid after it -- the same reason the 151 bump cost nothing.
+worker_edge_version: "152.0.4191.62"
+worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/c4921788-0a24-453a-a265-f0499bb3135b/MicrosoftEdgeEnterpriseX64.msi"
+worker_edge_msi_sha256: "093d7cbe7019c7504446599632dd984dce567dcb96604f14e4384c2c1420239b"
 # The binary is the source of truth for "which Edge is installed", not the registry's recorded version.
 # Same rule the worker itself now follows: it reported a version it was not running for five days because
 # the value was read once and cached, and the file on disk had moved underneath it.

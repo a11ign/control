@@ -110,11 +110,21 @@
   ansible.builtin.fail:
     msg: >-
       {{ inventory_hostname }} is on Edge {{ edge_installed.output | default([]) | first | default('?', true) }},
-      NEWER than the pinned {{ worker_edge_version }}. Chromium will not install over a newer build and
-      Windows will not let it be uninstalled, so this role cannot bring it back. Either reimage this guest,
-      or move `worker_edge_version` to the newer build and accept that every cached corpus capture is
-      invalidated — `browserVersion` is part of the capture cache key. Until then a capture run will refuse
-      to use this fleet, which is the behaviour you want.
+      NEWER than the pinned {{ worker_edge_version }}, and Chromium will not install over a newer build.
+      THREE remedies, cheapest first — and this message used to name the most expensive one first, which
+      sent an operator to reimage a machine that one flag fixes.
+      (1) FOLLOW IT. Move `worker_edge_version`, `worker_edge_msi_url` and `worker_edge_msi_sha256` to the
+      newer build from https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
+      the WHOLE fleet. This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
+      that drifts forward has exactly two ways back ... following it is one download against a reimage."
+      Check the cache cost rather than assuming it: if corpus captures record `browserVersion: ABSENT`
+      their key already reads `.../unknown` and matches no live guest, so following costs nothing.
+      (2) ROLL IT BACK. `msiexec /I <the pinned MSI> /qn ALLOWDOWNGRADE=1` is Microsoft's supported
+      enterprise rollback, with the updater disabled first — which this role has already done by the time
+      you read this. It is documented as a temporary fix that "risks exposure to known security issues",
+      so prefer (1) unless the newer build is what broke you.
+      (3) Reimage the guest. Last, not first.
+      Until one of them, a capture run will refuse to use this fleet, which is the behaviour you want.
 
 - name: Install it
   when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
