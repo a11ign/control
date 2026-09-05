@@ -46,4 +46,11 @@ present:
   description: False on a trimmed image with no Defender, which is not an error.
   returned: always
   type: bool
+status_error:
+  description:
+  - The exception Get-MpComputerStatus raised, when present is false. Absent when the query genuinely
+    found no Defender; present when it failed for some OTHER reason (permissions, a corrupted WMI
+    namespace) that would otherwise be indistinguishable from a trimmed image.
+  returned: when present is false and the query raised
+  type: str
 """
