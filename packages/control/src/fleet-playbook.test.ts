@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
-  onTheControlPlane }
+  onTheControlPlane, journalScope }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -172,4 +172,32 @@ test("a laptop on the same LAN is NOT the control plane", () => {
 test("an interface with no address does not throw or match", () => {
   // `networkInterfaces()` returns undefined for an interface in some states, and `.flat()` keeps the hole.
   assert.equal(onTheControlPlane({ en0: undefined, lo0: [{ }] }, "REDACTED-INTERNAL-ADDRESS"), false);
+});
+
+test("the journal a deploy streams is bounded to THIS run, not the unit's whole history", () => {
+  // `journalctl -u <unit>` returns every run since boot, oldest first. Measured 2026-09-05: a deploy that
+  // correctly REFUSED a busy fleet (`failed=1`, `changed=0`) was read as having deployed, because the PLAY
+  // RECAP printed above the refusal was the successful run from seven minutes earlier. Same defect
+  // CLAUDE.md records as having cost three wrong readings, arriving in the one place with no bound at all.
+  assert.equal(journalScope("a11y-fleet-deploy", "3f2a1b9c4d5e6f708192a3b4c5d6e7f8"),
+    "_SYSTEMD_INVOCATION_ID=3f2a1b9c4d5e6f708192a3b4c5d6e7f8");
+});
+
+test("no InvocationID falls back to the whole unit, because absent must not look like empty", () => {
+  // `lab-status.yml` learned this first: scoping on an id a released unit no longer has returned
+  // `-- No entries --`, "a status tool showing nothing where there is plenty, which is worse than showing
+  // too much". The caller says so in a line of its own when this branch is taken.
+  assert.equal(journalScope("a11y-fleet-deploy", ""), "-u a11y-fleet-deploy");
+});
+
+test("anything that is not an invocation id is refused, not interpolated", () => {
+  // This value reaches a remote shell on the machine holding the fleet SSH key, so the containment is its
+  // SHAPE — the same rule `validRef` follows. `systemctl show` returns 32 hex characters or nothing; every
+  // other answer is a broken control plane, and a broken control plane must not become a command.
+  for (const bad of [
+    "; rm -rf /", "$(id)", "`id`", "3f2a1b9c4d5e6f708192a3b4c5d6e7f8 ; id", "abc", "../../etc",
+    "3F2A1B9C4D5E6F708192A3B4C5D6E7F8", "3f2a1b9c4d5e6f708192a3b4c5d6e7f",
+  ]) {
+    assert.equal(journalScope("a11y-fleet-deploy", bad), "-u a11y-fleet-deploy", JSON.stringify(bad));
+  }
 });

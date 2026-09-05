@@ -407,6 +407,20 @@ async function main() {
 }
 
 /**
+ * Which journal to read: THIS invocation when systemd knows one, the whole unit otherwise.
+ *
+ * A pure function so the choice can be tested without a control plane. The id is 32 hex characters from
+ * `systemctl show`; anything else is refused rather than interpolated into a remote shell command, on the
+ * machine that holds the fleet SSH key — the same rule `validRef` follows and for the same reason.
+ *
+ * @param {string} unit @param {string} invocation
+ * @returns {string}
+ */
+function journalScope(unit, invocation) {
+  return /^[0-9a-f]{32}$/.test(invocation) ? `_SYSTEMD_INVOCATION_ID=${invocation}` : `-u ${unit}`;
+}
+
+/**
  * Wait for a control-plane unit to finish, streaming what it says, and return ITS status.
  *
  * WAIT FOR `SubState` TO LEAVE `running`, never for it to EQUAL a terminal value. A unit has several
@@ -418,18 +432,40 @@ async function main() {
  * `ExecMainStatus` is populated WHILE a unit runs and means nothing until `SubState` has left `running`,
  * which is why it is read only after the loop.
  *
+ * AND THE JOURNAL IS BOUNDED TO **THIS** INVOCATION. `journalctl -u <unit>` returns every run since boot,
+ * oldest first, so the first poll printed a PREVIOUS deploy's PLAY RECAP above this one's and only a
+ * timestamp told them apart. Measured 2026-09-05: a deploy that correctly REFUSED a busy fleet
+ * (`failed=1`, `changed=0`) was read as having deployed, because the recap sitting above the refusal was
+ * the successful run from seven minutes earlier. That is this repo's oldest diagnostic defect —
+ * *"`journalctl -u <unit> --since <ExecMainStartTimestamp>` is the PREVIOUS run's window once the unit has
+ * exited"*, recorded as having cost three wrong readings — arriving in the one place that had no bound at
+ * all. `lab-status.yml`'s task *"Whether that journal is ONE run or the unit's whole history"* is the
+ * remedy being copied.
+ *
+ * The id survives here where it does not for `lab:job`: this unit is `--remain-after-exit`, so systemd
+ * keeps its `InvocationID` after it finishes, and `main` stops and `reset-failed`s the unit before
+ * `systemd-run`, so the id is necessarily new. An EMPTY id still falls back to the whole unit journal and
+ * SAYS SO, because showing nothing where there is plenty is worse than showing too much.
+ *
  * @param {string} unit @param {number} budgetMs
  * @returns {Promise<{ status: number }>}
  */
 async function followUnit(unit, budgetMs) {
   const deadline = Date.now() + budgetMs;
   let shown = 0;
+  const invocation = ssh(`systemctl show -p InvocationID --value ${unit} 2>/dev/null || true`,
+    { capture: true }).trim();
+  const scope = journalScope(unit, invocation);
+  if (!invocation) {
+    process.stdout.write("  (this unit has no InvocationID, so the journal below is its WHOLE history, "
+      + "not just this run — read the timestamps)\n");
+  }
   for (;;) {
     const sub = ssh(`systemctl show -p SubState --value ${unit} 2>/dev/null || echo unknown`,
       { capture: true }).trim();
     // The journal so far, minus what has already been printed — so a caller that reconnects to a running
     // deploy sees it progress rather than a silent wait.
-    const log = ssh(`journalctl -u ${unit} --no-pager -o cat 2>/dev/null || true`, { capture: true });
+    const log = ssh(`journalctl ${scope} --no-pager -o cat 2>/dev/null || true`, { capture: true });
     const lines = log.split("\n");
     if (lines.length > shown) { process.stdout.write(lines.slice(shown).join("\n")); shown = lines.length; }
     if (sub !== "running" && sub !== "unknown") break;
@@ -449,4 +485,4 @@ async function followUnit(unit, budgetMs) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
 
 export { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS,
-  DEFAULT_PLAYBOOK_TIMEOUT_MS, onTheControlPlane };
+  DEFAULT_PLAYBOOK_TIMEOUT_MS, onTheControlPlane, journalScope };
