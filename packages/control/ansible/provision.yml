@@ -19,6 +19,43 @@
   # every worker is unavailable at once rather than one at a time -- which matters if a run is in flight.
   serial: 1
 
+  pre_tasks:
+    - name: Is any worker mid-capture
+      # Asked over HTTP from the control plane, deliberately NOT over the SSH connection -- the same
+      # question the dispatcher asks, answered the same way, so the two cannot disagree about "busy".
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        timeout: 5
+      delegate_to: localhost
+      register: provision_busy_check
+      failed_when: false
+      changed_when: false
+
+    - name: REFUSE to provision underneath a capture
+      # `provision-role.yml` -- this play's successor, running beside it until parity is proven -- has
+      # carried this refusal for weeks and this one did not. Same shape, same reasons: provisioning
+      # reinstalls NVDA and can reboot, destroying 12-520 s of unresumable screen-reader work, and it
+      # stamps `provisionRevision`, which is a capture cache key AND a `fleet-consistency` MUST_MATCH
+      # field -- so a box provisioned mid-run splits the fleet and every later capture run refuses to start.
+      #
+      # A HARD FAIL rather than a skip, for the reason `provision-role.yml` gives: a partially-provisioned
+      # fleet is exactly the INCONSISTENT state that stops everything, so skipping the busy box is the worst
+      # available option. A box that is not answering is NOT a refusal -- it is asleep or being rebuilt, and
+      # provisioning is how you would fix it. Only a live worker reporting `busy` blocks.
+      when:
+        - provision_busy_check.json.busy | default(false) | bool
+        - not (a11y_force_provision | default(false) | bool)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is CAPTURING right now. Provisioning reinstalls NVDA and can reboot,
+          which destroys 12-520 s of screen-reader work that cannot be resumed, and would move
+          provisionRevision on this box and not the others -- a capture cache key and a fleet-consistency
+          field, so the fleet would then read INCONSISTENT and every capture run would refuse to start.
+          Nothing has been changed. See what is going with `npm run lab:status`, end it deliberately with
+          `npm run lab:stop -- -e job=<name>`, then provision the WHOLE fleet together. If you genuinely
+          mean to provision over a live capture, `-e a11y_force_provision=true`.
+
   tasks:
     - name: Fast-forward the guest checkout so provisioning runs THIS version
       # Provisioning stamps `provisionRevision` from the checkout, and that value is a capture cache key.

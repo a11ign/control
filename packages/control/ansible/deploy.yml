@@ -63,6 +63,55 @@
         msg: "deploying code version {{ expected_code.stdout }}"
       run_once: true
 
+    - name: Is any worker mid-capture
+      # Asked over HTTP from the control plane, deliberately NOT over the SSH connection -- the same
+      # question the dispatcher asks, answered the same way, so the two cannot disagree about "busy".
+      # Copied in shape from `sleep.yml`, which learned it first, and from `provision-role.yml`, which
+      # copied it second. THIS PLAY IS WHERE IT WAS MISSING, and it is the play that reboots.
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        timeout: 5
+      delegate_to: localhost
+      register: deploy_busy_check
+      failed_when: false
+      changed_when: false
+
+    - name: REFUSE to deploy underneath a capture
+      # MEASURED COST, 2026-09-05: a `capture-real-pages` run started one minute after a different one
+      # finished; the progress file still described the FINISHED run, so the fleet read as free, and a
+      # deploy went out three minutes later. Twelve in-flight captures died -- "worker forgot capture
+      # <id> after accepting it -- it restarted mid-capture, so the work is gone and the case must be
+      # re-issued". Nothing was silently corrupted, because the capture-id store turns a lost result into
+      # a NAMED re-issue rather than a mystery, but twelve captures were paid for twice.
+      #
+      # THE SHAPE IS THIS REPO'S MOST EXPENSIVE ONE: a remedy applied at some call sites and not all.
+      # `sleep.yml` refuses (it SKIPS the busy box, because a half-slept fleet is harmless).
+      # `provision-role.yml` refuses (it HARD-FAILS, because a half-provisioned fleet splits
+      # `provisionRevision`, which is a cache key). `deploy.yml` -- the one play that reboots every guest
+      # it touches -- checked nothing at all, and its own header explains at length why it reboots.
+      #
+      # A HARD FAIL, like `provision-role.yml` and unlike `sleep.yml`, and for a stronger reason than
+      # either: a partial deploy leaves the fleet on two `codeVersion`s, which `assertFleetRunsThisCheckout`
+      # then refuses at the boundary of every capture entry point. So skipping the busy box does not
+      # even leave you a usable fleet -- it leaves you a stale one plus a run whose evidence was destroyed.
+      #
+      # A box that is not answering is NOT a refusal: it is asleep or mid-reboot, and deploying is how you
+      # would bring it back. Only a live worker reporting `busy` blocks. `recover.yml` is the deliberate
+      # exception in the other direction -- it EXISTS to kill a worker that is busy and wedged, so it must
+      # never grow this check.
+      when:
+        - deploy_busy_check.json.busy | default(false) | bool
+        - not (a11y_force_deploy | default(false) | bool)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is CAPTURING right now. Deploying reboots it, which destroys
+          12-520 s of screen-reader work that cannot be resumed, and leaves the fleet on two code
+          versions -- which `assertFleetRunsThisCheckout` refuses at the start of every capture run.
+          Nothing has been changed. See what is going with `npm run lab:status`, end it deliberately
+          with `npm run lab:stop -- -e job=<name>`, then deploy the WHOLE fleet together. If you
+          genuinely mean to deploy over a live capture, `-e a11y_force_deploy=true`.
+
   tasks:
     # A GUEST THAT IS STILL COMING BACK IS NOT AN UNREACHABLE ONE, and this play could not tell them
     # apart. It reboots every guest it deploys to, so running two deploys in succession — or deploying
