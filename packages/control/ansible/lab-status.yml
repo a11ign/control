@@ -235,10 +235,26 @@
         # prose on some paths — a warning, a next_command hint — and `from_json` throws on those, which
         # failed the whole task and reported nothing at all. Absent and unparseable must not both become
         # silence: say which one it was.
+        #
+        # PARSED AT ANY EXIT CODE, and the `rc != 2` that used to guard this was wrong the moment
+        # `--since` existed. `training:status --json` emits JSON on EVERY path — its own comment says so,
+        # because `JSON.parse(stdout)` throwing precisely when there is no run is the case an automated
+        # caller most needs — and both of its exit-2 paths (no run at all, and a run that predates the
+        # invocation asked about) carry a full payload. Discarding it on the code rather than on the
+        # SHAPE threw away the answer in exactly the two cases this task exists to report.
+        #
+        # EMPTY stdout at rc 2 is now a THIRD thing and it must not read as "no run": `refuseUnknownFlags`
+        # exits 2 and writes to stderr, so a lab checkout older than `--since` refuses the flag and
+        # produces precisely that. Measured 2026-09-05 — the first live run of this change reported
+        # "(no run in flight)" for a job that was five hours into capturing, and it looked like the fix
+        # working. Naming it is what separates "this lab has not pulled yet" from "nothing is running".
         msg: >-
           {{ (progress.stdout | from_json)
-             if (progress.rc != 2 and (progress.stdout | default('') | trim) is match('^\s*[{[]'))
-             else ('(no run in flight — training:status rc=' ~ progress.rc ~ ')'
+             if ((progress.stdout | default('') | trim) is match('^\s*[{[]'))
+             else ('(this lab predates --since: its training:status refused the flag, so progress cannot
+                    be bounded to this invocation. It resolves when the lab next pulls.)'
+                   if ('unknown flag' in (progress.stderr | default('')))
+                   else '(no run in flight — training:status rc=' ~ progress.rc ~ ')'
                    if (progress.stdout | default('') | trim | length) == 0
                    else '(training:status did not return JSON, rc=' ~ progress.rc ~ '): '
                         ~ (progress.stdout | default('') | trim | truncate(300))) }}
