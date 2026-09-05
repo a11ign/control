@@ -211,6 +211,31 @@
           {{ playbook_dir }}/../../../runs/fetched/{{ out | default('candidate') }}.{{ artifact
              }}{{ (lab_fetch_src | splitext)[1] | default('.json', true) }}
 
+    # CLEAR THE SAME ARTIFACT UNDER A DIFFERENT EXTENSION FIRST, or a stale one outlives its replacement.
+    #
+    # The destination is named after the artifact's REAL extension, which is right and is why this is
+    # needed: when an artifact's source format changes, the old file does not go anywhere. It sits beside
+    # the new one under a near-identical name and nothing distinguishes them but an mtime nobody reads.
+    #
+    # Measured 2026-09-05, at three round trips. `acceptance-records` is `.jsonl`; a
+    # `candidate.acceptance-records.json` from 25 August — eleven days stale — sat next to it, and I
+    # grepped the `.json` three times, concluded a fix had not worked, invented two wrong causes and acted
+    # on both: a full re-capture and a full regenerate of the held-out set. The fetch had succeeded every
+    # time and had PRINTED where it landed; it was piped to /dev/null.
+    #
+    # So the tool was not at fault and the remedy is still here rather than in the operator, for this
+    # repo's usual reason: "a stale value read as a current one" is its most-repeated defect, and asking a
+    # human to check an mtime is a rule that gets broken. Removing the siblings makes the wrong file
+    # impossible to read rather than merely unlikely.
+    - name: Remove any stale copy of this artifact under another extension
+      ansible.builtin.shell:
+        cmd: >-
+          find "{{ lab_fetch_dest | dirname }}" -maxdepth 1
+          -name "{{ lab_fetch_dest | basename | splitext | first }}.*"
+          ! -name "{{ lab_fetch_dest | basename }}" -delete
+      delegate_to: localhost
+      changed_when: false
+
     - name: Write it locally
       ansible.builtin.copy:
         content: "{{ fetched.content | b64decode }}"
