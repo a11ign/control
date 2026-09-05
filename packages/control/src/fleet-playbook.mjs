@@ -74,6 +74,9 @@ refuseUnknownFlags(
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
+/** How often to ask the control plane how its unit is doing. A poll INTERVAL, never a sleep-and-hope. */
+const FOLLOW_POLL_MS = 5_000;
+
 const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST || "REDACTED-INTERNAL-ADDRESS";
 const CONTROL_KEY = process.env.A11Y_PVE_KEY || `${process.env.HOME}/.ssh/a11y-pve_ed25519`;
 const CHECKOUT = "a11y-witness";
@@ -289,6 +292,74 @@ async function guardProtocolChange(chosen) {
   if (verdict.refuse) process.exit(3);
 }
 
+/**
+ * Start the playbook on the control plane as a named systemd unit, and return that unit's name.
+ *
+ * A PHASE, not a name restating its code: "get it running somewhere it will survive me" is a distinct
+ * step from "watch it and report what it did", and separating them is what lets `main` read as
+ * resolve-ref -> verify-landed -> start -> follow. Extracted when the PHYSICAL-line budget refused
+ * `main` at 92 lines — a check ESLint cannot make, since `skipComments: true` lets a comment-dense
+ * function run to twice its 70-line lint budget.
+ *
+ * ONE OBJECT, not six positionals — `max-params` is 4 here and the repo's rule is to bundle cohesive
+ * arguments rather than raise the ceiling. These six are one thing: what to deploy and how.
+ *
+ * @param {{ chosen: string, ref: string, expected: string, limitFlag: string|undefined,
+ *           serialFlag: string|undefined, allowEdgeDowngrade: boolean }} spec
+ * @returns {string} the unit name
+ */
+function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade }) {
+  // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
+//
+// It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
+// durable as the terminal that started it. Measured 2026-09-05: the caller was killed 100 s in, ssh
+// closed, ansible took SIGHUP mid-`Reboot`, and the fleet was left SPLIT — some boxes on the new code,
+// one unreachable, no PLAY RECAP, and nothing anywhere recording that a deploy had been interrupted.
+// The next capture refused with `10 stale worker(s)`, which is the safety net working one step too
+// late: you learn from a job refusing rather than from the fleet saying so.
+//
+// `systemd-run --remain-after-exit` parents it to PID 1, exactly as `run-job.yml` does for lab jobs and
+// `tailscale.yml` for the login — whose comment already states the rule this file did not follow: "the
+// work must outlive the connection that started it".
+//
+// `--remain-after-exit` and NOT `--collect`, for the reason lab-job.test.ts pins: without it the exit
+// code is discarded at the moment it matters. And the unit is stopped and `reset-failed` first, because
+// `systemd-run` refuses a name that is still loaded — a SUCCEEDED run keeps its name just as a failed
+// one does.
+const unit = `a11y-fleet-${chosen.replace(/\.yml$/, "")}`;
+try {
+  // `-e a11y_git_ref` is what the GUESTS fetch. Without it they default to `main` and stay exactly where
+  // they were, while the control plane sits on the branch you asked for — so `expected_code` is computed
+  // from your code and `served_code` from theirs, and the deploy fails with a mismatch that reads like a
+  // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
+  // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
+  ssh(`systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
+    + `systemd-run --unit=${unit} --remain-after-exit --working-directory=${CHECKOUT}/packages/control/ansible `
+    + `--setenv=ANSIBLE_CONFIG=ansible.cfg `
+    + `ansible-playbook -i inventory.yml ${chosen} -e a11y_git_ref=${ref}`
+    // The COMMIT that ref resolves to here, so each guest can assert it landed on it rather than the
+    // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
+    // the guests fetch; this catches the fetch silently not taking.
+    + ` -e a11y_expected_commit=${expected}`
+    + (limitFlag ? ` -l ${limitFlag}` : "")
+    + (serialFlag !== undefined ? ` -e worker_provision_serial=${serialFlag}` : "")
+    // A NAMED FLAG, because the obvious spelling silently did nothing. `-e worker_edge_allow_downgrade=true`
+    // typed on this command is not forwarded — this wrapper builds ansible's argv itself and passes on
+    // only what it recognises — and `refuseUnknownFlags` inspected only `--` arguments, so the whole
+    // fleet was provisioned believing an authorisation had been given that never arrived. Both halves
+    // are fixed; this is the half that gives the operator something real to type.
+    + (allowEdgeDowngrade ? " -e worker_edge_allow_downgrade=true" : ""),
+  { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
+} catch (cause) {
+  // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
+  // The status is what this block exists to surface AND to exit with, so it is load-bearing.
+  const failure = /** @type {{ status?: number }} */ (cause);
+  process.stderr.write(`\n  ${chosen} FAILED TO START (exit ${failure.status ?? "?"}).\n`);
+  process.exit(failure.status ?? 1);
+}
+  return unit;
+}
+
 async function main() {
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade } = parseArgs();
   await guardProtocolChange(chosen);
@@ -320,36 +391,59 @@ async function main() {
   // whole command line and whose stack is node's internals, which buries "which box failed" under twelve
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
-  try {
-    // `-e a11y_git_ref` is what the GUESTS fetch. Without it they default to `main` and stay exactly where
-    // they were, while the control plane sits on the branch you asked for — so `expected_code` is computed
-    // from your code and `served_code` from theirs, and the deploy fails with a mismatch that reads like a
-    // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
-    // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
-    ssh(`cd ${CHECKOUT}/packages/control/ansible && ANSIBLE_CONFIG=ansible.cfg `
-      + `ansible-playbook -i inventory.yml ${chosen} -e a11y_git_ref=${ref}`
-      // The COMMIT that ref resolves to here, so each guest can assert it landed on it rather than the
-      // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
-      // the guests fetch; this catches the fetch silently not taking.
-      + ` -e a11y_expected_commit=${expected}`
-      + (limitFlag ? ` -l ${limitFlag}` : "")
-      + (serialFlag !== undefined ? ` -e worker_provision_serial=${serialFlag}` : "")
-      // A NAMED FLAG, because the obvious spelling silently did nothing. `-e worker_edge_allow_downgrade=true`
-      // typed on this command is not forwarded — this wrapper builds ansible's argv itself and passes on
-      // only what it recognises — and `refuseUnknownFlags` inspected only `--` arguments, so the whole
-      // fleet was provisioned believing an authorisation had been given that never arrived. Both halves
-      // are fixed; this is the half that gives the operator something real to type.
-      + (allowEdgeDowngrade ? " -e worker_edge_allow_downgrade=true" : ""),
-    { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
-  } catch (cause) {
-    // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
-    // The status is what this block exists to surface AND to exit with, so it is load-bearing.
-    const failure = /** @type {{ status?: number }} */ (cause);
-    process.stderr.write(`\n  ${chosen} FAILED (ansible exit ${failure.status ?? "?"}). The PLAY RECAP above `
+  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade });
+
+  process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
+    + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`
+    + `    ssh root@${CONTROL_PLANE} 'systemctl status ${unit}'\n\n`);
+  const outcome = await followUnit(unit, PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS);
+
+  if (outcome.status !== 0) {
+    process.stderr.write(`\n  ${chosen} FAILED (ansible exit ${outcome.status}). The PLAY RECAP above `
       + "names which hosts; nothing was rolled back, so re-running is safe.\n");
-    process.exit(failure.status ?? 1);
+    process.exit(outcome.status);
   }
   process.stdout.write(`\n  ${chosen} completed; the PLAY RECAP above is the per-host result.\n`);
+}
+
+/**
+ * Wait for a control-plane unit to finish, streaming what it says, and return ITS status.
+ *
+ * WAIT FOR `SubState` TO LEAVE `running`, never for it to EQUAL a terminal value. A unit has several
+ * terminal SubStates — `exited`, `failed`, `dead` — and which one you get depends on how it ended and
+ * whether anything reaped it. `lab-job.test.ts` pins that rule and two waiters written an hour apart
+ * still hung on jobs that had long since finished, because they polled for the terminal values their
+ * authors happened to think of.
+ *
+ * `ExecMainStatus` is populated WHILE a unit runs and means nothing until `SubState` has left `running`,
+ * which is why it is read only after the loop.
+ *
+ * @param {string} unit @param {number} budgetMs
+ * @returns {Promise<{ status: number }>}
+ */
+async function followUnit(unit, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  let shown = 0;
+  for (;;) {
+    const sub = ssh(`systemctl show -p SubState --value ${unit} 2>/dev/null || echo unknown`,
+      { capture: true }).trim();
+    // The journal so far, minus what has already been printed — so a caller that reconnects to a running
+    // deploy sees it progress rather than a silent wait.
+    const log = ssh(`journalctl -u ${unit} --no-pager -o cat 2>/dev/null || true`, { capture: true });
+    const lines = log.split("\n");
+    if (lines.length > shown) { process.stdout.write(lines.slice(shown).join("\n")); shown = lines.length; }
+    if (sub !== "running" && sub !== "unknown") break;
+    if (Date.now() > deadline) {
+      process.stderr.write(`\n  ${unit} is STILL RUNNING past its ${Math.round(budgetMs / 60000)} min `
+        + `budget. It has NOT been stopped — this command gave up watching, which is not the same thing. `
+        + `Check it with: ssh root@${CONTROL_PLANE} 'systemctl status ${unit}'\n`);
+      process.exit(4);
+    }
+    await new Promise((r) => setTimeout(r, FOLLOW_POLL_MS));
+  }
+  const code = ssh(`systemctl show -p ExecMainStatus --value ${unit} 2>/dev/null || echo 1`,
+    { capture: true }).trim();
+  return { status: Number(code) || 0 };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
