@@ -473,11 +473,42 @@ function unitProperties(/** @type {string} */ unit) {
     .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
 }
 
-/** The journal for one unit, printed as bytes rather than through Ansible's YAML wrapping. */
+/**
+ * The journal for one unit, printed as bytes rather than through Ansible's YAML wrapping — and BOUNDED TO
+ * THE CURRENT INVOCATION, which it was not until 2026-09-05.
+ *
+ * It read `journalctl -u <unit> -n 300`, which is the unit's WHOLE HISTORY. So a re-dispatched pipeline
+ * printed the previous run's stages interleaved with this one's, newest last — and "newest last" is what
+ * makes it convincing. Measured that day: a watcher greping the tail for the current stage reported
+ * `Running retrain at` while this run was still on `capture-real-pages`, then reported
+ * `STOPPED at check-signals` from a run that had been stopped an hour earlier. Three misreads in one
+ * session, each of which sent an investigation somewhere the pipeline had not been.
+ *
+ * That is the defect the comment above this function already names — *"the three `journalctl` misreads that
+ * cost a run each are the record"* — committed by the tool written to prevent it, on the same file's second
+ * paragraph. `lab-status.yml` has bound the JOB journal by `_SYSTEMD_INVOCATION_ID` since it was written,
+ * with a task called "Whether that journal is ONE run or the unit's whole history"; the PIPELINE journal
+ * never got it.
+ *
+ * A released or never-started unit has no InvocationID, so the unbounded read is the FALLBACK rather than
+ * the default, and it says which one it gave you. "This run" and "everything this unit has ever done" are
+ * different answers, and a reader must never have to guess which is on screen.
+ */
 function printUnitLog(/** @type {string} */ unit) {
-  const seen = spawnSync("ssh", ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no",
-    "-o", "ConnectTimeout=10", `root@${CONTROL_PLANE}`,
-    `journalctl -u ${unit} --no-pager -n 300`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const ssh = (/** @type {string} */ command) => spawnSync("ssh",
+    ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+      `root@${CONTROL_PLANE}`, command],
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+
+  const invocation = ssh(`systemctl show -p InvocationID --value ${unit}`).stdout?.trim() ?? "";
+  const bounded = /^[0-9a-f]{32}$/.test(invocation);
+  process.stdout.write(bounded
+    ? `  this invocation only (${invocation})\n\n`
+    : "  NO CURRENT INVOCATION — this is the unit's WHOLE HISTORY, which may span several runs\n\n");
+
+  const seen = ssh(bounded
+    ? `journalctl _SYSTEMD_INVOCATION_ID=${invocation} --no-pager -n 300`
+    : `journalctl -u ${unit} --no-pager -n 300`);
   process.stdout.write(seen.stdout || "");
   process.exit(seen.status ?? 0);
 }
