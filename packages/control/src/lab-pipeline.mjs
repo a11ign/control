@@ -194,7 +194,7 @@ export const PIPELINES = {
   full: {
     fleet: true,
     what: "corpus, model and gates in one run — the whole thing, proven together",
-    jobs: ["capture", "retrain", "export-acceptance", "train", "shortcuts", "acceptance", "promote",
+    jobs: ["capture", "retrain", "generate-acceptance", "capture-acceptance", "capture-acceptance-2", "export-acceptance", "train", "shortcuts", "acceptance", "promote",
            "grants-audit", "applicability-audit", "rules-gate", "rules-coverage", "rules-real-pages",
            "release-gate"],
   },
