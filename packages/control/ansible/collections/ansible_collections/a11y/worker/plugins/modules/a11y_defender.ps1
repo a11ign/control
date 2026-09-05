@@ -24,13 +24,22 @@ $spec = @{
 $module = [Ansible.Basic.AnsibleModule]::Create($args, $spec)
 
 $status = $null
-try { $status = Get-MpComputerStatus -ErrorAction Stop } catch { }
+$statusError = $null
+try { $status = Get-MpComputerStatus -ErrorAction Stop } catch { $statusError = $_.Exception.Message }
 
 if (-not $status) {
-    # Not an error: a trimmed image may have no Defender at all, which is the desired end state anyway.
+    # Absence itself is not an error: a trimmed image may have no Defender at all, which is the desired
+    # end state anyway. But PSScriptAnalyzer's PSAvoidUsingEmptyCatchBlock is right that the ORIGINAL
+    # exception must not be thrown away -- CLAUDE.md's own rule for exactly this shape ("this codebase's
+    # whole diagnostics model exists because silent catches once hid an outage") applies here too: a box
+    # where Get-MpComputerStatus fails for a DIFFERENT reason (permissions, a corrupted WMI namespace) is
+    # not distinguishable from "genuinely absent" without this, and would report the same reassuring
+    # "not present" either way. Recorded rather than changing behaviour: nothing here can be verified
+    # against a real error message off Windows, so this is deliberately additive, not a new decision.
     $module.Result.changed = $false
     $module.Result.present = $false
     $module.Result.msg = 'Defender is not present on this image'
+    if ($statusError) { $module.Result.status_error = $statusError }
     $module.ExitJson()
 }
 

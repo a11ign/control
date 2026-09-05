@@ -92,12 +92,17 @@
         dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
         mode: "0644"
 
+    # ansible.builtin.apt_repository is deprecated in favour of this module (removal targeted for
+    # ansible-core 2.25); same repository, deb822 form. `signed_by` takes the keyring file the previous
+    # task already downloaded, so this manages only the source entry, not the key.
     - name: Tailscale's apt repository
-      ansible.builtin.apt_repository:
-        repo: >-
-          deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg]
-          https://pkgs.tailscale.com/stable/debian {{ ansible_distribution_release }} main
-        filename: tailscale
+      ansible.builtin.deb822_repository:
+        name: tailscale
+        types: deb
+        uris: https://pkgs.tailscale.com/stable/debian
+        suites: "{{ ansible_distribution_release }}"
+        components: main
+        signed_by: /usr/share/keyrings/tailscale-archive-keyring.gpg
         state: present
 
     - name: Install tailscale
