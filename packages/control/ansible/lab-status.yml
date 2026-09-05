@@ -162,7 +162,31 @@
 
     - name: The run's own progress report
       ansible.builtin.command:
-        argv: [npm, run, "--silent", "training:status", "--", "--json"]
+        # `--since` BOUNDS THE ANSWER TO THIS INVOCATION, and it is the same remedy as
+        # `_SYSTEMD_INVOCATION_ID` on the journal twenty lines above: the progress file is keyed on a
+        # CORPUS, not on a run, so without a bound it answers "what did this corpus last do" where the
+        # caller asked "what is the job I named doing".
+        #
+        # This is the THIRD fix to this one task and the first that addresses the shape rather than a
+        # case. The first covered acceptance reading the training corpus, the second covered jobs that do
+        # not capture at all -- and both rest on a job either capturing or not. A COMPOSITE job
+        # (`everything`, `retrain`) does both in turn: it captures, then exports, trains and gates for
+        # hours while its progress file goes on describing the finished capture. Reporting that as the
+        # job's state is the misread that killed 12 in-flight captures on 2026-09-05.
+        #
+        # ActiveEnterTimestamp is passed THROUGH, unconverted. `Date.parse` reads systemd's UTC rendering
+        # directly, so there is no date arithmetic in Jinja -- where this repo has twice paid for escaping
+        # settled by reading rather than by running. systemd's own "never been active" spellings (empty
+        # and `n/a`) mean no constraint; anything else unreadable is REFUSED rather than ignored, so a lab
+        # whose clock leaves UTC fails loudly instead of answering about the wrong run.
+        argv: [npm, run, "--silent", "training:status", "--", "--json",
+               # `join('')` and NOT `first`: a unit that has never been active, and a unit name systemd
+               # does not know, both yield NO match, and `| first` on an empty sequence is version-
+               # dependent -- tolerant on ansible-core 2.21 (measured), an error on older ones. `join('')`
+               # is empty for zero matches on every version, and there is exactly one
+               # `ActiveEnterTimestamp=` line to join. Verified by running all three inputs, not by reading.
+               "--since={{ (detail.stdout | default('')
+                            | regex_findall('ActiveEnterTimestamp=(.*)') | join('')) | trim }}"]
         chdir: "{{ lab_repo_path }}"
       # A TASK keyword, not a module argument — nested under `command:` it becomes an unknown arg, the task
       # fails, and `progress` registers a dict with no `rc`, which then breaks the debug below with

@@ -274,6 +274,13 @@
       # `check-signals` produces a candidate trained on a corpus with a hole in it, and the number at the
       # end looks exactly like a good one.
       retrain:
+        # A COMPOSITE job DOES capture, for part of its life. Declaring `progress:` here was wrong until
+        # `training:status` learned `--since`, because after the capture stage this file describes a
+        # FINISHED run for every hour the job spends exporting, training and running gates -- and
+        # "running: false, 49 of 49" read as a finished JOB is the misread that destroyed 12 in-flight
+        # captures on 2026-09-05. `lab-status.yml` bounds the read to this invocation's start, so the
+        # file is reported during the capture and refused after it.
+        progress: runs/screenreader-dataset
         argv: ["/usr/bin/npm", "run", "lab:retrain"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
         # A full corpus capture is the long pole; the rest is minutes. Above the ~9.8 h a full recapture
@@ -409,6 +416,13 @@
       # `lab:pipeline` stays and is still the right tool for a SHORT chain you want to watch — it prints
       # per-stage boundaries live, which a single unit cannot. This is for the long unattended one.
       everything:
+        # A COMPOSITE job DOES capture, for part of its life. Declaring `progress:` here was wrong until
+        # `training:status` learned `--since`, because after the capture stage this file describes a
+        # FINISHED run for every hour the job spends exporting, training and running gates -- and
+        # "running: false, 49 of 49" read as a finished JOB is the misread that destroyed 12 in-flight
+        # captures on 2026-09-05. `lab-status.yml` bounds the read to this invocation's start, so the
+        # file is reported during the capture and refused after it.
+        progress: runs/screenreader-dataset
         argv: ["/usr/bin/npm", "run", "--silent", "lab:everything"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
         # Above a full recapture plus a train plus every gate, because a ceiling that expires early turns
