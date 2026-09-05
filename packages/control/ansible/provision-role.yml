@@ -60,6 +60,21 @@
   # converge — so it is a choice now rather than a constant. `-e worker_provision_serial=0` runs the whole
   # fleet at once (`ansible.cfg` already sets `forks = 20`), which is what converging a fleet after adding
   # a box actually wants.
+  # ANY HOST'S REFUSAL ENDS THE PLAY, and without this the refusal below protects one box and splits the
+  # fleet — which is the outcome it was written to prevent.
+  #
+  # Ansible removes a FAILED host from the remaining tasks and carries on with the others. So a per-host
+  # `fail` in `pre_tasks` skips the busy worker (no destroyed capture, which is half the point) and lets the
+  # other nine deploy and reboot, leaving two `codeVersion`s across the fleet —
+  # `assertFleetRunsThisCheckout` then refuses every capture run, which is exactly what the refusal claims
+  # to stop. Found 2026-09-05 by an adversarial review of the commit that added the refusal; the guard fired
+  # and did not halt, and a text-matching test could not tell the two apart.
+  #
+  # `serial` does NOT substitute for this. `provision.yml`'s `serial: 1` happens to halt because a batch of
+  # one that fails is a batch that is 100% failed — but `provision-role.yml` is documented to be run with
+  # `--serial=0` (all at once), where one failure of ten leaves nine to proceed. The property wanted here is
+  # "abort on any host", which is what this directive says and what `serial` only implies at batch size 1.
+  any_errors_fatal: true
   serial: "{{ worker_provision_serial | default(1) }}"
 
   pre_tasks:

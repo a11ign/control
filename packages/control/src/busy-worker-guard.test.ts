@@ -109,3 +109,32 @@ test("every exemption names a playbook that exists, so the list cannot rot into 
     assert.ok(present.has(file), `EXEMPT names ${file}, which is not in ansible/ any more`);
   }
 });
+
+test("a refusal must HALT the play, not merely remove the host that refused", () => {
+  // THE HOLE THIS CLOSES, found 2026-09-05 by an adversarial review of the commit that added the refusal.
+  // Ansible removes a FAILED host from the remaining tasks and carries on with the others. So a per-host
+  // `fail` in `pre_tasks` skipped the busy worker — no destroyed capture, which is half the point — and let
+  // the other nine deploy and REBOOT, leaving two `codeVersion`s across the fleet. That is precisely the
+  // outcome the refusal's own message claims to prevent, and it is why the guard alone is not the fix.
+  //
+  // The tests above could not see it: they match the literal string `ansible.builtin.fail:`, and a guard
+  // that fires without halting is textually identical to one that works. "It fired" and "it stopped the
+  // rollout" are different claims — the same distinction as `ok` versus `ready` on `/health`.
+  //
+  // `serial` does NOT substitute. `provision.yml`'s `serial: 1` halts only because a batch of one that
+  // fails is 100% failed; `provision-role.yml` is DOCUMENTED to run with `--serial=0`, where one failure of
+  // ten leaves nine to proceed. The property wanted is "abort on any host", which is what this directive
+  // states outright and what `serial` only implies at batch size one.
+  for (const file of ["deploy.yml", "provision-role.yml"]) {
+    assert.match(executable(file), /^\s*any_errors_fatal:\s*true\s*$/m,
+      `${file} refuses a busy worker per-host, and without \`any_errors_fatal: true\` that removes only `
+      + "the refusing host — the rest of the fleet deploys and reboots, which is the split the refusal "
+      + "exists to prevent.");
+  }
+  // provision.yml is the deliberate exception and the reason is worth pinning rather than remembering:
+  // its `serial: 1` makes every batch a single host, so any failure IS a fully-failed batch and the play
+  // ends. Adding the directive there would be correct and redundant; asserting the mechanism is what stops
+  // somebody "tidying" the serial away and silently reopening this.
+  assert.match(executable("provision.yml"), /^\s*serial:\s*1\s*$/m,
+    "provision.yml relies on serial: 1 to halt on a refusal — if that changes it needs any_errors_fatal");
+});
