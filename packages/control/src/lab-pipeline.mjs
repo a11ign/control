@@ -54,6 +54,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+// The TESTED spelling of "which journal is this". See `printUnitLog`.
+import { journalScope } from "./fleet-playbook.mjs";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -501,14 +503,21 @@ function printUnitLog(/** @type {string} */ unit) {
     { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 
   const invocation = ssh(`systemctl show -p InvocationID --value ${unit}`).stdout?.trim() ?? "";
-  const bounded = /^[0-9a-f]{32}$/.test(invocation);
+  // `journalScope` rather than a second regex. This function had its own inline copy of the same 32-hex
+  // check and the same two-branch choice -- written ONE COMMIT AFTER the fix that introduced
+  // `journalScope`, which is "a fact stated twice" landing immediately after an instance of "a remedy
+  // reaching one of two paths". Found by an adversarial review, not by anyone reading it back.
+  //
+  // The imported one carries the tests: valid id, empty id, and injection attempts, mutation-checked
+  // against relaxing the regex to a truthiness test. The inline copy had none, and this value reaches a
+  // remote shell on the box holding the fleet SSH key.
+  const scope = journalScope(unit, invocation);
+  const bounded = scope.startsWith("_SYSTEMD_INVOCATION_ID=");
   process.stdout.write(bounded
     ? `  this invocation only (${invocation})\n\n`
     : "  NO CURRENT INVOCATION — this is the unit's WHOLE HISTORY, which may span several runs\n\n");
 
-  const seen = ssh(bounded
-    ? `journalctl _SYSTEMD_INVOCATION_ID=${invocation} --no-pager -n 300`
-    : `journalctl -u ${unit} --no-pager -n 300`);
+  const seen = ssh(`journalctl ${scope} --no-pager -n 300`);
   process.stdout.write(seen.stdout || "");
   process.exit(seen.status ?? 0);
 }
