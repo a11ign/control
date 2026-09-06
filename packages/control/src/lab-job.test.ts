@@ -76,7 +76,11 @@ test("the discovery is real, so this cannot pass having examined nothing", () =>
 test("a renamed setenv key or a re-indented catalogue is refused, not silently read as empty", () => {
   // MUTATION CHECK on the ARTEFACT this derivation depends on, not the doc: rename the fact it looks for,
   // and confirm the scan notices rather than quietly returning zero.
-  const renamed = CATALOGUE.replace(/A11Y_WORKERS=\{\{ lab_fleet_workers \}\}/g, "A11Y_WORKERS={{ pool }}");
+  // RENAME THE FACT, not one spelling of it. This replaced the verbatim `A11Y_WORKERS={{ lab_fleet_workers
+  // }}` only, so a job computing its pool FROM the fleet -- `capture-only` slicing it for a `workers` cap --
+  // survived the rename and the mutation reported the derivation broken when it was the mutation that was
+  // narrow. The derivation keys on the fact appearing inside an `A11Y_WORKERS=` template; so must this.
+  const renamed = CATALOGUE.replace(/lab_fleet_workers/g, "pool");
   assert.deepEqual(captureBearingJobs(renamed), [],
     "renaming the fact every entry keys on must drop every job, or this scan is reading something else");
 

@@ -41,7 +41,7 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, role, shard, model, worker, sample, subtype, feature]
+    lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature]
     # A parameter that reaches its command through a DERIVED FACT rather than by its own name. The
     # derivation below reads the job's own command, and a command saying `{{ lab_named_worker }}` cannot
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
@@ -206,7 +206,7 @@
       # which is the difference between "captured 0 cases" and "you asked for a case that does not exist".
       capture-only:
         progress: runs/screenreader-dataset
-        params: {only: required}
+        params: {only: required, workers: optional}
         # `:fresh` — GENERATE, then capture. It ran `training:capture` alone, so a case that did not yet
         # exist as a page could never be captured: `training:capture failed: No generated case matches`.
         # That defeats half of what this job is for. `--pipeline=verify` exists to prove a corpus change
@@ -229,8 +229,25 @@
         # their cache. Same rule the acceptance runs already follow -- `DATASET_KIND=acceptance` refuses
         # the cache outright, "because those runs exist to test whether NVDA's output is still stable",
         # which is exactly what this one is for.
+        # `workers` CAPS THE POOL, and it exists so a SCALING measurement is dispatchable at all.
+        #
+        # Without it this job runs across every box in `lab_fleet_workers`, so "the same shard at five
+        # boxes and at ten" -- the only way to establish whether this fleet scales, and the measurement the
+        # hardware decision rests on -- could not be expressed. Found 2026-09-06 when that run was approved
+        # and turned out to have no way to ask for the second arm. The alternative was `-e` an unread
+        # variable and hope, which `lab-job.yml`'s own parameter guard refuses on purpose.
+        #
+        # It TRUNCATES the address list rather than setting `A11Y_MAX_WORKERS`, which is a host-memory
+        # override for the local UTM path and does not apply to bare metal. Truncating names exactly which
+        # boxes ran, so the arm is reproducible and `A11Y_WORKERS` still reads as the pool the run used --
+        # a run that cannot say which boxes it measured is not a comparison.
         argv: ["/usr/bin/npm", "run", "training:capture:fresh", "--", "--only={{ only }}", "--no-cache"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
+        # ONE occurrence of `workers`, carrying its own default, so the parameter derivation reads it as
+        # OPTIONAL. Written first as a two-branch conditional, which mentions `workers` twice -- the first
+        # without a default -- and `lab-job.test.ts` correctly derived REQUIRED from that and refused the
+        # disagreement with the declaration above. The guard was right and the expression was the problem.
+        # 99 is "every box this fleet will ever have": the slice simply takes them all.
+        setenv: ["A11Y_WORKERS={{ (lab_fleet_workers | split(','))[:workers | default(99) | int] | join(',') }}"]
         # Minutes, not hours: this exists precisely because it is small.
         timeout: 3600
       # `--require-complete` because THIS box owns the corpus. Here "no evidence for that case" is a real

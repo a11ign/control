@@ -112,7 +112,24 @@ export function captureBearingJobs(catalogueText) {
       + "depends on changed, and this derivation is blind rather than the catalogue being small");
   }
   return jobs
-    .filter(({ block }) => /setenv:\s*\[[^\]]*A11Y_WORKERS=\{\{\s*lab_fleet_workers\s*\}\}/.test(block))
+    // DERIVES ITS POOL FROM THE FLEET is the property; a VERBATIM passthrough was the string. This used to
+    // require `A11Y_WORKERS={{ lab_fleet_workers }}` exactly, so the moment a job computed its pool from
+    // the fleet -- `capture-only` gained a `workers` cap, sliced off the same list -- it silently dropped
+    // out of the capture-bearing set and lost its fleet-staleness pre-check. Nothing would have said so:
+    // the job still dispatches real captures across real boxes, and the guard that refuses a stale fleet
+    // simply stops running for it.
+    //
+    // Widening is safe in the direction that matters: it can only ADD jobs to the protected set. A job
+    // that mentions `lab_fleet_workers` in its `A11Y_WORKERS` at all is dispatching across the fleet by
+    // construction, whatever it does to the list first.
+    //
+    // `\b` is DEFENSIVE, not load-bearing, and saying which is the point. Without it the pattern matches a
+    // PREFIX, so a rename to `lab_fleet_workers_SOMETHING` would still match. The rename mutation was
+    // widened at the same time to replace the fact everywhere rather than one spelling of it, and that
+    // alone closes the case -- so removing `\b` now fails no test. Kept because a prefix match is wrong
+    // whether or not a test happens to reach it, and recorded as unproven rather than left to read as
+    // proven.
+    .filter(({ block }) => /setenv:\s*\[[^\]]*A11Y_WORKERS=\{\{[^}]*lab_fleet_workers\b/.test(block))
     .map(({ name }) => name);
 }
 
