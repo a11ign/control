@@ -129,7 +129,8 @@ export function captureBearingJobs(catalogueText) {
     // alone closes the case -- so removing `\b` now fails no test. Kept because a prefix match is wrong
     // whether or not a test happens to reach it, and recorded as unproven rather than left to read as
     // proven.
-    .filter(({ block }) => /setenv:\s*\[[^\]]*A11Y_WORKERS=\{\{[^}]*lab_fleet_workers\b/.test(block))
+    .filter(({ block }) =>
+      /setenv:\s*\[[^\]]*A11Y_WORKERS=\{\{[^}]*lab_(fleet|selected)_workers\b/.test(block))
     .map(({ name }) => name);
 }
 

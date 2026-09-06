@@ -47,10 +47,23 @@
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
     # guessed at. `lab-job-params.test.ts` refuses a new `set_fact` guarded by `when: <param> is defined`
     # that is not listed here, which is what stops this drifting from the tasks that build the facts.
+    #
+    # THE VALUE IS AN EXPRESSION, NOT JUST A NAME, and that is what lets an alias be OPTIONAL. The
+    # derivation decides required-versus-optional by looking for `| default(...)` or `is defined`, so a
+    # bare name could only ever derive REQUIRED — true of the one alias here and wrong for the next one.
+    #
+    # READ BY `lab-job.test.ts`, which derives its substitution table from THIS map. It carried its own
+    # hardcoded copy until 2026-09-06, and the comment here cited `lab-job-params.test.ts` as what kept
+    # the two in step — **a file that has never existed in this repository**. The fact was stated twice,
+    # nothing compared the copies, and the sentence saying otherwise is what stopped anyone checking.
     lab_param_aliases:
       # `-e worker=` is a NAME from the inventory and the command needs an ADDRESS. Turning one into the
       # other is the containment: an address cannot be supplied directly.
       lab_named_worker: worker
+      # `-e workers=` names WHICH boxes and defaults to all of them. Same containment, same reason: the
+      # value is a list of inventory HOST NAMES (or a count), never addresses, so every address in the
+      # result is still built from the inventory and still passes the strict address assert below.
+      lab_selected_workers: workers | default('the whole fleet')
     # Every job this playbook can run. `timeout` becomes `RuntimeMaxSec`, so it is a real ceiling rather
     # than advice — set it above the slowest honest run, because a deadline that expires early turns "still
     # working" into "failed".
@@ -242,12 +255,18 @@
         # boxes ran, so the arm is reproducible and `A11Y_WORKERS` still reads as the pool the run used --
         # a run that cannot say which boxes it measured is not a comparison.
         argv: ["/usr/bin/npm", "run", "training:capture:fresh", "--", "--only={{ only }}", "--no-cache"]
-        # ONE occurrence of `workers`, carrying its own default, so the parameter derivation reads it as
-        # OPTIONAL. Written first as a two-branch conditional, which mentions `workers` twice -- the first
-        # without a default -- and `lab-job.test.ts` correctly derived REQUIRED from that and refused the
-        # disagreement with the declaration above. The guard was right and the expression was the problem.
-        # 99 is "every box this fleet will ever have": the slice simply takes them all.
-        setenv: ["A11Y_WORKERS={{ (lab_fleet_workers | split(','))[:workers | default(99) | int] | join(',') }}"]
+        # `lab_selected_workers`, the asserted fact built above — the ONLY job that reads the selection.
+        # Deliberately not applied to the other pooling jobs: a corpus recapture on a subset is a corpus
+        # captured on fewer boxes with nothing recording that, and this job is bounded to a handful of
+        # cases by `--only`, which is what makes a deliberately-smaller run meaningful here and a
+        # silent-partial-corpus hazard there.
+        #
+        # THE SLICE USED TO BE INLINE HERE and this replaced it when names arrived: an inline expression
+        # can only ever cut the address string it is handed, so selecting BY NAME needs `hostvars`, which
+        # means a fact — and a fact is what can be put through the address assert. The derivation still
+        # reads `workers` as OPTIONAL because `lab_param_aliases` maps this fact to
+        # `workers | default(...)`, which is why that map's values are expressions rather than names.
+        setenv: ["A11Y_WORKERS={{ lab_selected_workers }}"]
         # Minutes, not hours: this exists precisely because it is small.
         timeout: 3600
       # `--require-complete` because THIS box owns the corpus. Here "no evidence for that case" is a real
@@ -1000,36 +1019,81 @@
     #                                                          fleet. The strict address pattern would
     #                                                          have caught it and never sees this value.
     #
-    # A COUNT IS THE WHOLE INTERFACE TODAY, so the count is where the check has to go. Bounds only —
-    # deliberately not a rewrite of the expression, which is another session's and works.
-    - name: A worker cap must be a number the fleet can meet
+    # WHICH BOXES, by NAME or by COUNT. `-e workers=a11y-worker-2,a11y-worker-5` or `-e workers=5`; with
+    # neither it is the whole fleet and this is `lab_fleet_workers` unchanged, so every other job behaves
+    # exactly as before.
+    #
+    # NAMES CAME IN AFTER THE COUNT, on `orchestrator`'s ruling and for #21's reason: which five boxes ran
+    # is part of what a scaling measurement states, and "the first five in inventory order" is a choice
+    # nobody made. The count survives as sugar.
+    #
+    # NAMES, NEVER ADDRESSES, and that is the design rather than a preference. The address assert above
+    # exists because extra vars have the highest precedence in Ansible, so `-e A11Y_WORKERS=...` is
+    # reachable even where it looks inventory-derived, and this env is read by a process running as root
+    # on the box holding the corpus. A caller-supplied ADDRESS list is exactly the injection that assert
+    # makes inexpressible, arriving through a new door. A caller-supplied NAME is resolved through
+    # `hostvars` like every other, so the address still comes from the inventory and the result goes
+    # through the identical pattern assert below.
+    - name: Which workers this run may use
+      ansible.builtin.set_fact:
+        lab_selected_hosts: >-
+          {{ (workers is not defined) | ternary(
+               groups['a11y_workers'],
+               (workers | default('') | string is match('^[0-9]+$'))
+                 | ternary(groups['a11y_workers'][:workers | default(0) | int],
+                           workers | default('') | string | split(',') | map('trim') | select | list)) }}
+
+    # EVERY WAY OF NAMING A POOL THE FLEET CANNOT GIVE, refused by name. MEASURED against a five-host
+    # fixture by RUNNING the expressions rather than reading them — `[:n]` on a shorter list is silently
+    # the whole list, and a non-numeric or zero value renders an EMPTY `A11Y_WORKERS`, which is not a
+    # refusal: with no worker list a run goes to DISCOVERY and guesses localhost:8765, so a corpus capture
+    # dispatches at whatever answers on the lab. The strict address pattern would have caught that string
+    # and never sees it, because the selection is rendered after it.
+    - name: A worker selection must name a pool the fleet can actually give
       when: workers is defined
       ansible.builtin.assert:
         that:
-          - workers | string is match('^[0-9]+$')
-          - workers | int >= 1
-          - workers | int <= groups['a11y_workers'] | length
+          - lab_selected_hosts | length > 0
+          - lab_selected_hosts | difference(groups['a11y_workers']) | length == 0
+          - (workers | string is not match('^[0-9]+$')) or (workers | int <= groups['a11y_workers'] | length)
         fail_msg: >-
           Refusing to run: -e workers={{ workers }} against a fleet of
           {{ groups['a11y_workers'] | length }} box(es) ({{ groups['a11y_workers'] | join(', ') }}).
-          {{ (workers | string is not match('^[0-9]+$')) | ternary(
-               'That is not a number. The cap is a COUNT of boxes, and a non-numeric value renders as 0 —
-                which produces an EMPTY A11Y_WORKERS, and an empty worker list is discovery, not a refusal.',
-               (workers | int < 1) | ternary(
-                 'Zero boxes is not a smaller measurement, it is none — and it does not fail loudly: it
-                  produces an empty A11Y_WORKERS, which sends the run to worker DISCOVERY and a guessed
-                  localhost:8765 rather than to the fleet.',
+          {{ (lab_selected_hosts | length == 0) | ternary(
+               'That selects no workers at all, and it does not fail loudly on its own: it produces an
+                EMPTY A11Y_WORKERS, which sends the run to worker DISCOVERY and a guessed localhost:8765
+                rather than to the fleet. Zero boxes is not a smaller measurement, it is none.',
+               (lab_selected_hosts | difference(groups['a11y_workers']) | length > 0) | ternary(
+                 'These are not in the inventory: '
+                   ~ (lab_selected_hosts | difference(groups['a11y_workers']) | join(', ')),
                  'That is more boxes than the fleet has. Truncating silently would report a run on
                   ' ~ (groups['a11y_workers'] | length) ~ ' as the one you asked for.')) }}
 
-    # STATE THE POPULATION, on every run, not only when a cap was asked for. A measurement that names its
-    # boxes when somebody remembered to ask has an optional population, and #21 is about exactly that.
-    - name: Say how many boxes this run will use
+    - name: Address the selected workers
+      ansible.builtin.set_fact:
+        lab_selected_workers: >-
+          {{ lab_selected_hosts
+             | map('extract', hostvars, 'ansible_host')
+             | map('regex_replace', '^(.*)$', 'http://\1:8765')
+             | join(',') }}
+
+    # THE SAME ASSERT, NOT A WEAKER ONE. A subset built from the inventory is still an address list going
+    # into a root process, and a selection path that skipped this check would be the one door left open.
+    - name: The selected address list must be exactly that, and nothing else
+      ansible.builtin.assert:
+        that:
+          - lab_selected_workers is match('^http://[0-9.]+:8765(,http://[0-9.]+:8765)*$')
+        fail_msg: >-
+          Refusing to run: A11Y_WORKERS would be {{ lab_selected_workers | truncate(120) }}, which is not
+          a plain comma-separated list of worker addresses. Something has overridden the inventory.
+
+    # STATE THE POPULATION, on every run, not only when a selection was asked for. A measurement that
+    # names its boxes when somebody remembered to ask has an optional population, and #21 is about that.
+    - name: Say which boxes this run will use
       ansible.builtin.debug:
         msg: >-
-          {{ (workers | default(groups['a11y_workers'] | length)) | int }} of
-          {{ groups['a11y_workers'] | length }} worker(s):
-          {{ (groups['a11y_workers'])[:(workers | default(99) | int)] | join(', ') }}
+          {{ lab_selected_hosts | length }} of {{ groups['a11y_workers'] | length }} worker(s):
+          {{ lab_selected_hosts | join(', ') }}
 
     - name: "Run {{ job }}"
       ansible.builtin.include_tasks: tasks/run-job.yml

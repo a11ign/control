@@ -80,7 +80,7 @@ test("a renamed setenv key or a re-indented catalogue is refused, not silently r
   // }}` only, so a job computing its pool FROM the fleet -- `capture-only` slicing it for a `workers` cap --
   // survived the rename and the mutation reported the derivation broken when it was the mutation that was
   // narrow. The derivation keys on the fact appearing inside an `A11Y_WORKERS=` template; so must this.
-  const renamed = CATALOGUE.replace(/lab_fleet_workers/g, "pool");
+  const renamed = CATALOGUE.replace(/lab_(fleet|selected)_workers/g, "pool");
   assert.deepEqual(captureBearingJobs(renamed), [],
     "renaming the fact every entry keys on must drop every job, or this scan is reading something else");
 
