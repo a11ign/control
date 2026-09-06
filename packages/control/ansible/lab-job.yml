@@ -668,6 +668,44 @@
       # `argv` is a LIST, so the addresses are spliced in as
       # separate elements — joining them with a space would hand the script one argument containing four
       # URLs, which is the quoting class `argv:` exists to remove, reintroduced by hand.
+      capture-check:
+        params: {worker: required}
+        # THE CAPTURE LAYER'S OWN REGRESSION CHECK, dispatchable at last. `capture:check` was documented as
+        # MANDATORY after any change to `capture-core.mjs` and had never run once, because running it meant
+        # a laptop with a route to a worker — so the one check written for the least testable code in this
+        # repo was the one nobody could dispatch. `architecture-audit.md` named the gap; this closes it.
+        #
+        # A DIAGNOSTIC, DELIBERATELY, and that classification is load-bearing. It takes ONE named worker via
+        # `--worker=` rather than reading `lab_fleet_workers`, so `captureBearingJobs` does not see it and
+        # the fleet-staleness pre-check does not gate it — `worker-code-check.test.ts`'s own rule is that a
+        # diagnostic must NEVER be the thing that takes the pool offline. A stale worker here costs one
+        # wrong verdict; a stale worker on a corpus writer costs 2,122 captures indistinguishable from
+        # current ones for ever.
+        #
+        # `worker` is REQUIRED rather than defaulted. `capture-check.mjs`'s own header records that a
+        # mistyped `--worker=` falls back to IN-PROCESS mode, which on the lab is not a weaker test but a
+        # meaningless one — the lab has no NVDA. A default would make that fallback reachable by omission.
+        exitMeanings:
+          "1": >-
+            the capture layer REGRESSED — one or more assertions on the capture RESULT failed. The check
+            ran correctly and this is its answer. Read which assertion; do not re-run and hope.
+          "2": >-
+            it could not run the check at all — no worker reachable, or it refused before testing
+            anything. Never read this as "the capture layer is fine".
+        # THE ADDRESS IS RESOLVED FROM THE INVENTORY, never handed in. `--worker=http://:8765` cost 29
+        # minutes of four capture shards pointed at nothing, and `lab-job.test.ts` enforces that any
+        # `--worker=` argv reaches `hostvars[` — resolving a NAME makes a malformed address INEXPRESSIBLE
+        # rather than merely rejected. This job's first draft built the URL from the raw `worker` param and
+        # that guard caught it, which is the guard doing exactly what the incident bought it for.
+        #
+        # Spelled out here rather than reusing `lab_named_worker` because `capture-check.mjs` reads only
+        # the FLAG (`flagValue(process.argv, "worker")`), never `A11Y_WORKER` — so the `setenv` form the
+        # `stability` job uses would resolve correctly and then be ignored, which is worse than not
+        # resolving at all.
+        argv: "{{ [lab_tsx, 'packages/lab/src/harnesses/capture-check.mjs',
+                  '--worker=http://' ~ hostvars[worker].ansible_host ~ ':8765'] }}"
+        timeout: 1800
+
       evidence-check:
         params: {sample: optional}
         # ITS EXIT CODE IS THE ANSWER, not just a status: 0 safe to ship, 1 the evidence CHANGED so a
