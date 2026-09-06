@@ -56,6 +56,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { networkInterfaces } from "node:os";
+import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 // RELATIVE, NEVER `@a11y-witness/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -210,7 +211,7 @@ function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS
  * the empty read was taken for a zero.
  */
 function localBranch() {
-  return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 }
 
 // audit §9 "argv parsing": was its own copy of the fifteen-file idiom, now the shared, tested extractor.
@@ -384,7 +385,7 @@ async function main() {
   // to a commit is the only comparison that settles "is it running my code?" — the first version compared
   // the remote's resolved SHA against the branch NAME, which can never match, and refused a control plane
   // that was already correct.
-  const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8" }).trim();
+  const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);

@@ -47,6 +47,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 // RELATIVE, NEVER `@a11y-witness/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -305,7 +306,7 @@ export function validRef(ref) {
  * `-e ref=<sha>` becoming an unresolvable `origin/<sha>`.
  */
 const localBranch = () =>
-  execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 
 /**
  * Refuse a ref that is not on origin, BEFORE anything expensive runs.
@@ -317,7 +318,7 @@ const localBranch = () =>
 /** @param {string} ref */
 function resolveOnOrigin(ref) {
   const remote = execFileSync("git", ["ls-remote", "--heads", "--tags", "origin", ref],
-    { encoding: "utf8" }).trim();
+    { encoding: "utf8", env: sandboxGitEnv() }).trim();
   if (!remote) {
     throw new Error(`'${ref}' is not on origin. Both halves of this pipeline fetch from origin, so nothing `
       + "would run at the code you are looking at. Push it first.");
@@ -631,7 +632,7 @@ function dispatchToControlUnlessLocal() {
 function branchArg(/** @type {string[]} */ args) {
   const named = flagValue(args, "ref");
   if (named) return named;
-  return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 }
 
 async function main() {
