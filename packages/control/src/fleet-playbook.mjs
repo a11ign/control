@@ -1,5 +1,20 @@
 // @ts-check
 /**
+ * The worker file that DECLARES `CAPTURE_PROTOCOL_VERSION`, named once.
+ *
+ * It was `capture-core.mjs` until 2026-09-06, when that file was split three ways and the constant moved
+ * to its own module. The guard went on scraping the old file, found nothing, and refused EVERY deploy
+ * with "cannot read CAPTURE_PROTOCOL_VERSION ... That is a broken guard, not a clean one" — which is the
+ * guard behaving exactly right (it refuses rather than deploying blind) while being pointed at the wrong
+ * place. A remedy reaching one path and not the other, this repo's most expensive recurring shape, with
+ * the twist that the surviving path was a REFUSAL and so looked like a working guard from a distance.
+ *
+ * `protocol-version-file.test.ts` pins this name against the file that actually exports the constant, so
+ * the next move breaks a test instead of the fleet.
+ */
+export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
+
+/**
  * Run a fleet playbook from the one machine allowed to run it.
  *
  * `worker:deploy` is `utmctl file push` and reaches UTM VMs on a Mac only. The physical boxes are
@@ -271,7 +286,7 @@ async function guardProtocolChange(chosen) {
   // `no-win32-imports.test.ts` had to find it. A control-plane script must not depend on the operator's
   // machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
   const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(
-    readFileSync(resolve(workerSourceDir(), "capture-core.mjs"), "utf8"))?.[1] ?? null;
+    readFileSync(resolve(workerSourceDir(), PROTOCOL_VERSION_FILE), "utf8"))?.[1] ?? null;
   // THE INVENTORY, DIRECTLY — deliberately not `resolveWorkerPool`, and this is the one place that is
   // right. That resolver answers "which workers should I use", and honours `A11Y_WORKER(S)` first because
   // naming workers means you are managing them. This guard asks a different question: "am I about to
@@ -287,6 +302,7 @@ async function guardProtocolChange(chosen) {
     local,
     served: await servedProtocols(urls),
     allowed: process.argv.includes("--allow-protocol-change"),
+    source: PROTOCOL_VERSION_FILE,
   });
   if (verdict.message) process.stdout.write(`${verdict.message}  asked ${urls.length} worker(s) from ${source}.\n`);
   if (verdict.refuse) process.exit(3);
