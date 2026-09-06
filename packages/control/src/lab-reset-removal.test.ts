@@ -23,11 +23,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+import { withGitSandbox, sandboxGitEnv } from "../../../scripts/test-support/git-sandbox.ts";
+import type { GitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK = resolve(HERE, "../ansible/lab-reset.yml");
@@ -51,21 +52,17 @@ function removalShell(): string {
   return found[0];
 }
 
-/** A throwaway repo in the four states the shell must tell apart. */
-function scenario(): { dir: string; dirty: string } {
-  const dir = mkdtempSync(join(tmpdir(), "lab-reset-"));
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
-  git("init", "-q", ".");
-  git("config", "user.email", "t@t");
-  git("config", "user.name", "t");
+/** Plants a throwaway repo, already `git init`'d by `withGitSandbox`, into the four states the shell must tell apart. */
+function scenario(sandbox: GitSandbox): { dirty: string } {
+  const dir = sandbox.dir;
   writeFileSync(join(dir, "tracked.txt"), "base\n");
-  git("add", "tracked.txt");
-  git("commit", "-qm", "init");
+  sandbox.run(["add", "tracked.txt"]);
+  sandbox.commit("init");
   writeFileSync(join(dir, "tracked.txt"), "modified\n");   // a TRACKED modification
   writeFileSync(join(dir, "untracked.txt"), "new\n");      // UNTRACKED, still present
   // `gone.txt` is deliberately NOT created: untracked in the pre-checkout porcelain, already deleted by
   // the origin-carries sweep. That is the state the first version got wrong.
-  return { dir, dirty: " M tracked.txt\n?? untracked.txt\n?? gone.txt" };
+  return { dirty: " M tracked.txt\n?? untracked.txt\n?? gone.txt" };
 }
 
 function run(cmd: string, dir: string, dirty: string, path: string): { rc: number; out: string } {
@@ -74,7 +71,7 @@ function run(cmd: string, dir: string, dirty: string, path: string): { rc: numbe
   try {
     const out = execFileSync("sh", [script], {
       cwd: dir, encoding: "utf8",
-      env: { ...process.env, LAB_DIRTY_BEFORE: dirty, LAB_REMOVALS: path },
+      env: sandboxGitEnv({ LAB_DIRTY_BEFORE: dirty, LAB_REMOVALS: path }),
     });
     return { rc: 0, out: out.trim() };
   } catch (error) {
@@ -85,28 +82,26 @@ function run(cmd: string, dir: string, dirty: string, path: string): { rc: numbe
 
 test("each of the four states gets its own verdict, and only one of them refuses", () => {
   const cmd = removalShell();
-  const { dir, dirty } = scenario();
-  try {
-    const untracked = run(cmd, dir, dirty, "untracked.txt");
+  withGitSandbox((sandbox) => {
+    const { dirty } = scenario(sandbox);
+    const untracked = run(cmd, sandbox.dir, dirty, "untracked.txt");
     assert.match(untracked.out, /^removed untracked\.txt$/, "an untracked file is deleted");
     assert.equal(untracked.rc, 0);
 
-    const tracked = run(cmd, dir, dirty, "tracked.txt");
+    const tracked = run(cmd, sandbox.dir, dirty, "tracked.txt");
     assert.match(tracked.out, /^restored tracked\.txt/, "a tracked modification was already discarded");
     assert.equal(tracked.rc, 0);
 
     // THE REGRESSION. Gone AND untracked-before means the sweep above took it: success, not refusal.
-    const gone = run(cmd, dir, dirty, "gone.txt");
+    const gone = run(cmd, sandbox.dir, dirty, "gone.txt");
     assert.match(gone.out, /already removed gone\.txt/,
       "a file the origin-carries sweep already took must report success, not 'neither untracked nor tracked'");
     assert.equal(gone.rc, 0, "and it must not fail the play — the removal the operator asked for happened");
 
-    const unknown = run(cmd, dir, dirty, "never-seen.txt");
+    const unknown = run(cmd, sandbox.dir, dirty, "never-seen.txt");
     assert.match(unknown.out, /^REFUSED: never-seen\.txt/, "a path that was never dirty is still refused");
     assert.equal(unknown.rc, 1, "and the refusal must reach the exit status, not just stdout");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  });
 });
 
 test("the loop does not run in a subshell, so a refusal reaches the exit status", () => {
@@ -117,15 +112,13 @@ test("the loop does not run in a subshell, so a refusal reaches the exit status"
     "`... | while` puts the loop in a subshell and discards rc; feed it with a heredoc instead");
   assert.ok(/done <</.test(cmd), "the loop must be fed by a heredoc so rc survives");
 
-  const { dir, dirty } = scenario();
-  try {
+  withGitSandbox((sandbox) => {
+    const { dirty } = scenario(sandbox);
     const mutated = cmd
       .replace("while IFS= read -r path; do", "printf '%s\\n' \"$LAB_REMOVALS\" | while IFS= read -r path; do")
       .replace(/done <<LAB_REMOVALS_EOF\n[\s\S]*?\nLAB_REMOVALS_EOF/, "done");
-    assert.equal(run(mutated, dir, dirty, "never-seen.txt").rc, 0,
+    assert.equal(run(mutated, sandbox.dir, dirty, "never-seen.txt").rc, 0,
       "the mutation must reproduce the bug — if this is already 1, the assertion above proves nothing");
-    assert.equal(run(cmd, dir, dirty, "never-seen.txt").rc, 1, "and the shipped form must fix it");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    assert.equal(run(cmd, sandbox.dir, dirty, "never-seen.txt").rc, 1, "and the shipped form must fix it");
+  });
 });
