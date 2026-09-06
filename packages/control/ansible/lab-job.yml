@@ -32,6 +32,44 @@
 # No env passthrough. `A11Y_PYTHON` is read at four sites in this repo and becomes the executed
 # interpreter, so a caller-supplied environment is arbitrary code execution with a whitelisted job name and
 # an empty argv. `run-job.yml` builds a fixed env and nothing reaches it from here.
+# THE LAB MUST BE IN THE INVENTORY, AND AN EMPTY INVENTORY MUST NOT READ AS SUCCESS.
+#
+# `ansible-playbook` prints `skipping: no hosts matched`, an EMPTY PLAY RECAP, and **exits 0**. So every
+# command in this directory could fetch nothing, stop nothing, reset nothing and report success — measured
+# 2026-09-06 in a fresh worktree, where `lab:fetch` returned exit 0 having reached no host at all, and the
+# file already sitting in `runs/fetched/` from an earlier run made it look like it had worked.
+#
+# That is `fleet:deploy` exiting 0 having deployed to zero hosts, which cost this project a silent
+# no-op deploy on the same day, arriving in the lab commands by the same door: `inventory.yml` is
+# gitignored (#54), so any checkout that has not been given one resolves nothing.
+#
+# THIS PLAY RUNS ON `localhost`, which is always available, precisely so it can speak when the real play
+# cannot. A guard living inside the `a11y_lab` play would be skipped by the very condition it exists to
+# report — the bootstrap shape `inventory-install.yml` already had to solve.
+- name: The lab must be in the inventory before anything claims to have run
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Refuse an inventory that resolved no lab
+      ansible.builtin.assert:
+        that:
+          - groups['a11y_lab'] is defined
+          - groups['a11y_lab'] | length > 0
+        fail_msg: >-
+          No host matched `a11y_lab`, so this command would have done NOTHING and exited 0.
+          `inventory.yml` is gitignored, so a fresh checkout or a worktree does not have one.
+          Fix it with one of: run this from a checkout that has
+          `packages/control/ansible/inventory.yml`; or install the durable copy this machine can
+          always read, `npm run fleet:inventory-install`, which puts it at /etc/a11ign/inventory.yml
+          where `ansible.cfg` looks first.
+        # `| default([])` IS LOAD-BEARING. Ansible finalises BOTH messages before deciding which to
+        # print, so a bare `groups['a11y_lab']` here throws inside the filter when the group is absent —
+        # which is precisely the case this guard exists for — and the failure becomes
+        # "object of type 'dict' has no attribute 'a11y_lab'" instead of the sentence below it. Committed
+        # that way first, which is CLAUDE.md's own recorded shape: a guard that stops the job and explains
+        # nothing gets distrusted, then bypassed.
+        success_msg: "inventory resolved {{ groups['a11y_lab'] | default([]) | length }} lab host(s)"
+
 - name: Run a lab job
   hosts: a11y_lab
   gather_facts: false
