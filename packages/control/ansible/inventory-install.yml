@@ -74,8 +74,12 @@
       ansible.builtin.assert:
         that: inventory_source is file
         fail_msg: >-
-          {{ inventory_source }} is not on THIS machine, so there is nothing to install. It is gitignored
-          and a pull deletes it -- restore it here first from wherever this operator keeps secrets.
+          {{ inventory_source }} is not on the OPERATOR'S machine, so there is nothing to install. It is
+          gitignored and a pull deletes it -- restore it here first from wherever secrets are kept.
+      # ON THE CONTROLLER. `hosts: all` is the control plane now, and the source file lives HERE -- that
+      # asymmetry is the whole point of a bootstrap. Dropped when the target changed from `localhost` to
+      # `all`, which moved this check onto the machine that by definition does not have the file.
+      delegate_to: localhost
 
     - name: The directory it lives in
       ansible.builtin.file:
@@ -104,13 +108,20 @@
         path: "{{ inventory_source }}"
         checksum_algorithm: sha256
       register: expected
+      delegate_to: localhost
 
     - name: They must match, byte for byte
       ansible.builtin.assert:
         that: landed.stat.checksum == expected.stat.checksum
+        # EVERY value in this message is `| default`-guarded, because a failing assert whose OWN message
+        # cannot render reports an Ansible templating error instead of the fault: "object of type 'dict'
+        # has no attribute 'checksum'" rather than "the file did not arrive". `stat` returns a dict with
+        # no `checksum` when the file is absent -- which is exactly the case this assert exists to catch.
+        # A guard that stops the job and explains nothing gets distrusted, then bypassed.
         fail_msg: >-
-          {{ inventory_destination }} is {{ landed.stat.checksum | default('absent') }} but the source is
-          {{ expected.stat.checksum }}. It did NOT arrive intact; do not deploy until this is resolved.
+          {{ inventory_destination }} is {{ landed.stat.checksum | default('ABSENT') }} but the source is
+          {{ expected.stat.checksum | default('ABSENT (not on the operator machine)') }}. It did NOT
+          arrive intact; do not deploy until this is resolved.
         success_msg: >-
           {{ inventory_destination }} installed and verified, sha256 {{ landed.stat.checksum }}.
           `ansible.cfg` reads this path first, so a future `git pull` here can no longer take the fleet
