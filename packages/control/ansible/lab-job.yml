@@ -407,6 +407,16 @@
       # PIPELINE is deterministic, and a second guest is a second variable.
       stability:
         params: {worker: required}
+        # fleetVerdict/exitCodeFor, same 0/1/2 contract as gateVerdict -- see rules-gate's entry above for
+        # why this is declared rather than left to be inferred.
+        exitMeanings:
+          "1": >-
+            a canary was found UNSTABLE -- repeated captures of the same unchanged page disagreed by
+            content, real nondeterminism. Do not start a corpus run.
+          "2": >-
+            INCONCLUSIVE -- one or more canaries could not be judged (errored, or too few usable captures),
+            which reduces the denominator rather than counting as stable. "Could not measure" and "it
+            varied" need opposite responses; re-run before trusting a PASS or FAIL from this one.
         argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
         setenv: ["A11Y_WORKER={{ lab_named_worker }}"]
         timeout: 5400
@@ -496,6 +506,15 @@
       # cold-start NVDA costs ~25 s more. The unit name is the lock, so a second dispatch is refused rather
       # than queued -- see lab-stop.yml if one must be ended.
       gate-stability:
+        # Same script, same fleetVerdict/exitCodeFor contract as `stability` above -- see that entry.
+        exitMeanings:
+          "1": >-
+            a canary was found UNSTABLE -- repeated captures of the same unchanged page disagreed by
+            content, real nondeterminism. Do not start a corpus run.
+          "2": >-
+            INCONCLUSIVE -- one or more canaries could not be judged (errored, or too few usable captures),
+            which reduces the denominator rather than counting as stable. Re-run before trusting a PASS or
+            FAIL from this one.
         argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
         timeout: 3600
       # `--local` IS MANDATORY HERE AND IS NOT AN ESCAPE HATCH. `dispatchUnlessLocal` makes the control
@@ -505,14 +524,39 @@
       # which reads like a broken lab rather than a job wired to call itself. Both dispatching gates need
       # it; `lab-job.test.ts` now discovers them rather than trusting this comment.
       gate-probe-order:
+        # fleetVerdict/exitCodeFor, same 0/1/2 contract as rules-gate/stability above.
+        exitMeanings:
+          "1": >-
+            probe order changed what was found on a page -- captured control/treatment/control and the
+            treatment pass differed from both controls, a genuine order-dependence regression.
+          "2": >-
+            INCONCLUSIVE -- fewer pages were examined than this sweep's own population (corpus pages plus
+            live sites, minus known movers); re-run rather than trusting the result shown.
         argv: ["/usr/bin/node", "packages/lab/scripts/gate-probe-order.mjs", "--local"]
         timeout: 3600
       rules-real-pages:
+        # gateVerdict/exitCodeFor -- see rules-gate's entry above for why this is declared.
+        exitMeanings:
+          "1": >-
+            a rule-owned criterion asserted wrongly on a real, conformant page -- a genuine false positive,
+            not a coverage shortfall.
+          "2": >-
+            INCONCLUSIVE -- fewer real pages were examined than the audit's own population (an unusable
+            page not already DECLARED in runs/real-page-unexaminable.json still counts as a shortfall here,
+            by design). Re-run rather than trusting the ratio shown.
         argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages"]
         timeout: 900
       # Same, with --update: rewrites the baseline. Separate job because it WRITES a claim that every
       # finding it records is correct, and that is a deliberate act, not a side effect of checking.
       rules-real-pages-update:
+        # Same script, same gateVerdict/exitCodeFor contract as rules-real-pages above.
+        exitMeanings:
+          "1": >-
+            a rule-owned criterion asserted wrongly on a real, conformant page -- written into the baseline
+            regardless, since this variant's whole purpose is recording the current findings.
+          "2": >-
+            INCONCLUSIVE -- fewer real pages were examined than the audit's own population; the baseline
+            this writes would then describe a partial run. Re-run rather than trusting it.
         argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages", "--", "--update"]
         timeout: 900
       # WHAT STATE IS THE CORPUS IN? The question that had no command, so it was answered by opening an
@@ -590,6 +634,16 @@
         argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
         timeout: 900
       rules-gate:
+        # gateVerdict/exitCodeFor -- lab-job.test.ts derives which jobs need this and refuses a fifth
+        # undeclared adopter, so it cannot go stale the way `evidence-check` alone did for weeks.
+        exitMeanings:
+          "1": >-
+            a rule-owned criterion produced a false positive on a conformant corpus record -- a real
+            regression, not a coverage shortfall.
+          "2": >-
+            INCONCLUSIVE -- fewer corpus records were examined than this rule's own declared population
+            (gateVerdict's examined < of), almost always a stale or partial export. Re-export and re-run;
+            do not read this as a pass.
         argv: ["{{ lab_tsx }}", "packages/lab/scripts/score-rules.ts", "--gate"]
         timeout: 900
       # THE SHIPPED MODEL against the SAME held-out set — the baseline without which a candidate's score
