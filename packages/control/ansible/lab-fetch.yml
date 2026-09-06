@@ -67,6 +67,23 @@
       #
       # Read-only and enumerated like every other entry; the repeat is a NAME from a fixed list, never a
       # path, so `runs/../../etc/passwd` is inexpressible rather than rejected.
+      # THE EXPORTED DATASET, added 2026-09-06 for the same reason `capture` was added on 2026-08-28 — and
+      # for the SAME CASE, which is why it is worth writing down rather than just adding.
+      #
+      # That entry's comment says: "`rules:gate` named two conformant records it had failed --
+      # `keyboard-trap-modal-cycle.good` and one of its variants -- and nothing could show what the rule
+      # SAW on them." Tonight `rules:gate` named those same two again, the capture was fetched with that
+      # entry, and running the CURRENT compiled rule against that capture's real values produced NO
+      # finding: `ringOffersNoWayOut` false on one, `escapeReleasedFocus` true on the other, both branches
+      # gated shut. So the rule does not fire on the CAPTURE, and it demonstrably fires on the RECORD.
+      #
+      # The difference is the export, and there was no way to look at it — one artifact further in again,
+      # exactly as that comment predicted. A gate that names a failing record and cannot produce the record
+      # it scored is the same hole as one that cannot produce the page's evidence.
+      #
+      # It is large (~13 MB at 2,796 records) and that is the cost of being able to answer the question at
+      # all. `training:export` writes it; `rules:gate`, `rules:score` and the featurizer all read it.
+      dataset-export: "runs/screenreader-dataset/screenreader-evidence.jsonl"
       grants-audit: "runs/grants-audit.json"
       # THE REAL-PAGE BASELINE, which `rules-real-pages-update` writes and which is TRACKED — so accepting
       # a finding on the lab dirties the checkout and blocks every later job until it is committed here.
