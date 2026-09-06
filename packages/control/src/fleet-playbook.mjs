@@ -77,6 +77,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
 import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
+import { requireControlPlaneHost } from "./control-plane-host.mjs";
 
 /**
  * `--serial=` and `--limit=` decide how many of twelve machines an operation touches at once, and
@@ -93,7 +94,8 @@ refuseUnknownFlags(
 /** How often to ask the control plane how its unit is doing. A poll INTERVAL, never a sleep-and-hope. */
 const FOLLOW_POLL_MS = 5_000;
 
-const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST || "REDACTED-INTERNAL-ADDRESS";
+// No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
+const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST;
 /** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 const CONTROL_KEY = process.env.A11Y_PVE_KEY || `${process.env.HOME}/.ssh/a11y-pve_ed25519`;
@@ -455,6 +457,7 @@ try {
 }
 
 async function main() {
+  requireControlPlaneHost(); // throws before anything else if A11Y_CONTROL_HOST is unset -- see #83
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade } = parseArgs();
   await guardProtocolChange(chosen);
 

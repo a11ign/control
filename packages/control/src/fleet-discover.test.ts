@@ -24,7 +24,7 @@ test("a worker that MOVED is matched by MAC, not by address", () => {
   // change to /health — which matters, because a new field there would change codeVersion() and mark the
   // entire fleet stale.
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01" }],
+    [{ name: "w1", host: "203.0.113.83", mac: "aa:bb:cc:dd:ee:01" }],
     [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01", health }]);
   assert.equal(found[0].state, "moved");
   assert.equal(found[0].foundAt, "REDACTED-INTERNAL-ADDRESS");
@@ -167,7 +167,7 @@ test("enrolment does not turn the control plane into a capture worker", () => {
     "2026-08-21");
 
   for (const url of workersFromInventory(text)) {
-    assert.ok(!url.includes("REDACTED-INTERNAL-ADDRESS"), `the lab leaked into the fleet as ${url}`);
+    assert.ok(!url.includes("203.0.113.79"), `the lab leaked into the fleet as ${url}`);
   }
 });
 
@@ -193,7 +193,7 @@ test("inventoryHosts is group-aware too, or discover reports the lab as a sleepi
   assert.ok(hosts.length >= 4, "the real workers must still be found");
   for (const host of hosts) {
     assert.notEqual(host.name, "a11y-lab", "the control plane is not a capture worker");
-    assert.notEqual(host.host, "REDACTED-INTERNAL-ADDRESS", "the control plane is not a capture worker");
+    assert.notEqual(host.host, "203.0.113.79", "the control plane is not a capture worker");
   }
   // And the MACs still parse — wake.yml sends its magic packet to these, and a host read without its mac
   // is SKIPPED by wake rather than woken.

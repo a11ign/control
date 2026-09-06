@@ -24,29 +24,29 @@ const HEALTH = {
 const worker = (ip: string, mac: string | null) => ({ ip, mac, health: HEALTH });
 
 test("an unknown worker is appended, and the existing entry is untouched", () => {
-  const { text, added } = enrol(INVENTORY, [worker("REDACTED-INTERNAL-ADDRESS", "e8:6a:64:e2:3c:8d")], "2026-08-16");
+  const { text, added } = enrol(INVENTORY, [worker("203.0.113.107", "e8:6a:64:e2:3c:8d")], "2026-08-16");
 
   assert.equal(added.length, 1);
   assert.equal(added[0].name, "a11y-worker-2");
   // The whole safety argument: everything that was there before is still there, byte for byte.
   assert.ok(text.startsWith(INVENTORY), "existing inventory must be a literal prefix of the result");
   assert.match(text, /a11y-worker-2:/);
-  assert.match(text, /ansible_host: 192\.168\.1\.107/);
+  assert.match(text, /ansible_host: 203\.0\.113\.107/);
   assert.match(text, /mac: "e8:6a:64:e2:3c:8d"/);
 });
 
 test("the appended entry parses back as a host", () => {
   // Writing YAML by string concatenation is only acceptable if the file's own reader still sees it.
-  const { text } = enrol(INVENTORY, [worker("REDACTED-INTERNAL-ADDRESS", "e8:6a:64:e2:3c:8d")], "2026-08-16");
+  const { text } = enrol(INVENTORY, [worker("203.0.113.107", "e8:6a:64:e2:3c:8d")], "2026-08-16");
   const hosts = inventoryHosts(text);
 
   assert.deepEqual(hosts.map((h) => h.name), ["a11y-worker-1", "a11y-worker-2"]);
-  assert.equal(hosts[1].host, "REDACTED-INTERNAL-ADDRESS");
+  assert.equal(hosts[1].host, "203.0.113.107");
   assert.equal(hosts[1].mac, "e8:6a:64:e2:3c:8d");
 });
 
 test("comments in the existing file survive", () => {
-  const { text } = enrol(INVENTORY, [worker("REDACTED-INTERNAL-ADDRESS", "e8:6a:64:e2:3c:8d")], "2026-08-16");
+  const { text } = enrol(INVENTORY, [worker("203.0.113.107", "e8:6a:64:e2:3c:8d")], "2026-08-16");
   assert.match(text, /every one of them was paid for by an incident/);
 });
 
@@ -61,8 +61,8 @@ test("a MAC the inventory already declares is skipped, not added a second time",
 });
 
 test("enrolling twice is idempotent", () => {
-  const once = enrol(INVENTORY, [worker("REDACTED-INTERNAL-ADDRESS", "e8:6a:64:e2:3c:8d")], "2026-08-16");
-  const twice = enrol(once.text, [worker("REDACTED-INTERNAL-ADDRESS", "e8:6a:64:e2:3c:8d")], "2026-08-16");
+  const once = enrol(INVENTORY, [worker("203.0.113.107", "e8:6a:64:e2:3c:8d")], "2026-08-16");
+  const twice = enrol(once.text, [worker("203.0.113.107", "e8:6a:64:e2:3c:8d")], "2026-08-16");
 
   assert.deepEqual(twice.added, []);
   assert.equal(twice.text, once.text);
@@ -71,7 +71,7 @@ test("enrolling twice is idempotent", () => {
 test("several unknowns in one run get sequential names", () => {
   const { added } = enrol(
     INVENTORY,
-    [worker("REDACTED-INTERNAL-ADDRESS", "aa:bb:cc:dd:ee:01"), worker("REDACTED-INTERNAL-ADDRESS", "aa:bb:cc:dd:ee:02")],
+    [worker("203.0.113.107", "aa:bb:cc:dd:ee:01"), worker("REDACTED-INTERNAL-ADDRESS", "aa:bb:cc:dd:ee:02")],
     "2026-08-16",
   );
   assert.deepEqual(added.map((e) => e.name), ["a11y-worker-2", "a11y-worker-3"]);
@@ -98,7 +98,7 @@ test("names are never reused after a retirement", () => {
 
 test("the block records what the box was when it was enrolled", () => {
   const block = enrolmentBlock({
-    name: "a11y-worker-2", ip: "REDACTED-INTERNAL-ADDRESS", mac: "e8:6a:64:e2:3c:8d", health: HEALTH, today: "2026-08-16",
+    name: "a11y-worker-2", ip: "203.0.113.107", mac: "e8:6a:64:e2:3c:8d", health: HEALTH, today: "2026-08-16",
   });
   assert.match(block, /2026-08-16/);
   assert.match(block, /NVDA 2026\.1\.1/);

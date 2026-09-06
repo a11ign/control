@@ -99,7 +99,7 @@ test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool i
   const order: string[] = [];
   return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
     catalogueText: CATALOGUE,
-    workers: ["http://REDACTED-INTERNAL-ADDRESS:8765", "http://REDACTED-INTERNAL-ADDRESS:8765"],
+    workers: ["http://203.0.113.107:8765", "http://203.0.113.59:8765"],
     expected: "deadbeefdeadbeef",
     checkFleet: async (expected, workers, options) => {
       order.push("checked");
@@ -112,7 +112,7 @@ test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool i
   }).then(() => {
     assert.deepEqual(order, ["checked", "dispatched"], "the fleet must be checked before anything dispatches");
     assert.equal(seen.checked?.[0], "deadbeefdeadbeef");
-    assert.deepEqual(seen.checked?.[1], ["http://REDACTED-INTERNAL-ADDRESS:8765", "http://REDACTED-INTERNAL-ADDRESS:8765"]);
+    assert.deepEqual(seen.checked?.[1], ["http://203.0.113.107:8765", "http://203.0.113.59:8765"]);
     assert.equal((seen.checked?.[2] as { when?: string })?.when, "before dispatching to the lab");
     assert.deepEqual(seen.dispatched, ["-e", "job=capture-only", "-e", "only=route-title-stale+"]);
   });
@@ -126,7 +126,7 @@ test("a refusing check stops the job from ever reaching dispatch", () => {
   let dispatched = false;
   return run(["-e", "job=capture"], {
     catalogueText: CATALOGUE,
-    workers: ["http://REDACTED-INTERNAL-ADDRESS:8765"],
+    workers: ["http://203.0.113.107:8765"],
     expected: "deadbeefdeadbeef",
     checkFleet: async () => { throw new Error("FLEET IS NOT RUNNING THIS CHECKOUT"); },
     dispatch: () => { dispatched = true; },
@@ -158,7 +158,7 @@ test("-e describe=1 skips the fleet check too — nothing is about to run", () =
   let checked = false;
   return run(["-e", "job=capture", "-e", "describe=1"], {
     catalogueText: CATALOGUE,
-    workers: ["http://REDACTED-INTERNAL-ADDRESS:8765"],
+    workers: ["http://203.0.113.107:8765"],
     expected: "deadbeefdeadbeef",
     checkFleet: async () => { checked = true; },
     dispatch: () => {},
@@ -174,7 +174,7 @@ test("--allow-stale-workers reaches the check as `allow: true` and is stripped b
   let dispatched: string[] | undefined;
   return run(["-e", "job=capture", "--allow-stale-workers"], {
     catalogueText: CATALOGUE,
-    workers: ["http://REDACTED-INTERNAL-ADDRESS:8765"],
+    workers: ["http://203.0.113.107:8765"],
     expected: "deadbeefdeadbeef",
     checkFleet: async (_expected, _workers, options: { allow?: boolean }) => { allow = options.allow; },
     dispatch: (forwarded) => { dispatched = forwarded; },

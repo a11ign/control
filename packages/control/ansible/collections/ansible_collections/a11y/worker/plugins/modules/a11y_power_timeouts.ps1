@@ -3,7 +3,7 @@
 # Never sleep on AC. A worker that sleeps is a worker that has vanished.
 #
 # BARE-METAL ONLY in origin: VMs do not sleep, so this fleet ran for months without needing it. On the
-# first physical box it presented as `EHOSTUNREACH REDACTED-INTERNAL-ADDRESS:8765` for every request in an
+# first physical box it presented as `EHOSTUNREACH <worker>:8765` for every request in an
 # evidence-check run -- 48 instant failures -- and then answered a curl thirty seconds later.
 # Intermittent unreachability reads as a flaky network or a wedged worker; it was Windows power
 # management doing exactly its job.
