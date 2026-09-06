@@ -85,6 +85,13 @@
       # all. `training:export` writes it; `rules:gate`, `rules:score` and the featurizer all read it.
       dataset-export: "runs/screenreader-dataset/screenreader-evidence.jsonl"
       grants-audit: "runs/grants-audit.json"
+      # THE EVIDENCE DIFF ITSELF, not just its verdict. Added 2026-09-06: `evidence:check` printed
+      # `CHANGED  <case>  interaction.formChanges 1->1` -- same count, different content -- on six cases,
+      # and NOTHING could say WHICH KEY moved. That is the count-with-no-identity shape twice over in one
+      # night (`candidates: 2`, `graphicUnnamed`), on the one gate that decides whether thousands of
+      # cached captures may be kept: its answer costs ~4 h of fleet time either way, so "changed" without
+      # "changed how" is the difference between a triage and a guess.
+      evidence-check: "runs/screenreader-dataset/evidence-check/report.json"
       # THE REAL-PAGE BASELINE, which `rules-real-pages-update` writes and which is TRACKED — so accepting
       # a finding on the lab dirties the checkout and blocks every later job until it is committed here.
       # It was not fetchable, so the only route back was to re-derive it locally from a `runs/` copy that
