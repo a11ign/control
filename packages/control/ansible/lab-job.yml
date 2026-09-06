@@ -723,6 +723,65 @@
             and "walked N and billed none" need opposite fixes.
         argv: ["/usr/bin/node", "packages/lab/scripts/fleet-hours.mjs", "--json"]
         timeout: 1800
+      # THE CORPUS'S ONLY DEFENCE, AND IT HAD NO JOB — added 2026-09-06 for issue #43.
+      #
+      # `corpus:snapshot` and `corpus:backup` are the two halves of the one thing that protects an asset
+      # this project cannot rebuild: several thousand captures, 54 worker-hours measured, and NOT
+      # reproducible -- `browserVersion` is a cache key precisely because Edge announces differently across
+      # releases, so evidence taken under Edge 151 cannot be recreated now 152 ships.
+      #
+      # Both could only ever be run BY HAND, on the lab, over ssh. That is this repo's own rule failed on
+      # the highest-value operation it has: *"an operation that matters is CLI-invocable and reviewable, or
+      # it is done differently every time by whoever is at the keyboard."* `fleet:inventory-install` carries
+      # the same sentence, and lost inventory cost a silent zero-host deploy the same day.
+      #
+      # THE DESTINATION IS DELIBERATELY NOT SET HERE. `corpus-backup.mjs` reads `A11Y_CORPUS_REMOTE` and
+      # EXITS NON-ZERO without it rather than writing a local archive and reporting success -- "a backup
+      # tool that reports success while leaving one copy on one disk is worse than no backup tool". A job
+      # that supplied a default would be choosing where a user's data goes.
+      corpus-snapshot:
+        # Archives beside the corpus. Defends against `rm -rf runs/` and a bad recapture; NOT against
+        # losing the machine, which is what `corpus-backup` is for. Reads the corpus and writes an
+        # archive -- no fleet, no worker -- so it is safe beside a capture, though the archive then
+        # describes a moving target.
+        exitMeanings:
+          "2": >-
+            either there was nothing to snapshot, or -- the one that matters -- the archive holds FEWER
+            JSON files than were on disk. It lists the archive back with `tar -tzf` and compares, because
+            `tar` exiting 0 is not the archive holding the corpus: a 417 MB snapshot once extracted to
+            4,959 of 5,445 files with no error anywhere. A short archive restores as a corpus that looks
+            complete and is not, so this refuses rather than reporting a size. The archive is left in
+            place to be inspected.
+        argv: ["/usr/bin/npm", "run", "corpus:snapshot"]
+        timeout: 3600
+      corpus-backup:
+        # Copies the newest archive off this machine and READS IT BACK to prove it arrived, over the
+        # channel a restore would use -- the same argument as checking `/health.code` over HTTP rather
+        # than through the deploy channel.
+        exitMeanings:
+          "1": >-
+            either no destination is configured (`A11Y_CORPUS_REMOTE` unset on the lab) or the copy did
+            not read back. Those need opposite work and the message says which: the first is a decision
+            nobody has made, the second is a failed backup. Never treat it as "nothing to back up".
+        argv: ["/usr/bin/npm", "run", "corpus:backup"]
+        timeout: 7200
+      corpus-backup-verify:
+        # A SEPARATE JOB RATHER THAN `-e verify=1`, and the test is why. The first version wrote
+        # `{{ '--verify-only' if verify | default('') else '' }}`, and `lab-job.test.ts` refused it: the
+        # deriver reads a parameter's REQUIREDNESS out of the argv, and a conditional expression is not a
+        # shape it can answer for. That refusal is right beyond the mechanics -- CLAUDE.md records the SRE
+        # Workbook's rule that a YAML+Jinja config accreting "ad hoc language features" becomes something
+        # neither humans nor tools can analyse, and that the cleverness belongs in TOOLING. Two jobs whose
+        # argv is a literal is the version an operator can read and a test can check.
+        #
+        # It is also a different QUESTION: "is the last backup still readable" is a check you want to run
+        # on a schedule between backups, not a mode of writing one.
+        exitMeanings:
+          "1": >-
+            the last backup is not readable at the destination, or no destination is configured. An
+            unverified backup is a belief; a backup that fails THIS is a copy you cannot restore.
+        argv: ["/usr/bin/npm", "run", "corpus:backup", "--", "--verify-only"]
+        timeout: 1800
       capture-check:
         params: {worker: required}
         # THE CAPTURE LAYER'S OWN REGRESSION CHECK, dispatchable at last. `capture:check` was documented as
