@@ -24,7 +24,7 @@
 # ## Reached DIRECTLY, not through `pct exec` on the Proxmox host
 #
 # The container has its own IP and its own sshd. Everything about this lab used to be driven as
-# `ssh root@REDACTED-INTERNAL-ADDRESS 'pct exec 121 -- bash -lc "..."'`, and that second hop is a second layer of shell
+# `ssh root@<the lab's host> 'pct exec <container id> -- bash -lc "..."'`, and that second hop is a second layer of shell
 # quoting for every command to survive — which is where a heredoc came apart and where a bash array
 # evaporated crossing `nohup bash -c`, sending four capture shards at `--worker=http://:8765` for 29
 # minutes while every worker sat idle. Ansible's `command` module takes argv and never invokes a shell, so
@@ -34,7 +34,7 @@
 #
 # Confirm rather than trust it, and give it a reservation:
 #
-#     pct exec 121 -- ip -4 -br addr show eth0
+#     pct exec <container id> -- ip -4 -br addr show eth0
 #
 # A moved address answers nothing, and nothing-answering is indistinguishable from a dead machine — the
 # same staleness `fleet:discover` exists to catch on the workers.

@@ -27,7 +27,7 @@
  *   - the WORKERS are reachable only from the control plane, which holds the fleet SSH key
  *     (`inventory.yml`: *"worker playbooks can only be run from here and not from a developer's Mac"*)
  *   - the LAB is reachable only with the `a11y-pve` key, which the control plane does NOT have — verified
- *     2026-08-25: `REDACTED-INTERNAL-ADDRESS:22` is open from the control plane and answers
+ *     2026-08-25: `<the lab's address>:22` is open from the control plane and answers
  *     `Permission denied (publickey)` to the only key it holds
  *
  * So exactly one machine can drive both: this one. Giving the control plane the lab key would make a
@@ -57,6 +57,7 @@ import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.mjs";
+import { requireControlPlaneHost } from "./control-plane-host.mjs";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -415,7 +416,8 @@ function usage() {
 }
 
 /** Where the sequencing runs. Same address `fleet-playbook.mjs` already uses; named once, not twice. */
-const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST || "REDACTED-INTERNAL-ADDRESS";
+// No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
+const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST;
 const CONTROL_KEY = process.env.A11Y_PVE_KEY || `${process.env.HOME}/.ssh/a11y-pve_ed25519`;
 /**
  * The key CONTROL uses to reach the LAB. Not the same key this laptop uses, deliberately: it was generated
@@ -650,7 +652,8 @@ async function main() {
   }
   // AFTER the two questions above, never before: `--list` and a malformed request are answered locally in
   // milliseconds, and shipping them to another host would make asking what pipelines exist depend on the
-  // control plane being up.
+  // control plane being up. Same reason the host is required only here, not at import: see #83.
+  requireControlPlaneHost();
   dispatchToControlUnlessLocal();
   // Indexed by a name that came off the command line, which is the whole reason the refusal below
   // exists. The inferred type admits only the seven keys, so the lookup that CHECKS for an eighth is

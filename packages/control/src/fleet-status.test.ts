@@ -57,7 +57,7 @@ test("an idle worker reports no activity rather than a stale one", () => {
     // cleared, `capturing` had not, and `elapsedMs` was still growing.
     progress: {
       busy: false,
-      capturing: "http://REDACTED-INTERNAL-ADDRESS:5050/table-unassociated-hilltown/bad.html",
+      capturing: "http://203.0.113.79:5050/table-unassociated-hilltown/bad.html",
       elapsedMs: 2_526_239,
       lastPhase: "browserKeptAlive",
     },

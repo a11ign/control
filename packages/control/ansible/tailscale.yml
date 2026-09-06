@@ -19,7 +19,7 @@
 # ## Named machines, and derived rather than listed
 #
 # The routes are `/32`s built FROM the inventory, not a hand-kept list. Advertising the whole
-# `REDACTED-INTERNAL-ADDRESS/24` would have been simpler and would expose every device on the home LAN — phones, a NAS,
+# `<the control plane's /24>` would have been simpler and would expose every device on the home LAN — phones, a NAS,
 # the router's admin page — to anything on the tailnet. The set of machines this project touches is already
 # written down once, deliberately, and this is the same set: adding a worker to `inventory.yml` extends the
 # route automatically, and a machine that is not in the inventory is not reachable.

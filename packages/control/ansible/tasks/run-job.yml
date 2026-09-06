@@ -20,7 +20,7 @@
 #
 # ## What is being replaced
 #
-# `ssh root@REDACTED-INTERNAL-ADDRESS 'pct exec 121 -- bash -lc "..."'`, which is not in the source tree at all — so the
+# `ssh root@<the lab's host> 'pct exec <container id> -- bash -lc "..."'`, which is not in the source tree at all — so the
 # way this project's most expensive operations were started was untested, unversioned and unreviewable. It
 # cost, in two days: a heredoc mangled through two hops of shell quoting; a bash array that evaporated
 # crossing `nohup bash -c`, sending four capture shards at `--worker=http://:8765` for 29 minutes while
