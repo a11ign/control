@@ -212,6 +212,36 @@ export function summarise(probes) {
  * and a second hand-written description of the same object is how those two come apart.
  */
 
+/**
+ * What to DO about a degraded worker, or "" when none is.
+ *
+ * DEGRADED IS THE FAULT THAT PRODUCES ZERO FAILURES, which makes it the one a reader is least equipped to
+ * act on and most likely to skim past. The worker's own retry absorbs every recovery, so captures keep
+ * SUCCEEDING and `failures` stays 0 while that box runs at roughly three times a healthy peer's cost --
+ * measured 122.9 s against 40.6 s. The eviction rule counts consecutive FAILURES, so it can never fire.
+ *
+ * Naming the repair beside the state is the whole of this: a reader who has not read the runbook cannot
+ * get from "2 recoveries DEGRADED" to "reinstall NVDA on that box", and the row this closes is about
+ * exactly that gap.
+ *
+ * PURE and exported so the advice can be tested without a fleet. It was first written inline in `main`
+ * reading a `degradedNames` array built in `renderTable` -- a scope error that would have thrown only
+ * when a worker was actually degraded, which is the one moment it must work.
+ *
+ * @param {Array<{name: string, degraded?: boolean}> | undefined} rows
+ * @returns {string}
+ */
+export function degradedAdvice(rows) {
+  const names = (rows ?? []).filter((r) => r?.degraded).map((r) => String(r.name).split(/\s+/)[0]);
+  if (!names.length) return "";
+  return `  ${names.length} worker(s) DEGRADED: ${names.join(", ")}.\n`
+    + "  Their own retry is absorbing a fault, so captures still SUCCEED and `failures` stays 0 while\n"
+    + "  they run at roughly three times a healthy peer's cost. This is the fault that HIDES.\n"
+    + "  Repair: `npm run fleet:provision -- --limit=<name>` reinstalls NVDA on that box. Confirm with\n"
+    + "  `npm run worker:compare -- <page> <healthy> <degraded>` \u2014 wall time says slower without\n"
+    + "  saying where; the phase table says which phase.\n";
+}
+
 /** @param {WorkerRow[]} rows */
 function renderTable(rows) {
   const width = (/** @type {(row: WorkerRow) => unknown} */ pick) =>
@@ -227,6 +257,12 @@ function renderTable(rows) {
     const vitals = row.captures === null
       ? (row.error ?? "")
       : `${row.captures} captures, ${row.recoveries} recoveries${row.degraded ? "  DEGRADED" : ""}`;
+    // DEGRADED IS THE FAULT THAT PRODUCES ZERO FAILURES, so a reader is least likely to know what to do
+    // about it and most likely to read it as noise. The worker's own retry absorbs every recovery, so
+    // `failures` stays 0 while that box runs at ~3x its neighbours' cost -- measured 122.9 s against a
+    // healthy peer's 40.6 s. Naming the repair beside it is the difference between a number a reader must
+    // interpret and an instruction they can follow.
+
     lines.push(`  ${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  `
       + `${String(row.code ?? "-").padEnd(16)}  ${row.activity || vitals}`);
     // A degraded worker still SERVES, so it is a line under the row rather than a state: pulling it
@@ -280,12 +316,23 @@ async function main() {
     if (status.reachable >= 2) {
       process.stdout.write(status.consistent
         ? "  fleet CONSISTENT — these workers are interchangeable for capture\n"
-        : `  fleet INCONSISTENT — ${describeMismatches(status.mismatches).join("; ")}\n`);
+        : `  fleet INCONSISTENT — ${describeMismatches(status.mismatches).join("; ")}\n`
+          // NAME THE REMEDY, not just the state. A reader who has not read the runbook cannot get from
+          // "browserVersion differs" to "re-provision the WHOLE fleet, never one box", and the difference
+          // matters: `provisionRevision` is a capture CACHE KEY and a MUST_MATCH field, so a single box
+          // provisioned alone gets a stamp its peers lack and splits the fleet further. That is why
+          // `--serial=0` is right here and wrong almost everywhere else.
+          + "  These guests are NOT interchangeable for capture, so a corpus run must not start: two\n"
+          + "  workers on different values would share a cache key while producing different evidence.\n"
+          + "  Re-provision the WHOLE fleet together — `npm run fleet:provision -- --serial=0`. Never one\n"
+          + "  box alone: a lone re-provision splits the fleet rather than converging it.\n");
     }
     // SPLIT CODE IS A SEPARATE VERDICT FROM INCONSISTENT, and collapsing them would be wrong in both
     // directions. INCONSISTENT means the guests are not interchangeable for capture — a cache-key field
     // differs. This means a DEPLOY did not finish, which is a fixable operational state rather than an
     // evidence problem, and it has its own remedy.
+    const degraded = degradedAdvice(status.rows);
+    if (degraded) process.stdout.write(degraded);
     if (status.codes.length > 1) {
       const byCode = status.codes.map((c) =>
         `${c.slice(0, 12)} on ${status.rows.filter((r) => r.code === c).length}`);

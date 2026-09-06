@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { stateOf, activityOf, summarise } from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice } from "./fleet-status.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -108,4 +108,36 @@ test("the summary says WHICH channel it probed, never an unqualified 'reachable'
   assert.match(source, /serving \/health/, "the summary must name the channel it actually probed");
   assert.match(source, /whether you can DEPLOY/,
     "it must say what it does NOT cover — deployability is a different channel with different access");
+});
+
+test("a degraded worker gets a REMEDY, not just the word DEGRADED", () => {
+  // The row this closes: `fleet:status` reported state a reader had to interpret. DEGRADED is the worst
+  // case for that, because it is the fault that produces ZERO failures -- the worker's own retry absorbs
+  // it, captures keep succeeding, and the eviction rule (three consecutive FAILURES) can never fire.
+  const out = degradedAdvice([{ name: "a11y-worker-6 REDACTED-INTERNAL-ADDRESS:8765", degraded: true }]);
+  assert.match(out, /a11y-worker-6/, "it must name WHICH box");
+  assert.match(out, /fleet:provision -- --limit=/, "it must name the repair command");
+  assert.match(out, /worker:compare/, "and how to confirm the repair worked");
+  assert.match(out, /failures` stays 0/,
+    "and WHY it hides — a reader who thinks zero failures means healthy will skip the line");
+  assert.doesNotMatch(out, /\bundefined\b/, "no unresolved interpolation");
+});
+
+test("no degraded worker produces NO advice — never an empty heading", () => {
+  // An empty "0 worker(s) DEGRADED" line trains readers to skim the section that matters most.
+  assert.equal(degradedAdvice([{ name: "a11y-worker-2 1.2.3.4", degraded: false }]), "");
+  assert.equal(degradedAdvice([]), "");
+  assert.equal(degradedAdvice(undefined as never), "");
+});
+
+test("every degraded worker is named, not just the first", () => {
+  // Two degraded boxes and one line naming one of them is the count-based check in a new costume.
+  const out = degradedAdvice([
+    { name: "a11y-worker-6 x", degraded: true },
+    { name: "a11y-worker-9 y", degraded: true },
+    { name: "a11y-worker-2 z", degraded: false },
+  ]);
+  assert.match(out, /2 worker\(s\) DEGRADED/);
+  assert.match(out, /a11y-worker-6, a11y-worker-9/);
+  assert.doesNotMatch(out, /a11y-worker-2/, "a healthy box must not be named as degraded");
 });
