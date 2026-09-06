@@ -1,0 +1,71 @@
+# EXAMPLE — placeholder addresses only. The real `inventory.yml` is gitignored and restored from the
+# secrets store at bring-up on the control plane; see CLAUDE.md and packages/control/ansible/README.md.
+#
+# This file exists so `ansible-check.yml`'s `--syntax-check` has something real to validate in CI, where
+# the real inventory never exists, and so the three tests that read a real inventory file directly
+# (`fleet-discover.test.ts`, `fleet-env.test.ts`, `claude-md-counts.test.ts`) have a committed target.
+# Worker NAMES and COUNT are kept identical to production, because those are not secrets and
+# `claude-md-counts.test.ts` reads them to check CLAUDE.md's stated fleet size. Only the addresses and
+# MAC addresses are placeholders.
+#
+# KEEP THIS FILE'S SHAPE IN STEP WITH THE REAL ONE. `inventory-example-parity.test.ts` compares the two
+# structurally (group names, host names, and the set of keys each host declares) whenever the real file is
+# present locally — it skips honestly, not silently, when it is not (a fresh clone or CI).
+all:
+  children:
+    a11y_workers:
+      hosts:
+        a11y-worker-2:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:12"
+
+        a11y-worker-3:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:13"
+
+        a11y-worker-4:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:14"
+
+        a11y-worker-5:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:15"
+
+        a11y-worker-6:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:16"
+
+        a11y-worker-7:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:17"
+
+        a11y-worker-8:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:18"
+
+        a11y-worker-9:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:19"
+
+        a11y-worker-10:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:20"
+
+        a11y-worker-11:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:21"
+
+    a11y_control:
+      hosts:
+        a11y-control:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+
+    a11y_lab:
+      hosts:
+        a11y-lab:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+
+    a11y_hypervisor:
+      hosts:
+        pve-micro:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
