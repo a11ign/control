@@ -45,6 +45,17 @@
       # `../../etc/passwd` is inexpressible rather than rejected -- the shape `isValidCaptureId` uses, whose
       # test says "path traversal is the reason this check exists".
       capture: "runs/screenreader-dataset/captures/{{ capture | default('') }}.json"
+      # THE SAME HOLE, ONE CORPUS ALONG. `capture` above reaches the DATASET corpus and stops there, so a
+      # finding about a REAL page had no way to produce that page's evidence. Found 2026-09-06: the 1.4.13
+      # fixture captured 10 of 10 with 0 failures and `rules:coverage` still reported the rule firing 0x on
+      # a real page, while the dataset capture of the SAME page carried a textbook
+      # `focusReveal: {revealed:true, focusHeld:true, dismissed:false}`. Two captures of one page
+      # disagreeing is the whole diagnosis, and neither this playbook nor any other could fetch the second.
+      #
+      # `-e page=<slug>`, the same slug `capture-real-pages.mjs` writes: the url with the scheme stripped
+      # and every non-alphanumeric run replaced by a dash, e.g.
+      # `localhost-5050-focus-panel-undismissable-help-bad-html`. A NAME, validated like `capture` is.
+      real-capture: "runs/real-page-corpus/{{ page | default('') }}.json"
       # THE REAL-PAGE CAPTURES, added 2026-09-04 because there was no way to read one.
       #
       # `rules-real-pages` refused a run with a new 1.1.1 finding on cqc.org.uk and its own output said
@@ -175,6 +186,21 @@
         fail_msg: >-
           -e capture=<case>.<variant> is required for artifact=capture, e.g.
           keyboard-trap-modal-cycle.good. It is a NAME (letters, digits, dot, plus, dash), never a path.
+
+    # A SLUG IS A NAME, NEVER A PATH — the identical guard `capture` gets, and `regex_findall` for the
+    # identical reason: `regex_search` on a non-match throws INSIDE the filter, so no `| default` after it
+    # can rescue the message. A slug has no dots (the extension is added here), so its shape is narrower.
+    - name: A real-page slug must be a name, so a path cannot be expressed
+      when: artifact | default('') == 'real-capture'
+      ansible.builtin.assert:
+        that:
+          - page | default('') | length > 0
+          - (page | regex_findall('^[A-Za-z0-9-]+$')) | length > 0
+        fail_msg: >-
+          -e page=<slug> is required for artifact=real-capture, e.g.
+          localhost-5050-focus-panel-undismissable-help-bad-html. It is the slug
+          `capture-real-pages.mjs` writes: the url without its scheme, every non-alphanumeric run
+          replaced by a dash, no extension. A NAME (letters, digits, dash), never a path.
 
     - name: The artifact must be one we have, and the model directory a name
       ansible.builtin.assert:
