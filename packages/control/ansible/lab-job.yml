@@ -371,6 +371,29 @@
       export-test:
         argv: ["/usr/bin/npm", "run", "training:export:test"]
         timeout: 900
+      # REGENERATE THE PAGES AND THE MANIFEST, and nothing else. The one job the catalogue was missing,
+      # and its absence was found by the guard that needs it: `export` refuses a manifest whose case
+      # DEFINITIONS no longer match `CASES`, and its refusal named a raw
+      # `node packages/lab/src/training/generate-screenreader-dataset.mjs` -- a command an operator
+      # dispatching jobs cannot run. This repo's own rule: a remedy nobody can reach is a remedy nobody
+      # applies.
+      #
+      # Measured 2026-09-06: adding `alsoFails: ["2.4.7:focus-removed-on-receipt"]` to nine cases changed
+      # no page byte and no capture, and `export` correctly refused every later stage until the manifest
+      # caught up. The only route to that refresh was a CAPTURE job -- `capture` (a ~4.4 h full corpus) or
+      # `capture-only` (which is `--no-cache` by design, so it pays for a real capture to do it). Paying
+      # for evidence to refresh a label is the wrong trade.
+      #
+      # Deliberately NOT folded into `export`. Which of the manifest and `CASES` is authoritative is
+      # genuinely ambiguous -- that is why the guard reports rather than picks -- so an export that
+      # silently regenerated would resolve the ambiguity by fiat and destroy the only signal that a case
+      # matrix and a captured corpus have diverged.
+      #
+      # Generation is idempotent: same code, same bytes, so a page file is rewritten byte-identically
+      # unless the page actually changed. Running this cannot invalidate a cached capture on its own.
+      generate:
+        argv: ["/usr/bin/npm", "run", "training:generate"]
+        timeout: 900
       # Cheap, and here because it is a STEP rather than a check: it rewrites the labels every later stage
       # reads, and it silently used a stale manifest twice in one session before the drift guard existed.
       export:
