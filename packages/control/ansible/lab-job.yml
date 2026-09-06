@@ -977,6 +977,60 @@
           Refusing to run: A11Y_WORKERS would be {{ lab_fleet_workers | truncate(120) }}, which is not a
           plain comma-separated list of worker addresses. Something has overridden the inventory.
 
+    # `-e workers=N` MUST NAME A POOL THE FLEET CAN ACTUALLY GIVE, and until this assert existed it did
+    # not have to. The cap is applied inside `capture-only`'s `setenv` — `(lab_fleet_workers |
+    # split(','))[:workers | default(99) | int]` — which is rendered at dispatch and never goes through
+    # the address assert above, so nothing looked at the number at all.
+    #
+    # MEASURED against a five-host fixture, by running the shipped expression rather than reading it:
+    #
+    #   -e workers=2    -> two boxes                          correct
+    #   -e workers=99   -> ALL FIVE, silently                  the wrong-population shape: "the five-box
+    #                                                          arm" and "however many happened to be
+    #                                                          there" are different measurements, and a
+    #                                                          slice past the end reports the second as
+    #                                                          the first. `default(99)` is a sentinel
+    #                                                          meaning "all", so an out-of-range number
+    #                                                          is indistinguishable from asking for all.
+    #   -e workers=0    -> `A11Y_WORKERS=` — EMPTY             the worse one. An empty worker list is not
+    #                                                          a refusal: `leaseWorker` falls back to
+    #                                                          discovery and guesses `localhost:8765`, so
+    #                                                          a corpus capture dispatches at whatever
+    #                                                          answers on the lab rather than at the
+    #                                                          fleet. The strict address pattern would
+    #                                                          have caught it and never sees this value.
+    #
+    # A COUNT IS THE WHOLE INTERFACE TODAY, so the count is where the check has to go. Bounds only —
+    # deliberately not a rewrite of the expression, which is another session's and works.
+    - name: A worker cap must be a number the fleet can meet
+      when: workers is defined
+      ansible.builtin.assert:
+        that:
+          - workers | string is match('^[0-9]+$')
+          - workers | int >= 1
+          - workers | int <= groups['a11y_workers'] | length
+        fail_msg: >-
+          Refusing to run: -e workers={{ workers }} against a fleet of
+          {{ groups['a11y_workers'] | length }} box(es) ({{ groups['a11y_workers'] | join(', ') }}).
+          {{ (workers | string is not match('^[0-9]+$')) | ternary(
+               'That is not a number. The cap is a COUNT of boxes, and a non-numeric value renders as 0 —
+                which produces an EMPTY A11Y_WORKERS, and an empty worker list is discovery, not a refusal.',
+               (workers | int < 1) | ternary(
+                 'Zero boxes is not a smaller measurement, it is none — and it does not fail loudly: it
+                  produces an empty A11Y_WORKERS, which sends the run to worker DISCOVERY and a guessed
+                  localhost:8765 rather than to the fleet.',
+                 'That is more boxes than the fleet has. Truncating silently would report a run on
+                  ' ~ (groups['a11y_workers'] | length) ~ ' as the one you asked for.')) }}
+
+    # STATE THE POPULATION, on every run, not only when a cap was asked for. A measurement that names its
+    # boxes when somebody remembered to ask has an optional population, and #21 is about exactly that.
+    - name: Say how many boxes this run will use
+      ansible.builtin.debug:
+        msg: >-
+          {{ (workers | default(groups['a11y_workers'] | length)) | int }} of
+          {{ groups['a11y_workers'] | length }} worker(s):
+          {{ (groups['a11y_workers'])[:(workers | default(99) | int)] | join(', ') }}
+
     - name: "Run {{ job }}"
       ansible.builtin.include_tasks: tasks/run-job.yml
       vars:
