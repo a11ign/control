@@ -417,7 +417,20 @@ try {
   ssh(`systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
     + `systemd-run --unit=${unit} --remain-after-exit --working-directory=${CHECKOUT}/packages/control/ansible `
     + `--setenv=ANSIBLE_CONFIG=ansible.cfg `
-    + `ansible-playbook -i inventory.yml ${chosen} -e a11y_git_ref=${ref}`
+    // NO `-i` HERE. `ansible.cfg` sets `inventory = /etc/a11ign/inventory.yml,inventory.yml` so the
+    // durable copy is read FIRST -- and an explicit `-i` on the command line OVERRIDES that config
+    // entirely, which made the whole outside-the-checkout fix inert on the one path that dispatches
+    // everything.
+    //
+    // Measured 2026-09-06, minutes after installing and verifying the durable copy: `fleet:deploy` still
+    // printed `Unable to parse .../packages/control/ansible/inventory.yml` and matched no hosts. The
+    // config was correct, on main, and on the control plane -- and unread, because this line outranked it.
+    //
+    // I VERIFIED THAT CONFIG IN FOUR STATES WITH `ansible-inventory --list`, which READS the config. The
+    // dispatch path does not. A verification that exercises a different invocation from the one that ships
+    // is this repo's most-recorded defect, and it is the reason to remove the flag rather than to point it
+    // at the new path: one source of truth, in the file every playbook already honours.
+    + `ansible-playbook ${chosen} -e a11y_git_ref=${ref}`
     // The COMMIT that ref resolves to here, so each guest can assert it landed on it rather than the
     // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
     // the guests fetch; this catches the fetch silently not taking.
