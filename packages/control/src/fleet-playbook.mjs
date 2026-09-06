@@ -467,6 +467,28 @@ async function main() {
   // that was already correct.
   const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 
+  // A SHA IS NOT A REF THIS CAN DEPLOY, AND THE COMMENT SAYING SO WAS NOT A GUARD.
+  //
+  // `deploy.yml` fast-forwards each guest with `git merge --ff-only origin/{{ a11y_git_ref }}`, so the
+  // ref must be something `origin/<ref>` resolves to. `localBranch()`'s comment has recorded that since
+  // the run it cost -- "this repo has already spent a run on `-e ref=<sha>` becoming an unresolvable
+  // `origin/<sha>`" -- and it guarded only the DEFAULT. Passing `--ref=<sha>` explicitly walks straight
+  // past it, and 2026-09-06 spent another run doing exactly that: the checkout SUCCEEDS, the merge fails
+  // with a git message naming neither the flag nor the reason, and the deploy is a stack trace.
+  //
+  // A fact recorded in a comment is a fact somebody has to remember.
+  if (/^[0-9a-f]{7,40}$/i.test(ref)) {
+    process.stderr.write([
+      `REFUSING: --ref=${ref} looks like a COMMIT.`,
+      "This deploys by fast-forwarding each guest to `origin/<ref>`, which a commit does not resolve to.",
+      "The checkout would succeed and the merge would fail on a message that names neither the flag nor",
+      "the reason.",
+      "  Pass a BRANCH name. To deploy one commit, push it as a branch first.",
+      "",
+    ].join("\n"));
+    process.exit(2);
+  }
+
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   // `--ff-only` against origin, exactly as `deploy.yml` does to each guest: a checkout of an existing
