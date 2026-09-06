@@ -28,8 +28,23 @@
 # It does NOT reach the workers. The inventory is a control-plane fact -- `lab_fleet_workers` is resolved
 # here and handed to the lab as `A11Y_WORKERS`, and `gates/fleet.mjs` reads that env first for exactly
 # this reason. A worker box has never needed the file and this does not give it one.
+# ## It targets localhost, and the first version did not — a bootstrap circularity
+#
+# Written as `hosts: control_plane`, which is a group DEFINED IN THE INVENTORY THIS INSTALLS. On the one
+# machine that needs it — the machine whose copy a pull had just deleted — ansible could not parse the
+# inventory, so the play matched no hosts and the zero-host guard refused it. The play that fixes the
+# missing inventory needed the missing inventory to find its own target.
+#
+# It does not need one. `fleet-playbook.mjs` already starts this as a systemd unit ON the control plane, so
+# the file is being written to the machine the play is running on. `localhost` with a local connection has
+# no inventory dependency at all, which is what a bootstrap step must not have.
+#
+# Caught by the zero-host refusal added in the same session, within minutes of it being written, on its
+# author's own playbook. That is the guard doing exactly what it exists for: ansible exited 0 having
+# matched nothing.
 - name: Install the fleet inventory outside the control plane's checkout
-  hosts: control_plane
+  hosts: localhost
+  connection: local
   gather_facts: false
   vars:
     inventory_source: "{{ playbook_dir }}/inventory.yml"
@@ -44,7 +59,6 @@
         fail_msg: >-
           {{ inventory_source }} is not on THIS machine, so there is nothing to install. It is gitignored
           and a pull deletes it -- restore it here first from wherever this operator keeps secrets.
-      delegate_to: localhost
 
     - name: The directory it lives in
       ansible.builtin.file:
@@ -73,7 +87,6 @@
         path: "{{ inventory_source }}"
         checksum_algorithm: sha256
       register: expected
-      delegate_to: localhost
 
     - name: They must match, byte for byte
       ansible.builtin.assert:
