@@ -51,7 +51,7 @@ export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
  * happening, four boxes reporting four revisions "purely because each first-booted at a different commit
  * during one afternoon".
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -94,6 +94,8 @@ refuseUnknownFlags(
 const FOLLOW_POLL_MS = 5_000;
 
 const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST || "REDACTED-INTERNAL-ADDRESS";
+/** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
+const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 const CONTROL_KEY = process.env.A11Y_PVE_KEY || `${process.env.HOME}/.ssh/a11y-pve_ed25519`;
 const CHECKOUT = "a11y-witness";
 
@@ -315,6 +317,50 @@ async function guardProtocolChange(chosen) {
 }
 
 /**
+ * Does this playbook declare itself a control-plane BOOTSTRAP?
+ *
+ * The marker lives in the playbook (`# a11y_bootstrap: true`) rather than in a list here, so a second one
+ * cannot acquire the exception by being added to an array nobody re-argues. `bootstrap-playbooks-are-
+ * declared.test.ts` discovers every carrier and refuses one that also targets `a11y_workers` or
+ * `control_plane` — groups that come from the very file a bootstrap installs.
+ *
+ * @param {string} chosen @returns {boolean}
+ */
+export function declaresBootstrap(chosen, read = readFileSync) {
+  try {
+    return /^#\s*a11y_bootstrap:\s*true\s*$/m.test(String(read(`${ANSIBLE_DIR}/${chosen}`, "utf8")));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run a bootstrap playbook from THIS machine, with the control plane named on the command line.
+ *
+ * A bootstrap step must depend on nothing it is bootstrapping, and `inventory-install.yml` found both ways
+ * that can fail, in order: `hosts: control_plane` needs the inventory it installs to resolve its target,
+ * and `hosts: localhost` under the unit-based path means the control plane — where the source file is
+ * missing, which is the incident. `-i '<host>,'` takes the target from argv and the source from here.
+ *
+ * @param {string} chosen @returns {void}
+ */
+function runBootstrapFromHere(chosen) {
+  process.stdout.write(`  running ${chosen} FROM THIS MACHINE against ${CONTROL_PLANE}\n`
+    + "  (it declares `a11y_bootstrap`, and a bootstrap cannot run on what it bootstraps)\n\n");
+  const result = spawnSync("ansible-playbook", ["-i", `${CONTROL_PLANE},`, chosen],
+    { cwd: ANSIBLE_DIR, stdio: "inherit" });
+  if (result.error) {
+    process.stderr.write(`\n  could not run ansible-playbook here: ${result.error.message}\n`);
+    process.exit(2);
+  }
+  if (result.status !== 0) {
+    process.stderr.write(`\n  ${chosen} FAILED (ansible exit ${result.status}); its output is above.\n`);
+    process.exit(result.status ?? 1);
+  }
+  process.stdout.write(`\n  ${chosen} completed.\n`);
+}
+
+/**
  * Start the playbook on the control plane as a named systemd unit, and return that unit's name.
  *
  * A PHASE, not a name restating its code: "get it running somewhere it will survive me" is a distinct
@@ -407,6 +453,12 @@ async function main() {
     process.stderr.write(`the control plane is on ${landed.slice(0, 12)}, not ${expected.slice(0, 12)}. `
       + "Not deploying.\n");
     process.exit(1);
+  }
+
+  // A BOOTSTRAP PLAYBOOK RUNS FROM HERE. The playbook declares it; this reads the declaration.
+  if (declaresBootstrap(chosen)) {
+    runBootstrapFromHere(chosen);
+    return;
   }
 
   // A failed deploy must READ like a failed deploy. `execFileSync` throws an Error whose message is the

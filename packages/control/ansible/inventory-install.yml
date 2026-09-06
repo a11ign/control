@@ -42,9 +42,26 @@
 # Caught by the zero-host refusal added in the same session, within minutes of it being written, on its
 # author's own playbook. That is the guard doing exactly what it exists for: ansible exited 0 having
 # matched nothing.
+# a11y_bootstrap: true
+#
+# THE DECLARATION IS HERE, not in the wrapper, and that is the whole safety of the exception.
+#
+# `fleet-playbook.mjs` reads this marker to decide the playbook runs FROM the operator's machine with the
+# control plane named on the command line, rather than as a systemd unit ON the control plane. A hardcoded
+# list in the wrapper would let a second playbook acquire the exception by copy-paste with nobody arguing
+# for it -- which is the real risk, not the first exception.
+#
+# THE RULE, and it is general rather than "this file is special": a playbook that BOOTSTRAPS the control
+# plane runs from the operator's machine with its target on the command line, and it is the only kind that
+# may. `bootstrap-playbooks-are-declared.test.ts` DISCOVERS every playbook carrying this marker and refuses
+# one that also targets `a11y_workers` or `control_plane` -- because a bootstrap step must depend on
+# NOTHING it is bootstrapping, and both of those groups come from the file this installs.
+#
+# The systemd-unit path exists for a measured reason (2026-09-05: a caller killed 100 s into a ten-machine
+# reboot, the unit survived). A sub-second file copy has nothing to outlive, which is what makes this
+# exception principled rather than convenient. A playbook that takes MINUTES must never carry this marker.
 - name: Install the fleet inventory outside the control plane's checkout
-  hosts: localhost
-  connection: local
+  hosts: all
   gather_facts: false
   vars:
     inventory_source: "{{ playbook_dir }}/inventory.yml"
