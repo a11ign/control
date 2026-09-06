@@ -102,7 +102,12 @@ const CHECKOUT = "a11y-witness";
  * command a remote shell interprets, on the box holding the fleet SSH key. Same containment as
  * `-e out=<name>` in `lab-job.yml`, for the same reason.
  */
-const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml"];
+// `inventory-install.yml` is here rather than run by hand FOR THE REASON THIS FILE EXISTS: an operation
+// that matters is CLI-invocable and reviewable, or it is done differently every time by whoever is at the
+// keyboard. It also inherits the zero-host refusal below, which is the guard whose absence let a deploy to
+// nothing exit 0 -- though it targets `control_plane`, not `a11y_workers`, so an empty fleet is not its
+// failure mode.
+const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml"];
 
 /**
  * Ansible host patterns this may target, by SHAPE. Same containment as the playbook list, and needed for

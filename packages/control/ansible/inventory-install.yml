@@ -1,0 +1,87 @@
+---
+# Put `inventory.yml` where a `git pull` cannot delete it, on the CONTROL PLANE.
+#
+#     npm run fleet:inventory-install
+#
+# ## Why this is a playbook and not a copy command
+#
+# The file is untracked and gitignored (#54, the public-repo address exposure), so a pull removes it from
+# any checkout holding one. Measured 2026-09-06: the control plane pulled main, the file went, and
+# `fleet:deploy` printed `skipping: no hosts matched` and EXITED 0 -- ten workers untouched, the wrapper
+# reporting success.
+#
+# The obvious remedy is to copy the file up by hand. That is precisely what this project has ruled out:
+# the operations that matter are CLI-invocable and reviewable, or they are done differently every time by
+# whoever is at the keyboard. A one-off `scp` leaves no record of what was placed, no verification that it
+# arrived intact, and nothing to run again when the next machine needs it. `ansible/README.md` gives the
+# same reason for SSH-over-WinRM and for there being no `/admin/update` route.
+#
+# ## What it does, and what it deliberately does not
+#
+# Reads the inventory from THIS checkout and installs it at `/etc/a11ign/inventory.yml` on the control
+# plane, then reads it back and compares SHA-256 both sides. `ansible.cfg` already prefers that path, so
+# once this has run the fleet definition outlives every future pull on that machine.
+#
+# It does NOT touch the in-tree copy, on either machine. That copy is the migration fallback and removing
+# it is a separate decision; this play is additive, so running it twice changes nothing the second time.
+#
+# It does NOT reach the workers. The inventory is a control-plane fact -- `lab_fleet_workers` is resolved
+# here and handed to the lab as `A11Y_WORKERS`, and `gates/fleet.mjs` reads that env first for exactly
+# this reason. A worker box has never needed the file and this does not give it one.
+- name: Install the fleet inventory outside the control plane's checkout
+  hosts: control_plane
+  gather_facts: false
+  vars:
+    inventory_source: "{{ playbook_dir }}/inventory.yml"
+    inventory_destination: /etc/a11ign/inventory.yml
+
+  tasks:
+    - name: The source must exist, and saying so beats installing an empty file
+      # An absent source with `copy` would be a task error; naming it here says WHICH file and on which
+      # machine, because "no such file" about a gitignored path is the least useful message available.
+      ansible.builtin.assert:
+        that: inventory_source is file
+        fail_msg: >-
+          {{ inventory_source }} is not on THIS machine, so there is nothing to install. It is gitignored
+          and a pull deletes it -- restore it here first from wherever this operator keeps secrets.
+      delegate_to: localhost
+
+    - name: The directory it lives in
+      ansible.builtin.file:
+        path: "{{ inventory_destination | dirname }}"
+        state: directory
+        mode: "0750"
+
+    - name: Install it
+      ansible.builtin.copy:
+        src: "{{ inventory_source }}"
+        dest: "{{ inventory_destination }}"
+        mode: "0640"
+      register: installed
+
+    - name: What is on this machine now
+      # PROVE IT ARRIVED, over a read that shares no failure mode with the write. `copy` reporting changed
+      # says the module ran; a hash read back says the bytes are there. This repo's own rule -- a
+      # verification that shares a failure mode with the action verifies nothing.
+      ansible.builtin.stat:
+        path: "{{ inventory_destination }}"
+        checksum_algorithm: sha256
+      register: landed
+
+    - name: And what it should be
+      ansible.builtin.stat:
+        path: "{{ inventory_source }}"
+        checksum_algorithm: sha256
+      register: expected
+      delegate_to: localhost
+
+    - name: They must match, byte for byte
+      ansible.builtin.assert:
+        that: landed.stat.checksum == expected.stat.checksum
+        fail_msg: >-
+          {{ inventory_destination }} is {{ landed.stat.checksum | default('absent') }} but the source is
+          {{ expected.stat.checksum }}. It did NOT arrive intact; do not deploy until this is resolved.
+        success_msg: >-
+          {{ inventory_destination }} installed and verified, sha256 {{ landed.stat.checksum }}.
+          `ansible.cfg` reads this path first, so a future `git pull` here can no longer take the fleet
+          definition with it.
