@@ -347,7 +347,20 @@ export function declaresBootstrap(chosen, read = readFileSync) {
 function runBootstrapFromHere(chosen) {
   process.stdout.write(`  running ${chosen} FROM THIS MACHINE against ${CONTROL_PLANE}\n`
     + "  (it declares `a11y_bootstrap`, and a bootstrap cannot run on what it bootstraps)\n\n");
-  const result = spawnSync("ansible-playbook", ["-i", `${CONTROL_PLANE},`, chosen],
+  // `root@`, and the bare host is not enough. Ansible defaults an unqualified `-i '<host>,'` to the LOCAL
+  // username, so it tried `danielbeck@` and got `Permission denied (publickey)` — a credentials failure
+  // that reads like a missing key rather than a wrong user. Everything else in this file already reaches
+  // the control plane as root (`ssh()` builds `root@${CONTROL_PLANE}`); this is the same fact, and it has
+  // to be stated again because `-i` does not inherit it.
+  // AND THE KEY. `ssh()` twenty lines up passes `-i CONTROL_KEY` explicitly, because the control plane is
+  // a separate credential domain (ADR 0012) and the operator's default identity does not open it. Ansible
+  // has its own name for the same thing, so the fact is stated a third time in a third spelling —
+  // `root@` in the host, `--private-key` here — and neither inherits from the other.
+  //
+  // Without it: `root@<host>: Permission denied (publickey,password)`, which reads as a MISSING key rather
+  // than an unpassed one. The key is present and correct; nothing asked for it.
+  const result = spawnSync("ansible-playbook",
+    ["-i", `root@${CONTROL_PLANE},`, "--private-key", CONTROL_KEY, chosen],
     { cwd: ANSIBLE_DIR, stdio: "inherit" });
   if (result.error) {
     process.stderr.write(`\n  could not run ansible-playbook here: ${result.error.message}\n`);
