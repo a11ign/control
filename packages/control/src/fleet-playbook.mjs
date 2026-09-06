@@ -420,6 +420,13 @@ async function main() {
       + "names which hosts; nothing was rolled back, so re-running is safe.\n");
     process.exit(outcome.status);
   }
+  const nothing = deployedToNothing(outcome.log);
+  if (nothing) {
+    process.stderr.write(`\n  ${chosen} REACHED NO HOSTS and ansible still exited 0: ${nothing}\n`
+      + "  Nothing was deployed. This is NOT a successful run, and the fleet is on whatever code it had.\n"
+      + "  Verify with `npm run worker:code` before trusting any capture.\n");
+    process.exit(5);
+  }
   process.stdout.write(`\n  ${chosen} completed; the PLAY RECAP above is the per-host result.\n`);
 }
 
@@ -435,6 +442,46 @@ async function main() {
  */
 function journalScope(unit, invocation) {
   return /^[0-9a-f]{32}$/.test(invocation) ? `_SYSTEMD_INVOCATION_ID=${invocation}` : `-u ${unit}`;
+}
+
+/**
+ * Did this playbook run against NO HOSTS? Ansible says so and exits 0.
+ *
+ * Measured 2026-09-06: the control plane's checkout pulled main, `inventory.yml` is untracked and
+ * gitignored so the pull DELETED it, and `fleet:deploy` then printed
+ *
+ *     [WARNING]: Unable to parse .../inventory.yml as an inventory source
+ *     [WARNING]: Could not match supplied host pattern, ignoring: a11y_workers
+ *     PLAY [Deploy the worker code to the fleet]
+ *     skipping: no hosts matched
+ *
+ * and exited **0**. Ten workers untouched, the wrapper reporting completion. The only thing that caught it
+ * was running `worker:code` out of habit; otherwise the next capture would have refused with
+ * `10 stale worker(s)` and the cause would have been an hour old and elsewhere.
+ *
+ * A DEPLOY TO NOTHING IS NOT A SUCCESSFUL DEPLOY. Ansible's exit status answers "did the tasks I ran
+ * fail", and with no hosts there are no tasks — a true answer to a question nobody asked. This asks the
+ * one that matters.
+ *
+ * Matches on ANY of the four signatures rather than one, because they appear in different combinations:
+ * an unparseable inventory, an empty one, and a pattern that matched nothing are three different causes
+ * of the same silence, and naming which is what makes the message actionable.
+ *
+ * @param {string} log the unit's journal
+ * @returns {string | null} why it deployed to nothing, or null if it reached hosts
+ */
+export function deployedToNothing(log) {
+  const text = String(log ?? "");
+  if (!/skipping: no hosts matched|provided hosts list is empty/.test(text)) return null;
+  const unparseable = text.match(/Unable to parse (\S+) as an inventory source/);
+  if (unparseable) {
+    return `the inventory at ${unparseable[1]} could not be parsed — on the CONTROL PLANE, not here. `
+      + "It is gitignored, so a `git pull` there deletes it.";
+  }
+  if (/No inventory was parsed/.test(text)) return "no inventory was parsed at all on the control plane";
+  const pattern = text.match(/Could not match supplied host pattern, ignoring: (\S+)/);
+  if (pattern) return `the host pattern '${pattern[1]}' matched nothing in the inventory`;
+  return "the play matched no hosts, and the journal does not say why";
 }
 
 /**
@@ -465,7 +512,7 @@ function journalScope(unit, invocation) {
  * SAYS SO, because showing nothing where there is plenty is worse than showing too much.
  *
  * @param {string} unit @param {number} budgetMs
- * @returns {Promise<{ status: number }>}
+ * @returns {Promise<{ status: number, log: string }>}
  */
 async function followUnit(unit, budgetMs) {
   const deadline = Date.now() + budgetMs;
@@ -477,12 +524,15 @@ async function followUnit(unit, budgetMs) {
     process.stdout.write("  (this unit has no InvocationID, so the journal below is its WHOLE history, "
       + "not just this run — read the timestamps)\n");
   }
+  /** The journal as last read, kept so the caller can ask what the run actually did. */
+  let lastLog;
   for (;;) {
     const sub = ssh(`systemctl show -p SubState --value ${unit} 2>/dev/null || echo unknown`,
       { capture: true }).trim();
     // The journal so far, minus what has already been printed — so a caller that reconnects to a running
     // deploy sees it progress rather than a silent wait.
     const log = ssh(`journalctl ${scope} --no-pager -o cat 2>/dev/null || true`, { capture: true });
+    lastLog = log;
     const lines = log.split("\n");
     if (lines.length > shown) { process.stdout.write(lines.slice(shown).join("\n")); shown = lines.length; }
     if (sub !== "running" && sub !== "unknown") break;
@@ -496,7 +546,7 @@ async function followUnit(unit, budgetMs) {
   }
   const code = ssh(`systemctl show -p ExecMainStatus --value ${unit} 2>/dev/null || echo 1`,
     { capture: true }).trim();
-  return { status: Number(code) || 0 };
+  return { status: Number(code) || 0, log: lastLog };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
