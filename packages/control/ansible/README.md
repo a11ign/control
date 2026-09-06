@@ -224,6 +224,53 @@ land a freshly discovered worker inside `a11y_lab`, where it would be correctly 
 updated, never dispatched to. `fleet-discover.test.ts` reads an enrolment back through the reader a run
 actually uses, because being in the file is not the same as being a worker.
 
+## Issuing a new operator's credentials
+
+This section is written for the contingency case, not the everyday one: someone other than today's
+operator needs to become able to drive this fleet or this lab. ADR 0012's split names **two** credential
+domains, deliberately kept apart, and issuance is per-domain rather than "give them access":
+
+- **The fleet SSH key** — a public/private keypair whose public half is baked into every worker's
+  `administrators_authorized_keys` at provisioning time (see `roles/worker/tasks/account.yml`). It reaches
+  the twelve Windows boxes and nothing else.
+- **The lab's key** (named only as `a11y-pve` in this repo's own docs, per ADR 0012 — never by its exact
+  filename or the host it reaches, here or anywhere else in a document meant to be shared) — a second,
+  separate keypair whose public half is authorized on the Proxmox host alone. It reaches the corpus, the
+  trained scorer and the job runner, and nothing on the fleet.
+
+**Why two keys and not one.** A single credential that reached both would put ADR 0012's whole split behind
+one secret — lose it, and both domains are gone together; leak it, and both are exposed together. Kept
+separate, each domain's blast radius is bounded by what that one key can reach.
+
+**Issuing access, without printing material:**
+
+1. **Generate a new keypair for the new operator** (`ssh-keygen -t ed25519 -C "<their name>@a11y-witness"`
+   run BY THEM, on their own machine — the private half must never exist anywhere but there). They send
+   you the PUBLIC half only, over any channel; a public key is not a secret.
+2. **For fleet access:** add their public key to `roles/worker/tasks/account.yml`'s
+   `administrators_authorized_keys` list (or the equivalent Ansible variable it reads from — check that
+   task file, not this README, for the current mechanism) and re-run `provision-role.yml` or
+   `provision.yml` across the fleet so every box picks it up. Confirm with `ansible-playbook deploy.yml
+   --check` from their machine once they hold the private half.
+3. **For lab access:** add their public key to the Proxmox host's authorized-keys for the account this
+   repo's docs call `a11y-pve` — done on the host itself, by whoever already holds that access today, not
+   scripted here, because a lab-access change is rare enough that automating it would be exercised once and
+   then trusted unread. Confirm with a read-only command (`npm run lab:status`) before anything that could
+   write, per this repo's own habit of proving a channel with the cheapest possible probe first.
+4. **Never send a private key over any channel, ever, including to move it between your own machines.** If
+   a machine holding either private key is being retired, generate a FRESH keypair for its replacement and
+   revoke the old public key from the fleet/host side — do not copy the private file. A copied private key
+   is a second machine that can silently lose the "exactly one machine holds both" property ADR 0012 and
+   `docs/roles/README.md`'s "Credentials" section both rely on.
+5. **Revoking access** is the mirror of step 2 or 3: remove the public key from
+   `administrators_authorized_keys` (fleet) or the host's authorized-keys (lab), then re-provision the
+   fleet side so the removal actually lands rather than sitting uncommitted.
+
+**What this section deliberately does not do.** It does not name a host, an IP, a filename or a fingerprint
+— see `docs/roles/README.md`'s "Credentials are the single point of failure" section for why: this project
+treats a credential's existence and its domain as documentable, and its exact reachability material as the
+one thing that must survive only on the machine that holds it today.
+
 ## Why SSH and not WinRM
 
 WinRM against the `witness` account needs `LimitBlankPasswordUse=0`, and that setting is exactly what
