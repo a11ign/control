@@ -138,7 +138,17 @@ export async function wakeFleet(workers, { port = 8765, broadcast, deadlineMs = 
 async function main() {
   const wanted = process.argv.slice(2).filter((a) => !a.startsWith("--"));
   const inventory = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url));
-  const declared = inventoryHosts(readFileSync(inventory, "utf8"));
+  // `inventory.yml` is gitignored (real addresses, restored from the secrets store at bring-up) --
+  // absence is now a state a fresh clone hits routinely, not an edge case, so it gets a named error
+  // rather than an uncaught ENOENT stack. Same message shape as `fleet-status.mjs`'s `fleetToProbe()`.
+  let declared;
+  try {
+    declared = inventoryHosts(readFileSync(inventory, "utf8"));
+  } catch (error) {
+    process.stderr.write("No fleet to wake: inventory.yml could not be read "
+      + `(${/** @type {Error} */ (error).message}). Restore it from the secrets store, or add a host.\n`);
+    process.exit(2);
+  }
   const workers = wanted.length ? declared.filter((w) => wanted.includes(w.name)) : declared;
 
   if (!workers.length) {

@@ -112,8 +112,14 @@ test("MAC formats are normalised, so 00-1A-2B and 00:1a:2b are one machine", () 
   assert.equal(normaliseMac("nonsense"), null);
 });
 
-test("the real inventory parses, and its hosts carry an address", () => {
-  const text = readFileSync(fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)), "utf8");
+// Reads the EXAMPLE, deliberately, not the real inventory -- the real one is gitignored (real addresses,
+// restored from the secrets store at bring-up) and does not exist in CI or a fresh clone. This test only
+// checks the SHAPE (a host exists, its address is address-shaped), which the example preserves by design
+// -- see inventory.example.yml's own header and inventory-example-parity.test.ts, which is what proves the
+// example is still equivalent to the real file for exactly this purpose. Do not re-point this at
+// inventory.yml: it would pass locally and fail everywhere the real file is absent.
+test("the example inventory parses, and its hosts carry an address", () => {
+  const text = readFileSync(fileURLToPath(new URL("../ansible/inventory.example.yml", import.meta.url)), "utf8");
   const hosts = inventoryHosts(text);
   assert.ok(hosts.length >= 1, "the shipped inventory should declare at least one worker");
   for (const h of hosts) assert.match(h.host, /^[\d.]+$/);
@@ -127,11 +133,17 @@ test("the real inventory parses, and its hosts carry an address", () => {
 // worker would have landed in `a11y_lab` and been correctly ignored by the reader. Provisioned,
 // updated, never dispatched to, and nothing to say so.
 
-const REAL_INVENTORY = readFileSync(
-  fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)), "utf8");
+// Reads inventory.example.yml, deliberately -- this needs a REALISTIC multi-group inventory to exercise
+// enrol()'s group-awareness against, and the example carries the same group structure as the real file
+// (see inventory-example-parity.test.ts). It never reads the group's ADDRESSES, so the placeholder values
+// cost nothing here. inventory.yml itself is gitignored and would make this whole file fail to import on
+// a fresh clone or in CI, which is exactly the shape a MODULE-LEVEL readFileSync produces -- one file
+// failing at import time rather than one test failing at run time.
+const EXAMPLE_INVENTORY = readFileSync(
+  fileURLToPath(new URL("../ansible/inventory.example.yml", import.meta.url)), "utf8");
 
 test("an enrolled worker is visible to the reader a RUN uses, not merely present in the file", () => {
-  const { text, added } = enrol(REAL_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
+  const { text, added } = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
     "2026-08-21");
 
   assert.equal(added.length, 1);
@@ -141,8 +153,8 @@ test("an enrolled worker is visible to the reader a RUN uses, not merely present
 });
 
 test("enrolment does not disturb the workers already declared", () => {
-  const before = workersFromInventory(REAL_INVENTORY);
-  const { text } = enrol(REAL_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
+  const before = workersFromInventory(EXAMPLE_INVENTORY);
+  const { text } = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
     "2026-08-21");
 
   assert.deepEqual(workersFromInventory(text).filter((w) => !w.includes("REDACTED-INTERNAL-ADDRESS")), before);
@@ -151,7 +163,7 @@ test("enrolment does not disturb the workers already declared", () => {
 test("enrolment does not turn the control plane into a capture worker", () => {
   // The lab is in the inventory so there is one source of truth for what exists. It must never become
   // something a run dispatches capture cases to, before or after an enrolment.
-  const { text } = enrol(REAL_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
+  const { text } = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
     "2026-08-21");
 
   for (const url of workersFromInventory(text)) {
@@ -160,9 +172,9 @@ test("enrolment does not turn the control plane into a capture worker", () => {
 });
 
 test("enrolling nothing changes nothing", () => {
-  const { text, added } = enrol(REAL_INVENTORY, [], "2026-08-21");
+  const { text, added } = enrol(EXAMPLE_INVENTORY, [], "2026-08-21");
   assert.equal(added.length, 0);
-  assert.equal(text, REAL_INVENTORY);
+  assert.equal(text, EXAMPLE_INVENTORY);
 });
 
 test("an inventory with no worker group REFUSES the enrolment rather than appending anyway", () => {
@@ -176,7 +188,7 @@ test("inventoryHosts is group-aware too, or discover reports the lab as a sleepi
   // This module has its own host reader with its own regexes, and it matched host names at exactly eight
   // spaces of indentation — which is what the control-plane entry uses. So it returned the lab as a fifth
   // worker and `reconcile` called it ASLEEP?, probing :8765 on a box that has no worker and never will.
-  const hosts = inventoryHosts(REAL_INVENTORY);
+  const hosts = inventoryHosts(EXAMPLE_INVENTORY);
 
   assert.ok(hosts.length >= 4, "the real workers must still be found");
   for (const host of hosts) {

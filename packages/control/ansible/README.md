@@ -27,6 +27,12 @@ eval "$(npm run --silent fleet:env)"            # exports A11Y_WORKERS from the 
 npm run doctor                                  # now sees the whole fleet
 ```
 
+**`inventory.yml` is gitignored, not deleted.** Real addresses, in a public repo (#54) — it is restored
+from the secrets store at bring-up on the control plane, and `inventory.example.yml` is the committed
+stand-in: same worker names and group structure, placeholder addresses. `inventory-example-parity.test.ts`
+keeps the two in shape-sync. A checkout with no restored inventory reports an honest "no fleet declared"
+rather than a plausible wrong answer — see `fleet-env.mjs`'s `inventoryWorkerUrls`/`namedInventoryWorkers`.
+
 ## What this replaces
 
 `worker:deploy` is `utmctl file push` plus a `utmctl` reboot, keyed on a VM UUID. It has no host
