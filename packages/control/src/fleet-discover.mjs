@@ -49,7 +49,7 @@ import { networkInterfaces } from "node:os";
 // header for why. These imports cross back to worker-fleet the SANCTIONED way, by relative path.
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 
 /**
  * `--enroll` WRITES to inventory.yml; mistyped, it scans and quietly enrols nothing.
@@ -448,7 +448,11 @@ function writeEnrolments(inventoryPath, unknowns) {
 }
 
 async function main() {
-  const arg = (/** @type {any} */ name) => (process.argv.find((a) => a.startsWith(`--${name}=`)) ?? "").split("=")[1];
+  // audit §9 "argv parsing": this was `.split("=")[1]`, which truncates a value at its OWN "=" -- fine for
+  // `--cidr=`/`--port=`, which can never contain one, but a live discrepancy from the other fourteen
+  // hand-rolled copies of this idiom the day this helper is asked for anything else. `flagValue` preserves
+  // a value whole.
+  const arg = (/** @type {any} */ name) => flagValue(process.argv, name);
   const subnet = arg("cidr") || localSubnet();
   if (!subnet) {
     process.stderr.write("Could not work out which /24 to scan. Pass --cidr=192.168.1\n");

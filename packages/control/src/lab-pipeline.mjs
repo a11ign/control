@@ -53,7 +53,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.mjs";
 
@@ -387,7 +387,7 @@ const fleetDeploy = (/** @type {string} */ ref) =>
  */
 /** @param {string} name @param {Record<string, any>} pipeline */
 function caseIds(name, pipeline) {
-  const only = process.argv.find((a) => a.startsWith("--only="))?.slice("--only=".length);
+  const only = flagValue(process.argv, "only");
   if (only !== undefined && !validOnly(only)) {
     process.stderr.write(`refusing --only=${only}: case ids only, comma-separated.\n`);
     process.exit(2);
@@ -535,7 +535,7 @@ function printUnitLog(/** @type {string} */ unit) {
  * source -- the three `journalctl` misreads that cost a run each are the record.
  */
 function reportPipelineState() {
-  const named = process.argv.find((a) => a.startsWith("--pipeline="))?.slice("--pipeline=".length);
+  const named = flagValue(process.argv, "pipeline");
   const unit = `a11y-pipeline-${(named || "run").replace(/[^a-z0-9-]/gi, "")}`;
   if (process.argv.includes("--log")) return printUnitLog(unit);
 
@@ -578,8 +578,7 @@ function dispatchToControlUnlessLocal() {
   // the ssh after 100 s: the sequence died with it, which is the same "the orchestration did not survive
   // while every unit did" that made this item necessary. `--remain-after-exit` so the exit code is
   // readable afterwards; `--collect` would unload the unit and discard it at the moment it matters.
-  const pipelineName = (args.find((a) => a.startsWith("--pipeline="))
-    ?.slice("--pipeline=".length) || "run").replace(/[^a-z0-9-]/gi, "");
+  const pipelineName = (flagValue(args, "pipeline") || "run").replace(/[^a-z0-9-]/gi, "");
   const unit = `a11y-pipeline-${pipelineName}`;
   // ABSOLUTE, because the second `cd` below runs from inside the first when they are relative — which is
   // exactly how the first attempt failed, with `cd: a11y-witness: No such file or directory`.
@@ -630,13 +629,13 @@ function dispatchToControlUnlessLocal() {
 
 /** The ref the remote should stand on. Defaults to this checkout's branch, as `fleet:deploy` does. */
 function branchArg(/** @type {string[]} */ args) {
-  const named = args.find((a) => a.startsWith("--ref="))?.slice("--ref=".length);
+  const named = flagValue(args, "ref");
   if (named) return named;
   return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
 }
 
 async function main() {
-  const name = process.argv.find((a) => a.startsWith("--pipeline="))?.slice("--pipeline=".length);
+  const name = flagValue(process.argv, "pipeline");
   // `--list` is a question that was answered, so it exits 0. A missing --pipeline is a malformed request
   // and exits 2 — the same distinction the capture clients make, and collapsing the two would make
   // "show me the pipelines" indistinguishable from "you asked for nothing".
@@ -663,7 +662,7 @@ async function main() {
 
   const only = caseIds(name, pipeline);
 
-  const ref = process.argv.find((a) => a.startsWith("--ref="))?.slice("--ref=".length) ?? localBranch();
+  const ref = flagValue(process.argv, "ref") ?? localBranch();
   if (!validRef(ref)) {
     process.stderr.write(`refusing --ref=${ref}: a commit or simple branch name only.\n`);
     process.exit(2);

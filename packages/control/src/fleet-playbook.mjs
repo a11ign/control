@@ -62,7 +62,7 @@ import { networkInterfaces } from "node:os";
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
@@ -213,8 +213,8 @@ function localBranch() {
   return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
 }
 
-const argOf = (/** @type {string} */ name) =>
-  process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+// audit §9 "argv parsing": was its own copy of the fifteen-file idiom, now the shared, tested extractor.
+const argOf = (/** @type {string} */ name) => flagValue(process.argv, name);
 
 /**
  * Every argument, validated, or a refusal that names which one and what shape it wanted.
