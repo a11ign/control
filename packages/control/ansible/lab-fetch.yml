@@ -163,6 +163,16 @@
       # made one promotion overwrite another's note. That is unguessable by design, so this resolves the
       # newest match on the lab instead of predicting a name.
       promoted-changeset: ".changeset/promote-*.md"
+      # THE NEWEST CORPUS SNAPSHOT, so it can be uploaded from the CONTROL PLANE rather than the lab.
+      #
+      # The transport is deliberately two hops: `corpus-snapshot` archives on the lab, this brings the
+      # archive here, and the upload happens from a machine that already holds GitHub credentials. **No
+      # token ever sits on the lab**, which is the whole reason for the shape — the lab is the machine with
+      # the corpus on it, and a credential there is a credential next to the thing it protects.
+      #
+      # Globbed, so `find` picks the newest on the LAB rather than this file predicting a timestamp. A
+      # snapshot's name carries seconds precisely because two in one minute is a normal thing to want.
+      corpus-archive: "backups/corpus-*.tar.gz"
       promoted-training-report: "packages/scorer/models/screenreader-scorer/training-report.json"
       promoted-acceptance-report: "packages/scorer/models/screenreader-scorer/acceptance-report.json"
       acceptance-records: "runs/screenreader-acceptance/{{ repeat | default('repeat-1') }}.jsonl"
