@@ -3,7 +3,7 @@
  * `inventory.yml` — gitignored since 2026-09-06, real addresses, restored from the secrets store at
  * bring-up (issue #54). The example is only as good as its SHAPE staying in step with the real file: if a
  * new group or a required key is added to the real inventory and the example does not get it,
- * `ansible-check.yml`'s `--syntax-check` passes against a stale shape while validating nothing real — the
+ * `ci.yml`'s `ansible` job's `--syntax-check` passes against a stale shape while validating nothing real — the
  * exact "fact stated twice, and the copies drifted" shape CLAUDE.md names as this repo's most expensive
  * recurring defect.
  *
@@ -65,7 +65,7 @@ test("the real inventory's shape matches the example's -- or this test is honest
 
   assert.deepEqual(sortedArray(real.groups), sortedArray(example.groups),
     "inventory.yml and inventory.example.yml declare different GROUPS -- update the example to match, "
-    + "or ansible-check.yml is validating a stale shape in CI");
+    + "or ci.yml's ansible job is validating a stale shape in CI");
   assert.deepEqual(sortedArray(real.hosts), sortedArray(example.hosts),
     "inventory.yml and inventory.example.yml declare different HOST NAMES -- worker names are not "
     + "secrets and claude-md-counts.test.ts reads them from the example, so this must stay exact");
