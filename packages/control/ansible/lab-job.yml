@@ -668,6 +668,25 @@
       # `argv` is a LIST, so the addresses are spliced in as
       # separate elements — joining them with a space would hand the script one argument containing four
       # URLs, which is the quoting class `argv:` exists to remove, reintroduced by hand.
+      fleet-hours:
+        # WHAT A CAPTURE RUN COST, summed per capture from each capture's own last cumulative `atMs`.
+        # Reads the corpus and nothing else -- no fleet, no worker, no page server -- so it is safe to run
+        # while a capture is in flight, though the number then describes a moving target and the tool's own
+        # output says which corpus it read.
+        #
+        # IT MUST RUN HERE RATHER THAN ON A LAPTOP, which is the whole reason for this entry. `runs/` in any
+        # checkout is a copy only as fresh as its last sync -- measured 2026-09-06 at 4,422 captures on
+        # protocol 5 against a fleet on 16 -- so a median computed locally answers about a corpus that no
+        # longer exists. That is this repo's most-recorded defect and the reason the board's fleet-hours
+        # line reads "not instrumented" rather than carrying a laptop's figure.
+        exitMeanings:
+          "2": >-
+            it billed NO capture and refuses to report a total it did not measure. Deliberately not 1:
+            a cost report that examined nothing prints the same small number as a cheap run, so "0.00
+            worker-hours" must never be a silent success. Read WHICH silence it names -- "no JSON found"
+            and "walked N and billed none" need opposite fixes.
+        argv: ["/usr/bin/node", "packages/lab/scripts/fleet-hours.mjs", "--json"]
+        timeout: 1800
       capture-check:
         params: {worker: required}
         # THE CAPTURE LAYER'S OWN REGRESSION CHECK, dispatchable at last. `capture:check` was documented as
