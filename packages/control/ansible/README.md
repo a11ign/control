@@ -164,10 +164,10 @@ npm run lab:status -- -e job=train              # one job, systemd's view + its 
 ```
 
 > **Run these from YOUR machine, not from the control container.** `a11y_lab` authenticates with
-> `~/.ssh/a11y-pve_ed25519`, the Proxmox key, which lives on the operator's laptop and is deliberately not
+> `~/.ssh/<lab key filename>`, the Proxmox key, which lives on the operator's laptop and is deliberately not
 > on CT 120 — control holds the FLEET key, for the Windows workers, and ADR 0012 keeps those separate. Run
 > `lab:job` from CT 120 and it fails with
-> `no such identity: /root/.ssh/a11y-pve_ed25519 ... Permission denied (publickey)`, which reads like a
+> `no such identity: /root/.ssh/<lab key filename> ... Permission denied (publickey)`, which reads like a
 > broken job path rather than the wrong launch point. Cost twenty minutes to work out once.
 >
 > **`npm run capture:check` is operator-machine-only too, for an unrelated reason.** It imports guidepup,
@@ -176,7 +176,7 @@ npm run lab:status -- -e job=train              # one job, systemd's view + its 
 > import succeeds, which is why the worker-mode check runs from the Mac and talks to the guest over HTTP.
 
 **What this replaces, and why it was worth replacing.** Long lab work was started by typing
-`ssh root@REDACTED-INTERNAL-ADDRESS 'pct exec 121 -- bash -lc "..."'`, which appears NOWHERE in the source tree — so the
+`ssh root@<the lab's host> 'pct exec <container id> -- bash -lc "..."'`, which appears NOWHERE in the source tree — so the
 way this project's most expensive operations were launched was untested, unversioned and unreviewable. Two
 days of it cost: a heredoc mangled through two hops of shell quoting; a bash array that evaporated crossing
 `nohup bash -c`, sending four capture shards at `--worker=http://:8765` for 29 minutes while every worker
@@ -216,7 +216,7 @@ so `lab-job.test.ts` pins them:
   with it. Verified both ways: `exit 42` leaves `Result=exit-code ExecMainStatus=42`, rather than vanishing.
 
 **The lab must never become a capture worker.** `fleet-env.mjs` read every `ansible_host:` in this file as a
-worker at :8765 until 2026-08-21, so adding the lab would have put `http://REDACTED-INTERNAL-ADDRESS:8765` into
+worker at :8765 until 2026-08-21, so adding the lab would have put `http://<the lab's host>:8765` into
 `A11Y_WORKERS` and a run would have dispatched cases to a box with no NVDA. The reader is group-aware now,
 `inventoryHosts` shares that one implementation rather than carrying a second, and `enrol` splices new
 workers into the `a11y_workers` block rather than appending at the end of the file — which would otherwise
@@ -312,8 +312,8 @@ which served the previous code for another hour. A reboot always picks up pushed
   ```
 
 - **Reach a container DIRECTLY over SSH, not through `pct exec` on the Proxmox host.** Both containers have
-  their own IP and their own sshd, and they are in `inventory.yml` — `a11y_control` is REDACTED-INTERNAL-ADDRESS,
-  `a11y_lab` is REDACTED-INTERNAL-ADDRESS, both DHCP, so confirm rather than trust. The `pct exec` route is a second hop
+  their own IP and their own sshd, and they are in `inventory.yml` — both `a11y_control` and `a11y_lab`
+  are DHCP, so confirm the address there rather than trust it. The `pct exec` route is a second hop
   and therefore a second layer of shell quoting for every command to survive, which is where a heredoc came
   apart and where a bash array evaporated crossing `nohup bash -c`. It also carries a thinner environment,
   which is how the locale failure above was first met.
