@@ -95,7 +95,11 @@ refuseUnknownFlags(
 const FOLLOW_POLL_MS = 5_000;
 
 // No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
-const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST;
+// Resolved by `requireControlPlaneHost()` at the top of `main()`, not at import: env var first, then the
+// durable file it installs (#285, `fleet:control-host-install`), then a loud refusal. A bare env read
+// here would miss the file entirely, so this is reassigned once resolved rather than only validated.
+/** @type {string} */
+let CONTROL_PLANE;
 /** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 const CHECKOUT = "a11y-witness";
@@ -110,7 +114,8 @@ const CHECKOUT = "a11y-witness";
 // keyboard. It also inherits the zero-host refusal below, which is the guard whose absence let a deploy to
 // nothing exit 0 -- though it targets `control_plane`, not `a11y_workers`, so an empty fleet is not its
 // failure mode.
-const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml"];
+const PLAYBOOKS =
+  ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml", "control-host-install.yml"];
 
 /**
  * Ansible host patterns this may target, by SHAPE. Same containment as the playbook list, and needed for
@@ -439,6 +444,10 @@ try {
     // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
     // the guests fetch; this catches the fetch silently not taking.
     + ` -e a11y_expected_commit=${expected}`
+    // The control-plane address ALREADY resolved above (env var or its installed file, #285), so
+    // `control-host-install.yml` never has to read the environment itself -- it just records what got
+    // used to reach this machine. Harmless for every other playbook, which does not read this var.
+    + ` -e a11y_control_host=${CONTROL_PLANE}`
     + (limitFlag ? ` -l ${limitFlag}` : "")
     + (serialFlag !== undefined ? ` -e worker_provision_serial=${serialFlag}` : "")
     // A NAMED FLAG, because the obvious spelling silently did nothing. `-e worker_edge_allow_downgrade=true`
@@ -459,7 +468,8 @@ try {
 }
 
 async function main() {
-  requireControlPlaneHost(); // throws before anything else if A11Y_CONTROL_HOST is unset -- see #83
+  // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
+  CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade } = parseArgs();
   await guardProtocolChange(chosen);

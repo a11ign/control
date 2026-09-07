@@ -417,7 +417,11 @@ function usage() {
 
 /** Where the sequencing runs. Same address `fleet-playbook.mjs` already uses; named once, not twice. */
 // No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
-const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST;
+// Resolved by `requireControlPlaneHost()` below, not at import: env var first, then the durable file it
+// installs (#285, `fleet:control-host-install`), then a loud refusal. A bare env read here would miss the
+// file entirely, so this is reassigned once resolved rather than only validated.
+/** @type {string} */
+let CONTROL_PLANE;
 /**
  * The key CONTROL uses to reach the LAB. Not the same key this laptop uses, deliberately: it was generated
  * ON control so its private half has never been anywhere else, which is the property that makes moving the
@@ -652,7 +656,7 @@ async function main() {
   // AFTER the two questions above, never before: `--list` and a malformed request are answered locally in
   // milliseconds, and shipping them to another host would make asking what pipelines exist depend on the
   // control plane being up. Same reason the host is required only here, not at import: see #83.
-  requireControlPlaneHost();
+  CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
   dispatchToControlUnlessLocal();
   // Indexed by a name that came off the command line, which is the whole reason the refusal below

@@ -1,0 +1,90 @@
+---
+# Put A11Y_CONTROL_HOST's value where a shell that never set it can still find it, on the CONTROL PLANE.
+#
+#     npm run fleet:control-host-install
+#
+# ## Why this exists
+#
+# #285: ten bare-metal workers sat idle for hours because the shell dispatching `fleet:deploy` had never
+# had `A11Y_CONTROL_HOST` set. `requireControlPlaneHost()` refuses rather than guessing (#83), correctly,
+# and this does not change that. What was missing is the third state between "committed to git" (never --
+# see README.md's "Reaching the control plane itself") and "typed into every shell": a value installed
+# once on the machine it describes, the same way `fleet:inventory-install` already does for
+# `inventory.yml` at `/etc/a11ign/inventory.yml`.
+#
+# ## Where the value comes from, and why this is not a fallback default
+#
+# `fleet-playbook.mjs` has ALREADY resolved a real control-plane address before this playbook is ever
+# dispatched -- `requireControlPlaneHost()` runs at the top of every `main()`, or nothing here would have
+# had a host to SSH into in the first place. That resolved value is handed down as the `a11y_control_host`
+# extra-var, so this playbook never reads the environment itself: it records what was ALREADY used to
+# reach this machine, on the machine it describes. That is the distinction #285's own text draws: "the
+# value was supplied deliberately, by a human, on the machine it describes, and it never enters git" is
+# not the same claim as a hardcoded fallback, which supplies a value NOBODY chose, on every machine,
+# including ones it was never meant for -- which is exactly how a real LAN address ended up in this
+# repo's public history (#83).
+#
+# ## No bootstrap marker, and no circularity to declare one against
+#
+# `inventory-install.yml` needs `# a11y_bootstrap: true` because its SOURCE is a file that lives on the
+# OPERATOR'S own machine -- so it must run FROM there, over the wrapper's own SSH, naming the control
+# plane on the command line rather than through an inventory group the file being installed would have to
+# supply. This playbook's source is a value already resolved in the wrapper's own process and handed over
+# as an extra-var; there is no file to read from a machine this playbook cannot reach. Its target is
+# `localhost`, which needs no inventory at all, bootstrap or otherwise. Dispatched normally, it runs as a
+# systemd unit ON the control plane (`fleet-playbook.mjs`'s usual path), where `localhost` with a local
+# connection correctly means the control plane itself.
+# `bootstrap-playbooks-are-declared.test.ts` treats the marker as opt-in per playbook, never required --
+# this one has nothing to gain from it, and declaring it would only cost the unit-based path's own
+# survival guarantee for no reason this playbook needs.
+- name: Install A11Y_CONTROL_HOST's value outside the control plane's checkout
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    control_host_destination: /etc/a11ign/control-host
+
+  tasks:
+    - name: The value must actually be here -- an absent extra-var beats an empty file installed silently
+      ansible.builtin.assert:
+        that: a11y_control_host is defined and a11y_control_host | length > 0
+        fail_msg: >-
+          `a11y_control_host` was not passed to this playbook. It comes from `fleet-playbook.mjs`, which
+          resolves it before dispatching -- run this through `npm run fleet:control-host-install`, not
+          `ansible-playbook` directly.
+
+    - name: The directory it lives in
+      ansible.builtin.file:
+        path: "{{ control_host_destination | dirname }}"
+        state: directory
+        mode: "0750"
+
+    - name: Install it
+      ansible.builtin.copy:
+        content: "{{ a11y_control_host }}"
+        dest: "{{ control_host_destination }}"
+        mode: "0640"
+      register: installed
+
+    - name: Read it back, over a channel that shares no failure mode with the write
+      # `slurp`, not `stat`'s checksum -- the acceptance for this row is that the command PRINTS the
+      # value it read back, not a hash of it, so a run can be eyeballed rather than trusted.
+      ansible.builtin.slurp:
+        path: "{{ control_host_destination }}"
+      register: landed
+
+    - name: It must read back exactly what was asked for
+      vars:
+        landed_content: "{{ landed.content | default('', true) | b64decode }}"
+      ansible.builtin.assert:
+        that: landed_content == a11y_control_host
+        # `| default(..., true)` on every value, including the boolean second argument that also treats an
+        # empty string as absent -- a failing assert whose own message cannot render reports a templating
+        # error instead of the fault, and an empty decoded string is exactly the shape a truncated write
+        # would leave.
+        fail_msg: >-
+          {{ control_host_destination }} reads back {{ landed_content | default('ABSENT', true) }} but
+          {{ a11y_control_host }} was asked for. It did NOT arrive intact; do not rely on it yet.
+        success_msg: >-
+          {{ control_host_destination }} installed and verified: {{ landed_content }}. A future shell with
+          A11Y_CONTROL_HOST unset now falls back to this instead of refusing.

@@ -12,9 +12,25 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
+import { requireControlPlaneHost, requireControlPlaneKey, readControlHostFile } from "./control-plane-host.mjs";
+
+/** Runs `fn` with both env vars saved and restored, and a real temp file cleaned up after -- #285. */
+function withHostEnv(fn: (filePath: string) => void): void {
+  const beforeHost = process.env.A11Y_CONTROL_HOST;
+  const beforeFile = process.env.A11Y_CONTROL_HOST_FILE;
+  const dir = mkdtempSync(join(tmpdir(), "control-host-file-"));
+  try {
+    fn(join(dir, "control-host"));
+  } finally {
+    if (beforeHost === undefined) delete process.env.A11Y_CONTROL_HOST; else process.env.A11Y_CONTROL_HOST = beforeHost;
+    if (beforeFile === undefined) delete process.env.A11Y_CONTROL_HOST_FILE; else process.env.A11Y_CONTROL_HOST_FILE = beforeFile;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 test("returns A11Y_CONTROL_HOST when it is set", () => {
   const before = process.env.A11Y_CONTROL_HOST;
@@ -104,4 +120,65 @@ test("lab-pipeline.mjs no longer falls back to a hardcoded key path", () => {
   const source = readFileSync(new URL("./lab-pipeline.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, FALLBACK_KEY_PATH);
   assert.match(source, /requireControlPlaneKey\(\)/, "the loud refusal must still be wired in, not just removed");
+});
+
+/**
+ * #285: a value installed once on the machine that owns it -- the third state between "committed to git"
+ * and "typed into every shell". `readControlHostFile` and the precedence it feeds `requireControlPlaneHost`
+ * are what this row adds; the tests above must keep passing unchanged, which is the proof that #83's
+ * refusal survives this row rather than being softened by it.
+ */
+
+test("readControlHostFile: null when the file does not exist, never thrown", () => {
+  withHostEnv((filePath) => {
+    assert.equal(readControlHostFile(filePath), null);
+  });
+});
+
+test("readControlHostFile: the trimmed content when the file exists", () => {
+  withHostEnv((filePath) => {
+    writeFileSync(filePath, "control.example.test\n");
+    assert.equal(readControlHostFile(filePath), "control.example.test");
+  });
+});
+
+test("readControlHostFile: an empty (or whitespace-only) file is null, not a chosen empty host", () => {
+  withHostEnv((filePath) => {
+    writeFileSync(filePath, "  \n");
+    assert.equal(readControlHostFile(filePath), null);
+  });
+});
+
+test("requireControlPlaneHost: falls back to the file when A11Y_CONTROL_HOST is unset", () => {
+  withHostEnv((filePath) => {
+    delete process.env.A11Y_CONTROL_HOST;
+    process.env.A11Y_CONTROL_HOST_FILE = filePath;
+    writeFileSync(filePath, "from-file.example.test");
+    assert.equal(requireControlPlaneHost(), "from-file.example.test");
+  });
+});
+
+test("requireControlPlaneHost: the env var WINS over the file when both are set -- #285's own precedence rule", () => {
+  withHostEnv((filePath) => {
+    process.env.A11Y_CONTROL_HOST = "from-env.example.test";
+    process.env.A11Y_CONTROL_HOST_FILE = filePath;
+    writeFileSync(filePath, "from-file.example.test");
+    assert.equal(requireControlPlaneHost(), "from-env.example.test");
+  });
+});
+
+test("MUTATION target: still REFUSES when neither the env var nor the file exists -- the property #83 bought", () => {
+  withHostEnv((filePath) => {
+    delete process.env.A11Y_CONTROL_HOST;
+    process.env.A11Y_CONTROL_HOST_FILE = filePath; // never written -- absent, exactly like the issue's own acceptance
+    assert.throws(() => requireControlPlaneHost(), /A11Y_CONTROL_HOST is required/);
+  });
+});
+
+test("requireControlPlaneHost's refusal names the installer, so the fix is one command away", () => {
+  withHostEnv((filePath) => {
+    delete process.env.A11Y_CONTROL_HOST;
+    process.env.A11Y_CONTROL_HOST_FILE = filePath;
+    assert.throws(() => requireControlPlaneHost(), /fleet:control-host-install/);
+  });
 });
