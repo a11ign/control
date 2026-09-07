@@ -1,0 +1,43 @@
+---
+# A11Y_PVE_KEY IS REQUIRED AND HAS NO DEFAULT — the Ansible half of #85, closing #255.
+#
+# `packages/control/README.md` states this outright, and until now two `group_vars` files supplied a
+# default anyway:
+#
+#   ansible_ssh_private_key_file: "{{ lookup('env', 'A11Y_PVE_KEY') | default('~/.ssh/a11y-pve_ed25519', true) }}"
+#
+# The policy and the configuration disagreed, and the configuration wins for anyone running a playbook.
+# It is also a real key filename in a repo meant to be generic — the same exposure #83 closed for source
+# comments, in a spelling the JS guard structurally cannot see: `control-plane-host.test.ts` matches
+# `A11Y_PVE_KEY\s*\|\|` against the two `.mjs` files, and a Jinja `| default(...)` is not that shape.
+# That guard's own comment names these two files as the follow-up, which is the right way to ship a
+# partial fix and is why this row could be written precisely.
+#
+# ## `| mandatory` IS NOT THE FIX, and this is why — verified by running it, not by reading
+#
+# `lookup('env', 'X') | mandatory` passes an unset variable through as an EMPTY STRING rather than
+# raising, because the lookup returns `''` and never Ansible's `Undefined`, which is what `mandatory`
+# tests for. So the obvious one-word fix produces a guard that silently permits exactly what it was added
+# to refuse. Recorded in #248's commit message so nobody re-derives it; repeated here because this is
+# where the next person will reach for it.
+#
+# An explicit assert on the VALUE is therefore the mechanism, and it must run on `localhost` BEFORE the
+# play that connects: `ansible_ssh_private_key_file` is read at connection time, so an assert inside the
+# connecting play is already too late to produce a readable failure — it would surface as an SSH auth
+# error naming a key path nobody set.
+- name: The control-plane key must be supplied, not defaulted
+  ansible.builtin.assert:
+    that:
+      - lookup('env', 'A11Y_PVE_KEY') | default('', true) | length > 0
+    fail_msg: >-
+      A11Y_PVE_KEY is not set, and it has no default. It names the private key this playbook connects to
+      the Proxmox control plane and the lab with, and it is deliberately not committed — the same as
+      A11Y_CONTROL_HOST, and for the same reason: a real key filename in a repository meant to be generic
+      is somebody's infrastructure written down. Set it to your own key's path and run this again.
+      Refusing rather than guessing: a default here connects as whoever the guess happens to name, or
+      fails at the SSH layer with a path nobody chose.
+    # `| default('', true)` on BOTH sides is load-bearing. Ansible finalises the success message too, so a
+    # bare `lookup(...) | length` here throws inside the filter in exactly the case this guard exists for,
+    # and the failure becomes a Jinja traceback instead of the sentence above -- the shape CLAUDE.md
+    # records: "a guard that stops the job and explains nothing gets distrusted, then bypassed".
+    success_msg: "A11Y_PVE_KEY is set ({{ lookup('env', 'A11Y_PVE_KEY') | default('', true) | length }} chars)"

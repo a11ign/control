@@ -29,6 +29,19 @@
 # It does not create your tailnet, and it does not approve the routes — both are yours, in the admin
 # console. It prints the login URL and stops. Nothing here is destructive: `tailscale down` on the host
 # returns everything to exactly how it was.
+# THE CONTROL-PLANE KEY MUST BE SUPPLIED BEFORE ANYTHING CONNECTS -- #255.
+#
+# This playbook targets `a11y_hypervisor`, whose `group_vars` used to default `A11Y_PVE_KEY` to a real
+# key filename. The default is gone; this is the refusal that replaces it, and it runs on `localhost`
+# because `ansible_ssh_private_key_file` is read at connection time -- an assert inside the connecting
+# play would arrive after the failure it exists to explain.
+- name: The control-plane key must be supplied before connecting
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
 - name: Reach the fleet from anywhere
   hosts: a11y_hypervisor
   gather_facts: true

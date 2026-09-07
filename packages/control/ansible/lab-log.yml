@@ -62,6 +62,12 @@
         # nothing gets distrusted, then bypassed.
         success_msg: "inventory resolved {{ groups['a11y_lab'] | default([]) | length }} lab host(s)"
 
+    # AND THE KEY THAT CONNECTS TO IT -- #255. Same play, because both are preconditions that must be
+    # settled on localhost before anything opens an SSH connection, and both fail in the same direction:
+    # a missing inventory does nothing and exits 0, a missing key connects as whatever a default guessed.
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
 - name: Fetch a job's own output
   hosts: a11y_lab
   gather_facts: false
