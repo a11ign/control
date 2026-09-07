@@ -61,7 +61,7 @@
       # Fast Startup is off on these boxes (a11y_power_timeouts disables hibernation), so this is a real
       # S5 rather than a hybrid hibernate — which is what makes Wake-on-LAN work afterwards. Those two
       # facts are a dependency, not a coincidence.
-      ansible.windows.win_shell: shutdown.exe /s /t 10 /c "a11y-witness fleet sleep"
+      ansible.windows.win_shell: shutdown.exe /s /t 10 /c "a11ign fleet sleep"
       when:
         - state.status | default(0) == 200
         - (not (state.json.busy | default(false))) or (a11y_force_sleep | default(false) | bool)

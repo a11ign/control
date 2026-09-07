@@ -3,7 +3,7 @@ name: worker
 version: 1.0.0
 readme: README.md
 authors:
-  - a11y-witness
+  - a11ign
 description: >-
   Modules for an NVDA capture worker. These exist because no first-class module covers them and the
   alternative was inline PowerShell, which cannot honour check mode, cannot report a diff, and validates
@@ -11,4 +11,4 @@ description: >-
   difference - which is what makes `changed` mean something.
 license_file: ../../../../../../../LICENSE
 tags: [windows, accessibility]
-repository: https://github.com/DanBeckDev/a11y-witness
+repository: https://github.com/a11ign/a11ign

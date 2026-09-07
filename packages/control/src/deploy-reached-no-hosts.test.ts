@@ -23,7 +23,7 @@ const ANSIBLE = join(import.meta.dirname, "../ansible");
 
 test("the real log that exited 0 is refused, and names the inventory it could not parse", () => {
   const real = [
-    "[WARNING]: Unable to parse /root/a11y-witness/packages/control/ansible/inventory.yml as an inventory source",
+    "[WARNING]: Unable to parse /root/a11ign/packages/control/ansible/inventory.yml as an inventory source",
     "[WARNING]: No inventory was parsed, only implicit localhost is available",
     "[WARNING]: Could not match supplied host pattern, ignoring: a11y_workers",
     "PLAY [Deploy the worker code to the fleet]",

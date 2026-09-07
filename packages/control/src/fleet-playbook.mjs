@@ -57,7 +57,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { networkInterfaces } from "node:os";
 import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
-// RELATIVE, NEVER `@a11y-witness/worker-fleet/cli-flags`. A package-name import resolves through
+// RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
@@ -68,7 +68,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
 // The first version of this reached `workerUrls` in `check-worker-code.mjs`, which imports
-// `@a11y-witness/nvda-worker` by package name, and `fleet:deploy` died on the control plane with
+// `@a11ign/nvda-worker` by package name, and `fleet:deploy` died on the control plane with
 // ERR_MODULE_NOT_FOUND while passing on a laptop that has node_modules. A gate that does not exercise
 // what ships, for the fifth time in this repo.
 //
@@ -102,7 +102,7 @@ const FOLLOW_POLL_MS = 5_000;
 let CONTROL_PLANE;
 /** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
-const CHECKOUT = "a11y-witness";
+const CHECKOUT = "a11ign";
 
 /**
  * Playbooks this may run, by NAME. Not a path, and not free text: the value is interpolated into a

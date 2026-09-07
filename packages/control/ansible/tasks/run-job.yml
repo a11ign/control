@@ -285,7 +285,7 @@
   changed_when: true
 
 - name: "Rebuild the compiled packages"
-  # THE GATE SCORED CODE THAT WAS NOT THE CODE. `@a11y-witness/judge/rules` resolves to `dist/rules.js`,
+  # THE GATE SCORED CODE THAT WAS NOT THE CODE. `@a11ign/judge/rules` resolves to `dist/rules.js`,
   # so `rules:gate` runs COMPILED output — and a pull updates the source without touching it. Measured
   # 2026-08-22: a freshly added 2.4.2 rule fired when imported from source while the gate reported
   # `0/1 MISSING EVIDENCE`, because the lab's `dist/rules.js` contained zero occurrences of it. The gate

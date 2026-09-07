@@ -54,7 +54,7 @@
       # checks the files out with CRLF, and a byte-for-byte hasher therefore never matched it: measured
       # 31979b551b7a2cfa against this checkout's 22822b7a3a08969c, which read as "permanently stale".
       #
-      # Imported BY PATH, not as `@a11y-witness/nvda-worker`. The package name needs npm workspace
+      # Imported BY PATH, not as `@a11ign/nvda-worker`. The package name needs npm workspace
       # resolution, which would mean 100 MB of node_modules on the fleet-control container -- the box
       # that holds the SSH key able to reconfigure every worker. It does not need a dependency tree, and
       # putting the largest supply-chain surface in the system next to that credential is the coupling

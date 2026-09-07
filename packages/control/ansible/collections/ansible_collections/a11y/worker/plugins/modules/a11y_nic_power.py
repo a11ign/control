@@ -39,7 +39,7 @@ options:
     type: bool
     default: true
 author:
-- a11y-witness
+- a11ign
 """
 
 EXAMPLES = r"""

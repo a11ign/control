@@ -1,4 +1,4 @@
-# `@a11y-witness/control`
+# `@a11ign/control`
 
 **Private. Never published.** The control plane: the one machine that holds the fleet SSH key and can
 provision, deploy, wake and sleep the ten bare-metal capture workers. See

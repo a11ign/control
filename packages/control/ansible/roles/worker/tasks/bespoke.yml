@@ -242,7 +242,7 @@
   # Both are created regardless of which browser this guest drives — they cost an empty directory, and a
   # guest whose browser is switched later should not need re-provisioning to get a prepared profile.
   ansible.windows.win_file:
-    path: '%LOCALAPPDATA%\a11y-witness\{{ item }}'
+    path: '%LOCALAPPDATA%\a11ign\{{ item }}'
     state: directory
   loop:
     - edge-profile

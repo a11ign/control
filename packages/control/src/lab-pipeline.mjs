@@ -48,7 +48,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
-// RELATIVE, NEVER `@a11y-witness/worker-fleet/cli-flags`. A package-name import resolves through
+// RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
@@ -429,7 +429,7 @@ let CONTROL_PLANE;
  */
 const CONTROL_TO_LAB_KEY = "/root/.ssh/a11y-lab_ed25519";
 /** Where the checkout lives on control. Absolute, so a nested `cd` cannot land somewhere else. */
-const CONTROL_CHECKOUT = "/root/a11y-witness";
+const CONTROL_CHECKOUT = "/root/a11ign";
 
 /**
  * Run the whole sequence ON THE CONTROL PLANE, unless asked to run here.
@@ -587,7 +587,7 @@ function dispatchToControlUnlessLocal() {
   const pipelineName = (flagValue(args, "pipeline") || "run").replace(/[^a-z0-9-]/gi, "");
   const unit = `a11y-pipeline-${pipelineName}`;
   // ABSOLUTE, because the second `cd` below runs from inside the first when they are relative — which is
-  // exactly how the first attempt failed, with `cd: a11y-witness: No such file or directory`.
+  // exactly how the first attempt failed, with `cd: a11ign: No such file or directory`.
   const remote = `cd ${CONTROL_CHECKOUT} && git fetch --quiet origin && git checkout --quiet ${ref} `
     + `&& git merge --quiet --ff-only origin/${ref} `
     // THE LOCK IS "RUNNING", NOT "LOADED", and reading it wrong makes every pipeline single-use.

@@ -42,7 +42,7 @@ import { readFileSync } from "node:fs";
 //
 // It is a genuinely different case, checked rather than assumed while scoping #85: `README.md`'s "does not
 // belong in git" policy names only `A11Y_CONTROL_HOST` and `A11Y_PVE_KEY` -- the CONTROL PLANE's own
-// credentials. `A11Y_SSH_KEY` / `a11y-witness_ed25519` is the fleet's own key-naming CONVENTION, which this
+// credentials. `A11Y_SSH_KEY` / `a11ign_ed25519` is the fleet's own key-naming CONVENTION, which this
 // project treats as public by design: `serve-bootstrap.sh` and `ssh-key.yml` exist specifically to
 // ESTABLISH that convention on a new box, and `doctor.mjs`'s use of the same path is a diagnostic SCAN for
 // whether the convention was followed, not an operation that depends on the value being correct. Forcing

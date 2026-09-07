@@ -29,7 +29,7 @@
   # — which presents as a worker that was reachable yesterday and is not today.
   become: true
   community.windows.win_firewall_rule:
-    name: "a11y-witness worker {{ worker_port }}"
+    name: "a11ign worker {{ worker_port }}"
     localport: "{{ worker_port }}"
     protocol: tcp
     direction: in
@@ -71,7 +71,7 @@
   # the NIC's network category flips, and management access is the worst thing to lose that way.
   become: true
   community.windows.win_firewall_rule:
-    name: OpenSSH Server (a11y-witness)
+    name: OpenSSH Server (a11ign)
     localport: 22
     protocol: tcp
     direction: in

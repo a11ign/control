@@ -250,7 +250,7 @@ separate, each domain's blast radius is bounded by what that one key can reach.
 
 **Issuing access, without printing material:**
 
-1. **Generate a new keypair for the new operator** (`ssh-keygen -t ed25519 -C "<their name>@a11y-witness"`
+1. **Generate a new keypair for the new operator** (`ssh-keygen -t ed25519 -C "<their name>@a11ign"`
    run BY THEM, on their own machine — the private half must never exist anywhere but there). They send
    you the PUBLIC half only, over any channel; a public key is not a secret.
 2. **For fleet access:** add their public key to `roles/worker/tasks/account.yml`'s
@@ -360,7 +360,7 @@ which served the previous code for another hour. A reboot always picks up pushed
 
   ```bash
   ssh root@<control>                       # NOT `pct exec` on the Proxmox host: see below
-  cd a11y-witness/packages/control/ansible
+  cd a11ign/packages/control/ansible
   LC_ALL=C.UTF-8 LANG=C.UTF-8 ansible-playbook deploy.yml
   ```
 

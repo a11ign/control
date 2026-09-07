@@ -43,13 +43,13 @@ options:
     type: bool
     default: false
 author:
-- a11y-witness
+- a11ign
 """
 
 EXAMPLES = r"""
 - name: NVDA, intact
   a11y.worker.a11y_nvda:
-    repo_path: C:\\Users\\witness\\a11y-witness
+    repo_path: C:\\Users\\witness\\a11ign
 """
 
 RETURN = r"""

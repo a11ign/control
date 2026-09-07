@@ -28,7 +28,7 @@
   become: true
   community.windows.win_scheduled_task:
     name: "{{ worker_task_name }}"
-    description: a11y-witness NVDA capture worker
+    description: a11ign NVDA capture worker
     actions:
       - path: "{{ worker_repo_path }}\\packages\\nvda-worker\\src\\run-server.cmd"
         # Quoted because the path contains spaces.
@@ -68,7 +68,7 @@
   become: true
   community.windows.win_scheduled_task:
     name: "{{ worker_check_task_name }}"
-    description: a11y-witness capture regression gate (on demand)
+    description: a11ign capture regression gate (on demand)
     actions:
       - path: "{{ worker_repo_path }}\\packages\\nvda-worker\\src\\run-capture-check.cmd"
     username: "{{ ansible_user }}"

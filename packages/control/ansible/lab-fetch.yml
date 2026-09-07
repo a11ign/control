@@ -186,7 +186,7 @@
       shortcuts: "runs/scorer-shortcuts.json"
       # THE PROMOTED WEIGHTS THEMSELVES. `promote:gated` runs on the lab, because that is the only place
       # the candidate and the code both exist -- and it deliberately does not commit, since promoting is a
-      # MAJOR release of @a11y-witness/scorer and a job that can push is a job that can release by
+      # MAJOR release of @a11ign/scorer and a job that can push is a job that can release by
       # accident. So the artefacts sit uncommitted on a box a human cannot reach without ssh, which is the
       # hand-crank this whole interface exists to remove.
       #

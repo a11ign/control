@@ -42,7 +42,7 @@
  * ## Why this cannot import `worker-code-check.mjs` directly
  *
  * That file's `expectedWorkerCode` reaches `codeVersion`/`workerSourceDir` through a SUBPATH export
- * (`@a11y-witness/nvda-worker/code-version`), which resolves through `node_modules` — and this package
+ * (`@a11ign/nvda-worker/code-version`), which resolves through `node_modules` — and this package
  * runs from a raw git checkout with none (ADR 0012; `control-has-no-dependencies.test.ts` enforces it).
  * `code-drift.mjs` is the part of that file with no opinion about what "expected" means — pure comparison
  * and message-building, importing nothing but `node:child_process` — and this file computes `expected`

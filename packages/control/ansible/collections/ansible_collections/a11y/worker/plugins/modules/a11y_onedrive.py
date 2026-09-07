@@ -27,7 +27,7 @@ options:
     type: str
     default: absent
 author:
-- a11y-witness
+- a11ign
 """
 
 EXAMPLES = r"""

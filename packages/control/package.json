@@ -1,5 +1,5 @@
 {
-  "name": "@a11y-witness/control",
+  "name": "@a11ign/control",
   "version": "0.1.0",
   "private": true,
   "description": "The control plane: the machine that holds the fleet SSH key and dispatches work to it and to the lab. Deliberately dependency-free \u2014 see ADR 0012.",

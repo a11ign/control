@@ -17,7 +17,7 @@
  *   - no module may be IMPORTED BY PACKAGE NAME, because that resolution goes through `node_modules` and
  *     would simply fail on the machine this package exists to run on
  *
- * The second is the one prose would miss. `@a11y-witness/worker-fleet/cli-flags` looks harmless and is not:
+ * The second is the one prose would miss. `@a11ign/worker-fleet/cli-flags` looks harmless and is not:
  * it works on a laptop, and on the control plane it is a crash.
  */
 import { test } from "node:test";
@@ -46,7 +46,7 @@ test("NOTHING IS IMPORTED BY PACKAGE NAME, TRANSITIVELY — one hop is not a bou
   //
   // TRANSITIVE, and that was learned by breaking it. This test checked only `packages/control`'s OWN
   // imports, so when `fleet-playbook.mjs` began importing `check-worker-code.mjs` BY PATH — which passes
-  // a one-hop check — it dragged in that file's `@a11y-witness/nvda-worker` import and `fleet:deploy`
+  // a one-hop check — it dragged in that file's `@a11ign/nvda-worker` import and `fleet:deploy`
   // died on the control plane with ERR_MODULE_NOT_FOUND. It passed here the whole time, because a laptop
   // has node_modules. A gate that does not exercise what ships is not a gate, for the fifth time in this
   // repo; the honest fix is to follow the graph, not to check the first hop and trust the rest.
