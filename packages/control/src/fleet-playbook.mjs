@@ -77,7 +77,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
 import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
-import { requireControlPlaneHost } from "./control-plane-host.mjs";
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 
 /**
  * `--serial=` and `--limit=` decide how many of twelve machines an operation touches at once, and
@@ -95,10 +95,13 @@ refuseUnknownFlags(
 const FOLLOW_POLL_MS = 5_000;
 
 // No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
-const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST;
+// Resolved by `requireControlPlaneHost()` at the top of `main()`, not at import: env var first, then the
+// durable file it installs (#285, `fleet:control-host-install`), then a loud refusal. A bare env read
+// here would miss the file entirely, so this is reassigned once resolved rather than only validated.
+/** @type {string} */
+let CONTROL_PLANE;
 /** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
-const CONTROL_KEY = process.env.A11Y_PVE_KEY || `${process.env.HOME}/.ssh/a11y-pve_ed25519`;
 const CHECKOUT = "a11y-witness";
 
 /**
@@ -111,7 +114,8 @@ const CHECKOUT = "a11y-witness";
 // keyboard. It also inherits the zero-host refusal below, which is the guard whose absence let a deploy to
 // nothing exit 0 -- though it targets `control_plane`, not `a11y_workers`, so an empty fleet is not its
 // failure mode.
-const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml"];
+const PLAYBOOKS =
+  ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml", "control-host-install.yml"];
 
 /**
  * Ansible host patterns this may target, by SHAPE. Same containment as the playbook list, and needed for
@@ -200,7 +204,10 @@ function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS
       encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
     });
   }
-  const args = ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+  // requireControlPlaneKey(), not the raw env var: no default (see control-plane-host.mjs, #85), and
+  // calling it here rather than caching a module-level constant is what keeps the return type `string`
+  // rather than `string | undefined` at the point this array needs a real path.
+  const args = ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
     // The connection must survive a long silent stretch: an NVDA install prints nothing for minutes and a
     // dropped SSH would read as a failed provision. Keepalives are cheap and the alternative is a
     // diagnosis of the wrong thing.
@@ -354,7 +361,7 @@ function runBootstrapFromHere(chosen) {
   // that reads like a missing key rather than a wrong user. Everything else in this file already reaches
   // the control plane as root (`ssh()` builds `root@${CONTROL_PLANE}`); this is the same fact, and it has
   // to be stated again because `-i` does not inherit it.
-  // AND THE KEY. `ssh()` twenty lines up passes `-i CONTROL_KEY` explicitly, because the control plane is
+  // AND THE KEY. `ssh()` twenty lines up passes `-i requireControlPlaneKey()` explicitly, because the control plane is
   // a separate credential domain (ADR 0012) and the operator's default identity does not open it. Ansible
   // has its own name for the same thing, so the fact is stated a third time in a third spelling —
   // `root@` in the host, `--private-key` here — and neither inherits from the other.
@@ -362,7 +369,7 @@ function runBootstrapFromHere(chosen) {
   // Without it: `root@<host>: Permission denied (publickey,password)`, which reads as a MISSING key rather
   // than an unpassed one. The key is present and correct; nothing asked for it.
   const result = spawnSync("ansible-playbook",
-    ["-i", `root@${CONTROL_PLANE},`, "--private-key", CONTROL_KEY, chosen],
+    ["-i", `root@${CONTROL_PLANE},`, "--private-key", requireControlPlaneKey(), chosen],
     { cwd: ANSIBLE_DIR, stdio: "inherit" });
   if (result.error) {
     process.stderr.write(`\n  could not run ansible-playbook here: ${result.error.message}\n`);
@@ -437,6 +444,10 @@ try {
     // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
     // the guests fetch; this catches the fetch silently not taking.
     + ` -e a11y_expected_commit=${expected}`
+    // The control-plane address ALREADY resolved above (env var or its installed file, #285), so
+    // `control-host-install.yml` never has to read the environment itself -- it just records what got
+    // used to reach this machine. Harmless for every other playbook, which does not read this var.
+    + ` -e a11y_control_host=${CONTROL_PLANE}`
     + (limitFlag ? ` -l ${limitFlag}` : "")
     + (serialFlag !== undefined ? ` -e worker_provision_serial=${serialFlag}` : "")
     // A NAMED FLAG, because the obvious spelling silently did nothing. `-e worker_edge_allow_downgrade=true`
@@ -457,7 +468,9 @@ try {
 }
 
 async function main() {
-  requireControlPlaneHost(); // throws before anything else if A11Y_CONTROL_HOST is unset -- see #83
+  // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
+  CONTROL_PLANE = requireControlPlaneHost();
+  requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade } = parseArgs();
   await guardProtocolChange(chosen);
 
