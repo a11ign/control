@@ -635,10 +635,18 @@
         timeout: 3600
       rules-real-pages:
         # gateVerdict/exitCodeFor -- see rules-gate's entry above for why this is declared.
+        #
+        # THIS CODE FIRES ON A NEW FINDING WHETHER IT IS ASSERTED OR REFERRED -- #364. The two are not the
+        # same claim: only an ASSERTED finding is the false-positive this project measures itself by, and
+        # most rule-owned subtypes map `secondary` -> `cantTell`, so REFERRED is the common case by design.
+        # A hand-written "1" meaning naming only the worse of the two claimed a genuine false positive on a
+        # run that was pure referral noise -- read the script's own OF THOSE N: ... ASSERTED, ... REFERRED
+        # line, printed above this message, for which one actually happened.
         exitMeanings:
           "1": >-
-            a rule-owned criterion asserted wrongly on a real, conformant page -- a genuine false positive,
-            not a coverage shortfall.
+            a NEW finding appeared on a real, conformant page -- not a coverage shortfall. Whether it is a
+            genuine conformance-claim violation or referral noise is printed above (search for ASSERTED /
+            REFERRED); this code fires on either.
           "2": >-
             INCONCLUSIVE -- fewer real pages were examined than the audit's own population (an unusable
             page not already DECLARED in runs/real-page-unexaminable.json still counts as a shortfall here,
@@ -648,11 +656,15 @@
       # Same, with --update: rewrites the baseline. Separate job because it WRITES a claim that every
       # finding it records is correct, and that is a deliberate act, not a side effect of checking.
       rules-real-pages-update:
-        # Same script, same gateVerdict/exitCodeFor contract as rules-real-pages above.
+        # Same script, same gateVerdict/exitCodeFor contract as rules-real-pages above -- and the same
+        # ASSERTED-vs-REFERRED ambiguity in "1" (#364): this fires on either, and this variant WRITES the
+        # finding into the baseline regardless of which one it was, since its whole purpose is recording
+        # the current findings.
         exitMeanings:
           "1": >-
-            a rule-owned criterion asserted wrongly on a real, conformant page -- written into the baseline
-            regardless, since this variant's whole purpose is recording the current findings.
+            a NEW finding appeared on a real, conformant page and was written into the baseline regardless.
+            Whether it is a genuine conformance-claim violation or referral noise is printed above (search
+            for ASSERTED / REFERRED); this code fires on either.
           "2": >-
             INCONCLUSIVE -- fewer real pages were examined than the audit's own population; the baseline
             this writes would then describe a partial run. Re-run rather than trusting it.
