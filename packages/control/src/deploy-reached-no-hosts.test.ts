@@ -75,6 +75,11 @@ const DISPATCHED_ELSEWHERE: Record<string, string> = {
   "collect-logs.yml":
     "ORPHAN — no npm script runs it and no wrapper names it, so it cannot be dispatched at all. Wire it up "
     + "or delete it; that is a backlog row, not something to fix by widening this test.",
+  "update-origin-remote.yml":
+    "#325's scripted fleet-remote change for the org transfer -- a deliberate ONE-TIME operation run by "
+    + "hand on transfer day, never through the routine deploy wrapper. Wiring it into `fleet-playbook.mjs` "
+    + "would make an org-move-only command reachable from the same surface as every ordinary deploy, "
+    + "which is exactly the wrong affordance for something that must never run twice by accident.",
 };
 
 test("every a11y_workers playbook is dispatched by the wrapper (and so refuses) or is declared elsewhere", () => {
