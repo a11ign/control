@@ -79,7 +79,7 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature]
+    lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir]
     # A parameter that reaches its command through a DERIVED FACT rather than by its own name. The
     # derivation below reads the job's own command, and a command saying `{{ lab_named_worker }}` cannot
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
@@ -102,6 +102,10 @@
       # value is a list of inventory HOST NAMES (or a count), never addresses, so every address in the
       # result is still built from the inventory and still passes the strict address assert below.
       lab_selected_workers: workers | default('the whole fleet')
+      # `-e capture_root=` names WHICH captures directory, inside the dataset root. Aliased for the
+      # same reason as the two above: the deriver reads requiredness out of the fact's expression,
+      # so a parameter reaching a job only through `setenv` is invisible to it without this line.
+      lab_capture_root: capture_root | default('')
     # Every job this playbook can run. `timeout` becomes `RuntimeMaxSec`, so it is a real ceiling rather
     # than advice — set it above the slowest honest run, because a deadline that expires early turns "still
     # working" into "failed".
@@ -257,7 +261,7 @@
       # which is the difference between "captured 0 cases" and "you asked for a case that does not exist".
       capture-only:
         progress: runs/screenreader-dataset
-        params: {only: required, workers: optional}
+        params: {only: required, workers: optional, capture_root: optional}
         # `:fresh` — GENERATE, then capture. It ran `training:capture` alone, so a case that did not yet
         # exist as a page could never be captured: `training:capture failed: No generated case matches`.
         # That defeats half of what this job is for. `--pipeline=verify` exists to prove a corpus change
@@ -304,7 +308,20 @@
         # means a fact — and a fact is what can be put through the address assert. The derivation still
         # reads `workers` as OPTIONAL because `lab_param_aliases` maps this fact to
         # `workers | default(...)`, which is why that map's values are expressions rather than names.
-        setenv: ["A11Y_WORKERS={{ lab_selected_workers }}"]
+        # `DATASET_CAPTURE_ROOT` EXISTS IN THE CODE AND NO JOB EXPOSED IT — the same shape as `--only=`,
+        # which `capture-screenreader-dataset.mjs` supported for months while the only unit available was
+        # all-or-nothing. `dataset-paths.mjs` has read it since forever; nothing could set it from here.
+        #
+        # WHY A SCALING RUN NEEDS IT, measured 2026-09-06. #22 pre-registers "per-capture median and IQR at
+        # each arm" and mandates ALTERNATING arms — and both arms wrote to the same `captures/`, so the
+        # second overwrote the first's per-capture diagnostics before anything could read them. **The
+        # method destroyed the statistic the row asks for**, and alternating makes it worse rather than
+        # better. The first run could only report wall-clock-derived figures, which is a proxy.
+        #
+        # Empty by default, so every existing caller is byte-identical: `DATASET_CAPTURE_ROOT=` unset is
+        # what `dataset-paths.mjs` already falls back on (`|| "captures"`). A NAME from a fixed shape, never
+        # a path, for the reason every other parameter here is contained that way.
+        setenv: ["A11Y_WORKERS={{ lab_selected_workers }}", "DATASET_CAPTURE_ROOT={{ lab_capture_root }}"]
         # Minutes, not hours: this exists precisely because it is small.
         timeout: 3600
       # `--require-complete` because THIS box owns the corpus. Here "no evidence for that case" is a real
@@ -759,7 +776,13 @@
             a cost report that examined nothing prints the same small number as a cheap run, so "0.00
             worker-hours" must never be a silent success. Read WHICH silence it names -- "no JSON found"
             and "walked N and billed none" need opposite fixes.
-        argv: ["/usr/bin/node", "packages/lab/scripts/fleet-hours.mjs", "--json"]
+        # `-e dir=` targets ONE captures directory, which is what makes a per-arm scaling measurement
+        # readable at all: #22's two arms now write to their own roots (`-e capture_root=`), and without
+        # this the only thing `fleet:hours` could report is the whole corpus — every arm and every
+        # protocol averaged into one number describing no run that ever happened.
+        params: {captures_dir: optional}
+        argv: ["/usr/bin/node", "packages/lab/scripts/fleet-hours.mjs", "--json",
+               "--dir={{ captures_dir | default(lab_repo_path ~ '/runs') }}"]
         timeout: 1800
       # THE CORPUS'S ONLY DEFENCE, AND IT HAD NO JOB — added 2026-09-06 for issue #43.
       #
@@ -1050,6 +1073,32 @@
       when: worker is defined and worker in (groups['a11y_workers'] | default([]))
       ansible.builtin.set_fact:
         lab_named_worker: "http://{{ hostvars[worker].ansible_host }}:8765"
+
+    # A CAPTURE ROOT IS A NAME, NEVER A PATH — the same containment `capture` and `page` get in
+    # `lab-fetch.yml`, and for the same reason: this value reaches a child process as an environment
+    # variable, so `../../etc` must be INEXPRESSIBLE rather than rejected later. `dataset-paths.mjs`
+    # resolves it under the dataset root, so a name is all it can usefully be.
+    #
+    # Empty is the normal case and must stay allowed: unset is what every existing caller passes, and
+    # `dataset-paths.mjs` already falls back to "captures" on an empty value.
+    # THE FACT HAS TO BE BUILT, not just declared. `lab_param_aliases` tells the DERIVATION which
+    # parameter produced a fact; it does not create one. Referencing `lab_capture_root` in `setenv`
+    # without this task fails at render with `'lab_capture_root' is undefined` — caught by a ONE-CASE
+    # probe before a 26-minute two-arm run, which is this repo's own rule about proving a condition can
+    # be true before backgrounding anything that waits on it.
+    - name: Which captures directory this job writes to
+      ansible.builtin.set_fact:
+        lab_capture_root: "{{ capture_root | default('') }}"
+
+    - name: A capture root must be a name, so a path cannot be expressed
+      when: lab_capture_root | default('') | length > 0
+      ansible.builtin.assert:
+        that:
+          - (lab_capture_root | regex_findall('^[A-Za-z0-9_-]+$')) | length > 0
+        fail_msg: >-
+          -e capture_root={{ lab_capture_root | truncate(60) }} is not a NAME. It is a directory name
+          under the dataset root (letters, digits, underscore, dash), never a path -- e.g.
+          `-e capture_root=captures-arm-ten`.
 
     - name: That address must be exactly an address
       when: lab_named_worker is defined
