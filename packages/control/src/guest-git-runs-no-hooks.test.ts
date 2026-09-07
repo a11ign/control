@@ -77,12 +77,9 @@ const GIT_CALL = /(?<![\w./\-"'])&?\s*\bgit\s+(?!-c\s+core\.hooksPath=)(?<rest>\
  * Every `.yml` under `ansible/`, read once. Includes `tasks/` and `roles/`, because a task file included
  * into a guest-targeting play runs on the guest exactly as an inline task does.
  *
- * @param {string} dir
- * @returns {{ name: string, text: string }[]}
  */
-function playbooks(dir = ANSIBLE) {
-  /** @type {{ name: string, text: string }[]} */
-  const found = [];
+function playbooks(dir: string = ANSIBLE): { name: string, text: string }[] {
+  const found: { name: string, text: string }[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = `${dir}${entry.name}`;
     if (entry.isDirectory()) found.push(...playbooks(`${path}/`));
@@ -99,12 +96,9 @@ function playbooks(dir = ANSIBLE) {
  * A block ends at the next line indented no further than the module key itself, which is how a YAML
  * block scalar ends.
  *
- * @param {string} text
- * @returns {string[]}
  */
-export function windowsShellBlocks(text) {
-  /** @type {string[]} */
-  const blocks = [];
+export function windowsShellBlocks(text: string): string[] {
+  const blocks: string[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i += 1) {
     const opener = /^(?<indent>\s*)ansible\.windows\.win_shell:\s*\|/.exec(lines[i]);
@@ -126,17 +120,15 @@ export function windowsShellBlocks(text) {
  * about git commands -- this file's own patch notes quote `git checkout` -- and a test that fails on
  * prose describing the rule is a test nobody keeps.
  *
- * @param {string} block
- * @returns {string[]} the offending invocations, without the flag
+ * Returns the offending invocations, without the flag.
  */
-export function gitCallsMissingNoHooks(block) {
-  const code = block.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+export function gitCallsMissingNoHooks(block: string): string[] {
+  const code = block.split("\n").filter((line: string) => !/^\s*#/.test(line)).join("\n");
   return [...code.matchAll(GIT_CALL)].map((m) => `git ${(m.groups?.rest ?? "").trim()}`);
 }
 
 test("every git call in a Windows guest shell disables repository hooks -- DISCOVERED, not listed", () => {
-  /** @type {string[]} */
-  const offenders = [];
+  const offenders: string[] = [];
   let examined = 0;
   for (const { name, text } of playbooks()) {
     for (const block of windowsShellBlocks(text)) {
