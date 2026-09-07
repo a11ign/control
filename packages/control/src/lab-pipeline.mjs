@@ -57,7 +57,7 @@ import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.mjs";
-import { requireControlPlaneHost } from "./control-plane-host.mjs";
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -418,7 +418,6 @@ function usage() {
 /** Where the sequencing runs. Same address `fleet-playbook.mjs` already uses; named once, not twice. */
 // No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
 const CONTROL_PLANE = process.env.A11Y_CONTROL_HOST;
-const CONTROL_KEY = process.env.A11Y_PVE_KEY || `${process.env.HOME}/.ssh/a11y-pve_ed25519`;
 /**
  * The key CONTROL uses to reach the LAB. Not the same key this laptop uses, deliberately: it was generated
  * ON control so its private half has never been anywhere else, which is the property that makes moving the
@@ -467,7 +466,7 @@ function unitProperties(/** @type {string} */ unit) {
   // SubState was `running`, because it had read Description into subState and the command line into
   // ExecMainStatus. That is the precise defect this whole file warns about -- "Result and ExecMainStatus
   // are populated WHILE a unit runs" -- committed by the tool written to prevent it.
-  const seen = spawnSync("ssh", ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no",
+  const seen = spawnSync("ssh", ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=10", `root@${CONTROL_PLANE}`,
     `systemctl show -p SubState -p Result -p ExecMainStatus -p Description ${unit}`], { encoding: "utf8" });
   if (seen.status !== 0) {
@@ -501,7 +500,7 @@ function unitProperties(/** @type {string} */ unit) {
  */
 function printUnitLog(/** @type {string} */ unit) {
   const ssh = (/** @type {string} */ command) => spawnSync("ssh",
-    ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+    ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
       `root@${CONTROL_PLANE}`, command],
     { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 
@@ -616,7 +615,7 @@ function dispatchToControlUnlessLocal() {
     + `--setenv=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin `
     + `--setenv=A11Y_PVE_KEY=${CONTROL_TO_LAB_KEY} --setenv=PYTHONUNBUFFERED=1 `
     + `npm run --silent lab:pipeline -- ${args.join(" ")} --local`;
-  const started = spawnSync("ssh", ["-i", CONTROL_KEY, "-o", "StrictHostKeyChecking=no",
+  const started = spawnSync("ssh", ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=10", `root@${CONTROL_PLANE}`, remote], { stdio: "inherit" });
   if (started.status !== 0) process.exit(started.status ?? 2);
   process.stdout.write(`\nstarted as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
@@ -654,6 +653,7 @@ async function main() {
   // milliseconds, and shipping them to another host would make asking what pipelines exist depend on the
   // control plane being up. Same reason the host is required only here, not at import: see #83.
   requireControlPlaneHost();
+  requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
   dispatchToControlUnlessLocal();
   // Indexed by a name that came off the command line, which is the whole reason the refusal below
   // exists. The inferred type admits only the seven keys, so the lookup that CHECKS for an eighth is

@@ -29,14 +29,19 @@ Exports two entry points other packages import: `./fleet-playbook` and `./lab-pi
 
 `fleet-playbook.mjs` and `lab-pipeline.mjs` both SSH into the control-plane machine to run Ansible there —
 that machine holds the fleet key, so the command has to run on it rather than merely be issued from
-wherever you are. Two variables name that connection, each with a default baked in for this
-deployment's own control host:
+wherever you are. Two variables name that connection, and **both are REQUIRED — neither has a default**:
 
 - `A11Y_CONTROL_HOST` — the control plane's address.
-- `A11Y_PVE_KEY` — the SSH private key used to reach it. Defaults to a key under `~/.ssh/`.
+- `A11Y_PVE_KEY` — the SSH private key used to reach it.
 
-Both are overridable, and both are deliberately undocumented **as specific values** anywhere public: this
-repo is meant to be generic, and one deployment's control-host address and key filename are not the
-project's — the same reason the tailnet ACL and `*.local.yml` are gitignored. If you are standing up your
-own control plane, set both to point at it; if you are working in this checkout against an existing one,
-you already have — or need to be given — the values, and they do not belong in git.
+Both used to fall back to a real, specific value baked into this file (this deployment's own host and key
+filename), which is exactly the policy violation the paragraph below describes — a real credential sitting
+in public git history, reached by anyone who never set the variable. `requireControlPlaneHost()` (#83) and
+`requireControlPlaneKey()` (#85) now REFUSE rather than guess when either is unset, and there is
+deliberately no default here to replace what was removed.
+
+Neither is documented **as a specific value** anywhere public: this repo is meant to be generic, and one
+deployment's control-host address and key filename are not the project's — the same reason the tailnet ACL
+and `*.local.yml` are gitignored. If you are standing up your own control plane, set both to point at it;
+if you are working in this checkout against an existing one, you already have — or need to be given — the
+values, and they do not belong in git.
