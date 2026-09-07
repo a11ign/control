@@ -81,7 +81,7 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir]
+    lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply]
     # A parameter that reaches its command through a DERIVED FACT rather than by its own name. The
     # derivation below reads the job's own command, and a command saying `{{ lab_named_worker }}` cannot
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
@@ -661,6 +661,26 @@
       # carries no `runs/model-*` -- so run there it answers a different question and says so.
       inventory:
         argv: ["/usr/bin/node", "packages/lab/scripts/lab-inventory.mjs"]
+        timeout: 900
+      # CAPTURES NO DECLARED PAGE CLAIMS — named and classified here, because only this box has the
+      # authoritative corpus. A laptop's `runs/` is as fresh as its last sync and would report a set that
+      # does not exist.
+      #
+      # REPORTS BY DEFAULT AND DELETES NOTHING. `-e apply=true` is a separate, deliberate act, the same
+      # shape `lab:reset` takes and for the same reason: `runs/` is gitignored, these captures are hours of
+      # worker time, and they are NOT reproducible -- `browserVersion` is a cache key, so evidence taken
+      # under Edge 151 cannot be re-made now 152 ships. There is no undo.
+      #
+      # It refuses to delete a RELOCATED capture whatever you pass: those are declared pages reached at
+      # another origin (every fixture is declared `localhost:5050` and captured at the LAN address, because
+      # a worker cannot reach `localhost`), and five of them are the only real-page grounding 2.4.1, 2.4.2,
+      # 2.4.3, 2.1.1 and 1.4.13 have. See #143 and #146.
+      prune-orphan-captures:
+        params: {apply: optional}
+        # The flag is APPENDED or absent, never passed as an empty placeholder: `refuseUnknownFlags`
+        # would reject a bare `--`, and a job whose no-op form is refused is one nobody runs.
+        argv: "{{ ['/usr/bin/node', 'packages/lab/scripts/corpus-prune-orphans.mjs']
+                  + (['--apply'] if (apply | default('') | string | lower) == 'true' else []) }}"
         timeout: 900
       # THE PYTHON TESTS, WHERE THE CORPUS IS. Several of them read `runs/` and SKIP HONESTLY without it,
       # so on a laptop and in CI they pass having examined a fraction of the data or none at all — the
