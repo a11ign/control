@@ -1,0 +1,32 @@
+---
+# THE JOB CATALOGUE, FOUND BY WHAT IT IS AND NEVER BY WHERE IT SITS.
+#
+# `lab-job.yml` defines `lab_jobs`, and four other playbooks re-read that file to check a job name against
+# it — `lab-log.yml`, `lab-status.yml` (twice) and `lab-stop.yml`, plus `lab-job.yml`'s own `describe`
+# output. All five spelled the lookup `(... | from_yaml)[0].vars.lab_jobs`, indexing the plays by POSITION.
+#
+# **All five broke at once on 2026-09-06**, when the zero-host inventory refusal was added to the top of
+# every `lab-*.yml` as a `hosts: localhost` play. That play has no `vars`, so `[0].vars` became
+# `object of type 'dict' has no attribute 'vars'` and `lab:log`, `lab:status` and `lab:stop` — the three
+# commands you reach for when something has gone wrong — all refused before doing anything. The refusal
+# named a Jinja attribute error, which reads as a corrupted catalogue rather than as a moved play.
+#
+# CLAUDE.md states the rule this violated twice over. "A position is a convention nobody wrote down; a
+# name is a fact" — and the same session had ALREADY fixed exactly this in three TESTS
+# (`lab-job.test.ts`, `trainer-callers.test.ts`, `gate-partial-corpus-contract.test.ts`), keying them on
+# `vars.lab_jobs` instead of `[0]`. The remedy reached the tests and not the playbooks the tests were
+# written about, which is this repo's most expensive recurring shape committed inside the fix for it.
+#
+# So: ONE spelling, selected by the attribute it must have. A play inserted above, below or between the
+# existing ones cannot move it, and a `lab-job.yml` that ever stops defining `lab_jobs` fails loudly at
+# `first` rather than silently reading a neighbour's vars.
+#
+# `lookup('file', ...)` returns TEXT and its result is never re-templated, which is what makes re-reading
+# the catalogue possible at all: `lab_jobs[job].argv` contains `{{ only }}` and friends, so rendering the
+# structure would destroy the very question being asked ("does this job need `only`?"). See
+# `lab-job.yml`'s own note on that.
+lab_catalogue: >-
+  {{ (lookup('file', playbook_dir ~ '/lab-job.yml') | from_yaml
+      | selectattr('vars', 'defined')
+      | selectattr('vars.lab_jobs', 'defined')
+      | first).vars.lab_jobs }}

@@ -65,6 +65,8 @@
 - name: Fetch a job's own output
   hosts: a11y_lab
   gather_facts: false
+  vars_files:
+    - vars/lab-catalogue.yml
 
   tasks:
     - name: That is a job this lab has
@@ -72,7 +74,7 @@
       # catalogue is read from `lab-job.yml`, the file that defines it, so this cannot come to name a job
       # that no longer exists.
       ansible.builtin.assert:
-        that: job in (lookup('file', playbook_dir ~ '/lab-job.yml') | from_yaml)[0].vars.lab_jobs
+        that: job in lab_catalogue
         fail_msg: >-
           '{{ job }}' is not a job this lab has. Nothing was lost and no journal rotated; the name is not one.
           `npm run lab:job` lists every job that can be started.

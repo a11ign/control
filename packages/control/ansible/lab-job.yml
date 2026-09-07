@@ -73,6 +73,8 @@
 - name: Run a lab job
   hosts: a11y_lab
   gather_facts: false
+  vars_files:
+    - vars/lab-catalogue.yml
 
   vars:
     # Every `-e NAME=` a caller may supply. NOT derived: this is the published interface, and it is what
@@ -964,7 +966,7 @@
              | map(attribute='key') | zip(job_params.values()) | map('join', ': ') | join(', ')
              if job_params else 'no parameters' }}.
           Budget {{ lab_jobs[job].timeout | default('the playbook default') }}s.
-          Runs {{ ((lookup('file', playbook_dir ~ '/lab-job.yml') | from_yaml)[0].vars.lab_jobs)[job].argv }}
+          Runs {{ lab_catalogue[job].argv }}
       when: describe | default(false) | bool
 
     - name: Describing is not running

@@ -66,6 +66,8 @@
 - name: What the lab is doing
   hosts: a11y_lab
   gather_facts: false
+  vars_files:
+    - vars/lab-catalogue.yml
 
   tasks:
     # `list-units --all` rather than a name we guessed, so a job nobody remembered starting still shows up.
@@ -92,7 +94,7 @@
       # The catalogue is read from `lab-job.yml`, the file that defines it, rather than copied here: a
       # second list of job names is exactly how one comes to name a job that no longer exists.
       ansible.builtin.assert:
-        that: job in (lookup('file', playbook_dir ~ '/lab-job.yml') | from_yaml)[0].vars.lab_jobs
+        that: job in lab_catalogue
         fail_msg: >-
           '{{ job }}' is not a job this lab has, so there is no unit to report on — asking about it used
           to answer SubState=dead and exit 0, which is what a FINISHED job answers.
@@ -194,7 +196,7 @@
       # places to get the path wrong, and the first version of this change used `lab_jobs[job]` directly,
       # which is silently undefined and made every job look like one that reports no progress.
       ansible.builtin.set_fact:
-        lab_job_entry: "{{ ((lookup('file', playbook_dir ~ '/lab-job.yml') | from_yaml)[0].vars.lab_jobs
+        lab_job_entry: "{{ (lab_catalogue
                             | default({}))[job] | default({}) }}"
       when: job is defined
 
