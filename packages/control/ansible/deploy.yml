@@ -159,7 +159,27 @@
       # `$ErrorActionPreference` does not cover native executables, which is exactly the trap here.
       ansible.windows.win_shell: |
         $ErrorActionPreference = "Stop"
-        function Run($what) { & git @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
+        # `-c core.hooksPath=` ON EVERY GUEST-SIDE GIT CALL. A WORKER IS AN APPLIANCE, and this repo's
+        # hooks are written for a developer's machine: `post-checkout` is `#!/usr/bin/env bash` and these
+        # guests have no bash, so `git checkout` there exits 127 and the deploy fails permanently.
+        #
+        # Measured 2026-09-07 on a11y-worker-2, the one box that had completed a full deploy at the commit
+        # that added the hook: `/usr/bin/env: 'bash': No such file or directory` / `git checkout failed
+        # with 127`. `prepare` runs `install-git-hooks.mjs`, so the guest's own `npm install` -- a step of
+        # the deploy -- sets `core.hooksPath` on the guest and ARMS this for the NEXT deploy. One box had
+        # got there; the other nine had not, which is the only reason the whole fleet did not fail at once.
+        #
+        # The fix is here rather than in `install-git-hooks.mjs` because a deploy must not depend on the
+        # guest's hook configuration AT ALL: every git operation on a guest is performed BY this playbook,
+        # on a checkout nobody authors in, so a repository hook has no work to do there and only failure
+        # modes. Disabling them at the call site is unconditional; not installing them is a state that can
+        # drift. `guest-git-runs-no-hooks.test.ts` pins it across every playbook that runs git on a guest.
+        #
+        # The value is a path that does not exist rather than empty: git resolves an EMPTY `core.hooksPath`
+        # relative to the working directory, so `post-checkout` would still be found in a checkout root
+        # that happened to contain one. A non-existent directory makes every hook unfindable, which is what
+        # "no hooks" has to mean.
+        function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
         Run "fetch" fetch --quiet origin
         # A WORKER IS AN APPLIANCE: git is the source of truth there and nothing is authored on a guest,
         # so a modified TRACKED file is dirt and it blocks every fast-forward for ever. Measured
@@ -170,11 +190,11 @@
         # uses, for the opposite reason. On the LAB a dirty file may be work that exists nowhere else and
         # is refused; on a WORKER it cannot be, so it is named and cleared rather than blocking the fleet.
         # Untracked files are never touched.
-        $dirty = git status --porcelain --untracked-files=no
+        $dirty = git -c core.hooksPath=a11y-no-hooks status --porcelain --untracked-files=no
         if ($dirty) { Write-Output "discarding local modifications on this guest:"; Write-Output $dirty; Run "checkout" checkout -- . }
         Run "checkout" -c advice.detachedHead=false checkout --quiet {{ a11y_git_ref | default('main') }}
         Run "merge" merge --ff-only --quiet origin/{{ a11y_git_ref | default('main') }}
-        git rev-parse HEAD
+        git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
       args:
         chdir: "{{ a11y_repo_path }}"
       register: guest_head

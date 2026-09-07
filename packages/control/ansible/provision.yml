@@ -60,10 +60,14 @@
     - name: Fast-forward the guest checkout so provisioning runs THIS version
       # Provisioning stamps `provisionRevision` from the checkout, and that value is a capture cache key.
       # Running an old script would stamp an old revision and quietly split the fleet's cache.
+        # `-c core.hooksPath=a11y-no-hooks` for `deploy.yml`'s reason: a guest is an appliance with no
+        # bash, so any repository hook git tries to run there fails the command outright. `post-merge` is
+        # not shipped today, which is exactly why this is worth setting NOW -- adding one would silently
+        # break provisioning on every box, and the failure would read as a broken guest checkout.
       ansible.windows.win_shell: |
-        git fetch --quiet origin
-        git merge --ff-only --quiet origin/{{ a11y_git_ref | default('main') }}
-        git rev-parse --short HEAD
+        git -c core.hooksPath=a11y-no-hooks fetch --quiet origin
+        git -c core.hooksPath=a11y-no-hooks merge --ff-only --quiet origin/{{ a11y_git_ref | default('main') }}
+        git -c core.hooksPath=a11y-no-hooks rev-parse --short HEAD
       args:
         chdir: "{{ a11y_repo_path }}"
       register: provision_head
