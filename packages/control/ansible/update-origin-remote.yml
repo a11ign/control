@@ -1,0 +1,210 @@
+---
+# Point every guest's `origin` at a new repository, and PROVE the new remote actually resolves —
+# #325's scripted answer to #63's fourth silent breakage: "the fleet and the lab pull from origin."
+#
+#     ansible-playbook update-origin-remote.yml -e new_repo_url=https://github.com/a11ign/a11y-witness.git
+#     ansible-playbook update-origin-remote.yml -e new_repo_url=... -l a11y-worker-3
+#
+# ## Why this exists rather than relying on GitHub's redirect
+#
+# A transfer leaves the OLD `github.com/<owner>/<repo>` URL resolving via a silent redirect —
+# `git clone`/`fetch`/`ls-remote` against it keep working, and the guest's own `git remote -v` still
+# prints the stale URL forever, because git never rewrites a remote on redirect. Measured directly in
+# #325's rehearsal: a fresh `git clone` against the pre-transfer URL succeeded with no warning after the
+# real transfer had completed, and the resulting `.git/config` still named the old owner. That is exactly
+# the shape this repo's CLAUDE.md calls its own most-repeated defect — "everything keeps working while
+# pointing at a name we no longer own" — arriving at the fleet instead of at a URL in a doc.
+#
+# So the remote is changed explicitly and verified against a LIVE fetch, never left to the redirect. The
+# redirect is not wrong to rely on right up until GitHub disables it (it does not, indefinitely, but
+# nothing here should depend on a mechanism this project does not control and cannot observe failing).
+#
+# ## Two host groups, two shells, one verification shape
+#
+# `a11y_workers` are Windows guests (`ansible.windows.win_shell`, `core.hooksPath=a11y-no-hooks` on every
+# guest-side git call — see `deploy.yml`'s own header for why: a worker is an appliance, and this repo's
+# hooks assume bash, which these guests do not have). `a11y_lab` is Linux (`ansible.builtin.command` with
+# `argv:`, never a shell string — the same reason `lab-reset.yml` and `lab-job.yml` already use it: no
+# quoting class to defend against). Both verify the SAME way: read the remote back, then prove it is not
+# merely configured but LIVE with `git ls-remote`, the config-vs-traffic distinction this repo's own rule
+# already states elsewhere ("verifying a setting was WRITTEN is not verifying it is IN EFFECT").
+#
+# ## Scope
+#
+# `a11y_control` and `a11y_hypervisor` are deliberately NOT touched here. The control plane is where this
+# playbook itself is run FROM, and changing its own `origin` is the operator's job, done once, by hand,
+# with the same care as the transfer itself — scripting it would mean a bug in this file could strand the
+# one machine capable of running the fix. `a11y_hypervisor` has no checkout of this repository at all.
+#
+# ## Fleet: run against the fleet is `orchestrator`'s to sequence, not this file's
+#
+# This playbook is the SCRIPT, proven correct in shape and reused from `deploy.yml`'s own conventions
+# throughout. #325 explicitly does not run it against real hardware. Before running it for real:
+# `npm run fleet:status` first (never mid-capture, for the identical reason `deploy.yml` refuses), and
+# `-e new_repo_url=` is required and validated rather than defaulted, because a default here is exactly
+# the "an ignored argument runs on the wrong thing and reports success" shape this project's CLI census
+# was built to end for its own scripts.
+
+- name: Validate the new remote URL was actually given
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: -e new_repo_url= is required
+      ansible.builtin.assert:
+        that:
+          - new_repo_url is defined
+          - new_repo_url | length > 0
+          - new_repo_url is match('^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$')
+        fail_msg: >-
+          -e new_repo_url=<https url ending .git> is required. Refusing to default it -- an origin
+          change is exactly the kind of argument that must never silently fall back to a guess.
+
+    # THE LAB MUST BE IN THE INVENTORY, AND AN EMPTY INVENTORY MUST NOT READ AS SUCCESS -- `lab-reset.yml`'s
+    # own header names the shape: `ansible-playbook` prints `skipping: no hosts matched` and exits 0, so a
+    # play against an empty `a11y_lab` group would report success having reached nothing. Checked HERE, on
+    # `localhost`, which runs regardless of what the real play would have skipped.
+    - name: Refuse an inventory that resolved no lab
+      ansible.builtin.assert:
+        that:
+          - groups['a11y_lab'] is defined
+          - groups['a11y_lab'] | length > 0
+        fail_msg: >-
+          No host matched `a11y_lab`, so the lab play below would have done NOTHING and exited 0.
+          Run this from a checkout that has `packages/control/ansible/inventory.yml`, or install the
+          durable copy with `npm run fleet:inventory-install`.
+
+    # AND THE KEY THAT CONNECTS TO IT -- #255, same reasoning `lab-reset.yml` already states: a missing
+    # inventory does nothing and exits 0, a missing key connects as whatever a default guessed. Both are
+    # preconditions settled on `localhost` before anything opens an SSH connection.
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Point every capture worker's origin at the new location
+  hosts: a11y_workers
+  gather_facts: false
+  serial: 1
+  vars:
+    a11y_port: "{{ a11y_port | default(8765) }}"
+  pre_tasks:
+    # SAME REFUSAL AS `deploy.yml`, reused rather than re-derived -- a remote change does not reboot the
+    # guest, but it DOES touch the git config a live capture's own worker process has open, and the next
+    # `deploy.yml` run against a HALF-migrated fleet would fast-forward some guests from one remote and
+    # some from another with no way to tell them apart until `assertFleetRunsThisCheckout` refuses.
+    - name: Is this worker mid-capture
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        timeout: 5
+      delegate_to: localhost
+      register: origin_busy_check
+      failed_when: false
+      changed_when: false
+
+    - name: REFUSE to change origin underneath a capture
+      when:
+        - origin_busy_check.json.busy | default(false) | bool
+        - not (a11y_force_origin_change | default(false) | bool)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is CAPTURING right now. Nothing has been changed. Wait for it, or
+          `-e a11y_force_origin_change=true` if you genuinely mean to proceed anyway.
+  tasks:
+    - name: Read the CURRENT origin, before touching anything
+      ansible.windows.win_shell: |
+        git -c core.hooksPath=a11y-no-hooks remote get-url origin
+      args:
+        chdir: "{{ a11y_repo_path }}"
+      register: origin_before
+      changed_when: false
+
+    - name: Already on the new remote -- nothing to do
+      when: (origin_before.stdout | trim) == new_repo_url
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} already has origin={{ new_repo_url }}."
+
+    - name: Set the new remote and PROVE it resolves
+      when: (origin_before.stdout | trim) != new_repo_url
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = "Stop"
+        function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
+        Run "remote set-url" remote set-url origin '{{ new_repo_url }}'
+        # A CONFIG WRITE IS NOT TRAFFIC. `ls-remote` forces a real network round trip against the new URL
+        # before this guest is reported migrated -- the same "verifying a setting was WRITTEN is not
+        # verifying it is IN EFFECT" rule this repo already applies to NVDA settings, one config file over.
+        Run "ls-remote" ls-remote --exit-code origin HEAD
+        git -c core.hooksPath=a11y-no-hooks remote get-url origin
+      args:
+        chdir: "{{ a11y_repo_path }}"
+      register: origin_after
+      changed_when: true
+
+    - name: The guest is on the new remote, verified live
+      when: (origin_before.stdout | trim) != new_repo_url
+      ansible.builtin.assert:
+        that: (origin_after.stdout_lines | last | trim) == new_repo_url
+        fail_msg: >-
+          {{ inventory_hostname }}: origin was set but the readback does not match. Do not trust this
+          guest's origin; investigate by hand before deploying to it.
+
+- name: Point the lab's origin at the new location
+  hosts: a11y_lab
+  gather_facts: false
+  tasks:
+    - name: What is dirty on the lab, before touching its origin
+      # SAME CAUTION AS `lab-reset.yml`: a modified tracked file on the lab may be a real, unpublished
+      # result (a trained model, an export) rather than drift, and the lab is the one machine in this
+      # fleet where that distinction is real. Reported, never discarded, by this playbook.
+      ansible.builtin.command:
+        argv: [git, status, --porcelain]
+        chdir: "{{ lab_repo_path }}"
+      register: lab_dirty
+      changed_when: false
+
+    - name: The lab checkout is dirty -- reported, not acted on
+      when: (lab_dirty.stdout | trim) != ''
+      ansible.builtin.debug:
+        msg: >-
+          {{ lab_repo_path }} has uncommitted changes. An origin change does not touch the working tree,
+          but see `npm run lab:reset` before running anything that does.
+
+    - name: Read the CURRENT origin, before touching anything
+      ansible.builtin.command:
+        argv: [git, remote, get-url, origin]
+        chdir: "{{ lab_repo_path }}"
+      register: lab_origin_before
+      changed_when: false
+
+    - name: Already on the new remote -- nothing to do
+      when: (lab_origin_before.stdout | trim) == new_repo_url
+      ansible.builtin.debug:
+        msg: "The lab already has origin={{ new_repo_url }}."
+
+    - name: Set the new remote
+      when: (lab_origin_before.stdout | trim) != new_repo_url
+      ansible.builtin.command:
+        argv: [git, remote, set-url, origin, "{{ new_repo_url }}"]
+        chdir: "{{ lab_repo_path }}"
+      changed_when: true
+
+    - name: PROVE the new remote resolves -- a config write is not traffic
+      when: (lab_origin_before.stdout | trim) != new_repo_url
+      ansible.builtin.command:
+        argv: [git, ls-remote, --exit-code, origin, HEAD]
+        chdir: "{{ lab_repo_path }}"
+      changed_when: false
+
+    - name: Read the origin back
+      when: (lab_origin_before.stdout | trim) != new_repo_url
+      ansible.builtin.command:
+        argv: [git, remote, get-url, origin]
+        chdir: "{{ lab_repo_path }}"
+      register: lab_origin_after
+      changed_when: false
+
+    - name: The lab is on the new remote, verified live
+      when: (lab_origin_before.stdout | trim) != new_repo_url
+      ansible.builtin.assert:
+        that: (lab_origin_after.stdout | trim) == new_repo_url
+        fail_msg: >-
+          The lab's origin was set but the readback does not match. Do not trust it; investigate by
+          hand before dispatching any job.
