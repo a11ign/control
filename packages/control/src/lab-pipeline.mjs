@@ -58,6 +58,7 @@ import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -428,8 +429,12 @@ let CONTROL_PLANE;
  * sequencing there worth doing at all.
  */
 const CONTROL_TO_LAB_KEY = "/root/.ssh/a11y-lab_ed25519";
-/** Where the checkout lives on control. Absolute, so a nested `cd` cannot land somewhere else. */
-const CONTROL_CHECKOUT = "/root/a11y-witness";
+/**
+ * Where the checkout lives on control. Absolute, so a nested `cd` cannot land somewhere else — and
+ * DERIVED, because this was the second of two literals naming one directory and only this one got
+ * restored when the rename moved both. See `control-plane-checkout.mjs`.
+ */
+const CONTROL_CHECKOUT = CONTROL_PLANE_CHECKOUT_PATH;
 
 /**
  * Run the whole sequence ON THE CONTROL PLANE, unless asked to run here.

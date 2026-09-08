@@ -77,6 +77,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
 import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
+import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 
 /**
@@ -102,7 +103,11 @@ const FOLLOW_POLL_MS = 5_000;
 let CONTROL_PLANE;
 /** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
-const CHECKOUT = "a11ign";
+// The control plane's checkout, from the ONE place that knows its name. This was a bare literal
+// and `e435ac17` moved it, which made every play `cd` into a directory that does not exist -- see
+// `control-plane-checkout.mjs` for why four sweeps missed it. Relative, because `ssh()` above lands
+// in `/root` first.
+const CHECKOUT = CONTROL_PLANE_CHECKOUT;
 
 /**
  * Playbooks this may run, by NAME. Not a path, and not free text: the value is interpolated into a

@@ -360,7 +360,7 @@ which served the previous code for another hour. A reboot always picks up pushed
 
   ```bash
   ssh root@<control>                       # NOT `pct exec` on the Proxmox host: see below
-  cd a11ign/packages/control/ansible
+  cd a11y-witness/packages/control/ansible
   LC_ALL=C.UTF-8 LANG=C.UTF-8 ansible-playbook deploy.yml
   ```
 
