@@ -31,7 +31,7 @@
 # already established, which is why the credential-free design survives.
 - name: "Settle the defaults for: {{ interactive_name }}"
   ansible.builtin.set_fact:
-    interactive_log: "C:\\ProgramData\\a11ign\\{{ interactive_name }}.log"
+    interactive_log: "C:\\ProgramData\\a11y-witness\\{{ interactive_name }}.log"
     # Exit codes other than 0 that mean success. Provisioning uses 75 for "planned handoff, rebooting as
     # another user", which is deliberately neither 0 nor a failure.
     interactive_ok: "{{ [0] + (interactive_success_codes | default([])) }}"
@@ -39,7 +39,7 @@
 - name: "Somewhere for the transcript to go: {{ interactive_name }}"
   become: true
   ansible.windows.win_file:
-    path: C:\ProgramData\a11ign
+    path: C:\ProgramData\a11y-witness
     state: directory
 
 - name: "Register the one-shot task: {{ interactive_name }}"

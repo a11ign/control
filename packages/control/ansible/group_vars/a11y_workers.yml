@@ -37,7 +37,7 @@ ansible_become_user: SYSTEM
 # Where provisioning puts things. These mirror `provision-nvda-worker.ps1`'s own defaults
 # (A11Y_REPO_PATH, A11Y_TASK_NAME) rather than re-deciding them here — if they diverge, a deploy updates a
 # checkout the worker does not run, and `/health.code` is the only thing that would notice.
-a11y_repo_path: 'C:\Users\witness\a11ign'
+a11y_repo_path: 'C:\Users\witness\a11y-witness'
 a11y_task_name: a11ysrv
 a11y_port: 8765
 a11y_health_url: "http://{{ ansible_host }}:{{ a11y_port }}/health"

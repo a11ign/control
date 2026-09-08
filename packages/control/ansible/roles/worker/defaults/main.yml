@@ -4,7 +4,7 @@
 # configures one path while the worker reads another leaves a box that provisions cleanly and serves
 # nothing.
 worker_repo_url: https://github.com/a11ign/a11ign.git
-worker_repo_path: 'C:\Users\witness\a11ign'
+worker_repo_path: 'C:\Users\witness\a11y-witness'
 worker_task_name: a11ysrv
 worker_check_task_name: a11ycheck
 worker_port: 8765

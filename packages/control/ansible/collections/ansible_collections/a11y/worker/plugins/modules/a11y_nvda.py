@@ -49,7 +49,7 @@ author:
 EXAMPLES = r"""
 - name: NVDA, intact
   a11y.worker.a11y_nvda:
-    repo_path: C:\\Users\\witness\\a11ign
+    repo_path: C:\\Users\\witness\\a11y-witness
 """
 
 RETURN = r"""
