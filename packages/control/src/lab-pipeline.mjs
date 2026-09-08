@@ -429,7 +429,7 @@ let CONTROL_PLANE;
  */
 const CONTROL_TO_LAB_KEY = "/root/.ssh/a11y-lab_ed25519";
 /** Where the checkout lives on control. Absolute, so a nested `cd` cannot land somewhere else. */
-const CONTROL_CHECKOUT = "/root/a11ign";
+const CONTROL_CHECKOUT = "/root/a11y-witness";
 
 /**
  * Run the whole sequence ON THE CONTROL PLANE, unless asked to run here.

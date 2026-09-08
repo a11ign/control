@@ -21,9 +21,18 @@ const ANSIBLE = join(import.meta.dirname, "../ansible");
  * have refused with `10 stale worker(s)`, an hour later, pointing at the fleet rather than at the deploy.
  */
 
+/**
+ * VERBATIM, and restored to verbatim by #515. `e435ac17` rewrote the path inside this transcript along
+ * with every other occurrence of the product's name — so a log this file calls `real`, in a test whose
+ * name calls it "the real log", asserted a path ansible never printed. A recorded transcript is EVIDENCE:
+ * it says what a tool actually said, and a rename sweep editing it makes the record claim something that
+ * did not happen. Same class as the ten eval fixtures whose capture `url` was rewritten in the same
+ * commit. If a future sweep offers to update this string, the answer is no — it is not a name we own,
+ * it is something ansible said on 2026-09-06.
+ */
 test("the real log that exited 0 is refused, and names the inventory it could not parse", () => {
   const real = [
-    "[WARNING]: Unable to parse /root/a11ign/packages/control/ansible/inventory.yml as an inventory source",
+    "[WARNING]: Unable to parse /root/a11y-witness/packages/control/ansible/inventory.yml as an inventory source",
     "[WARNING]: No inventory was parsed, only implicit localhost is available",
     "[WARNING]: Could not match supplied host pattern, ignoring: a11y_workers",
     "PLAY [Deploy the worker code to the fleet]",
