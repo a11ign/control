@@ -47,24 +47,22 @@ all:
           ansible_host: REDACTED-INTERNAL-ADDRESS
           mac: "00:00:00:00:00:19"
 
-        # a11y-worker-10 — WITHDRAWN 2026-09-07, awaiting a console visit. Kept here as a COMMENT and
-        # not deleted, because the box is expected back: these are the lines that restore it.
+        # a11y-worker-10 — REJOINED 2026-09-09, withdrawn 2026-09-07. It never needed the console visit.
         #
-        # It answers neither /health, nor SSH, nor ICMP. `fleet:wake` sent the magic packet and reported
-        # "did NOT come back — check Wake-on-LAN and Deep Sleep in its firmware", which
-        # `ansible/README.md` records as "a console visit, once per machine. Nothing can automate it."
+        # Measured directly on 2026-09-09: /health answered 200, SSH port 22 was OPEN, and only ICMP was
+        # down — and ICMP loss on a Windows box is the firewall's default, never evidence. Uptime was
+        # 4.6 days, so it had not rebooted since before the withdrawal: whatever failed on the 7th was a
+        # PATH to it, not the box. `provisionRevision` already matched the fleet, so it rejoined with a
+        # deploy and a recover, never a provision, and no cache key moved.
         #
-        # WHY IT LEAVES THE LIST RATHER THAN STAYING AND FAILING: `lab_fleet_workers` is every host in
-        # this group, unconditionally, with no health filter — so a dead box here is dispatched work by
-        # every pooling job and takes the run down with it. Measured the same day: `capture-only` died on
-        # "The worker at http://…:8765 did not answer /health" after the job had already started.
+        # `ready` was false only because a `ShellExperienceHost` notification held the foreground.
+        # `fleet:deploy`'s reboot is CONDITIONAL and skipped here; `fleet:recover` is what cleared it.
         #
-        # The real `inventory.yml` carries the identical comment. Restore BOTH together, or
-        # `inventory-example-parity.test.ts` fails and says so.
-        #
-        # a11y-worker-10:
-        #   ansible_host: REDACTED-INTERNAL-ADDRESS
-        #   mac: "00:00:00:00:00:20"
+        # Full record in `docs/operational-lessons.md`. The real `inventory.yml` carries the identical
+        # comment; change BOTH together, or `inventory-example-parity.test.ts` fails and says so.
+        a11y-worker-10:
+          ansible_host: REDACTED-INTERNAL-ADDRESS
+          mac: "00:00:00:00:00:20"
 
         a11y-worker-11:
           ansible_host: REDACTED-INTERNAL-ADDRESS
