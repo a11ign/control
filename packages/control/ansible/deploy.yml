@@ -193,7 +193,7 @@
         $dirty = git -c core.hooksPath=a11y-no-hooks status --porcelain --untracked-files=no
         if ($dirty) { Write-Output "discarding local modifications on this guest:"; Write-Output $dirty; Run "checkout" checkout -- . }
         Run "checkout" -c advice.detachedHead=false checkout --quiet {{ a11y_git_ref | default('main') }}
-        Run "merge" merge --ff-only --quiet origin/{{ a11y_git_ref | default('main') }}
+        Run "merge" merge --ff-only --quiet {{ a11y_expected_commit | default('origin/' ~ (a11y_git_ref | default('main'))) }}
         git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
       args:
         chdir: "{{ a11y_repo_path }}"

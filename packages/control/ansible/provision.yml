@@ -66,7 +66,7 @@
         # break provisioning on every box, and the failure would read as a broken guest checkout.
       ansible.windows.win_shell: |
         git -c core.hooksPath=a11y-no-hooks fetch --quiet origin
-        git -c core.hooksPath=a11y-no-hooks merge --ff-only --quiet origin/{{ a11y_git_ref | default('main') }}
+        git -c core.hooksPath=a11y-no-hooks merge --ff-only --quiet {{ a11y_expected_commit | default('origin/' ~ (a11y_git_ref | default('main'))) }}
         git -c core.hooksPath=a11y-no-hooks rev-parse --short HEAD
       args:
         chdir: "{{ a11y_repo_path }}"
