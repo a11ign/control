@@ -472,6 +472,80 @@ try {
   return unit;
 }
 
+/**
+ * THE COMMAND THAT PUTS THE CONTROL PLANE ON THE COMMIT THIS OPERATOR ASKED FOR -- a SHA, never a name.
+ *
+ * #666. This used to end `git merge --ff-only origin/${ref}`, and the two sides of the deploy then
+ * resolved the ref INDEPENDENTLY, at different instants: `expected` from the operator's local checkout,
+ * `origin/<ref>` from a fetch the control plane performs seconds later. They are equal only when nothing
+ * merged in between.
+ *
+ * That is not a rare race here, it is the DEFAULT PATH. `localBranch()` returns the literal string
+ * `"HEAD"` on a detached checkout, and the primary checkout -- the one this command is meant to be run
+ * from -- is detached by design and by hook. So the control plane fetches `origin/HEAD`, which is main's
+ * tip NOW, and the read-back compares it to the operator's tip THEN.
+ *
+ * Measured 2026-09-09, with main merging every few minutes: three attempts, three failures, nine healthy
+ * boxes throughout. The middle one is the one that names the shape -- `the control plane is on
+ * 673ef5c7eb2b, not 68b2bedd9c6f` -- the control plane was NEWER than the operator's checkout, not older.
+ * A staleness problem has a direction; this does not.
+ *
+ * `--ref=main` is not the fix and makes it worse: `expected` becomes the LOCAL `main` branch, which on a
+ * machine with worktrees sits wherever the last worktree left it -- 11d77ade against an origin/main of
+ * d2729386 on the day this was written. That is the `fleet:recover` trap CLAUDE.md already records.
+ *
+ * THE REF IS STILL A NAME IN THE CHECKOUT, because it has to be: a checkout of `<sha>` would leave the
+ * control plane detached, and `localBranch()`'s own comment records what a bare SHA costs anything doing
+ * `origin/<ref>`. The name selects the branch; the SHA decides where it lands. Only the second is
+ * compared, and `--ff-only` still refuses anything that is not a fast-forward.
+ *
+ * This is CLAUDE.md's `lab:pipeline` rule -- "ONE ref, resolved once and given to both halves" -- reaching
+ * a second pair of halves. The first pair was `fleet:deploy`'s `a11y_git_ref` and `lab:job`'s `ref`
+ * defaulting independently, which put the fleet and the lab on different commits and read as a corrupted
+ * guest checkout.
+ *
+ * THE CHECKOUT IS NOT A PARAMETER, and that is `control-plane-checkout-is-one-fact.test.ts`'s rule rather
+ * than a style choice. Taking it as an argument made this site enter `${checkout}` -- a name that is
+ * neither the source of truth's export nor a classified other directory -- and the guard failed it BY
+ * NAME, which is exactly the distinction it exists to keep: "a different directory" and "somebody wrote a
+ * second way to say this one" must never look alike. `CHECKOUT` is `CONTROL_PLANE_CHECKOUT`, aliased once,
+ * at the top of this file. There is only one control plane checkout, so there is nothing to pass.
+ *
+ * @param {string} ref the branch name to be ON -- `HEAD` on a detached checkout, which is a no-op checkout
+ * @param {string} expected the commit resolved ONCE, here, and the only thing the read-back compares
+ * @returns {string} the shell command to run on the control plane
+ */
+export function controlPlaneCheckout(ref, expected) {
+  return `cd ${CHECKOUT} && git fetch --quiet --all && git checkout --quiet ${ref} `
+    + `&& git merge --ff-only --quiet ${expected}`;
+}
+
+/**
+ * REFUSE A COMMIT THE CONTROL PLANE CANNOT FETCH, rather than letting `merge --ff-only` say it in git's
+ * words. An operator on an unpushed commit is the ordinary case -- work in a worktree, deploy from the
+ * primary -- and `fatal: not something we can merge` names neither the flag nor the reason, which is this
+ * repo's own definition of a guard that gets distrusted and then bypassed.
+ *
+ * `git branch -r --contains` rather than a fetch of our own: the question is whether THIS checkout has
+ * already seen the commit on a remote-tracking branch, which is the same thing the control plane's fetch
+ * will find. An empty answer is the refusal; it is never read as a yes.
+ *
+ * @param {string} ref
+ * @param {string} expected
+ */
+function requireCommitIsOnOrigin(ref, expected) {
+  const remotes = execFileSync("git", ["branch", "-r", "--contains", expected],
+    { encoding: "utf8", env: sandboxGitEnv() }).trim();
+  if (remotes) return;
+  process.stderr.write([
+    `REFUSING: ${expected.slice(0, 12)} (${ref}) is on no remote-tracking branch, so the control plane`,
+    "cannot fetch it and the deploy would fail on a git message naming neither the flag nor the reason.",
+    "  Push the commit first, or `npm run primary:update` if you meant to deploy origin/main.",
+    "",
+  ].join("\n"));
+  process.exit(2);
+}
+
 async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
@@ -509,10 +583,8 @@ async function main() {
 
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
-  // `--ff-only` against origin, exactly as `deploy.yml` does to each guest: a checkout of an existing
-  // local branch sits at whatever that branch already pointed at, so fetching alone moves nothing.
-  ssh(`cd ${CHECKOUT} && git fetch --quiet --all && git checkout --quiet ${ref} `
-    + `&& git merge --ff-only --quiet origin/${ref}`);
+  requireCommitIsOnOrigin(ref, expected);
+  ssh(controlPlaneCheckout(ref, expected));
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report
   // success — this project's most expensive recurring shape, and the reason `deploy.yml` verifies each

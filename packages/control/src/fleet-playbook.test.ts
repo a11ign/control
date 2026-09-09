@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
-  onTheControlPlane, journalScope }
+  onTheControlPlane, journalScope, controlPlaneCheckout }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -201,4 +201,44 @@ test("anything that is not an invocation id is refused, not interpolated", () =>
   ]) {
     assert.equal(journalScope("a11y-fleet-deploy", bad), "-u a11y-fleet-deploy", JSON.stringify(bad));
   }
+});
+
+test("THE CONTROL PLANE IS SENT A COMMIT, NEVER A NAME IT WOULD RESOLVE ITSELF (#666)", () => {
+  // The whole defect in one assertion. This command used to end `merge --ff-only origin/${ref}`, so the
+  // control plane resolved the ref from a fetch it performed SECONDS AFTER the operator resolved it here.
+  // Equal only when nothing merged in between — and on 2026-09-09, with main merging every few minutes,
+  // three consecutive deploys failed on it while all nine boxes were healthy.
+  const command = controlPlaneCheckout("HEAD", "d2729386d6b8807cf610c6e620173930020798a5");
+
+  assert.match(command, /merge --ff-only --quiet d2729386d6b8807cf610c6e620173930020798a5$/,
+    `the merge target must be the resolved commit:\n${command}`);
+  assert.doesNotMatch(command, /merge[^\n]*origin\//,
+    "merging `origin/<ref>` is the bug: it is a second, later resolution of the same question");
+});
+
+test("but the CHECKOUT is still a name, because a bare SHA would detach the control plane (#666)", () => {
+  // Not symmetry for its own sake. `localBranch()`'s own comment records what a bare SHA costs anything
+  // doing `origin/<ref>`, and a detached control plane is a different failure from a stale one. The name
+  // selects the branch; the SHA decides where it lands; only the SHA is compared afterwards.
+  const command = controlPlaneCheckout("main", "d2729386d6b8807cf610c6e620173930020798a5");
+
+  assert.match(command, /git checkout --quiet main /,
+    `the checkout target stays the branch name:\n${command}`);
+  assert.match(command, /git fetch --quiet --all/,
+    "the fetch has to come first, or the commit is not in the object store to merge to");
+  assert.ok(command.indexOf("checkout") < command.indexOf("merge"),
+    `checkout must precede merge:\n${command}`);
+});
+
+test("`HEAD` is the DEFAULT ref on the checkout this command is meant to be run from (#666)", () => {
+  // Why the race is the default path rather than an edge case: `localBranch()` is `rev-parse --abbrev-ref
+  // HEAD`, which is the literal string "HEAD" when detached — and the primary checkout is detached by
+  // design AND by hook (`post-checkout` puts it back). So the un-flagged deploy sent `origin/HEAD`, main's
+  // tip at whatever instant the control plane fetched.
+  const command = controlPlaneCheckout("HEAD", "abc1234def5678");
+
+  // `git checkout HEAD` is a deliberate no-op — it is the merge that moves the checkout, and it moves it
+  // to one commit rather than to a branch tip that has since advanced.
+  assert.match(command, /git checkout --quiet HEAD /, command);
+  assert.match(command, /merge --ff-only --quiet abc1234def5678$/, command);
 });
