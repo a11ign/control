@@ -208,7 +208,7 @@ test("THE CONTROL PLANE IS SENT A COMMIT, NEVER A NAME IT WOULD RESOLVE ITSELF (
   // control plane resolved the ref from a fetch it performed SECONDS AFTER the operator resolved it here.
   // Equal only when nothing merged in between — and on 2026-09-09, with main merging every few minutes,
   // three consecutive deploys failed on it while all nine boxes were healthy.
-  const command = controlPlaneCheckout("/root/a11y-witness", "HEAD", "d2729386d6b8807cf610c6e620173930020798a5");
+  const command = controlPlaneCheckout("HEAD", "d2729386d6b8807cf610c6e620173930020798a5");
 
   assert.match(command, /merge --ff-only --quiet d2729386d6b8807cf610c6e620173930020798a5$/,
     `the merge target must be the resolved commit:\n${command}`);
@@ -220,7 +220,7 @@ test("but the CHECKOUT is still a name, because a bare SHA would detach the cont
   // Not symmetry for its own sake. `localBranch()`'s own comment records what a bare SHA costs anything
   // doing `origin/<ref>`, and a detached control plane is a different failure from a stale one. The name
   // selects the branch; the SHA decides where it lands; only the SHA is compared afterwards.
-  const command = controlPlaneCheckout("/root/a11y-witness", "main", "d2729386d6b8807cf610c6e620173930020798a5");
+  const command = controlPlaneCheckout("main", "d2729386d6b8807cf610c6e620173930020798a5");
 
   assert.match(command, /git checkout --quiet main /,
     `the checkout target stays the branch name:\n${command}`);
@@ -235,7 +235,7 @@ test("`HEAD` is the DEFAULT ref on the checkout this command is meant to be run 
   // HEAD`, which is the literal string "HEAD" when detached — and the primary checkout is detached by
   // design AND by hook (`post-checkout` puts it back). So the un-flagged deploy sent `origin/HEAD`, main's
   // tip at whatever instant the control plane fetched.
-  const command = controlPlaneCheckout("/root/a11y-witness", "HEAD", "abc1234def5678");
+  const command = controlPlaneCheckout("HEAD", "abc1234def5678");
 
   // `git checkout HEAD` is a deliberate no-op — it is the merge that moves the checkout, and it moves it
   // to one commit rather than to a branch tip that has since advanced.

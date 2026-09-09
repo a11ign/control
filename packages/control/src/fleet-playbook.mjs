@@ -504,13 +504,19 @@ try {
  * defaulting independently, which put the fleet and the lab on different commits and read as a corrupted
  * guest checkout.
  *
- * @param {string} checkout the control plane's checkout path
+ * THE CHECKOUT IS NOT A PARAMETER, and that is `control-plane-checkout-is-one-fact.test.ts`'s rule rather
+ * than a style choice. Taking it as an argument made this site enter `${checkout}` -- a name that is
+ * neither the source of truth's export nor a classified other directory -- and the guard failed it BY
+ * NAME, which is exactly the distinction it exists to keep: "a different directory" and "somebody wrote a
+ * second way to say this one" must never look alike. `CHECKOUT` is `CONTROL_PLANE_CHECKOUT`, aliased once,
+ * at the top of this file. There is only one control plane checkout, so there is nothing to pass.
+ *
  * @param {string} ref the branch name to be ON -- `HEAD` on a detached checkout, which is a no-op checkout
  * @param {string} expected the commit resolved ONCE, here, and the only thing the read-back compares
  * @returns {string} the shell command to run on the control plane
  */
-export function controlPlaneCheckout(checkout, ref, expected) {
-  return `cd ${checkout} && git fetch --quiet --all && git checkout --quiet ${ref} `
+export function controlPlaneCheckout(ref, expected) {
+  return `cd ${CHECKOUT} && git fetch --quiet --all && git checkout --quiet ${ref} `
     + `&& git merge --ff-only --quiet ${expected}`;
 }
 
@@ -578,7 +584,7 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
-  ssh(controlPlaneCheckout(CHECKOUT, ref, expected));
+  ssh(controlPlaneCheckout(ref, expected));
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report
   // success — this project's most expensive recurring shape, and the reason `deploy.yml` verifies each
