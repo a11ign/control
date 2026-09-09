@@ -3,7 +3,16 @@
 # defaults (A11Y_REPO_PATH, A11Y_TASK_NAME, A11Y_PORT) rather than re-deciding them, because a role that
 # configures one path while the worker reads another leaves a box that provisions cleanly and serves
 # nothing.
-worker_repo_url: https://github.com/a11ign/a11ign.git
+# A CLONE TARGET A MACHINE EXECUTES, so it cites REPO and not PRODUCT_REPO (#604). `repo-identity
+# .mjs` already draws that line: PRODUCT_REPO is what the product CALLS itself -- badges, clone
+# instructions a human reads -- and REPO is where git actually resolves TODAY. It carves one
+# exception inside PRODUCT_REPO's own territory for `uses: <repo>@main` lines, because those have
+# to resolve on GitHub now; this is the same exception, for a stronger reason. A badge that 404s
+# is a broken image. This 404s a `git clone` on a box being provisioned, and provisioning is the
+# one thing nobody is watching when it breaks: `fleet:deploy` pulls into a checkout the guest
+# already has, so the fleet keeps running and only GROWING it fails. #325/#63 flip this, with
+# every other PRODUCT_REPO site, on the day the transfer happens.
+worker_repo_url: https://github.com/DanBeckDev/a11y-witness.git
 worker_repo_path: 'C:\Users\witness\a11y-witness'
 worker_task_name: a11ysrv
 worker_check_task_name: a11ycheck
