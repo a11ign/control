@@ -30,6 +30,18 @@
   register: worker_stop
   changed_when: true
 
+- name: Note if the worker task did not stop cleanly
+  # #635: the loop above waits for a positive verdict correctly (node gone, or 30s), but its RESULT was
+  # never read by anything -- so a timeout and a clean stop looked identical to every task after this
+  # one. Named here for both callers; `restart.yml` (which has no code-check afterward) treats it as
+  # fatal below, and `deploy.yml` proceeds to `verify-code.yml`, which is its own remedy for the same
+  # race (a stale `/health.code` after a deploy).
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: node did not stop within 30s -- the OLD process may still be serving
+      after Start-ScheduledTask below
+  when: worker_stop.stdout is defined and 'still running' in worker_stop.stdout
+
 - name: Start the worker task
   ansible.windows.win_shell: Start-ScheduledTask -TaskName '{{ a11y_task_name }}'
   changed_when: true

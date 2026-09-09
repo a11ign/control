@@ -21,6 +21,19 @@
     - name: Restart and wait for it to serve
       ansible.builtin.import_tasks: tasks/restart-worker.yml
 
+    - name: Refuse to report success if the OLD process may still be serving
+      # #635: restart-worker.yml's stop-wait can time out after 30s and start a new task on top of a
+      # process that never actually exited -- for THIS playbook specifically there is no downstream
+      # check (deploy.yml has verify-code.yml's code-mismatch reboot; this does not), so unlike deploy a
+      # race here would silently leave the exact 429 wedge this playbook exists to clear, reported as
+      # "serving again".
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }}: node did not stop within 30s before Start-ScheduledTask ran -- the
+          wedge this playbook exists to clear may not actually be cleared. Re-run, or reboot the guest
+          directly.
+      when: worker_stop.stdout is defined and 'still running' in worker_stop.stdout
+
     - name: Report
       ansible.builtin.debug:
         msg: >-

@@ -88,10 +88,40 @@
         - state.status | default(0) == 200
         - (not (state.json.busy | default(false))) or (a11y_force_sleep | default(false) | bool)
 
+    - name: Pause before confirming -- one dropped request looks identical to a real shutdown
+      # #635: this exact fleet has a MEASURED precedent for a single failed health check being wrong --
+      # a worker answered EHOSTUNREACH for 48 straight requests in one evidence-check run, then answered
+      # a curl thirty seconds later. The wait above stops on the FIRST non-200, which cannot tell that
+      # blip apart from a real power-off. One more read, a few seconds on, is what can.
+      ansible.builtin.pause:
+        seconds: 5
+      when:
+        - gone.status is not defined or gone.status != 200
+        - state.status | default(0) == 200
+        - (not (state.json.busy | default(false))) or (a11y_force_sleep | default(false) | bool)
+
+    - name: Confirm it is still not answering, not a dropped request
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        timeout: 5
+      delegate_to: localhost
+      register: gone_confirmed
+      failed_when: false
+      changed_when: false
+      when:
+        - gone.status is not defined or gone.status != 200
+        - state.status | default(0) == 200
+        - (not (state.json.busy | default(false))) or (a11y_force_sleep | default(false) | bool)
+
     - name: Report
+      # #635: "powered down" requires the wait loop's own non-200 AND the confirmation read agreeing --
+      # a lone non-200 from the wait loop that the confirmation read contradicts (still 200) means the
+      # loop caught a blip, not a shutdown, and must not be reported as one.
       ansible.builtin.debug:
         msg: >-
           {{ inventory_hostname }}:
           {{ 'still capturing, left up' if (state.json.busy | default(false)) and not (a11y_force_sleep | default(false) | bool)
              else ('was already down' if (state.status | default(0)) != 200
-             else ('powered down' if (gone.status | default(0)) != 200 else 'STILL ANSWERING — it did not go down')) }}
+             else ('powered down' if (gone.status | default(0)) != 200 and (gone_confirmed.status | default(0)) != 200
+             else 'STILL ANSWERING — it did not go down')) }}

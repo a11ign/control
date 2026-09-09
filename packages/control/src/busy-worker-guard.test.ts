@@ -88,6 +88,32 @@ test("a play that would leave the fleet SPLIT fails hard; sleep, which cannot, o
   assert.match(sleep, /a11y_force_sleep/, "sleep.yml skips a busy box and takes an explicit override");
 });
 
+test("#635: restart.yml refuses to report success if the OLD node process may still be serving", () => {
+  // restart-worker.yml's stop-wait loop exits on a real positive verdict (node gone) OR a 30s timeout,
+  // and explicitly names which one happened -- but nothing downstream READ that name, so a timeout and
+  // a clean stop looked identical to every task after it. restart.yml is the one caller with no other
+  // remedy for the resulting race (deploy.yml has verify-code.yml's code-mismatch reboot), so it must
+  // fail outright on the "still running" outcome rather than report "serving again".
+  const restart = executable("restart.yml");
+  assert.match(restart, /ansible\.builtin\.fail:/,
+    "restart.yml must FAIL when the worker task did not stop cleanly, not merely note it and continue");
+  assert.match(restart, /worker_stop\.stdout is defined and 'still running' in worker_stop\.stdout/,
+    "the refusal must actually read restart-worker.yml's own registered stop result");
+});
+
+test("#635: sleep.yml requires a SECOND non-200 read before reporting a worker powered down", () => {
+  // A single failed health check is not a shutdown -- this fleet has its own measured precedent
+  // (EHOSTUNREACH for 48 straight requests, then a healthy answer) for a lone dropped request reading
+  // identically to a real power-off. `until: gone.status is not defined or gone.status != 200` alone
+  // stops on the first one; the fix adds a confirmation read and requires both to agree.
+  const sleep = executable("sleep.yml");
+  assert.match(sleep, /register:\s*gone_confirmed/,
+    "sleep.yml no longer confirms a non-200 read before believing the worker shut down");
+  assert.match(sleep, /\(gone\.status \| default\(0\)\) != 200 and \(gone_confirmed\.status \| default\(0\)\) != 200/,
+    "the Report task must require BOTH the wait loop's read and the confirmation read to agree before "
+    + "saying 'powered down' -- one non-200 that the confirmation contradicts is a blip, not a shutdown");
+});
+
 test("the refusal is overridable, and the override is named in the message that refuses", () => {
   // A guard with no way past it is one people work around by other means -- this repo reached for
   // `A11Y_SKIP_VERIFY=1` six times in one evening for a refusal it did not understand. An override that
