@@ -348,7 +348,15 @@ export async function fleetStatus() {
   // `verdict` is the answer; this is one of its inputs.
   const verdict = fleetVerdict({ consistent, compared, total: workers.length, mismatches });
   return { rows, comparedAgree: consistent, verdict, mismatches, codes, compared,
-    reachable: guests.length, total: workers.length };
+    reachable: guests.length, total: workers.length,
+    // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
+    //
+    // Removing it outright fails SILENTLY: `undefined` is falsy, so `if (status.consistent)` would read
+    // every fleet as inconsistent and nothing would throw. So it stays -- but it does NOT alias
+    // `comparedAgree`, which would keep the exact misreading #920 fixes. It carries the CORRECTED answer:
+    // true only when every box in the inventory was compared and they agree. A legacy consumer gets the
+    // fix without changing a line, which is the one thing a compatibility field should do.
+    consistent: verdict.state === "CONSISTENT" };
 }
 
 async function main() {

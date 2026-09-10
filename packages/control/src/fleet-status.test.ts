@@ -224,3 +224,14 @@ test("THE SAME DEFECT ONE LEVEL DOWN: a box that answers but reports no environm
 test("nothing to compare is UNKNOWN, never a vacuous CONSISTENT", () => {
   assert.equal(fleetVerdict({ consistent: true, compared: 0, total: 10 }).state, "UNKNOWN");
 });
+
+test("the deprecated `consistent` field carries the CORRECTED answer, never the old misreading", () => {
+  // Kept one release for scripts outside the repo, because removing it fails silently: `undefined` is
+  // falsy. But aliasing `comparedAgree` would keep #920's defect in the one field a legacy script reads,
+  // so it mirrors the verdict instead. Asserted on the SOURCE because `fleetStatus` probes real workers.
+  const source = readFileSync(fileURLToPath(new URL("./fleet-status.mjs", import.meta.url)), "utf8");
+  assert.match(source, /consistent: verdict\.state === "CONSISTENT"/,
+    "the legacy field must be true only when the whole inventory was compared and agrees");
+  assert.doesNotMatch(source, /consistent: comparedAgree|consistent: consistent\b/,
+    "aliasing the compared-set agreement would hand a legacy script the exact misreading this fixes");
+});
