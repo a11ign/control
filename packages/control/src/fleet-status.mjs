@@ -275,6 +275,13 @@ function renderTable(rows) {
 /**
  * THE CONSISTENCY VERDICT, WITH ITS DENOMINATOR — #920.
  *
+ * NAMED `consistencyVerdict`, NOT `fleetVerdict`, and the first version was the second. `fleetVerdict`
+ * is the shared gate helper in `packages/lab/src/gates/fleet.mjs`, and `exit-code-contract.test.ts`
+ * detects adoption of the exit-code contract by that name — so a same-named function here made this
+ * file read as adopting a contract it does not use, while also being listed as DOCUMENTED. CI caught
+ * it as "a script cannot adopt the contract AND carry its own". A name that is already somebody
+ * else's identifier is a claim about what the code does, in exactly the way a comment is.
+ *
  * `fleetStatus` compared only the boxes that answered and printed `fleet CONSISTENT` over them, while the
  * reachability count sat on a separate line. **An unreachable box that has drifted reads as agreement.**
  * Measured: the status read CONSISTENT over nine boxes, and the tenth — excluded for not answering — was
@@ -302,7 +309,7 @@ function renderTable(rows) {
  * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[] }} input
  * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN", line: string }}
  */
-export function fleetVerdict({ consistent, compared, total, mismatches = [] }) {
+export function consistencyVerdict({ consistent, compared, total, mismatches = [] }) {
   const across = `across ${compared} of ${total}`;
   if (compared === 0) {
     return { state: "UNKNOWN",
@@ -346,7 +353,7 @@ export async function fleetStatus() {
   // `comparedAgree`, not `consistent`: the field says agreement AMONG THE COMPARED SET, and a bare
   // `consistent: true` over nine of ten is the exact misreading #920 is about, one serialisation away.
   // `verdict` is the answer; this is one of its inputs.
-  const verdict = fleetVerdict({ consistent, compared, total: workers.length, mismatches });
+  const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches });
   return { rows, comparedAgree: consistent, verdict, mismatches, codes, compared,
     reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.

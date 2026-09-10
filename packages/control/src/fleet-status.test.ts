@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { stateOf, activityOf, summarise, degradedAdvice, fleetVerdict } from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict } from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -167,7 +167,7 @@ const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n
 /** The verdict `fleetStatus` would print over these guests, out of an inventory of `total`. */
 const verdictOver = (guests: ReturnType<typeof box>[], total: number) => {
   const { consistent, mismatches, compared } = fleetConsistency(guests);
-  return fleetVerdict({ consistent, compared, total, mismatches });
+  return consistencyVerdict({ consistent, compared, total, mismatches });
 };
 
 test("YESTERDAY, EXACTLY: nine agreeing boxes and one that did not answer is NOT consistent", () => {
@@ -217,12 +217,12 @@ test("THE SAME DEFECT ONE LEVEL DOWN: a box that answers but reports no environm
   const answeredButEmpty = { worker: "http://a11y-worker-4:8765", environment: undefined };
   const { consistent, mismatches, compared } = fleetConsistency([box(2), box(3), answeredButEmpty as never, box(5)]);
   assert.equal(compared, 3, "fleetConsistency must say how many it actually compared");
-  const verdict = fleetVerdict({ consistent, compared, total: 4, mismatches });
+  const verdict = consistencyVerdict({ consistent, compared, total: 4, mismatches });
   assert.equal(verdict.state, "UNKNOWN", "a box that answered with nothing to compare is not agreement");
 });
 
 test("nothing to compare is UNKNOWN, never a vacuous CONSISTENT", () => {
-  assert.equal(fleetVerdict({ consistent: true, compared: 0, total: 10 }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10 }).state, "UNKNOWN");
 });
 
 test("the deprecated `consistent` field carries the CORRECTED answer, never the old misreading", () => {
