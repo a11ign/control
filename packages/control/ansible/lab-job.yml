@@ -764,6 +764,14 @@
       rules-coverage:
         argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
         timeout: 900
+      # HOW MANY REAL-PAGE CAPTURES LOSE REQUIREMENT 2's FULL-PAGE CLAIM, and to which sweep.
+      # Reads `runs/real-page-corpus`, so it is a VERDICT only here: a copy in any other checkout is only
+      # as fresh as its last sync, and one measured at 89 hours old reported cleanly over a corpus that no
+      # longer existed. That is CLAUDE.md's "a gate that reads runs/ is not yours to report", and this
+      # entry is what lets the rule be obeyed rather than worked around with a shell loop over SSH.
+      full-page-claims:
+        argv: ["/usr/bin/npm", "run", "--silent", "lab:full-page-claims"]
+        timeout: 600
       rules-gate:
         # gateVerdict/exitCodeFor -- lab-job.test.ts derives which jobs need this and refuses a fifth
         # undeclared adopter, so it cannot go stale the way `evidence-check` alone did for weeks.
