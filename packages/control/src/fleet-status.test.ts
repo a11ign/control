@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { stateOf, activityOf, summarise, degradedAdvice } from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice, fleetVerdict } from "./fleet-status.mjs";
+import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -140,4 +141,86 @@ test("every degraded worker is named, not just the first", () => {
   assert.match(out, /2 worker\(s\) DEGRADED/);
   assert.match(out, /a11y-worker-6, a11y-worker-9/);
   assert.doesNotMatch(out, /a11y-worker-2/, "a healthy box must not be named as degraded");
+});
+
+/**
+ * THE VERDICT CARRIES ITS DENOMINATOR, AND IS NEVER "CONSISTENT" OVER A SUBSET — #920.
+ *
+ * `fleet:status` compared only the boxes that answered and printed `fleet CONSISTENT` over them. Measured:
+ * it said so over nine boxes while the tenth — excluded for not answering — was `a11y-worker-4` on Windows
+ * `10.0.26200`, the other nine on `10.0.22631`. The OS is a capture-cache key, so the fleet was not one
+ * fleet, and five captures were taken on the divergent box before anyone noticed.
+ *
+ * Driven through the REAL `fleetConsistency`, not a stub: the defect this row found is a predicate that
+ * filters before it counts, and a stub would take the filtering out of the test along with the defect.
+ */
+// The REAL `MUST_MATCH` field names. The first version of this fixture wrote `os` for the Windows build,
+// which `fleetConsistency` does not compare — so a box on a different build read as agreeing and two
+// tests failed. That failure was the fixture being wrong, and it is exactly the shape of the defect: a
+// field nobody compares is a difference nobody sees.
+const env = (windowsVersion: string) => ({
+  browserVersion: "151.0.0", screenReaderVersion: "2024.4", windowsVersion, architecture: "x64",
+  captureProtocol: 12,
+});
+const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n}:8765`, environment: env(os) });
+
+/** The verdict `fleetStatus` would print over these guests, out of an inventory of `total`. */
+const verdictOver = (guests: ReturnType<typeof box>[], total: number) => {
+  const { consistent, mismatches, compared } = fleetConsistency(guests);
+  return fleetVerdict({ consistent, compared, total, mismatches });
+};
+
+test("YESTERDAY, EXACTLY: nine agreeing boxes and one that did not answer is NOT consistent", () => {
+  const nineOfTen = [2, 3, 5, 6, 7, 8, 9, 10, 11].map((n) => box(n));
+  const verdict = verdictOver(nineOfTen, 10);
+  assert.notEqual(verdict.state, "CONSISTENT",
+    "an unreachable box that has drifted reads exactly like one that agrees — this is the assertion the "
+    + "row exists for");
+  assert.equal(verdict.state, "UNKNOWN");
+});
+
+test("the verdict line carries its denominator, asserted on the RENDERED text", () => {
+  // The counts already existed in the return value. The defect was that nothing joined them to the word,
+  // so the assertion is on the sentence a reader sees, never on the fields.
+  const all = verdictOver([2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((n) => box(n)), 10);
+  assert.match(all.line, /^fleet CONSISTENT across 10 of 10 — /);
+  const some = verdictOver([2, 3, 5, 6, 7, 8, 9, 10, 11].map((n) => box(n)), 10);
+  assert.match(some.line, /9 compared agree, and 1 of 10 could not be compared/);
+  assert.doesNotMatch(some.line, /CONSISTENT/, "not even as a substring — the word is the verdict");
+});
+
+test("UNKNOWN and INCONSISTENT are different states, with a fixture for each", () => {
+  // "Nine agree and one did not answer" is a box to reach. "They disagree" is a fleet to re-provision.
+  const unanswered = verdictOver([2, 3, 5].map((n) => box(n)), 4);
+  const diverged = verdictOver([box(2), box(3), box(4, "10.0.26200"), box(5)], 4);
+  assert.equal(unanswered.state, "UNKNOWN");
+  assert.equal(diverged.state, "INCONSISTENT");
+  assert.match(diverged.line, /^fleet INCONSISTENT across 4 of 4 — /);
+});
+
+test("TEN OF TEN AGREEING STILL PRINTS CONSISTENT", () => {
+  // Both directions, or a verdict that is never CONSISTENT would pass every other assertion here.
+  assert.equal(verdictOver([2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((n) => box(n)), 10).state, "CONSISTENT");
+});
+
+test("a disagreement among the boxes that answered is INCONSISTENT, whatever the missing one says", () => {
+  // The absent box cannot rescue a fleet that already disagrees, so this is not UNKNOWN.
+  const verdict = verdictOver([box(2), box(3, "10.0.26200"), box(5)], 10);
+  assert.equal(verdict.state, "INCONSISTENT");
+  assert.match(verdict.line, /across 3 of 10/, "and it still says how many it was about");
+});
+
+test("THE SAME DEFECT ONE LEVEL DOWN: a box that answers but reports no environment is not compared", () => {
+  // `fleetConsistency` drops a guest with no `environment` before comparing. Denominating by the number
+  // of boxes that ANSWERED would have fixed the instance and left the class: four answered, three were
+  // compared, and the verdict is about three.
+  const answeredButEmpty = { worker: "http://a11y-worker-4:8765", environment: undefined };
+  const { consistent, mismatches, compared } = fleetConsistency([box(2), box(3), answeredButEmpty as never, box(5)]);
+  assert.equal(compared, 3, "fleetConsistency must say how many it actually compared");
+  const verdict = fleetVerdict({ consistent, compared, total: 4, mismatches });
+  assert.equal(verdict.state, "UNKNOWN", "a box that answered with nothing to compare is not agreement");
+});
+
+test("nothing to compare is UNKNOWN, never a vacuous CONSISTENT", () => {
+  assert.equal(fleetVerdict({ consistent: true, compared: 0, total: 10 }).state, "UNKNOWN");
 });
