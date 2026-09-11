@@ -74,7 +74,12 @@
       acceptance-report: "runs/model-{{ out | default('candidate') }}/acceptance-report.json"
       shipped-acceptance: "runs/model-shipped-baseline/acceptance-report.json"
       false-positives: "runs/model-{{ out | default('candidate') }}/false-positives.json"
-      abstention-sweep: "runs/real-page-corpus/abstention-sweep.json"
+      # EVERY PATH IN THIS MAP IS STATED A SECOND TIME, by the producer that writes the file -- and nothing
+      # compared the two until #959. `cbea0d3b` (2026-09-05) moved the sweep out of the real-page corpus into
+      # `runs/abstention/` and left this entry behind, so from then on the file PLAN.md's floor decisions
+      # rest on could not be fetched, and no command failed: the fetch said "file not found" only when
+      # asked. `lab-fetch-paths.test.ts` now resolves every entry here against its producer's own path.
+      abstention-sweep: "runs/abstention/abstention-sweep.json"
       capture-progress: "runs/screenreader-dataset/capture-progress.json"
       # ONE CORPUS CAPTURE, by case id. Added 2026-08-28, when `rules:gate` named two conformant records it
       # had failed -- `keyboard-trap-modal-cycle.good` and one of its variants -- and nothing could show what
