@@ -276,7 +276,10 @@ test("the rollback playbook refuses before it acts, and its dry run is itself (#
   const guards: [string, RegExp][] = [
     ["one host", /ansible_play_hosts_all \| length == 1/],
     ["the others agree on one build", /rollback_fleet_builds \| unique \| length == 1/],
-    ["this box is not on it", /rollback_this_build != rollback_fleet_builds \| first/],
+    // AHEAD, not merely different: worker-judge's review found "differs" passed a box one build BEHIND and
+    // a box on the same build in another edition, and DISM would have taken either further from the fleet.
+    ["the same edition as the fleet", /rollback_this_edition == rollback_fleet_edition/],
+    ["a build strictly AHEAD of the fleet's", /rollback_this_number \| int > rollback_fleet_number \| int/],
     ["not mid-capture", /rollback_before\.json\.busy/],
     ["the dry run stops here", /ansible\.builtin\.meta: end_host\s+when: not os_rollback_apply/],
     ["a closed path is refused", /rollback_found\.windowDays \| int > 0/],
@@ -293,4 +296,8 @@ test("the rollback playbook refuses before it acts, and its dry run is itself (#
   assert.match(executable, /a11y_os_rollback_apply \| default\(false\)/);
   // The proof is the build /health reports afterwards, not DISM's exit code.
   assert.match(executable, /rollback_after\.json\.environment\.windowsVersion/);
+  // The restart is not assumed either way: a stage that loses its connection (DISM restarting the box
+  // itself) is tolerated, and a restart is asked for only when the box is still there to be asked.
+  assert.match(executable, /register: rollback_staged\s+ignore_unreachable: true/);
+  assert.match(executable, /when: not \(rollback_staged\.unreachable \| default\(false\)\)/);
 });

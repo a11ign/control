@@ -20,9 +20,9 @@
 #
 # - EXACTLY ONE host. `fleet-playbook.mjs` requires `--limit=<one worker>`, and the play asserts it again,
 #   so a fleet-wide OS change cannot be expressed.
-# - A box ALREADY ON THE FLEET'S BUILD. The target must differ from a build every other answering worker
-#   agrees on, so a wrong `--limit` cannot roll back a healthy box. If the others disagree among
-#   themselves, there is nothing to converge on, and that is a refusal too.
+# - Anything but a box AHEAD of the fleet. The target must be on the edition every other answering worker
+#   agrees on, with a strictly greater build number, so a wrong `--limit` cannot roll back a healthy box,
+#   one behind, or one on another edition. If the others disagree among themselves, that is a refusal too.
 # - A box MID-CAPTURE, asked over HTTP exactly as `deploy.yml` asks.
 # - A CLOSED PATH: no rollback window, or no `Windows.old`. It says so, and names the next path (a one-time
 #   firmware `BootNext` to network boot, #921), which is not this playbook.
@@ -32,9 +32,8 @@
 #
 # ## The proof is the BUILD `/health` reports afterwards, never DISM's return code
 #
-# DISM stages the rollback with `/NoRestart`, and its output and exit code are kept. The restart is
-# `win_reboot`'s, so the wait belongs to Ansible rather than to a dropped SSH session. Then `/health` must
-# report the fleet's build. A worker holds no unique state, so the cost of a failed rollback is the box
+# DISM stages the rollback; whether it then restarts the box itself is NOT assumed. A restart is requested
+# only if the box is still reachable, and one long wait on `/health` must then report the fleet's build. A worker holds no unique state, so the cost of a failed rollback is the box
 # staying excluded, which is where it already is.
 - name: Roll one drifted worker back to the fleet's Windows build
   hosts: a11y_workers
@@ -79,19 +78,33 @@
           {{ rollback_others.results | selectattr('json', 'defined')
              | map(attribute='json.environment.windowsVersion', default='unknown') | list }}
 
-    - name: REFUSE unless the others agree on one build and this box is not on it
+    # A ROLLBACK ONLY GOES BACKWARD, so "differs" is not enough -- worker-judge's review of #973 evaluated the
+    # first version of this guard and found it passed a box one build BEHIND the fleet and a box on the SAME
+    # build in a different edition. DISM would have taken either further from the fleet, and only the proof
+    # at the end would have noticed. So the edition (everything before `N.N.BUILD`) must match, and the
+    # build number must be strictly GREATER than the fleet's.
+    - name: The edition and the build NUMBER of each, because only a box AHEAD can be rolled back to the fleet
+      ansible.builtin.set_fact:
+        rollback_this_edition: "{{ rollback_this_build | regex_replace('\\s*\\d+\\.\\d+\\.\\d+\\s*$', '') }}"
+        rollback_this_number: "{{ (rollback_this_build | regex_search('\\d+\\.\\d+\\.(\\d+)\\s*$', '\\1') or ['0']) | first | int }}"
+        rollback_fleet_edition: "{{ (rollback_fleet_builds | first | default('unknown')) | regex_replace('\\s*\\d+\\.\\d+\\.\\d+\\s*$', '') }}"
+        rollback_fleet_number: "{{ ((rollback_fleet_builds | first | default('unknown')) | regex_search('\\d+\\.\\d+\\.(\\d+)\\s*$', '\\1') or ['0']) | first | int }}"
+
+    - name: REFUSE unless the others agree on one build, this box is on the same edition, and it is AHEAD
       ansible.builtin.assert:
         that:
           - rollback_fleet_builds | length >= 2
           - rollback_fleet_builds | unique | length == 1
           - "'unknown' not in rollback_fleet_builds"
           - rollback_this_build != 'unknown'
-          - rollback_this_build != rollback_fleet_builds | first
+          - rollback_fleet_number | int > 0
+          - rollback_this_edition == rollback_fleet_edition
+          - rollback_this_number | int > rollback_fleet_number | int
         fail_msg: >-
           {{ inventory_hostname }} is on {{ rollback_this_build }}; the other
           {{ rollback_fleet_builds | length }} answering worker(s) report {{ rollback_fleet_builds | unique }}.
-          This rolls back a box that DIFFERS from a build the rest agree on -- nothing else. A box on the
-          fleet's build has nothing to roll back to, and a fleet that disagrees has nothing to converge on.
+          This rolls back a box on the fleet's EDITION whose build is AHEAD of a build the rest agree on --
+          nothing else. Behind, level, another edition, or a fleet that disagrees: a rollback cannot converge it.
 
     - name: REFUSE a worker mid-capture
       when: rollback_before.json.busy | default(false) | bool
@@ -146,42 +159,55 @@
           is a one-time firmware BootNext to network boot
           ({{ rollback_found.networkBootEntries | default([]) | join('; ') or 'NO network-boot entry found' }}).
 
-    - name: Stage the rollback -- DISM, with the restart left to Ansible
+    # THE RESTART IS NOT ASSUMED EITHER WAY. `/NoRestart` asks DISM to stage and return, but whether this verb
+    # honours it is unverified, and `/Quiet` alone restarts by itself. So the stage tolerates losing its
+    # connection (a self-restart), a restart is requested only if the box is still reachable, and ONE long
+    # wait on `/health` -- the capture channel, from the control plane -- carries the proof either way.
+    - name: Stage the rollback -- DISM (which may restart the box itself)
       ansible.windows.win_shell: |
         & dism.exe /Online /Initiate-OSUninstall /Quiet /NoRestart
         exit $LASTEXITCODE
       register: rollback_staged
-      # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: staged, and waiting for the restart below.
-      failed_when: rollback_staged.rc not in [0, 3010]
+      ignore_unreachable: true
+      # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: staged, and waiting for a restart.
+      failed_when: >-
+        not (rollback_staged.unreachable | default(false))
+        and (rollback_staged.rc | default(-1)) not in [0, 3010]
       changed_when: true
 
-    - name: Restart into the rollback -- it can take a long time, and the box is excluded meanwhile
-      ansible.windows.win_reboot:
-        reboot_timeout: 5400
-        post_reboot_delay: 60
+    - name: Restart into the rollback -- only if DISM did not restart the box itself
+      when: not (rollback_staged.unreachable | default(false))
+      ansible.windows.win_shell: 'shutdown.exe /r /t 15 /c "a11y-witness OS rollback"'
+      ignore_unreachable: true
+      changed_when: true
 
-    - name: Wait for the worker to serve /health again
+    - name: Wait until /health reports the fleet's build -- the rollback restart is long
       ansible.builtin.uri:
         url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
         method: GET
         return_content: true
-        status_code: 200
         timeout: 10
       delegate_to: localhost
       register: rollback_after
-      retries: 60
+      # 135 attempts of at most 10 s + 30 s is 90 minutes, inside the playbook's 2 h unit ceiling.
+      retries: 135
       delay: 30
-      until: rollback_after.status is defined and rollback_after.status == 200
+      until: >-
+        rollback_after.status | default(0) == 200
+        and (rollback_after.json.environment.windowsVersion | default('')) == rollback_fleet_builds | first
+      failed_when: false
 
     - name: PROVE it -- the build /health reports is the fleet's
       ansible.builtin.assert:
         that:
           - rollback_after.json.environment.windowsVersion | default('unknown') == rollback_fleet_builds | first
         fail_msg: >-
-          {{ inventory_hostname }} serves /health again but reports
-          {{ rollback_after.json.environment.windowsVersion | default('unknown') }}, not the fleet's
-          {{ rollback_fleet_builds | first }}. DISM staged it (rc {{ rollback_staged.rc }}), so the rollback
-          itself did not take. Record it on #921; the next path is the one-time BootNext.
+          {{ inventory_hostname }} did not come back on the fleet's {{ rollback_fleet_builds | first }} within
+          90 minutes: last /health status {{ rollback_after.status | default('none') }}, build
+          {{ rollback_after.json.environment.windowsVersion | default('unknown') }}. DISM
+          {{ 'lost the connection (it restarted the box itself)' if rollback_staged.unreachable | default(false)
+          else 'returned rc ' ~ (rollback_staged.rc | default('?')) }}. Record it on #921; the next path is the
+          one-time BootNext.
         success_msg: >-
           {{ inventory_hostname }} is on {{ rollback_after.json.environment.windowsVersion }}, the fleet's
           build. Next: `fleet:deploy` (the rollback restores the old checkout), then `fleet:status` must read
