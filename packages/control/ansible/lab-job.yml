@@ -1062,11 +1062,11 @@
       ansible.builtin.assert:
         that:
           - worker is not defined
-          - role | default('training') in ['training', 'calibration', 'fixture']
+          - role | default('training') in ['training', 'calibration', 'fixture', 'field']
           - shard | default('0/1') is match('^[0-9]+/[0-9]+$')
         fail_msg: >-
           capture-real-pages now runs across the whole fleet ({{ groups['a11y_workers'] | join(', ') }})
-          and takes no -e worker. Optionally -e role=training|calibration and -e shard=i/n; sharding is for
+          and takes no -e worker. Optionally -e role=training|calibration|fixture|field and -e shard=i/n; sharding is for
           splitting a run across separate machines, not for using more than one worker.
 
     # Same containment as `worker` and `role`: a NAME from a fixed list, never a path. `--output` is a

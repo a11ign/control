@@ -118,9 +118,16 @@ export const PIPELINES = {
     // this names the roles so the refusal never has cause to fire from a pipeline run.
     //
     // `fixture` is deliberately absent: those four pages are not scored as conformant real pages.
+    //
+    // `field` (#955) is PRESENT although it is never scored either, because it is recaptured on the batch
+    // like the others and this is the batch: its pages exist to show furniture defects (#951's chat
+    // widget), and a stale capture of a marketing page shows last month's furniture. `rules-real-pages`
+    // prints it as its own population, outside the conformance line. Its recorded refusals are skipped by
+    // `capture-real-pages` itself, so this entry costs fleet time for the captured pages only.
     jobs: [
       { job: "capture-real-pages", vars: { role: "calibration" } },
       { job: "capture-real-pages", vars: { role: "training" } },
+      { job: "capture-real-pages", vars: { role: "field" } },
       "rules-real-pages",
       "rules-coverage",
     ],
