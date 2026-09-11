@@ -88,7 +88,7 @@ import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane
  * An unrecognised flag is otherwise IGNORED, so it runs the default and reports success.
  */
 refuseUnknownFlags(
-  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade"],
+  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply"],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
@@ -119,8 +119,37 @@ const CHECKOUT = CONTROL_PLANE_CHECKOUT;
 // keyboard. It also inherits the zero-host refusal below, which is the guard whose absence let a deploy to
 // nothing exit 0 -- though it targets `control_plane`, not `a11y_workers`, so an empty fleet is not its
 // failure mode.
-const PLAYBOOKS =
-  ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml", "control-host-install.yml"];
+// `os-rollback.yml` (#921) is the one entry that changes a box's OPERATING SYSTEM, so it is also the one
+// that refuses to run without `--limit=<one worker>` and does nothing but read without `--apply`
+// (`osRollbackRefusal` below, and the playbook's own guards).
+const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml",
+  "control-host-install.yml", "os-rollback.yml"];
+
+/** Exactly one worker, by name -- what `os-rollback.yml` needs where every other playbook takes a list. */
+const ONE_WORKER = /^a11y-worker-[0-9]{1,3}$/;
+
+/**
+ * THE TWO REFUSALS THAT BELONG TO AN OS CHANGE, and to nothing else in this allowlist (#921).
+ *
+ * `--limit` is optional everywhere else because omitting it means "the fleet", which is what a deploy
+ * wants. For a Windows rollback, "the fleet" is the one target that must never be expressible, so the
+ * flag is required and must name exactly ONE worker. `--apply` is the switch that turns the playbook's
+ * read-only dry run into the change; on any other playbook it would be accepted and ignored, which is the
+ * silently-discarded-flag shape `refuseUnknownFlags` exists for, so it is refused there by name.
+ *
+ * @param {{ chosen: string, limitFlag: string | undefined, apply: boolean }} args
+ * @returns {string | null} the refusal to print, or null when the combination is allowed
+ */
+function osRollbackRefusal({ chosen, limitFlag, apply }) {
+  if (apply && chosen !== "os-rollback.yml") {
+    return `refusing --apply with --playbook=${chosen}: only os-rollback.yml has a change it holds back.`;
+  }
+  if (chosen === "os-rollback.yml" && !ONE_WORKER.test(limitFlag ?? "")) {
+    return "refusing os-rollback.yml without --limit=<one worker>: it changes ONE box's operating system, "
+      + `and "${limitFlag ?? "(no --limit, i.e. the whole fleet)"}" is not one worker.`;
+  }
+  return null;
+}
 
 /**
  * Ansible host patterns this may target, by SHAPE. Same containment as the playbook list, and needed for
@@ -173,7 +202,9 @@ function validRef(ref) {
  *
  * @type {Record<string, number>}
  */
-const PLAYBOOK_TIMEOUT_MS = { "provision-role.yml": 4 * 60 * 60 * 1000 };
+// `os-rollback.yml`: a Windows rollback runs inside a restart that can take the better part of an hour, and
+// the play waits for it (`win_reboot`'s own ceiling is 90 minutes), so the default would kill a working one.
+const PLAYBOOK_TIMEOUT_MS = { "provision-role.yml": 4 * 60 * 60 * 1000, "os-rollback.yml": 2 * 60 * 60 * 1000 };
 const DEFAULT_PLAYBOOK_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
@@ -246,7 +277,7 @@ const argOf = (/** @type {string} */ name) => flagValue(process.argv, name);
  * these refusals exists because the value reaches a shell on the box holding the fleet SSH key.
  *
  * @returns {{chosen: string, limitFlag: string|undefined, serialFlag: string|undefined, ref: string,
- *            allowEdgeDowngrade: boolean}}
+ *            allowEdgeDowngrade: boolean, apply: boolean}}
  */
 function parseArgs() {
   const refuse = (/** @type {string} */ message) => {
@@ -282,10 +313,13 @@ function parseArgs() {
     refuse(`refusing --serial with --playbook=${chosen}: only provision-role.yml batches.`);
   }
 
+  const apply = process.argv.includes("--apply");
+  const osRefusal = osRollbackRefusal({ chosen, limitFlag, apply });
+  if (osRefusal) refuse(osRefusal);
   const ref = argOf("ref") ?? localBranch();
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
 
-  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply };
 }
 
 /**
@@ -396,14 +430,14 @@ function runBootstrapFromHere(chosen) {
  * `main` at 92 lines — a check ESLint cannot make, since `skipComments: true` lets a comment-dense
  * function run to twice its 70-line lint budget.
  *
- * ONE OBJECT, not six positionals — `max-params` is 4 here and the repo's rule is to bundle cohesive
- * arguments rather than raise the ceiling. These six are one thing: what to deploy and how.
+ * ONE OBJECT, not seven positionals — `max-params` is 4 here and the repo's rule is to bundle cohesive
+ * arguments rather than raise the ceiling. These seven are one thing: what to deploy and how.
  *
  * @param {{ chosen: string, ref: string, expected: string, limitFlag: string|undefined,
- *           serialFlag: string|undefined, allowEdgeDowngrade: boolean }} spec
+ *           serialFlag: string|undefined, allowEdgeDowngrade: boolean, apply: boolean }} spec
  * @returns {string} the unit name
  */
-function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade }) {
+function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply }) {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -460,7 +494,8 @@ try {
     // only what it recognises — and `refuseUnknownFlags` inspected only `--` arguments, so the whole
     // fleet was provisioned believing an authorisation had been given that never arrived. Both halves
     // are fixed; this is the half that gives the operator something real to type.
-    + (allowEdgeDowngrade ? " -e worker_edge_allow_downgrade=true" : ""),
+    + (allowEdgeDowngrade ? " -e worker_edge_allow_downgrade=true" : "")
+    + (apply ? " -e a11y_os_rollback_apply=true" : ""),
   { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
 } catch (cause) {
   // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
@@ -550,7 +585,7 @@ async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
-  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade } = parseArgs();
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply } = parseArgs();
   await guardProtocolChange(chosen);
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
@@ -606,7 +641,7 @@ async function main() {
   // whole command line and whose stack is node's internals, which buries "which box failed" under twelve
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
-  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade });
+  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
     + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`
@@ -750,4 +785,4 @@ async function followUnit(unit, budgetMs) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
 
 export { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS,
-  DEFAULT_PLAYBOOK_TIMEOUT_MS, onTheControlPlane, journalScope };
+  DEFAULT_PLAYBOOK_TIMEOUT_MS, onTheControlPlane, journalScope, osRollbackRefusal };

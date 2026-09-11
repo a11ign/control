@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
-  onTheControlPlane, journalScope, controlPlaneCheckout }
+  onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -53,8 +53,12 @@ test("only the named playbooks are runnable, and they are names rather than path
   // because the fault it exists for cannot be reached any other way — a worker wedged inside a capture
   // does not respond to `Stop-ScheduledTask`, keeps the port, and goes on serving a matching
   // `/health.code` from files the deploy has just updated, so `verify-code.yml`'s reboot never fires.
-  assert.deepEqual(PLAYBOOKS,
-    ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml", "control-host-install.yml"]);
+  // `os-rollback.yml` joined on 2026-09-11 (#921) and displaced `recover.yml` as the most destructive entry:
+  // it rolls a box's WINDOWS BUILD back. It earns its place the same way -- a feature update that slipped
+  // the appliance policy had no remote repair at all -- and it is fenced harder than anything else here:
+  // one named worker or nothing, and a read-only dry run unless `--apply` (tests below).
+  assert.deepEqual(PLAYBOOKS, ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml",
+    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml"]);
   // `provision.yml` stays REFUSED and that is not an oversight: it is the UTM/PowerShell provisioning
   // playbook, a different file from `provision-role.yml`, and only the role one should be reachable from
   // a laptop. Two files one character apart, one allowed and one not, is exactly what an allowlist is for.
@@ -241,4 +245,52 @@ test("`HEAD` is the DEFAULT ref on the checkout this command is meant to be run 
   // to one commit rather than to a branch tip that has since advanced.
   assert.match(command, /git checkout --quiet HEAD /, command);
   assert.match(command, /merge --ff-only --quiet abc1234def5678$/, command);
+});
+
+test("an OS rollback names exactly ONE worker, and --apply belongs to it alone (#921)", () => {
+  // "No --limit" means the whole fleet everywhere else, which is right for a deploy and the one target a
+  // Windows rollback must never have. A list is refused too: one box's OS at a time.
+  for (const limitFlag of [undefined, "a11y_workers", "a11y-worker-3,a11y-worker-4", ""]) {
+    assert.match(osRollbackRefusal({ chosen: "os-rollback.yml", limitFlag, apply: false }) ?? "",
+      /without --limit=<one worker>/, JSON.stringify(limitFlag));
+  }
+  assert.equal(osRollbackRefusal({ chosen: "os-rollback.yml", limitFlag: "a11y-worker-4", apply: false }), null);
+  assert.equal(osRollbackRefusal({ chosen: "os-rollback.yml", limitFlag: "a11y-worker-4", apply: true }), null);
+  // Accepted and ignored would be the silently-discarded flag this repo refuses everywhere else.
+  for (const chosen of PLAYBOOKS.filter((name) => name !== "os-rollback.yml")) {
+    assert.match(osRollbackRefusal({ chosen, limitFlag: "a11y-worker-4", apply: true }) ?? "",
+      /refusing --apply/, chosen);
+    assert.equal(osRollbackRefusal({ chosen, limitFlag: undefined, apply: false }), null, chosen);
+  }
+  assert.ok(PLAYBOOK_TIMEOUT_MS["os-rollback.yml"] > DEFAULT_PLAYBOOK_TIMEOUT_MS,
+    "a rollback runs inside a restart that can take most of an hour; the default ceiling would kill it");
+});
+
+test("the rollback playbook refuses before it acts, and its dry run is itself (#921)", () => {
+  const play = readFileSync(fileURLToPath(new URL("../ansible/os-rollback.yml", import.meta.url)), "utf8");
+  const executable = play.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  const at = (pattern: RegExp) => executable.search(pattern);
+
+  // Each guard is present, and each comes BEFORE the first task that changes anything.
+  const firstChange = at(/Initiate-OSUninstall/);
+  const guards: [string, RegExp][] = [
+    ["one host", /ansible_play_hosts_all \| length == 1/],
+    ["the others agree on one build", /rollback_fleet_builds \| unique \| length == 1/],
+    ["this box is not on it", /rollback_this_build != rollback_fleet_builds \| first/],
+    ["not mid-capture", /rollback_before\.json\.busy/],
+    ["the dry run stops here", /ansible\.builtin\.meta: end_host\s+when: not os_rollback_apply/],
+    ["a closed path is refused", /rollback_found\.windowDays \| int > 0/],
+  ];
+  assert.ok(firstChange > 0, "the playbook must contain the change it guards");
+  for (const [name, pattern] of guards) {
+    const where = at(pattern);
+    assert.ok(where >= 0, `guard missing: ${name}`);
+    assert.ok(where < firstChange, `guard AFTER the change it exists to prevent: ${name}`);
+  }
+  // Busy is asked over HTTP from the control plane, the same channel `deploy.yml` asks on.
+  assert.match(executable, /url: "http:\/\/\{\{ ansible_host \}\}:\{\{ a11y_port \}\}\/health"/);
+  // The apply switch has exactly one spelling, the one `fleet-playbook.mjs` passes.
+  assert.match(executable, /a11y_os_rollback_apply \| default\(false\)/);
+  // The proof is the build /health reports afterwards, not DISM's exit code.
+  assert.match(executable, /rollback_after\.json\.environment\.windowsVersion/);
 });

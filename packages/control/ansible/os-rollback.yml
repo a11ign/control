@@ -1,0 +1,188 @@
+---
+# ROLL ONE DRIFTED WORKER BACK TO THE WINDOWS BUILD THE REST OF THE FLEET IS ON -- #921.
+#
+#     npm run fleet:os-rollback -- --limit=<worker>            # READ ONLY: which path is open, and why
+#     npm run fleet:os-rollback -- --limit=<worker> --apply    # the change
+#
+# ## Why this exists
+#
+# The OS build is a capture-cache key (`environmentKey()`), so a fleet on two builds blends two corpora,
+# and every corpus-wide job has to route around the odd box or refuse. A Windows FEATURE update reached one
+# worker past the appliance policy. The only repair on record was a console visit, because PXE plus
+# `autounattend.xml` is a BUILD path: a box with a working install boots the install, and `fleet:recover`
+# reboots without rebuilding. That was measured once and written up as "needs hands", which was more than
+# it showed.
+#
+# Windows keeps the previous build for a window after a feature update, and `DISM /Online
+# /Initiate-OSUninstall` goes back to it with no installer and no network boot. That is this playbook.
+#
+# ## It refuses more than it does
+#
+# - EXACTLY ONE host. `fleet-playbook.mjs` requires `--limit=<one worker>`, and the play asserts it again,
+#   so a fleet-wide OS change cannot be expressed.
+# - A box ALREADY ON THE FLEET'S BUILD. The target must differ from a build every other answering worker
+#   agrees on, so a wrong `--limit` cannot roll back a healthy box. If the others disagree among
+#   themselves, there is nothing to converge on, and that is a refusal too.
+# - A box MID-CAPTURE, asked over HTTP exactly as `deploy.yml` asks.
+# - A CLOSED PATH: no rollback window, or no `Windows.old`. It says so, and names the next path (a one-time
+#   firmware `BootNext` to network boot, #921), which is not this playbook.
+#
+# Without `--apply` it runs every read and every refusal, then stops. THE DRY RUN IS THE PLAYBOOK, not a
+# separate script that could disagree with it.
+#
+# ## The proof is the BUILD `/health` reports afterwards, never DISM's return code
+#
+# DISM stages the rollback with `/NoRestart`, and its output and exit code are kept. The restart is
+# `win_reboot`'s, so the wait belongs to Ansible rather than to a dropped SSH session. Then `/health` must
+# report the fleet's build. A worker holds no unique state, so the cost of a failed rollback is the box
+# staying excluded, which is where it already is.
+- name: Roll one drifted worker back to the fleet's Windows build
+  hosts: a11y_workers
+  gather_facts: false
+  vars:
+    os_rollback_apply: "{{ a11y_os_rollback_apply | default(false) | bool }}"
+  tasks:
+    - name: Exactly ONE worker, or nothing
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          os-rollback.yml was given {{ ansible_play_hosts_all | length }} workers. It changes the OS of ONE
+          box, named with --limit=<worker>; several at once is not a thing it does.
+      run_once: true
+
+    - name: What this worker reports now
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: rollback_before
+
+    - name: What every OTHER worker reports
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      loop: "{{ groups['a11y_workers'] | difference([inventory_hostname]) }}"
+      register: rollback_others
+      failed_when: false
+      changed_when: false
+
+    - name: The build this box is on, and the builds the others agree on
+      ansible.builtin.set_fact:
+        rollback_this_build: "{{ rollback_before.json.environment.windowsVersion | default('unknown') }}"
+        rollback_fleet_builds: >-
+          {{ rollback_others.results | selectattr('json', 'defined')
+             | map(attribute='json.environment.windowsVersion', default='unknown') | list }}
+
+    - name: REFUSE unless the others agree on one build and this box is not on it
+      ansible.builtin.assert:
+        that:
+          - rollback_fleet_builds | length >= 2
+          - rollback_fleet_builds | unique | length == 1
+          - "'unknown' not in rollback_fleet_builds"
+          - rollback_this_build != 'unknown'
+          - rollback_this_build != rollback_fleet_builds | first
+        fail_msg: >-
+          {{ inventory_hostname }} is on {{ rollback_this_build }}; the other
+          {{ rollback_fleet_builds | length }} answering worker(s) report {{ rollback_fleet_builds | unique }}.
+          This rolls back a box that DIFFERS from a build the rest agree on -- nothing else. A box on the
+          fleet's build has nothing to roll back to, and a fleet that disagrees has nothing to converge on.
+
+    - name: REFUSE a worker mid-capture
+      when: rollback_before.json.busy | default(false) | bool
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is CAPTURING right now. Rolling its OS back restarts it and throws away
+          that capture. Wait for it to finish.
+
+    - name: Read the rollback window, Windows.old, and the firmware's network-boot entries (READ ONLY)
+      ansible.windows.win_shell: |
+        $window = (& dism.exe /Online /Get-OSUninstallWindow 2>&1) -join "`n"
+        $days = if ($window -match 'Uninstall Window\s*:\s*(\d+)') { [int]$Matches[1] } else { -1 }
+        $firmware = (& bcdedit.exe /enum firmware 2>&1) -join "`n"
+        $network = @(($firmware -split "`r?`n") |
+          Where-Object { $_ -match '^description\s+.*(Network|PXE|IPv4|IPv6|LAN)' } |
+          ForEach-Object { ($_ -replace '^description\s+', '').Trim() })
+        [pscustomobject]@{
+          windowDays = $days
+          windowsOld = (Test-Path "$env:SystemDrive\Windows.old")
+          networkBootEntries = $network
+          dism = $window
+        } | ConvertTo-Json -Compress
+      register: rollback_probe
+      changed_when: false
+
+    - name: What the probe found
+      ansible.builtin.set_fact:
+        rollback_found: "{{ rollback_probe.stdout | from_json }}"
+
+    - name: Say which path is open
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ rollback_this_build }} -> fleet {{ rollback_fleet_builds | first }}.
+          ROLLBACK {{ 'OPEN' if (rollback_found.windowDays | int > 0 and rollback_found.windowsOld | bool)
+          else 'CLOSED' }}: uninstall window {{ rollback_found.windowDays }} day(s), Windows.old
+          {{ 'present' if rollback_found.windowsOld | bool else 'ABSENT' }}.
+          Network-boot entries in firmware: {{ rollback_found.networkBootEntries | default([]) | join('; ')
+          or 'none' }}. {{ 'Applying.' if os_rollback_apply else 'DRY RUN -- nothing was changed.' }}
+
+    - name: STOP HERE without --apply -- this is the dry run
+      ansible.builtin.meta: end_host
+      when: not os_rollback_apply
+
+    - name: REFUSE a closed rollback path, and name the next one
+      ansible.builtin.assert:
+        that:
+          - rollback_found.windowDays | int > 0
+          - rollback_found.windowsOld | bool
+        fail_msg: >-
+          {{ inventory_hostname }} cannot roll back: uninstall window {{ rollback_found.windowDays }} day(s),
+          Windows.old {{ 'present' if rollback_found.windowsOld | bool else 'absent' }}. The next path on #921
+          is a one-time firmware BootNext to network boot
+          ({{ rollback_found.networkBootEntries | default([]) | join('; ') or 'NO network-boot entry found' }}).
+
+    - name: Stage the rollback -- DISM, with the restart left to Ansible
+      ansible.windows.win_shell: |
+        & dism.exe /Online /Initiate-OSUninstall /Quiet /NoRestart
+        exit $LASTEXITCODE
+      register: rollback_staged
+      # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: staged, and waiting for the restart below.
+      failed_when: rollback_staged.rc not in [0, 3010]
+      changed_when: true
+
+    - name: Restart into the rollback -- it can take a long time, and the box is excluded meanwhile
+      ansible.windows.win_reboot:
+        reboot_timeout: 5400
+        post_reboot_delay: 60
+
+    - name: Wait for the worker to serve /health again
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        return_content: true
+        status_code: 200
+        timeout: 10
+      delegate_to: localhost
+      register: rollback_after
+      retries: 60
+      delay: 30
+      until: rollback_after.status is defined and rollback_after.status == 200
+
+    - name: PROVE it -- the build /health reports is the fleet's
+      ansible.builtin.assert:
+        that:
+          - rollback_after.json.environment.windowsVersion | default('unknown') == rollback_fleet_builds | first
+        fail_msg: >-
+          {{ inventory_hostname }} serves /health again but reports
+          {{ rollback_after.json.environment.windowsVersion | default('unknown') }}, not the fleet's
+          {{ rollback_fleet_builds | first }}. DISM staged it (rc {{ rollback_staged.rc }}), so the rollback
+          itself did not take. Record it on #921; the next path is the one-time BootNext.
+        success_msg: >-
+          {{ inventory_hostname }} is on {{ rollback_after.json.environment.windowsVersion }}, the fleet's
+          build. Next: `fleet:deploy` (the rollback restores the old checkout), then `fleet:status` must read
+          ten on one OS and one code hash before the box captures again.
