@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict } from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus }
+  from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -164,10 +165,17 @@ const env = (windowsVersion: string) => ({
 });
 const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n}:8765`, environment: env(os) });
 
-/** The verdict `fleetStatus` would print over these guests, out of an inventory of `total`. */
+/**
+ * The verdict `fleetStatus` would print over these guests, out of an inventory of `total`.
+ *
+ * `rows` is supplied all-ready because these cases are about the ENVIRONMENT comparison; #1029 made a
+ * missing `rows` UNKNOWN rather than CONSISTENT, so passing it is what keeps these tests about the thing
+ * they are about instead of about readiness.
+ */
 const verdictOver = (guests: ReturnType<typeof box>[], total: number) => {
   const { consistent, mismatches, compared } = fleetConsistency(guests);
-  return consistencyVerdict({ consistent, compared, total, mismatches });
+  const rows = guests.map((g) => ({ name: g.worker, state: "ready" }));
+  return consistencyVerdict({ consistent, compared, total, mismatches, rows });
 };
 
 test("YESTERDAY, EXACTLY: nine agreeing boxes and one that did not answer is NOT consistent", () => {
@@ -217,12 +225,12 @@ test("THE SAME DEFECT ONE LEVEL DOWN: a box that answers but reports no environm
   const answeredButEmpty = { worker: "http://a11y-worker-4:8765", environment: undefined };
   const { consistent, mismatches, compared } = fleetConsistency([box(2), box(3), answeredButEmpty as never, box(5)]);
   assert.equal(compared, 3, "fleetConsistency must say how many it actually compared");
-  const verdict = consistencyVerdict({ consistent, compared, total: 4, mismatches });
+  const verdict = consistencyVerdict({ consistent, compared, total: 4, mismatches, rows: [] });
   assert.equal(verdict.state, "UNKNOWN", "a box that answered with nothing to compare is not agreement");
 });
 
 test("nothing to compare is UNKNOWN, never a vacuous CONSISTENT", () => {
-  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10 }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10, rows: [] }).state, "UNKNOWN");
 });
 
 test("the deprecated `consistent` field carries the CORRECTED answer, never the old misreading", () => {
@@ -234,4 +242,83 @@ test("the deprecated `consistent` field carries the CORRECTED answer, never the 
     "the legacy field must be true only when the whole inventory was compared and agrees");
   assert.doesNotMatch(source, /consistent: comparedAgree|consistent: consistent\b/,
     "aliasing the compared-set agreement would hand a legacy script the exact misreading this fixes");
+});
+
+// --- #1029: a clean environment comparison is not a usable fleet ---
+
+const ENVIRONMENT = { windows: "10.0.26100", arch: "x64", nvda: "2024.4", edge: "152.0.1", provisionRevision: "r7" };
+
+/** A probe as `probeWorker` returns one, with only the readiness dial to turn. */
+const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreachable") =>
+  (state === "unreachable"
+    ? { name, url: `http://${name}:8765`, reachable: false, error: "ECONNREFUSED" }
+    : {
+      name, url: `http://${name}:8765`, reachable: true,
+      health: { ok: true, ready: state !== "warming", busy: state === "busy", environment: ENVIRONMENT,
+        code: "abc1234", vitals: { captures: 3, recoveries: 0 } },
+      progress: {},
+    });
+
+const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[]) => {
+  const workers = states.map((_, i) => ({ name: `a11y-worker-${i + 2}`, url: `http://a11y-worker-${i + 2}:8765` }));
+  return fleetStatus({
+    workers: () => workers,
+    probe: async (w) => fakeProbe(w.name, states[workers.indexOf(w)]),
+  });
+};
+
+test("#1029: a fleet whose environments agree but whose box is WARMING does not read CONSISTENT", async () => {
+  // `a11y-worker-4` sat warming behind a PhoneExperienceHost dialog for ~19.7 hours while this line read
+  // `fleet CONSISTENT across 10 of 10 -- these workers are interchangeable for capture`. They were not.
+  const status = await driveFleet(["ready", "ready", "warming", "ready"]);
+  assert.equal(status.verdict.state, "BLOCKED");
+  assert.match(status.verdict.line, /a11y-worker-4, warming/,
+    "NAMED, never counted -- 'blocked' sends a reader back to fleet:status, 'blocked on a11y-worker-4, "
+    + "warming' sends them to a box");
+  assert.match(status.verdict.line, /environments agree across 4 of 4/,
+    "and the consistency fact SURVIVES: this row makes the verdict pessimistic, it does not delete a "
+    + "measurement a reader still needs");
+  assert.equal(status.comparedAgree, true, "the underlying comparison is untouched and still true");
+  assert.equal(status.consistent, false,
+    "and the deprecated compatibility field carries the corrected answer, so an outside script reading "
+    + "`fleet:status --json` gets the fix without changing a line");
+});
+
+test("#1029: BUSY is not a fault -- a fleet mid-capture still reads CONSISTENT", async () => {
+  // The easy wrong fix refuses a healthy fleet under load. Asserted in both directions against the same
+  // driver, so the two cases differ by one worker's state and nothing else.
+  const busy = await driveFleet(["ready", "busy", "busy", "ready"]);
+  assert.equal(busy.verdict.state, "CONSISTENT");
+  const warming = await driveFleet(["ready", "busy", "warming", "ready"]);
+  assert.equal(warming.verdict.state, "BLOCKED",
+    "and the SAME fleet with one box warming instead of busy is blocked -- the two states are read "
+    + "differently, which is the whole point of `stateOf` keeping four of them");
+});
+
+test("#1029: the existing verdicts are unchanged -- this is an addition, not a re-decision", () => {
+  const rows = [{ name: "a", state: "warming" }];
+  assert.equal(consistencyVerdict({ consistent: false, compared: 4, total: 4, mismatches: [], rows }).state,
+    "INCONSISTENT", "a real mismatch still outranks readiness: the environments disagreeing is the worse "
+    + "fact and the one that must be reported");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10, rows }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 9, total: 10, rows }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({
+    consistent: true, compared: 4, total: 4, rows: [{ name: "a", state: "ready" }],
+  }).state, "CONSISTENT", "and an all-ready, all-agreeing fleet still reads CONSISTENT");
+});
+
+test("#1029: a caller that supplies NO readiness gets UNKNOWN, never a permissive CONSISTENT", () => {
+  // worker-judge's tiebreak on #1048, and the argument I made on their #1033 four hours earlier turned
+  // back on me: "nobody told me the readiness" is CANNOT ASK, not "all ready". A default that silently
+  // answers the permissive way is the 19.7 hours in miniature -- the whole defect was this function
+  // answering a question it had not been given the inputs for.
+  const verdict = consistencyVerdict({ consistent: true, compared: 4, total: 4 });
+  assert.equal(verdict.state, "UNKNOWN");
+  assert.match(verdict.line, /no readiness was supplied/,
+    "and it says WHICH question went unasked, so the caller knows what to pass rather than what to retry");
+  assert.match(verdict.line, /environments agree across 4 of 4/,
+    "while still reporting the fact it DID measure -- refusing to answer is not refusing to report");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [] }).state, "CONSISTENT",
+    "and an EXPLICIT empty list is a different statement from no list at all: it says the caller asked "
+    + "and found nobody blocked, which is exactly the distinction `undefined` versus `[]` exists to make");
 });
