@@ -152,6 +152,122 @@ function osRollbackRefusal({ chosen, limitFlag, apply }) {
 }
 
 /**
+ * #1084: THE PINNED WINDOWS BUILD, READ FROM THE INVENTORY AND NEVER RESTATED HERE.
+ *
+ * The OS is a capture-cache key, so a box on a different build is a box producing evidence that must not
+ * blend with the rest. Writing the build into this file would make it a SECOND COPY of the value that
+ * keys the cache — the fact-stated-twice defect on the one value where it costs a corpus.
+ *
+ * **MEASURED 2026-09-12: THE INVENTORY DECLARES NO PIN YET** (`31611ef4`). That is why `null` is a state
+ * with its own name below rather than a falsy nothing: a guard that reads an absent key and concludes
+ * "nothing to compare" is off, silently, in exactly the fleet it was written for.
+ *
+ * Read as TEXT rather than through a YAML parser, matching `inventoryHosts` in `fleet-discover.mjs` —
+ * half the value of `inventory.yml` is its comments, and a round-trip loses them.
+ *
+ * @param {string} inventoryText
+ * @returns {string | null} the declared build, or null when the inventory declares none
+ */
+export function pinnedBuild(inventoryText) {
+  const line = /^\s*windows_build\s*:\s*["']?([0-9][0-9.]*)["']?\s*$/m.exec(inventoryText);
+  return line ? line[1] : null;
+}
+
+/**
+ * The build out of a guest's reported `windowsVersion` -- the trailing `<major>.<minor>.<build>` of a
+ * string like `Microsoft Windows 11 Pro <build>`. **No real build is written here, in code OR in this
+ * comment:** a value in a doc example is a copy a reader takes as authoritative, and this file must
+ * state the pin nowhere.
+ *
+ * Returns null rather than a guess when there is no build-shaped token: an unparseable reading is "could
+ * not ask", not "a different build", and those are the two this row exists to keep apart.
+ *
+ * @param {string | null | undefined} windowsVersion
+ * @returns {string | null}
+ */
+export function buildOf(windowsVersion) {
+  const found = /\b([0-9]+\.[0-9]+\.[0-9]+)\b/.exec(windowsVersion ?? "");
+  return found ? found[1] : null;
+}
+
+/**
+ * #1084: EVERY GUEST SORTED INTO THE THREE STATES THIS ROW EXISTS TO KEEP APART.
+ *
+ * `compliant` — its build equals the pin.
+ * `drifted`   — it reported a build and the build is not the pin. **Named for a REBUILD**, because
+ *               `fleet:provision` installs the ROLE and not the OS: a line saying a box is "now
+ *               compliant" would be a claim provisioning cannot make true.
+ * `unreadable` — it reported no build we could parse. **"Could not ask" is not "the answer is no"**, and
+ *               this repo has paid for that distinction more than once; folding these into `drifted`
+ *               would send somebody to rebuild a box that may be fine, and into `compliant` would hide
+ *               the box that is not.
+ *
+ * @param {{ name: string, windowsVersion?: string | null }[]} guests
+ * @param {string} pinned
+ * @returns {{ compliant: string[], drifted: {name: string, build: string}[], unreadable: string[] }}
+ */
+export function buildStates(guests, pinned) {
+  /** @type {{ compliant: string[], drifted: {name: string, build: string}[], unreadable: string[] }} */
+  const states = { compliant: [], drifted: [], unreadable: [] };
+  for (const guest of guests) {
+    const build = buildOf(guest.windowsVersion);
+    if (build === null) states.unreadable.push(guest.name);
+    else if (build === pinned) states.compliant.push(guest.name);
+    else states.drifted.push({ name: guest.name, build });
+  }
+  return states;
+}
+
+/**
+ * #1084: THE REFUSAL `fleet:provision` PRINTS, or null when there is nothing to say.
+ *
+ * A WARNING IS NOT THE ACCEPTANCE. The pin is a MUST_MATCH cache key and `provisionRevision`'s own design
+ * is that a canary box IS the failure mode — so a mismatch refuses, and the message names the box and
+ * BOTH builds, because "a box has drifted" without the two values is not something anybody can act on.
+ *
+ * **AN UNDECLARED PIN IS A FOURTH STATE AND IT DOES NOT REFUSE — today, deliberately.** Provisioning is
+ * how a drifted fleet gets its role back, so a guard that refuses every run until somebody edits a file
+ * on the control plane bricks the repair path. It is loud on every run instead, and it names the key to
+ * add. #1084 carries the decision; the day the pin lands, this branch stops being reachable.
+ *
+ * **NOTHING CALLS THIS YET, AND SAYING SO IS THE POINT.** The comparison is pure and testable here; the
+ * call site needs each guest's `/health` reading, which lives in `fleet-status.mjs` and not in the
+ * playbook runner. **That wiring is #921's half** — the row this was split out of, whose acceptance is a
+ * run against the real fleet. A function that is perfect and never reached is the defect this repository
+ * has hit three times in a week, so the unwired surface is named rather than left for a reviewer to find.
+ *
+ * @param {{ guests: {name: string, windowsVersion?: string | null}[], pinned: string | null }} input
+ * @returns {{ refusal: string | null, notice: string | null }}
+ */
+export function buildAssertion({ guests, pinned }) {
+  if (pinned === null) {
+    return { refusal: null, notice: "NO PINNED IMAGE: `inventory.yml` declares no `windows_build` for "
+      + "`a11y_workers`, so this run compared nothing. The OS is a capture-cache key and an unpinned "
+      + "fleet cannot be checked against it -- add `windows_build: \"<build>\"` to the group's vars. "
+      + "NOT a clean result: no comparison was made." };
+  }
+  const { compliant, drifted, unreadable } = buildStates(guests, pinned);
+  // THE CENSUS IS ALWAYS PRINTED, whatever the verdict. "No box drifted" and "no box was asked" are
+  // different facts and a bare clean verdict spells them the same -- this repo's own rule about a count
+  // that cannot say what it examined.
+  const census = `build vs pinned ${pinned}: ${compliant.length} on the pin, ${drifted.length} drifted, `
+    + `${unreadable.length} unreadable, of ${guests.length} asked.`;
+  const unread = unreadable.length === 0 ? null
+    : `COULD NOT READ the build of ${unreadable.join(", ")} -- neither compliant nor drifted, and not `
+      + "evidence either way. Ask those boxes before concluding anything about them.";
+  if (drifted.length === 0) {
+    return { refusal: null, notice: unread === null ? census : `${census}\n${unread}` };
+  }
+  const these = drifted.length === 1 ? "this box" : "these boxes";
+  const named = drifted.map(({ name, build }) => `${name} is on ${build}`).join(", ");
+  const refusal = `REFUSING: ${named}, and the pinned image is ${pinned}. The OS is a capture-cache key, `
+    + `so ${these} ${drifted.length === 1 ? "is" : "are"} producing evidence that must not blend with the `
+    + `rest. THE REPAIR IS A REBUILD (PXE + autounattend.xml): \`fleet:provision\` installs the ROLE, not `
+    + `the OS, so it cannot make ${these} compliant and does not claim to.\n${census}`;
+  return { refusal: unread === null ? refusal : `${refusal}\n${unread}`, notice: null };
+}
+
+/**
  * Ansible host patterns this may target, by SHAPE. Same containment as the playbook list, and needed for
  * the same reason: `--limit` reaches a shell on the box holding the fleet key. Worker names and the group
  * name, nothing else — `all` is not special-cased because omitting the flag already means all.

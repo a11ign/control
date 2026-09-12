@@ -13,7 +13,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
-  onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal }
+  onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
+  pinnedBuild, buildOf, buildStates, buildAssertion }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -378,4 +379,125 @@ test("#971: the comparison is on the resolved COMMITS, so an abbreviated SHA is 
   assert.ok(staleRefRefusal({ ref: "main", local: SHA("a"), origin: SHA("a").slice(0, 12) }),
     "two spellings of the same commit must still refuse -- equality here is the whole check, and "
     + "accepting a prefix would make it a substring test that passes on any shared prefix");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// #1084: `fleet:provision` asserts the guest build against the PINNED image.
+//
+// A feature update reached `a11y-worker-4` and landed at a reboot. The appliance policy stops a mid-run
+// reboot; it does not stop an update installing and arriving later. **The OS is a capture-cache key**
+// precisely so two builds never blend evidence into one corpus — so one box drifting costs that box, and
+// the same drift on any box costs a corpus.
+//
+// Split from #921, whose acceptance is a run against the real fleet. THIS half is pure: the comparison
+// and its message. The live confirmation stays on #921 where `orchestrator` can run it.
+// ---------------------------------------------------------------------------------------------------
+
+/** The two builds from the #921 incident, used as data. Neither appears in `fleet-playbook.mjs`. */
+const PIN = "10.0.22631";
+const DRIFTED = "10.0.26200";
+const reported = (build: string) => `Microsoft Windows 11 Pro ${build}`;
+
+test("#1084 ACCEPTANCE: a box on a different build is REFUSED, naming the box and BOTH builds", () => {
+  const { refusal, notice } = buildAssertion({ guests: [
+    { name: "a11y-worker-2", windowsVersion: reported(PIN) },
+    { name: "a11y-worker-4", windowsVersion: reported(DRIFTED) },
+  ], pinned: PIN });
+
+  assert.ok(refusal, "a build mismatch must REFUSE. A warning is not the acceptance: the pin is a "
+    + "MUST_MATCH cache key, and `provisionRevision`'s own design is that a canary box IS the failure mode");
+  assert.match(refusal, /a11y-worker-4/, "the refusal must name the box");
+  assert.match(refusal, new RegExp(DRIFTED.replace(/\./g, "\\.")), "and the build it is ON");
+  assert.match(refusal, new RegExp(PIN.replace(/\./g, "\\.")), "and the build it SHOULD be on -- "
+    + "\"a box has drifted\" without the two values is not something anybody can act on");
+  assert.equal(notice, null, "a refusal is not also a notice");
+});
+
+test("#1084: a drifted box is named for REBUILD, and never reported as repaired", () => {
+  // `fleet:provision` installs the ROLE, not the OS. A line saying a box is "now compliant" would be a
+  // claim provisioning cannot make true, and a provision step that "fixed" a build would be silently
+  // reinstalling an operating system under a capture run.
+  const { refusal } = buildAssertion({
+    guests: [{ name: "a11y-worker-4", windowsVersion: reported(DRIFTED) }], pinned: PIN });
+  assert.match(String(refusal), /REBUILD/, "the instruction must be a rebuild");
+  assert.match(String(refusal), /installs the ROLE, not the OS/,
+    "and it must say WHY, or the next reader tries to make provisioning do it");
+  assert.doesNotMatch(String(refusal), /\b(repaired|now compliant|fixed)\b/i,
+    "\"needs a rebuild\" and \"is now compliant\" are different instructions and one of them is a lie");
+});
+
+test("#1084: a box whose build cannot be READ is a third state, not folded into either", () => {
+  // "Could not ask" and "the answer is no" must not render the same. Folding these into `drifted` sends
+  // somebody to rebuild a box that may be fine; folding them into `compliant` hides the box that is not.
+  const states = buildStates([
+    { name: "on-the-pin", windowsVersion: reported(PIN) },
+    { name: "drifted", windowsVersion: reported(DRIFTED) },
+    { name: "silent", windowsVersion: null },
+    { name: "unparseable", windowsVersion: "Windows, version unknown" },
+  ], PIN);
+
+  assert.deepEqual(states.compliant, ["on-the-pin"]);
+  assert.deepEqual(states.drifted.map((d) => d.name), ["drifted"]);
+  assert.deepEqual(states.unreadable, ["silent", "unparseable"],
+    "a reading with no build-shaped token is unreadable, never a guess");
+
+  const { refusal } = buildAssertion({ guests: [
+    { name: "drifted", windowsVersion: reported(DRIFTED) },
+    { name: "silent", windowsVersion: null },
+  ], pinned: PIN });
+  assert.match(String(refusal), /COULD NOT READ the build of silent/,
+    "and the unreadable box is SAID, not dropped from the output because something else failed");
+});
+
+test("#1084: a clean run still says what it EXAMINED — zero drifted is not zero asked", () => {
+  const clean = buildAssertion({
+    guests: [{ name: "a11y-worker-2", windowsVersion: reported(PIN) }], pinned: PIN });
+  assert.equal(clean.refusal, null, "nothing drifted, so nothing is refused");
+  assert.match(String(clean.notice), /1 on the pin, 0 drifted, 0 unreadable, of 1 asked/,
+    "the census is printed whatever the verdict");
+
+  const nothing = buildAssertion({ guests: [], pinned: PIN });
+  assert.match(String(nothing.notice), /of 0 asked/,
+    "\"no box drifted\" and \"no box was asked\" are different facts and a bare clean verdict spells "
+    + "them the same");
+});
+
+test("#1084: NO PIN DECLARED is a fourth state — loud, and not a clean result", () => {
+  // MEASURED 2026-09-12 on `31611ef4`: the inventory declares no pin, so this is today's fleet rather
+  // than a hypothetical. It does not refuse: provisioning is how a drifted fleet gets its role back, and
+  // a guard that refuses every run until a file on the control plane is edited bricks the repair path.
+  const { refusal, notice } = buildAssertion({
+    guests: [{ name: "a11y-worker-2", windowsVersion: reported(PIN) }], pinned: null });
+  assert.equal(refusal, null, "an undeclared pin must not brick the repair path");
+  assert.match(String(notice), /NO PINNED IMAGE/, "but it must be said on every run");
+  assert.match(String(notice), /windows_build/,
+    "and it must name the key to add -- follow the message exactly and you must pass");
+  assert.match(String(notice), /NOT a clean result/,
+    "because the one thing it must never read as is agreement");
+});
+
+test("#1084: the pin is READ FROM the inventory, in either quoting, and absent reads as absent", () => {
+  const withPin = `all:\n  children:\n    a11y_workers:\n      vars:\n        windows_build: "${PIN}"\n`;
+  assert.equal(pinnedBuild(withPin), PIN);
+  assert.equal(pinnedBuild(withPin.replace(`"${PIN}"`, PIN)), PIN, "unquoted is the same declaration");
+  assert.equal(pinnedBuild("all:\n  children:\n    a11y_workers:\n      hosts:\n        w2:\n"), null,
+    "and an inventory with no such key declares no pin, rather than an empty one");
+  assert.equal(buildOf(reported(PIN)), PIN);
+  assert.equal(buildOf("Windows, version unknown"), null);
+});
+
+test("#1084: the pinned build is NOT restated in the source — a second copy of the cache key", () => {
+  // A build written into `fleet-playbook.mjs` would be the fact-stated-twice defect on the one value
+  // where it costs a corpus: the inventory and the assertion could then disagree, and the assertion
+  // would win silently.
+  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
+  const buildLiteral = /\b\d+\.\d+\.\d{4,}\b/;
+  assert.doesNotMatch(source, buildLiteral,
+    "fleet-playbook.mjs states a Windows build literal -- the pin is read from the inventory, never "
+    + "restated here");
+  // The control on the pattern: it must be able to find one, or the assertion above passes because the
+  // regex is broken rather than because the source is clean.
+  assert.match(`the pinned image is ${PIN}`, buildLiteral,
+    "the build-literal pattern cannot see a build literal -- it has narrowed to something that matches "
+    + "nothing, and the assertion above would then be vacuous");
 });
