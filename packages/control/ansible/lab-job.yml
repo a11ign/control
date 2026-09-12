@@ -649,8 +649,8 @@
             REFERRED); this code fires on either.
           "2": >-
             INCONCLUSIVE -- fewer real pages were examined than the audit's own population (an unusable
-            page not already DECLARED in runs/real-page-unexaminable.json still counts as a shortfall here,
-            by design). Re-run rather than trusting the ratio shown.
+            page not already DECLARED in packages/lab/baselines/real-page-unexaminable.json still counts as a
+            shortfall here, by design). Re-run rather than trusting the ratio shown.
         argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages"]
         timeout: 900
       # Same, with --update: rewrites the baseline. Separate job because it WRITES a claim that every
