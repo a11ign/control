@@ -615,6 +615,14 @@
             which reduces the denominator rather than counting as stable. Re-run before trusting a PASS or
             FAIL from this one.
         argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
+        # #1041: A NAMED WORKER, THE SAME AS `stability` ABOVE, AND FOR THE SAME STATED REASON -- this gate
+        # asks whether the PIPELINE is deterministic, so a second guest is a second variable. The entry ran
+        # the identical script with the identical flag and passed NO worker at all, so every dispatch died
+        # on `no workers in A11Y_WORKERS and none in inventory.yml`. The script was right to refuse rather
+        # than guess; the defect was here. Its recorded failures were read as the OS split and were never
+        # that -- `gate:stability` itself passed through `stability` on the same code.
+        params: {worker: required}
+        setenv: ["A11Y_WORKER={{ lab_named_worker }}"]
         timeout: 3600
       # `--local` IS MANDATORY HERE AND IS NOT AN ESCAPE HATCH. `dispatchUnlessLocal` makes the control
       # plane the DEFAULT, which is right for an operator running the gate from a laptop -- but this entry
