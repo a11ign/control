@@ -306,10 +306,30 @@ function renderTable(rows) {
  * `doctor`'s `checkFleetConsistency` already says "N of M guests agree … the rest could not be asked". It
  * learned this first; this command, whose whole job is to describe the fleet, never did.
  *
- * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[] }} input
- * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN", line: string }}
+ * **AND A CLEAN ENVIRONMENT COMPARISON IS NOT A USABLE FLEET — #1029.** This function used to take no
+ * readiness input at all, so its verdict was byte-identical whether or not a box could capture. Measured:
+ * `a11y-worker-4` sat `warming` behind a `PhoneExperienceHost` dialog for ~19.7 hours while this line read
+ * `fleet CONSISTENT across 10 of 10 — these workers are interchangeable for capture`. They were not
+ * interchangeable; one of them could not capture at all.
+ *
+ * That is THE SAME CLASS as the denominator lesson above, one field over: it was applied to which boxes
+ * were COMPARED and never to whether a compared box can WORK. A guest that answers `/health`, reports a
+ * matching environment and cannot start NVDA was counted as agreeing, and the headline called the set
+ * interchangeable. `ready` is the field this repo already ruled you dispatch on; the headline verdict was
+ * the one place that did not.
+ *
+ * **Two facts, one verdict, and the verdict is the pessimistic one.** The consistency answer is not
+ * deleted — it is real, separate, and still printed in the BLOCKED line — it simply may no longer stand
+ * in for usability.
+ *
+ * `busy` IS NOT A FAULT. A worker mid-capture is the system working, and refusing a healthy fleet under
+ * load is the easy wrong fix; only `warming` and `unreachable` may hold the headline down.
+ *
+ * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[],
+ *           rows?: { name?: string, state?: string }[] }} input `rows` carries each box's `stateOf`
+ * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
  */
-export function consistencyVerdict({ consistent, compared, total, mismatches = [] }) {
+export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows = [] }) {
   const across = `across ${compared} of ${total}`;
   if (compared === 0) {
     return { state: "UNKNOWN",
@@ -325,13 +345,31 @@ export function consistencyVerdict({ consistent, compared, total, mismatches = [
         + "compared. A box that did not answer and has drifted reads exactly like one that agrees, so this "
         + "is not a consistent fleet until it answers" };
   }
+  // NAMED, NEVER COUNTED. "blocked" and "blocked on a11y-worker-4, warming" are different instructions:
+  // one sends a reader to `fleet:status` again, the other sends them to a box.
+  const blocked = rows.filter((row) => row.state === "warming" || row.state === "unreachable");
+  if (blocked.length > 0) {
+    const named = blocked.map((row) => `${row.name ?? "an unnamed box"}, ${row.state}`).join("; ");
+    return { state: "BLOCKED",
+      line: `fleet BLOCKED — the environments agree ${across}, and ${blocked.length} of ${total} cannot `
+        + `capture: ${named}. A consistent environment is not a usable fleet, and this line used to read `
+        + "CONSISTENT for 19.7 hours while a box was held behind a dialog" };
+  }
   return { state: "CONSISTENT",
     line: `fleet CONSISTENT ${across} — these workers are interchangeable for capture` };
 }
 
-export async function fleetStatus() {
-  const workers = fleetToProbe();
-  const probes = await Promise.all(workers.map(probeWorker));
+/**
+ * @param {{ workers?: () => { name: string, url: string }[],
+ *           probe?: (worker: { name: string, url: string }) => Promise<any> }} [deps] injectable ONLY so a
+ *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
+ *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
+ *   the verdict holds the function and leaves the CALL unheld, which is where the 19.7 hours happened.
+ *   Production passes nothing and the defaults are the real probes.
+ */
+export async function fleetStatus(deps) {
+  const workers = (deps?.workers ?? fleetToProbe)();
+  const probes = await Promise.all(workers.map(deps?.probe ?? probeWorker));
   const rows = summarise(probes);
   const guests = probes
     .filter((p) => p.reachable)
@@ -353,7 +391,9 @@ export async function fleetStatus() {
   // `comparedAgree`, not `consistent`: the field says agreement AMONG THE COMPARED SET, and a bare
   // `consistent: true` over nine of ten is the exact misreading #920 is about, one serialisation away.
   // `verdict` is the answer; this is one of its inputs.
-  const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches });
+  // `rows` carries each box's `stateOf`, which this verdict had no way to see until #1029. Passing it
+  // is the whole fix: the two halves were both computed here and never crossed.
+  const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows });
   return { rows, comparedAgree: consistent, verdict, mismatches, codes, compared,
     reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.

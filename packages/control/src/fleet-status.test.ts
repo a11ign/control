@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict } from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus }
+  from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -234,4 +235,67 @@ test("the deprecated `consistent` field carries the CORRECTED answer, never the 
     "the legacy field must be true only when the whole inventory was compared and agrees");
   assert.doesNotMatch(source, /consistent: comparedAgree|consistent: consistent\b/,
     "aliasing the compared-set agreement would hand a legacy script the exact misreading this fixes");
+});
+
+// --- #1029: a clean environment comparison is not a usable fleet ---
+
+const ENVIRONMENT = { windows: "10.0.26100", arch: "x64", nvda: "2024.4", edge: "152.0.1", provisionRevision: "r7" };
+
+/** A probe as `probeWorker` returns one, with only the readiness dial to turn. */
+const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreachable") =>
+  (state === "unreachable"
+    ? { name, url: `http://${name}:8765`, reachable: false, error: "ECONNREFUSED" }
+    : {
+      name, url: `http://${name}:8765`, reachable: true,
+      health: { ok: true, ready: state !== "warming", busy: state === "busy", environment: ENVIRONMENT,
+        code: "abc1234", vitals: { captures: 3, recoveries: 0 } },
+      progress: {},
+    });
+
+const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[]) => {
+  const workers = states.map((_, i) => ({ name: `a11y-worker-${i + 2}`, url: `http://a11y-worker-${i + 2}:8765` }));
+  return fleetStatus({
+    workers: () => workers,
+    probe: async (w) => fakeProbe(w.name, states[workers.indexOf(w)]),
+  });
+};
+
+test("#1029: a fleet whose environments agree but whose box is WARMING does not read CONSISTENT", async () => {
+  // `a11y-worker-4` sat warming behind a PhoneExperienceHost dialog for ~19.7 hours while this line read
+  // `fleet CONSISTENT across 10 of 10 -- these workers are interchangeable for capture`. They were not.
+  const status = await driveFleet(["ready", "ready", "warming", "ready"]);
+  assert.equal(status.verdict.state, "BLOCKED");
+  assert.match(status.verdict.line, /a11y-worker-4, warming/,
+    "NAMED, never counted -- 'blocked' sends a reader back to fleet:status, 'blocked on a11y-worker-4, "
+    + "warming' sends them to a box");
+  assert.match(status.verdict.line, /environments agree across 4 of 4/,
+    "and the consistency fact SURVIVES: this row makes the verdict pessimistic, it does not delete a "
+    + "measurement a reader still needs");
+  assert.equal(status.comparedAgree, true, "the underlying comparison is untouched and still true");
+  assert.equal(status.consistent, false,
+    "and the deprecated compatibility field carries the corrected answer, so an outside script reading "
+    + "`fleet:status --json` gets the fix without changing a line");
+});
+
+test("#1029: BUSY is not a fault -- a fleet mid-capture still reads CONSISTENT", async () => {
+  // The easy wrong fix refuses a healthy fleet under load. Asserted in both directions against the same
+  // driver, so the two cases differ by one worker's state and nothing else.
+  const busy = await driveFleet(["ready", "busy", "busy", "ready"]);
+  assert.equal(busy.verdict.state, "CONSISTENT");
+  const warming = await driveFleet(["ready", "busy", "warming", "ready"]);
+  assert.equal(warming.verdict.state, "BLOCKED",
+    "and the SAME fleet with one box warming instead of busy is blocked -- the two states are read "
+    + "differently, which is the whole point of `stateOf` keeping four of them");
+});
+
+test("#1029: the existing verdicts are unchanged -- this is an addition, not a re-decision", () => {
+  const rows = [{ name: "a", state: "warming" }];
+  assert.equal(consistencyVerdict({ consistent: false, compared: 4, total: 4, mismatches: [], rows }).state,
+    "INCONSISTENT", "a real mismatch still outranks readiness: the environments disagreeing is the worse "
+    + "fact and the one that must be reported");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10, rows }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 9, total: 10, rows }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({
+    consistent: true, compared: 4, total: 4, rows: [{ name: "a", state: "ready" }],
+  }).state, "CONSISTENT", "and an all-ready, all-agreeing fleet still reads CONSISTENT");
 });
