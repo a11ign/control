@@ -64,6 +64,7 @@ import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
+import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
@@ -165,12 +166,34 @@ function osRollbackRefusal({ chosen, limitFlag, apply }) {
  * Read as TEXT rather than through a YAML parser, matching `inventoryHosts` in `fleet-discover.mjs` —
  * half the value of `inventory.yml` is its comments, and a round-trip loses them.
  *
+ * A TRAILING COMMENT IS PART OF THE DECLARATION, NOT A DIFFERENT LINE — worker-judge reviewing #1091.
+ * The first version required end-of-line after the value, so
+ * `windows_build: "<build>"  # the pin, #921` read as **no pin at all** and fell through to the branch
+ * that deliberately does not refuse: a pinned fleet would compare nothing while the notice said the file
+ * declares no pin, which is false about the file. **And the notice is an instruction**, so it would send
+ * somebody to add a key that is already there. The natural way anyone records a pinned OS build is with
+ * the reason beside it — it is the one value whose *why* costs a corpus — and this function's own
+ * argument for text-parsing is that the comments are half the point.
+ *
+ * SCOPED TO THE WORKER GROUP, because the message says it is. A `windows_build` under `a11y_lab`, or on
+ * one host, read as the fleet pin; with `/m` and `exec` the tiebreak was FILE ORDER. `groupPerLine` is
+ * imported rather than re-derived — `fleet-discover.mjs` made the same call for the same reason, and a
+ * second group parser there is what once reported the lab container as a fifth worker. `WORKER_GROUP` is
+ * likewise not restated.
+ *
  * @param {string} inventoryText
- * @returns {string | null} the declared build, or null when the inventory declares none
+ * @returns {string | null} the declared build, or null when the WORKER GROUP declares none
  */
 export function pinnedBuild(inventoryText) {
-  const line = /^\s*windows_build\s*:\s*["']?([0-9][0-9.]*)["']?\s*$/m.exec(inventoryText);
-  return line ? line[1] : null;
+  const groups = groupPerLine(inventoryText);
+  for (const [index, line] of inventoryText.split(/\r?\n/).entries()) {
+    if (groups[index] !== WORKER_GROUP) continue;
+    // The value, then optionally a comment. A line whose `#` comes FIRST is a commented-out declaration
+    // and matches nothing — which is the mirror trap, and the reason a comment is allowed only AFTER.
+    const found = /^\s*windows_build\s*:\s*["']?([0-9][0-9.]*)["']?\s*(?:#.*)?$/.exec(line);
+    if (found) return found[1];
+  }
+  return null;
 }
 
 /**

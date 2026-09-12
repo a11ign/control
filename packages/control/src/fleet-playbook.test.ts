@@ -476,14 +476,63 @@ test("#1084: NO PIN DECLARED is a fourth state — loud, and not a clean result"
     "because the one thing it must never read as is agreement");
 });
 
+/** The pin declared under the worker group's `vars:`, at the indent a real inventory uses. */
+const workerGroup = (body: string) => `all:\n  children:\n    a11y_workers:\n      vars:\n${body}`;
+
 test("#1084: the pin is READ FROM the inventory, in either quoting, and absent reads as absent", () => {
-  const withPin = `all:\n  children:\n    a11y_workers:\n      vars:\n        windows_build: "${PIN}"\n`;
+  const withPin = workerGroup(`        windows_build: "${PIN}"\n`);
   assert.equal(pinnedBuild(withPin), PIN);
   assert.equal(pinnedBuild(withPin.replace(`"${PIN}"`, PIN)), PIN, "unquoted is the same declaration");
   assert.equal(pinnedBuild("all:\n  children:\n    a11y_workers:\n      hosts:\n        w2:\n"), null,
     "and an inventory with no such key declares no pin, rather than an empty one");
   assert.equal(buildOf(reported(PIN)), PIN);
   assert.equal(buildOf("Windows, version unknown"), null);
+});
+
+test("#1091 REVIEW: a TRAILING COMMENT is part of the declaration, not a different line", () => {
+  // worker-judge's blocker, and it failed to the branch that deliberately does not refuse: a pinned fleet
+  // would compare nothing while the notice said the inventory declares no pin -- FALSE about the file,
+  // and the notice is an instruction, so it would send somebody to add a key already there.
+  //
+  // The natural way anyone records a pinned OS build is with the reason beside it: it is the one value
+  // whose *why* costs a corpus. And `pinnedBuild`'s own header argues for text-parsing precisely because
+  // "half the value of `inventory.yml` is its comments".
+  assert.equal(pinnedBuild(workerGroup(`        windows_build: "${PIN}"  # the pin, #921\n`)), PIN,
+    "a quoted value with a trailing comment is still a declaration");
+  assert.equal(pinnedBuild(workerGroup(`        windows_build: ${PIN} # why this build\n`)), PIN,
+    "and unquoted with one too");
+
+  // THE MIRROR, and it is why the comment is allowed only AFTER the value: a COMMENTED-OUT declaration
+  // must read as no pin. Reading it would be the fixture-naming-the-thing trap one level out -- the text
+  // is present, the declaration is not.
+  assert.equal(pinnedBuild(workerGroup(`        # windows_build: "${PIN}"\n`)), null,
+    "a commented-out pin is not a pin, however much of the line survives");
+});
+
+test("#1091 REVIEW: the pin is SCOPED to the worker group, because the message says it is", () => {
+  // A `windows_build` under `a11y_lab`, or at column 0, read as the FLEET pin -- and with `/m` and `exec`
+  // the tiebreak was FILE ORDER. `groupPerLine` is imported rather than re-derived, which is the call
+  // `fleet-discover.mjs` already made: a second group parser there once reported the lab container as a
+  // fifth worker.
+  assert.equal(pinnedBuild(`windows_build: "${PIN}"\n`), null,
+    "a declaration in no group is not the worker group's");
+  assert.equal(pinnedBuild(`all:\n  children:\n    a11y_lab:\n      vars:\n        windows_build: "9.9.9"\n`),
+    null, "and another group's build is not the fleet's, whatever it says");
+  assert.equal(pinnedBuild(`all:\n  children:\n    a11y_lab:\n      vars:\n        windows_build: "9.9.9"\n`
+    + `    a11y_workers:\n      vars:\n        windows_build: "${PIN}"\n`), PIN,
+    "and with a decoy FIRST in the file, the worker group's is still the one read -- file order was the "
+    + "old tiebreak and it must not be the new one");
+});
+
+test("#1091 REVIEW: `buildOf` reads a THREE-part version, and the limit is stated rather than hidden", () => {
+  // worker-judge's note. `Win32_OperatingSystem.Version` is `<major>.<minor>.<build>` and every real value
+  // in this tree is three-part, so this is a stated bound and not a live defect: a four-part value
+  // carrying a UBR would have its revision dropped silently. Pinned here so the day a worker starts
+  // reporting one, this fails rather than comparing a truncated value against a full one.
+  assert.equal(buildOf(reported(PIN)), PIN, "the three-part shape every real reading uses");
+  assert.equal(buildOf(`Microsoft Windows 11 Pro ${PIN}.1742`), PIN,
+    "A FOUR-PART VALUE LOSES ITS REVISION. If a worker ever reports one, widen this and the pin together "
+    + "-- comparing a truncated reading against a full pin would refuse every box at once");
 });
 
 test("#1084: the pinned build is NOT restated in the source — a second copy of the cache key", () => {
