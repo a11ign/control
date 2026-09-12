@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
-  onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal }
+  onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -300,4 +300,82 @@ test("the rollback playbook refuses before it acts, and its dry run is itself (#
   // itself) is tolerated, and a restart is asked for only when the box is still there to be asked.
   assert.match(executable, /register: rollback_staged\s+ignore_unreachable: true/);
   assert.match(executable, /when: not \(rollback_staged\.unreachable \| default\(false\)\)/);
+});
+
+// --- #971: A REF THAT MEANS SOMETHING DIFFERENT HERE THAN ON ORIGIN ---
+//
+// `expected` is `git rev-parse <ref>` IN THIS CHECKOUT, and on a machine with worktrees a local branch
+// sits wherever the last worktree left it. Measured 2026-09-11: `primary:update` put the local `main` on
+// f0d69cb7 at 05:44Z; by the deploy, origin/main was 25a5f680. The control plane shipped f0d69cb7 and THE
+// READ-BACK PASSED -- both halves of that check use the same stale SHA, so it is internally consistent and
+// a merge behind. `worker:code` found it afterwards as 10 of 10 STALE.
+//
+// The trap was already written in this file's own comments ("`--ref=main` is not the fix and makes it
+// worse") and nothing refused it. These test the refusal, not the comment.
+//
+// PURE, over two resolved SHAs, and that is the row's own condition: the real deploy path is
+// orchestrator's and nobody else runs it. What these CANNOT establish is that the refusal happens before
+// anything is shipped -- that is placement in `main` (ahead of `requireCommitIsOnOrigin` and the first
+// `ssh`), and asserting it by reading this file's source is the wiring-not-behaviour defect this same file
+// records against #645's first attempt. It is stated on the PR rather than faked with a source scrape.
+
+const SHA = (c: string) => c.repeat(40);
+
+test("#971 ACCEPTANCE: a ref resolving to a different commit on origin is REFUSED, naming both SHAs and "
+  + "the way out", () => {
+  const refusal = staleRefRefusal({ ref: "main", local: "f0d69cb7" + "a".repeat(32),
+    origin: "25a5f680" + "b".repeat(32) })!;
+  assert.ok(refusal, "a stale local branch must not deploy silently");
+  assert.match(refusal, /^REFUSING:/, "the first word must say what happened");
+  assert.match(refusal, /f0d69cb7aaaa/, "the SHA it would have shipped");
+  assert.match(refusal, /25a5f680bbbb/, "and the SHA origin holds, so the operator can see which is which");
+  assert.match(refusal, /npm run primary:update/, "the fix the row asked to be named");
+  // BOTH WAYS OUT, not one. A local tip that differs may be BEHIND origin or AHEAD of it, and telling an
+  // operator to fast-forward when they meant to ship unpushed work is a refusal that cannot be followed.
+  assert.match(refusal, /push it, and pass --ref=/);
+});
+
+test("#971: agreement is silent -- the ordinary deploy must not acquire a new way to fail", () => {
+  assert.equal(staleRefRefusal({ ref: "main", local: SHA("a"), origin: SHA("a") }), null);
+  assert.equal(staleRefRefusal({ ref: "HEAD", local: SHA("b"), origin: SHA("b") }), null,
+    "`HEAD` is the DEFAULT ref on the detached primary, which is where this command is meant to be run "
+    + "from -- if this ever refused, every ordinary deploy would stop");
+});
+
+test("#971: `HEAD` is checked like any other ref, and it is the case that actually bit -- the primary is "
+  + "detached by design, so `localBranch()` returns the literal string HEAD", () => {
+  const refusal = staleRefRefusal({ ref: "HEAD", local: SHA("d"), origin: SHA("e") })!;
+  assert.ok(refusal, "a detached primary behind origin/main is exactly the 2026-09-11 incident");
+  assert.match(refusal, /origin\/HEAD/);
+});
+
+test("#971: an UNRESOLVABLE `origin/<ref>` is refused, never read as agreement -- could-not-ask answering "
+  + "clear is this repository's most expensive recurring shape", () => {
+  const refusal = staleRefRefusal({ ref: "local-only", local: SHA("c"), origin: null })!;
+  assert.ok(refusal);
+  assert.match(refusal, /does not resolve/);
+  // AND ITS REMEDIES ARE DIFFERENT ONES. `primary:update` cannot help a branch origin has never seen, so
+  // offering it here would be a message that reads like help and is not.
+  assert.match(refusal, /git push -u origin local-only/);
+  assert.doesNotMatch(refusal, /To deploy origin's tip/,
+    "the stale-branch remedy must not be pasted onto a case it cannot fix");
+});
+
+test("#971: both SHAs are column-aligned, and a long ref name degrades rather than throwing", () => {
+  const lines = staleRefRefusal({ ref: "main", local: SHA("1"), origin: SHA("2") })!.split("\n");
+  const local = lines.find((l) => l.includes("this checkout"))!;
+  const origin = lines.find((l) => l.includes("origin/main:"))!;
+  assert.equal(local.indexOf(SHA("1").slice(0, 12)), origin.indexOf(SHA("2").slice(0, 12)),
+    "the two SHAs must start in the same column -- the eye lands on the digits that differ");
+  const long = "agent/" + "x".repeat(60);
+  assert.doesNotThrow(() => staleRefRefusal({ ref: long, local: SHA("1"), origin: SHA("2") }),
+    "a negative repeat count would throw; alignment is cosmetic and must degrade, never fail");
+});
+
+test("#971: the comparison is on the resolved COMMITS, so an abbreviated SHA is not equal to its full "
+  + "form -- `git rev-parse` gives both sides the full 40, and anything shorter reaching here is a bug "
+  + "this must not paper over", () => {
+  assert.ok(staleRefRefusal({ ref: "main", local: SHA("a"), origin: SHA("a").slice(0, 12) }),
+    "two spellings of the same commit must still refuse -- equality here is the whole check, and "
+    + "accepting a prefix would make it a substring test that passes on any shared prefix");
 });

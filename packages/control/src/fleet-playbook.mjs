@@ -262,6 +262,28 @@ function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS
  * `-e ref=<sha>` becoming an unresolvable `origin/<sha>`, and two of the uses had `failed_when: false`, so
  * the empty read was taken for a zero.
  */
+/**
+ * #971: what a revision resolves to in THIS checkout, or `null` when it does not resolve at all.
+ *
+ * `null` rather than a throw, because a missing `origin/<ref>` is a state the caller decides about, not an
+ * error to unwind on -- and rather than the empty string, because `""` compares falsy-equal to too many
+ * things and this value is compared for EQUALITY with another SHA.
+ * @param {string} rev
+ * @returns {string | null}
+ */
+function resolveOrNull(rev) {
+  try {
+    const sha = execFileSync("git", ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`],
+      { encoding: "utf8", env: sandboxGitEnv() }).trim();
+    return sha === "" ? null : sha;
+  } catch {
+    // `rev-parse --verify --quiet` exits 1 on an unresolvable revision, which is the ANSWER here rather
+    // than a failure -- and swallowing it is safe only because the answer is `null`, which this file's
+    // callers refuse rather than treat as agreement.
+    return null;
+  }
+}
+
 function localBranch() {
   return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 }
@@ -556,6 +578,70 @@ export function controlPlaneCheckout(ref, expected) {
 }
 
 /**
+ * REFUSE A REF THAT MEANS SOMETHING DIFFERENT HERE THAN IT DOES ON ORIGIN -- pure, over two SHAs (#971).
+ *
+ * `expected` is resolved with `git rev-parse <ref>` IN THIS CHECKOUT, and on a machine with worktrees a
+ * local branch sits wherever the last worktree left it. Measured 2026-09-11: `primary:update` put the
+ * local `main` on `f0d69cb7` at 05:44Z; by the deploy, `origin/main` was `25a5f680`. **The control plane
+ * shipped `f0d69cb7` and the read-back passed** -- everything internally consistent and one merge stale.
+ * `worker:code` found it afterwards as 10 of 10 STALE.
+ *
+ * The trap was already documented thirty lines up ("`--ref=main` is not the fix and makes it worse") and
+ * nothing refused it. A fact recorded in a comment is a fact somebody has to remember, which is the same
+ * sentence the SHA refusal below this one was written under.
+ *
+ * `origin === null` -- `origin/<ref>` does not resolve -- IS ALSO A REFUSAL, and deliberately so. "Could
+ * not ask" answering "clear" is this repository's most expensive recurring shape, and it is the rule the
+ * two guards either side of this one already follow (`requireCommitIsOnOrigin`'s empty answer is the
+ * refusal; `armDecision`'s null labels are refused rather than read as unheld). It also fails EARLIER
+ * than the alternative: the control plane's own `git checkout <ref>` would fail on a branch it does not
+ * have, in git's words, naming neither the flag nor the reason.
+ *
+ * THE MESSAGE NAMES BOTH WAYS OUT rather than guessing which. A local tip that differs may be BEHIND
+ * origin (deploy origin's tip: `primary:update`) or AHEAD of it (deploy your own commit: push it and name
+ * its branch). Telling an operator to fast-forward when they meant to ship unpushed work is a refusal
+ * that cannot be followed, and this file's neighbours already treat that as the defect rather than a
+ * wording preference.
+ *
+ * @param {{ ref: string, local: string, origin: string | null }} resolved
+ * @returns {string | null} the refusal to print, or `null` when the two agree
+ */
+export function staleRefRefusal({ ref, local, origin }) {
+  if (origin === local) return null;
+  const short = (/** @type {string} */ sha) => sha.slice(0, 12);
+  if (origin === null) {
+    return [
+      `REFUSING: --ref=${ref} resolves to ${short(local)} here, and \`origin/${ref}\` does not resolve.`,
+      "There is nothing to compare it against, and the control plane has no such branch to check out --",
+      "its own `git checkout` would fail in git's words, naming neither the flag nor the reason.",
+      "",
+      `  Push the branch:   git push -u origin ${ref}`,
+      "  Or name one origin already has:   --ref=main   (with `npm run primary:update` run first)",
+      "",
+    ].join("\n");
+  }
+  // Both SHAs on their own line and COLUMN-ALIGNED, so the eye lands on the digits that differ rather than
+  // on two 12-character strings buried in prose. `padEnd` to whichever label is longer, so it is the SHORT
+  // one that moves -- computing a pad for one side only misaligns by the difference, which is how the
+  // first version of this shipped and what its own test caught.
+  const labels = ["  this checkout:", `  origin/${ref}:`];
+  const column = Math.max(...labels.map((l) => l.length)) + 1;
+  return [
+    `REFUSING: --ref=${ref} means a DIFFERENT COMMIT here than on origin.`,
+    `${labels[0].padEnd(column)}${short(local)}`,
+    `${labels[1].padEnd(column)}${short(origin)}`,
+    "",
+    "Deploying would ship the local one and the read-back would PASS, because both halves of that check",
+    "use the same stale SHA -- internally consistent and a merge behind. That is how 10 of 10 boxes went",
+    "stale on 2026-09-11 with every check green.",
+    "",
+    "  To deploy origin's tip:      npm run primary:update   (then re-run this)",
+    "  To deploy your own commit:   push it, and pass --ref=<that branch>",
+    "",
+  ].join("\n");
+}
+
+/**
  * REFUSE A COMMIT THE CONTROL PLANE CANNOT FETCH, rather than letting `merge --ff-only` say it in git's
  * words. An operator on an unpushed commit is the ordinary case -- work in a worktree, deploy from the
  * primary -- and `fatal: not something we can merge` names neither the flag nor the reason, which is this
@@ -613,6 +699,15 @@ async function main() {
       "  Pass a BRANCH name. To deploy one commit, push it as a branch first.",
       "",
     ].join("\n"));
+    process.exit(2);
+  }
+
+  // #971: WHAT THAT REF MEANS ON ORIGIN, asked before anything is shipped. `null` when `origin/<ref>`
+  // does not resolve, which `staleRefRefusal` refuses rather than reads as agreement.
+  const onOrigin = resolveOrNull(`origin/${ref}`);
+  const stale = staleRefRefusal({ ref, local: expected, origin: onOrigin });
+  if (stale) {
+    process.stderr.write(stale);
     process.exit(2);
   }
 
