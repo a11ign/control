@@ -165,10 +165,17 @@ const env = (windowsVersion: string) => ({
 });
 const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n}:8765`, environment: env(os) });
 
-/** The verdict `fleetStatus` would print over these guests, out of an inventory of `total`. */
+/**
+ * The verdict `fleetStatus` would print over these guests, out of an inventory of `total`.
+ *
+ * `rows` is supplied all-ready because these cases are about the ENVIRONMENT comparison; #1029 made a
+ * missing `rows` UNKNOWN rather than CONSISTENT, so passing it is what keeps these tests about the thing
+ * they are about instead of about readiness.
+ */
 const verdictOver = (guests: ReturnType<typeof box>[], total: number) => {
   const { consistent, mismatches, compared } = fleetConsistency(guests);
-  return consistencyVerdict({ consistent, compared, total, mismatches });
+  const rows = guests.map((g) => ({ name: g.worker, state: "ready" }));
+  return consistencyVerdict({ consistent, compared, total, mismatches, rows });
 };
 
 test("YESTERDAY, EXACTLY: nine agreeing boxes and one that did not answer is NOT consistent", () => {
@@ -218,12 +225,12 @@ test("THE SAME DEFECT ONE LEVEL DOWN: a box that answers but reports no environm
   const answeredButEmpty = { worker: "http://a11y-worker-4:8765", environment: undefined };
   const { consistent, mismatches, compared } = fleetConsistency([box(2), box(3), answeredButEmpty as never, box(5)]);
   assert.equal(compared, 3, "fleetConsistency must say how many it actually compared");
-  const verdict = consistencyVerdict({ consistent, compared, total: 4, mismatches });
+  const verdict = consistencyVerdict({ consistent, compared, total: 4, mismatches, rows: [] });
   assert.equal(verdict.state, "UNKNOWN", "a box that answered with nothing to compare is not agreement");
 });
 
 test("nothing to compare is UNKNOWN, never a vacuous CONSISTENT", () => {
-  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10 }).state, "UNKNOWN");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 0, total: 10, rows: [] }).state, "UNKNOWN");
 });
 
 test("the deprecated `consistent` field carries the CORRECTED answer, never the old misreading", () => {
@@ -298,4 +305,20 @@ test("#1029: the existing verdicts are unchanged -- this is an addition, not a r
   assert.equal(consistencyVerdict({
     consistent: true, compared: 4, total: 4, rows: [{ name: "a", state: "ready" }],
   }).state, "CONSISTENT", "and an all-ready, all-agreeing fleet still reads CONSISTENT");
+});
+
+test("#1029: a caller that supplies NO readiness gets UNKNOWN, never a permissive CONSISTENT", () => {
+  // worker-judge's tiebreak on #1048, and the argument I made on their #1033 four hours earlier turned
+  // back on me: "nobody told me the readiness" is CANNOT ASK, not "all ready". A default that silently
+  // answers the permissive way is the 19.7 hours in miniature -- the whole defect was this function
+  // answering a question it had not been given the inputs for.
+  const verdict = consistencyVerdict({ consistent: true, compared: 4, total: 4 });
+  assert.equal(verdict.state, "UNKNOWN");
+  assert.match(verdict.line, /no readiness was supplied/,
+    "and it says WHICH question went unasked, so the caller knows what to pass rather than what to retry");
+  assert.match(verdict.line, /environments agree across 4 of 4/,
+    "while still reporting the fact it DID measure -- refusing to answer is not refusing to report");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [] }).state, "CONSISTENT",
+    "and an EXPLICIT empty list is a different statement from no list at all: it says the caller asked "
+    + "and found nobody blocked, which is exactly the distinction `undefined` versus `[]` exists to make");
 });

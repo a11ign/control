@@ -322,6 +322,11 @@ function renderTable(rows) {
  * deleted — it is real, separate, and still printed in the BLOCKED line — it simply may no longer stand
  * in for usability.
  *
+ * **AND NO READINESS SUPPLIED IS `UNKNOWN`, NOT `CONSISTENT`.** `rows` has no default: a caller that omits
+ * it has not asked whether the fleet can capture, and answering the permissive way is the same defect this
+ * function was fixed for, one door over. worker-judge's tiebreak, reviewing #1048: when the safe direction
+ * and the permissive direction are one line apart, take the safe one.
+ *
  * `busy` IS NOT A FAULT. A worker mid-capture is the system working, and refusing a healthy fleet under
  * load is the easy wrong fix; only `warming` and `unreachable` may hold the headline down.
  *
@@ -329,7 +334,7 @@ function renderTable(rows) {
  *           rows?: { name?: string, state?: string }[] }} input `rows` carries each box's `stateOf`
  * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
  */
-export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows = [] }) {
+export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows }) {
   const across = `across ${compared} of ${total}`;
   if (compared === 0) {
     return { state: "UNKNOWN",
@@ -344,6 +349,15 @@ export function consistencyVerdict({ consistent, compared, total, mismatches = [
       line: `fleet UNKNOWN — the ${compared} compared agree, and ${total - compared} of ${total} could not be `
         + "compared. A box that did not answer and has drifted reads exactly like one that agrees, so this "
         + "is not a consistent fleet until it answers" };
+  }
+  // NO READINESS SUPPLIED IS CANNOT ASK, NOT "ALL READY". A default that silently answers the permissive
+  // way is the 19.7 hours in miniature: this function's whole defect was answering a question it had not
+  // been given the inputs for. There is exactly one production caller and it passes `rows`, so this
+  // changes no real verdict -- it closes the door through which the same bug walks back in.
+  if (rows === undefined) {
+    return { state: "UNKNOWN",
+      line: `fleet UNKNOWN — the environments agree ${across}, and no readiness was supplied, so whether `
+        + "these boxes can capture was never asked. A consistent environment is not a usable fleet" };
   }
   // NAMED, NEVER COUNTED. "blocked" and "blocked on a11y-worker-4, warming" are different instructions:
   // one sends a reader to `fleet:status` again, the other sends them to a box.
