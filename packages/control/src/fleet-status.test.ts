@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import type { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus, LINK, linkVerdictOf,
-  readLinkLayer, neighbourScript, renderHead } from "./fleet-status.mjs";
+  readLinkLayer, neighbourScript, renderHead, failedRead } from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -265,6 +265,9 @@ const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[]) =>
   return fleetStatus({
     workers: () => workers,
     probe: async (w) => fakeProbe(w.name, states[workers.indexOf(w)]),
+    // #1311 review: injected so a test that ever drives an "unreachable" box here fails loudly rather than
+    // ssh-ing to the real control plane from a shell that knows where it is -- structural, not a URL's spelling.
+    linkRead: () => { throw new Error("a unit test reached the real layer-2 read: inject linkRead"); },
   });
 };
 
@@ -473,4 +476,27 @@ test("#1298: one ssh to the control plane with its own key and BatchMode, and on
   assert.equal(byHostname.get("a11y-worker-9")?.verdict, LINK.NO_VERDICT,
     "a hostname is in no neighbour table, so reading its absence as OFF would be a false walk");
   assert.equal(ran, 0, "and with nothing askable there is no ssh at all");
+});
+
+test("#1311 review: a control plane that ANSWERED and failed the read is no verdict, never `control plane unreachable`", async () => {
+  const spawned = (result: object) => (() => ({ stdout: "", ...result })) as unknown as typeof spawnSync;
+  const failedThere = await driveLinks([], { 3: ["FAILED"] }, { run: spawned({ status: 1 }) });
+  assert.equal(failedThere.linkLayer.lines[0],
+    "unknown (no layer-2 verdict for a11y-worker-3: the control plane answered, but the read failed there (remote exit 1))");
+  assert.doesNotMatch(failedThere.linkLayer.lines.join("\n"), /control plane unreachable/,
+    "it answered, so sending somebody to check its reachability is the wrong errand");
+  assert.deepEqual(failedThere.linkLayer.gate, { hold: true, off: [], unknown: ["a11y-worker-3"] },
+    "and the gate holds exactly as it did");
+
+  const timedOut = await driveLinks([], { 3: ["FAILED"] }, {
+    run: spawned({ status: null, error: Object.assign(new Error("spawnSync ssh ETIMEDOUT"), { code: "ETIMEDOUT" }) }) });
+  assert.match(timedOut.linkLayer.lines[0], /^unknown \(no layer-2 verdict for a11y-worker-3: the read did not finish within 45 s/);
+  const killed = await driveLinks([], { 3: ["FAILED"] }, { run: spawned({ status: null }) });
+  assert.match(killed.linkLayer.lines[0], /^unknown \(no layer-2 verdict for a11y-worker-3: ssh was killed/);
+
+  const neverStarted = await driveLinks([], { 3: ["FAILED"] }, {
+    run: spawned({ status: null, error: Object.assign(new Error("spawnSync ssh ENOENT"), { code: "ENOENT" }) }) });
+  assert.match(neverStarted.linkLayer.lines[0], /^unknown \(control plane unreachable\) for a11y-worker-3: ssh could not be started/,
+    "ssh never starting is the one other case where the control plane was genuinely never asked");
+  assert.equal(failedRead({ status: 0 }), null, "and a clean read is not a failure");
 });

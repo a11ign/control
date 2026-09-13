@@ -488,11 +488,38 @@ function controlPlaneFromEnvironment() {
 }
 
 /**
- * One ssh to the control plane for every address, or the reason it could not be asked.
+ * WHICH FAILURE decides the words -- worker-capture's should-fix on #1311.
+ *
+ * Only ssh's own 255, or ssh never starting, means the control plane was NOT ASKED. Any other non-zero
+ * status means it answered and the script failed there, and a timeout or a kill cannot say which -- so
+ * those are no verdict, never "control plane unreachable", which would send somebody to check a network
+ * path that worked. The gate holds on every one of them alike; only the errand differs.
+ *
+ * @param {{ error?: NodeJS.ErrnoException, status: number | null }} result what `spawnSync` returned
+ * @returns {LinkAnswer | null} null when the read succeeded
+ */
+export function failedRead({ error, status }) {
+  if (error?.code === "ETIMEDOUT") {
+    return { verdict: LINK.NO_VERDICT, detail: `the read did not finish within ${NEIGHBOUR_READ_TIMEOUT_MS / MS_PER_SECOND} s, `
+      + "so whether the control plane answered is not known" };
+  }
+  if (error) return { verdict: LINK.UNASKED, detail: `ssh could not be started (${error.message})` };
+  if (status === SSH_OWN_FAILURE) return { verdict: LINK.UNASKED, detail: "ssh exit 255, ssh's own connection failure" };
+  if (status === null) {
+    return { verdict: LINK.NO_VERDICT, detail: "ssh was killed before the read finished, so whether the control plane answered is not known" };
+  }
+  if (status !== 0) {
+    return { verdict: LINK.NO_VERDICT, detail: `the control plane answered, but the read failed there (remote exit ${status})` };
+  }
+  return null;
+}
+
+/**
+ * One ssh to the control plane for every address, or the answer every box gets when the read failed.
  *
  * @param {string[]} addresses
  * @param {{ run: typeof spawnSync, controlPlane: () => { host: string, key: string } }} deps
- * @returns {{ unasked: string | null, polls: Map<string, string[]> }}
+ * @returns {{ failed: LinkAnswer | null, polls: Map<string, string[]> }}
  */
 function askControlPlane(addresses, { run, controlPlane }) {
   /** @type {{ host: string, key: string }} */
@@ -501,17 +528,13 @@ function askControlPlane(addresses, { run, controlPlane }) {
     target = controlPlane();
   } catch (error) {
     const why = String(/** @type {Error} */ (error).message ?? error).split(" -- ")[0];
-    return { unasked: `this shell was never told where it is (${why})`, polls: new Map() };
+    return { failed: { verdict: LINK.UNASKED, detail: `this shell was never told where it is (${why})` }, polls: new Map() };
   }
   const result = run("ssh", ["-i", target.key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=10", `root@${target.host}`, neighbourScript(addresses)],
   { encoding: "utf8", timeout: NEIGHBOUR_READ_TIMEOUT_MS });
-  if (result.error) return { unasked: `ssh did not complete (${result.error.message})`, polls: new Map() };
-  if (result.status !== 0) {
-    const own = result.status === SSH_OWN_FAILURE ? ", ssh's own connection failure" : "";
-    return { unasked: `ssh exit ${result.status}${own}`, polls: new Map() };
-  }
-  return { unasked: null, polls: parseNeighbourPolls(String(result.stdout ?? "")) };
+  const failed = failedRead(result);
+  return { failed, polls: failed ? new Map() : parseNeighbourPolls(String(result.stdout ?? "")) };
 }
 
 /**
@@ -550,10 +573,8 @@ export function readLinkLayer(rows, { run = spawnSync, controlPlane = controlPla
     else answers.set(name, { verdict: LINK.NO_VERDICT, detail: `named by hostname (${address}), which no neighbour table lists` });
   }
   if (!askable.length) return answers;
-  const { unasked, polls } = askControlPlane(askable.map(({ address }) => address), { run, controlPlane });
-  for (const { name, address } of askable) {
-    answers.set(name, unasked === null ? answerFor(polls, address) : { verdict: LINK.UNASKED, detail: unasked });
-  }
+  const { failed, polls } = askControlPlane(askable.map(({ address }) => address), { run, controlPlane });
+  for (const { name, address } of askable) answers.set(name, failed ?? answerFor(polls, address));
   return answers;
 }
 
