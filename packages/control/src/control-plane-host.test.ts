@@ -42,24 +42,44 @@ test("returns A11Y_CONTROL_HOST when it is set", () => {
   }
 });
 
+// #1428: THE REFUSAL TESTS CONTROL BOTH SOURCES THEY ASSERT ABOUT. `requireControlPlaneHost` falls back to
+// `readControlHostFile()`, which reads `A11Y_CONTROL_HOST_FILE` -- and, when that is unset, the installed default
+// `/etc/a11ign/control-host`. These two tests used to clear only `A11Y_CONTROL_HOST`, so on any machine exporting
+// the file variable the host resolved and nothing threw: 14 / 2 on the agents host, green in CI. Each now runs
+// inside `withHostEnv` with the file variable pointed at a path that is never written, so neither the ambient
+// export nor the installed default can answer.
+
 test("REFUSES rather than guessing when A11Y_CONTROL_HOST is unset", () => {
-  const before = process.env.A11Y_CONTROL_HOST;
-  try {
+  withHostEnv((absentFile) => {
     delete process.env.A11Y_CONTROL_HOST;
+    process.env.A11Y_CONTROL_HOST_FILE = absentFile;
     assert.throws(() => requireControlPlaneHost(), /A11Y_CONTROL_HOST is required/);
-  } finally {
-    if (before === undefined) delete process.env.A11Y_CONTROL_HOST; else process.env.A11Y_CONTROL_HOST = before;
-  }
+  });
 });
 
 test("an empty string is treated the same as unset, not as a chosen empty host", () => {
-  const before = process.env.A11Y_CONTROL_HOST;
-  try {
+  withHostEnv((absentFile) => {
     process.env.A11Y_CONTROL_HOST = "";
+    process.env.A11Y_CONTROL_HOST_FILE = absentFile;
     assert.throws(() => requireControlPlaneHost(), /A11Y_CONTROL_HOST is required/);
-  } finally {
-    if (before === undefined) delete process.env.A11Y_CONTROL_HOST; else process.env.A11Y_CONTROL_HOST = before;
-  }
+  });
+});
+
+test("#1428: the refusal still refuses on a machine that EXPORTS a control-host file -- the agents host's shape, "
+  + "stood in for here so CI sees it too", () => {
+  withHostEnv((absentFile) => {
+    const exported = `${absentFile}-exported`;
+    writeFileSync(exported, "exported.example.test\n");
+    delete process.env.A11Y_CONTROL_HOST;
+    process.env.A11Y_CONTROL_HOST_FILE = exported;
+    assert.equal(requireControlPlaneHost(), "exported.example.test",
+      "the positive control: with that export in place the fallback really answers -- this is what the refusal must exclude");
+    process.env.A11Y_CONTROL_HOST_FILE = absentFile;
+    assert.throws(() => requireControlPlaneHost(), /A11Y_CONTROL_HOST is required/,
+      "and a test that points the file variable at an absent path refuses despite the export");
+    process.env.A11Y_CONTROL_HOST = "";
+    assert.throws(() => requireControlPlaneHost(), /A11Y_CONTROL_HOST is required/, "the empty-string case too");
+  });
 });
 
 // A private IPv4 literal used as a fallback default -- `... || "10.x.x.x"` / `"192.168.x.x"` -- is exactly
