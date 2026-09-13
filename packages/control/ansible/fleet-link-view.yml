@@ -1,0 +1,214 @@
+---
+# Are the workers ABSENT at layer 2, or PRESENT at layer 2 and silent at layer 3?
+#
+#     npm run fleet:link-view
+#     npm run fleet:link-view -- -e since=13:25 -e until=13:40      # UTC, for the journal window
+#
+# Written during the 2026-09-12 outage, when all ten boxes stopped answering HTTP, SSH and ICMP at once
+# while the gateway, both containers and the hypervisor stayed up. The question that decides who does what
+# next is not answerable from a Mac:
+#
+#   - **absent at layer 2** (no neighbour entry, or entries gone/FAILED) → the machines are not on the wire.
+#     Power, or the switch port. Somebody has to look at the hardware.
+#   - **present at layer 2** (REACHABLE/STALE with the MAC the inventory records) → the machines are on the
+#     wire and something above the link is refusing. That is a different errand entirely.
+#
+# Sending a person to a rack is expensive and sending them to look at the WRONG thing is worse, so this
+# exists rather than an ad-hoc ssh: it asks the same question from three vantage points and prints the
+# answer next to the MAC `inventory.yml` already records for each box.
+#
+# ## Read-only, and deliberately so
+#
+# Every task is a read with `changed_when: false`. Nothing wakes and nothing restarts — during an outage the
+# temptation is to act, and an action taken before the link question is answered destroys the evidence that
+# would have answered it. Acting is `wake.yml`'s and `recover.yml`'s business.
+#
+# It DOES send one ICMP echo per address, deliberately, and that is not a contradiction of the above: a
+# neighbour entry reading STALE is a CACHED answer from before the incident, and reporting it as presence
+# is the single most likely way this playbook could send somebody to look at the wrong thing. It changes
+# nothing on any worker -- it cannot, since the whole question is whether anything is there to change.
+#
+# ## ONLY `REACHABLE` AND `FAILED` ARE VERDICTS, and the first version of this file said otherwise
+#
+# That version claimed the probe makes STALE "either become REACHABLE or FAILED". **Measured 2026-09-13
+# against a HEALTHY fleet: eight of ten addresses still read STALE after the probe, and two read
+# REACHABLE.** The kernel answers from a cache entry it still considers usable rather than re-ARPing, so a
+# probe does not force a verdict -- it only offers the chance of one.
+#
+# So STALE is treated as NO ANSWER here, not as presence and not as absence, and the read retries for a
+# terminal state. When the retries expire the address is printed as `NO VERDICT` with its cached MAC,
+# which is the honest output: it says the tool could not tell, in a file whose entire purpose is telling
+# someone which errand to run.
+#
+# ## Why three vantage points
+#
+# `a11y-control` and `a11y-lab` are unprivileged containers on `pve-micro`; the hypervisor is a separate
+# network stack on the same subnet. If all three agree the boxes are gone, the finding is about the boxes.
+# If the containers disagree with the hypervisor, the finding is about container networking, and nobody
+# should be sent to a rack at all.
+- name: The control plane must be in the inventory before anything claims to have run
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    # Same guard, same reason as every other playbook here: `inventory.yml` is gitignored, so a checkout
+    # that has not been given one matches no hosts, prints an EMPTY PLAY RECAP and EXITS 0 -- a diagnosis
+    # that reached nothing, reported as success, during an incident.
+    - name: Refuse an inventory that resolved no hosts to ask
+      ansible.builtin.assert:
+        that:
+          - groups['a11y_control'] is defined
+          - groups['a11y_control'] | length > 0
+          - groups['a11y_workers'] is defined
+          - groups['a11y_workers'] | length > 0
+        fail_msg: >-
+          No host matched `a11y_control`, or no worker matched `a11y_workers`, so this command would have
+          asked NOTHING and exited 0. `inventory.yml` is gitignored; run this from a checkout that has one.
+        success_msg: >-
+          asking {{ groups['a11y_control'] | length }} control host(s), {{ groups['a11y_lab'] | default([]) | length }}
+          lab host(s) and {{ groups['a11y_hypervisor'] | default([]) | length }} hypervisor(s) about
+          {{ groups['a11y_workers'] | length }} worker address(es)
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: What the link layer says about the workers
+  # The hypervisor is in this list on purpose -- see the header. It is NOT a capture worker and nothing
+  # here treats it as one; it is a third network stack that can see the same subnet.
+  hosts: a11y_control:a11y_lab:a11y_hypervisor
+  gather_facts: false
+
+  vars:
+    # Derived from the inventory, never retyped. The fleet is defined ONCE in `inventory.yml`, and a second
+    # copy of ten addresses in a diagnostic is exactly the "fact stated twice" shape this repo has paid for
+    # five times in one day.
+    worker_addresses: "{{ groups['a11y_workers'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+  tasks:
+    # WHICH CLOCK. A window like "13:25 to 13:40" is meaningless until the box says what time it thinks it
+    # is and in which zone -- and this is being read against a UTC timeline written on a tracker by a
+    # session on a machine in Europe/London, an hour off. Asked first so every timestamp below is readable.
+    - name: What time this box thinks it is
+      ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
+      changed_when: false
+      register: box_clock
+
+    - name: "clock: {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} says {{ box_clock.stdout }} (UTC)"
+
+    # The neighbour table, RAW. Not filtered to the ten addresses on the box, because "the entry is absent"
+    # and "my filter did not match it" are the same empty output, and this is the exact question being
+    # asked. The filtering happens below, on a value that was read whole.
+    - name: The whole neighbour table
+      # `ip neigh` on Debian; `arp -an` kept as the fallback so a box without iproute2 reports a table
+      # rather than a command-not-found that reads like an empty table.
+      ansible.builtin.shell: ip neigh show 2>/dev/null || arp -an 2>/dev/null || true
+      changed_when: false
+      register: neigh
+
+    - name: "LINK VIEW from {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg: |-
+          {% for addr in worker_addresses %}
+          {% set hit = neigh.stdout_lines | select('search', '(^|[^0-9.])' ~ (addr | replace('.', '\\.')) ~ '([^0-9.]|$)') | list %}
+          {{ "%-16s"|format(addr) }} {{ hit | join(' ; ') if hit | length > 0 else 'ABSENT from the neighbour table' }}
+          {% endfor %}
+
+    # STALE IS A MEMORY, NOT A MEASUREMENT. The read above can return an entry cached before the incident,
+    # which looks exactly like presence. One echo per address forces re-resolution; the re-read below is the
+    # answer that can be relied on. `|| true` because every one of these is expected to fail right now, and a
+    # failed ping is the finding rather than an error.
+    - name: Probe each address once, so a cached entry cannot masquerade as a live one
+      ansible.builtin.shell: >-
+        for a in {{ worker_addresses | join(' ') }}; do ping -c 1 -W 1 "$a" >/dev/null 2>&1 || true; done; true
+      changed_when: false
+
+    # READ THE SETTLED STATE, NEVER A SAMPLE MID-RESOLUTION. `PROBE`, `DELAY` and `INCOMPLETE` all mean
+    # "the kernel is still asking", and the first version of this task printed them as though they were
+    # answers -- which reads as "something is there" when it means nothing yet. Only `REACHABLE` and
+    # `FAILED` are terminal, so this retries until no worker address is in a transient state, which is the
+    # condition rather than a slept duration.
+    - name: The neighbour table AFTER the probe, once it has settled
+      ansible.builtin.shell: ip neigh show 2>/dev/null || arp -an 2>/dev/null || true
+      changed_when: false
+      register: neigh_after
+      # STALE joins the transient list, per the header: it is a cache entry, not an answer.
+      until: >-
+        worker_addresses | reject('in', neigh_after.stdout_lines
+          | select('search', 'PROBE|DELAY|INCOMPLETE|STALE')
+          | map('regex_replace', '^([0-9.]+).*$', '\\1') | list) | list | length == worker_addresses | length
+      retries: 10
+      delay: 3
+      failed_when: false
+
+    - name: "LINK VIEW from {{ inventory_hostname }}, AFTER a fresh probe"
+      ansible.builtin.debug:
+        msg: |-
+          {% for addr in worker_addresses %}
+          {% set hit = neigh_after.stdout_lines | select('search', '(^|[^0-9.])' ~ (addr | replace('.', '\\.')) ~ '([^0-9.]|$)') | list %}
+          {{ "%-16s"|format(addr) }} {{ (hit | join(' ; ') ~ ('   <- NO VERDICT: cached, not revalidated' if hit | join(' ') is search('STALE') else '')) if hit | length > 0 else 'ABSENT from the neighbour table' }}
+          {% endfor %}
+
+    - name: "the raw table, so nothing above is taken on trust"
+      ansible.builtin.debug:
+        msg: "{{ neigh.stdout_lines | default(['(empty)']) }}"
+
+- name: What executed against a worker in the window, on the box that holds the fleet key
+  # ONLY the control plane. ADR 0012 put the fleet SSH key here and nowhere else, so this is the only box
+  # from which a playbook or an ssh session could have reached a worker at all. "Nothing ran" is a finding
+  # about the whole org, and it can only be made here.
+  hosts: a11y_control
+  gather_facts: false
+
+  vars:
+    since_utc: "{{ since | default('13:25') }}"
+    until_utc: "{{ until | default('13:40') }}"
+
+  tasks:
+    # `journalctl --since` takes the BOX's local time, not UTC, whatever the string looks like -- a source
+    # bounded to a window nobody chose. `--utc` makes the OUTPUT unambiguous; the window itself is passed
+    # explicitly with a date so a bare "13:25" cannot silently mean yesterday.
+    - name: The journal for the window
+      ansible.builtin.shell: >-
+        journalctl --utc --since "{{ ansible_date_time.date | default(lookup('pipe', 'date -u +%Y-%m-%d')) }} {{ since_utc }}"
+        --until "{{ ansible_date_time.date | default(lookup('pipe', 'date -u +%Y-%m-%d')) }} {{ until_utc }}"
+        --no-pager 2>/dev/null | tail -400 || true
+      changed_when: false
+      register: window_journal
+
+    - name: "journal {{ since_utc }}-{{ until_utc }} UTC on {{ inventory_hostname }}: {{ window_journal.stdout_lines | default([]) | length }} line(s)"
+      ansible.builtin.debug:
+        msg: "{{ window_journal.stdout_lines | default(['(no journal lines in the window)']) }}"
+
+    # The durable record of what ANSIBLE did, which outlives the journal's retention and names the playbook.
+    # `.retry` files and the log path both live where `ansible.cfg` puts them; absent is a finding, so the
+    # listing is `|| true` and the absence is printed rather than failing the play.
+    - name: Ansible's own log and any retry files
+      ansible.builtin.shell: >-
+        ls -la /var/log/ansible* /root/*.retry /root/.ansible/*.log 2>/dev/null || true;
+        echo '--- ansible log tail ---';
+        tail -200 /var/log/ansible.log 2>/dev/null || echo '(no /var/log/ansible.log)'
+      changed_when: false
+      register: ansible_record
+
+    - name: "ansible's durable record on {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg: "{{ ansible_record.stdout_lines | default(['(nothing)']) }}"
+
+    # THE DHCP SIDE, asked honestly. This box is a DHCP CLIENT, not the server -- the server is the gateway
+    # -- so the expected answer is "its own lease and nothing about the workers". Printed anyway, because
+    # "the control plane cannot see the lease side" is the finding, and an unasked question reads the same
+    # as an asked one with no answer.
+    - name: Whatever this box knows about DHCP
+      ansible.builtin.shell: >-
+        echo '--- leases this box holds ---';
+        cat /var/lib/dhcp/*.leases /var/lib/dhcpcd/*.lease* 2>/dev/null | tail -40 || true;
+        echo '--- is anything serving DHCP here ---';
+        (command -v dnsmasq >/dev/null && echo 'dnsmasq present' || echo 'no dnsmasq');
+        (systemctl is-active isc-dhcp-server 2>/dev/null || echo 'no isc-dhcp-server')
+      changed_when: false
+      register: dhcp_view
+
+    - name: "DHCP, as {{ inventory_hostname }} can see it"
+      ansible.builtin.debug:
+        msg: "{{ dhcp_view.stdout_lines | default(['(nothing)']) }}"

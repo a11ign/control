@@ -1,0 +1,41 @@
+# How to reach the control plane. It is a container like the lab, and it needs the same four facts.
+#
+# ## The file that did not exist, and what its absence looked like
+#
+# `a11y_workers`, `a11y_lab` and `a11y_hypervisor` each had a `group_vars` file. `a11y_control` did not,
+# so a playbook targeting it from a developer's Mac inherited NOTHING and Ansible fell back to the local
+# username:
+#
+#     fatal: [a11y-control]: UNREACHABLE! => Failed to connect to the host via ssh:
+#     danielbeck@<the control plane>: Permission denied (publickey,password).
+#
+# **That message names a credential problem and not a missing variable**, which is why the absence
+# survived: it reads as "your key is wrong", and an operator checks their key. `fleet-playbook.mjs:559-569`
+# already documents the identical failure at a different call site, in as many words -- *"Ansible defaults
+# an unqualified `-i '<host>,'` to the LOCAL username, so it tried `danielbeck@` and got Permission denied
+# (publickey) -- a credentials failure that reads like a missing key rather than a wrong user."* The remedy
+# reached that call site and not the class; this file closes the class.
+#
+# Found 2026-09-12 while writing `fleet-link-view.yml` during the fleet outage, when the one box that could
+# answer "are the workers on the wire" was the one box no playbook could reach without inline overrides.
+#
+# ## Why this is not simply `a11y_lab.yml` with a different address
+#
+# It is nearly that, and the parts that differ are the parts worth stating. This box holds the FLEET key
+# (ADR 0012's split) and runs Ansible itself; it has no venv, no corpus and no second Python, so the two
+# `ansible_python_interpreter` facts the lab needs have no counterpart here. Everything below is the
+# connection and nothing else.
+ansible_connection: ssh
+ansible_user: root
+ansible_shell_type: sh
+ansible_port: 22
+
+# The Proxmox key, exactly as `a11y_lab.yml` takes it, and for the same reason: an operator with several
+# keys would otherwise have ssh pick one by luck, and "Permission denied (publickey)" says nothing about
+# which key was offered.
+#
+# NO DEFAULT -- #255. A real key filename here is somebody's infrastructure written down. The refusal that
+# makes the requirement true is `tasks/require-control-plane-key.yml`, asserted on localhost before
+# anything connects; `| mandatory` does NOT work, because `lookup('env', ...)` returns '' rather than
+# Undefined and passes straight through it.
+ansible_ssh_private_key_file: "{{ lookup('env', 'A11Y_PVE_KEY') }}"
