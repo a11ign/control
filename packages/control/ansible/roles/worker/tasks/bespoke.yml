@@ -247,3 +247,34 @@
   loop:
     - edge-profile
     - chrome-profile
+  register: profile_dirs
+
+- name: Record how each browser profile came to exist
+  # row 1201: ADOPTION IS RECORDED HERE BECAUSE ONLY PROVISIONING KNOWS IT INDEPENDENTLY.
+  #
+  # `browser-profile.mjs` used to decide "did Edge run in this profile before?" from the presence of
+  # Edge's own `Local State` file, and nothing else. If Edge ever stops writing that file, every profile
+  # reads as FRESH, the capture cache key moves, and nothing reports the change -- the failure mode and
+  # the ordinary answer are the same absence.
+  #
+  # THE WORKER CANNOT WRITE THIS RECORD. Nothing in `packages/nvda-worker` creates the profile directory
+  # -- Edge does, on first run -- so at a profile's first encounter the only evidence available to the
+  # worker IS `Local State`. A worker writing this file would be recording that inference and reading it
+  # back later as a fact, which is worse than the gap: it would make one witness look like two.
+  #
+  # The task above is the one place the answer exists. `win_file` reports `changed` when it CREATED the
+  # directory and unchanged when it was already there, so `item.changed` is the fact, read from the
+  # action that established it rather than inferred afterwards from the tree.
+  #
+  # FORCE: NO IS LOAD-BEARING, NOT TIDINESS. Provisioning is re-run routinely. On the second run the
+  # directory exists because the FIRST run made it -- so overwriting would relabel a `created-fresh`
+  # profile as `adopted-existing` and quietly promote cold evidence to warm. The record is written once,
+  # at the only moment it is true, and never revised.
+  ansible.windows.win_copy:
+    dest: '%LOCALAPPDATA%\a11y-witness\{{ item.item }}\.a11y-profile-origin'
+    content: "{{ 'created-fresh' if item.changed else 'adopted-existing' }}"
+    force: false
+  loop: "{{ profile_dirs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
