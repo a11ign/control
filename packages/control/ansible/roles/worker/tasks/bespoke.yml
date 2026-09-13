@@ -273,15 +273,24 @@
   #
   # UNVERIFIED AGAINST A GUEST: whether `%LOCALAPPDATA%` expands in a `win_copy` DEST the way it does in
   # a `win_file` PATH. The task above proves the `win_file` case in production; the only other `win_copy`
-  # in this repository uses an absolute path (line 75), so there is no local precedent for `%VAR%` here.
-  # If it does not expand, the record lands in a literal directory named `%LOCALAPPDATA%` -- and NOTHING
-  # FAILS: every guest falls back to `Local State`, exactly as before, so the failure is indistinguishable
-  # from not having shipped this. Said out loud rather than assumed, because that is the one failure mode
-  # this row was filed to remove.
+  # in this repository uses an absolute path, so there is no local precedent for `%VAR%` here.
+  #
+  # THE LIKELY CONSEQUENCE IS A LOUD PROVISIONING FAILURE, NOT SILENCE -- corrected after review, and
+  # from this file's own experience rather than from reasoning: `Somewhere to put the driver` above
+  # records that *"`win_copy` does NOT create the destination's parent and fails with 'Destination
+  # directory ... does not exist'"*. An unexpanded `%LOCALAPPDATA%` names a parent that was never created
+  # (the task above created the EXPANDED one), so this task should fail the run rather than write
+  # somewhere harmless. A first draft of this note said "nothing fails", which is the sentence that makes
+  # a reader deprioritise checking it.
   #
   # The command that settles it, on #630's fleet half:
   #   npm run fleet:provision -- --limit=a11y-worker-2
   #   then, on the guest:  Test-Path "$env:LOCALAPPDATA\a11y-witness\edge-profile\.a11y-profile-origin"
+  # UNBECOMED, AND THAT IS LOAD-BEARING RATHER THAN INHERITED. `%LOCALAPPDATA%` is per-user, as the task
+  # above says of itself, and the worker runs as `witness`. Adding `become: true` here -- which the driver
+  # task above does, so it is a natural thing to copy -- would resolve this to a DIFFERENT user's profile:
+  # the record would land somewhere real, `win_copy` would succeed, and the worker would find nothing.
+  # That failure is genuinely silent, unlike the expansion one, so `profile-origin-writer.test.ts` pins it.
   ansible.windows.win_copy:
     dest: '%LOCALAPPDATA%\a11y-witness\{{ item.item }}\.a11y-profile-origin'
     content: "{{ 'created-fresh' if item.changed else 'adopted-existing' }}"
