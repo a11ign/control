@@ -270,6 +270,18 @@
   # directory exists because the FIRST run made it -- so overwriting would relabel a `created-fresh`
   # profile as `adopted-existing` and quietly promote cold evidence to warm. The record is written once,
   # at the only moment it is true, and never revised.
+  #
+  # UNVERIFIED AGAINST A GUEST: whether `%LOCALAPPDATA%` expands in a `win_copy` DEST the way it does in
+  # a `win_file` PATH. The task above proves the `win_file` case in production; the only other `win_copy`
+  # in this repository uses an absolute path (line 75), so there is no local precedent for `%VAR%` here.
+  # If it does not expand, the record lands in a literal directory named `%LOCALAPPDATA%` -- and NOTHING
+  # FAILS: every guest falls back to `Local State`, exactly as before, so the failure is indistinguishable
+  # from not having shipped this. Said out loud rather than assumed, because that is the one failure mode
+  # this row was filed to remove.
+  #
+  # The command that settles it, on #630's fleet half:
+  #   npm run fleet:provision -- --limit=a11y-worker-2
+  #   then, on the guest:  Test-Path "$env:LOCALAPPDATA\a11y-witness\edge-profile\.a11y-profile-origin"
   ansible.windows.win_copy:
     dest: '%LOCALAPPDATA%\a11y-witness\{{ item.item }}\.a11y-profile-origin'
     content: "{{ 'created-fresh' if item.changed else 'adopted-existing' }}"
