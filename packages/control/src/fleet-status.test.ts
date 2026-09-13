@@ -3,9 +3,10 @@
 // table at all — it is the "two states reported as one" shape this project keeps paying for.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { spawnSync } from "node:child_process";
 
-import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus }
-  from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus, LINK, linkVerdictOf,
+  readLinkLayer, neighbourScript, renderHead } from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -321,4 +322,155 @@ test("#1029: a caller that supplies NO readiness gets UNKNOWN, never a permissiv
   assert.equal(consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [] }).state, "CONSISTENT",
     "and an EXPLICIT empty list is a different statement from no list at all: it says the caller asked "
     + "and found nobody blocked, which is exactly the distinction `undefined` versus `[]` exists to make");
+});
+
+// --- #1298: a box that does not answer /health says FIRST, in words, whether it is on the network ---
+
+/** `ip neigh show <address>` in the shapes the control plane printed on 2026-09-13; "" is no entry at all. */
+const neigh = (address: string, state: string) => {
+  if (state === "") return "";
+  if (state === "FAILED" || state === "INCOMPLETE") return `${address} dev eth0 ${state}`;
+  return `${address} dev eth0 lladdr 02:00:5e:00:53:01 ${state}`;
+};
+
+/**
+ * A control plane whose neighbour table reads `script[address]` over the polls, interleaved per poll the
+ * way `neighbourScript` prints it, recording every command it was asked to run.
+ */
+const controlPlaneReading = (script: Record<string, string[]>) => {
+  const calls: string[][] = [];
+  const run = ((command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    const addresses = Object.keys(script);
+    const polls = Math.max(0, ...addresses.map((a) => script[a].length));
+    const stdout = Array.from({ length: polls }, (_, i) =>
+      addresses.map((a) => `${a}|${neigh(a, script[a][i] ?? "")}`)).flat().join("\n");
+    return { status: 0, stdout };
+  }) as unknown as typeof spawnSync;
+  return { run, calls, controlPlane: () => ({ host: "control.invalid", key: "/nonexistent/key" }) };
+};
+
+/** A box as the inventory names it: `<inventory name>  <address>:<port>`, on a documentation address. */
+const inventoryBox = (n: number) => ({ name: `a11y-worker-${n}  192.0.2.${n}:8765`, url: `http://192.0.2.${n}:8765` });
+
+/** `fleetStatus` over boxes that answer and boxes that do not, the silent ones reading `silent[n]` at layer 2. */
+const driveLinks = (answering: number[], silent: Record<number, string[]>,
+  plane: { run?: typeof spawnSync, controlPlane?: () => { host: string, key: string } } = {}) => {
+  const reading = controlPlaneReading(Object.fromEntries(
+    Object.entries(silent).map(([n, states]) => [`192.0.2.${n}`, states])));
+  const workers = [...answering, ...Object.keys(silent).map(Number)].map(inventoryBox);
+  return fleetStatus({
+    workers: () => workers,
+    probe: async (w) => (answering.some((n) => w.url === `http://192.0.2.${n}:8765`)
+      ? { ...fakeProbe(w.name, "ready"), url: w.url }
+      : { name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }),
+    linkRead: (rows) => readLinkLayer(rows, {
+      run: plane.run ?? reading.run, controlPlane: plane.controlPlane ?? reading.controlPlane }),
+  });
+};
+
+const STATE_LINE = /^(OFF THE NETWORK|ON THE NETWORK|unknown)/;
+
+test("#1298: only REACHABLE and FAILED are layer-2 answers, and the last one seen is the one reported", () => {
+  const a = "192.0.2.7";
+  const read = (...states: string[]) => linkVerdictOf(states.map((s) => neigh(a, s)));
+  assert.equal(read("INCOMPLETE", "FAILED").verdict, LINK.OFF);
+  assert.equal(read("STALE", "DELAY", "PROBE", "REACHABLE").verdict, LINK.ON);
+  assert.equal(read("REACHABLE", "FAILED").verdict, LINK.OFF,
+    "the question is whether it is on the wire NOW, so a later FAILED outranks an earlier REACHABLE");
+  const stale = read("STALE", "STALE", "DELAY");
+  assert.equal(stale.verdict, LINK.NO_VERDICT,
+    "8 of 10 HEALTHY boxes read STALE after a probe on 2026-09-13 -- a cached entry is not an answer");
+  assert.match(stale.detail, /DELAY, a cached entry that never settled/);
+  const never = read("", "", "");
+  assert.equal(never.verdict, LINK.NO_VERDICT, "never in the table means never resolved from there: not seen is not absent");
+  assert.match(never.detail, /not on its segment/);
+});
+
+test("#1298: OFF THE NETWORK, ON THE NETWORK and no verdict are different lines, one per box, printed before the table", async () => {
+  const status = await driveLinks([2], { 3: ["INCOMPLETE", "FAILED"], 4: ["STALE", "REACHABLE"], 5: ["STALE", "STALE"] });
+  const lines = status.linkLayer.lines;
+  const shown = lines.join("\n");
+  assert.ok(lines.includes("OFF THE NETWORK (no layer-2 answer from a11y-worker-3: check cable and power)"), shown);
+  assert.ok(lines.some((l) => l.startsWith("ON THE NETWORK, worker not answering (a11y-worker-4 ")), shown);
+  assert.ok(lines.some((l) => /^unknown \(no layer-2 verdict for a11y-worker-5: last read STALE/.test(l)), shown);
+  assert.ok(!lines.some((l) => l.includes("a11y-worker-2")), "a box that answered /health is not asked about, and not named");
+  for (const box of ["a11y-worker-3", "a11y-worker-4", "a11y-worker-5"]) {
+    assert.equal(lines.filter((l) => STATE_LINE.test(l) && l.includes(`${box} `) || STATE_LINE.test(l) && l.includes(`${box}:`)).length, 1,
+      `${box} is on exactly one state line, and no line carries two boxes' states`);
+  }
+  assert.ok(lines.some((l) => /fleet:wake -- <name>/.test(l)), "an OFF box gets the one cheap thing to try before the walk");
+  const head = renderHead(status);
+  const firstState = head.findIndex((l) => l.includes("OFF THE NETWORK"));
+  const tableHeader = head.findIndex((l) => /^\s+worker\s+state\s+code/.test(l));
+  assert.ok(firstState >= 0 && tableHeader > firstState, `printed FIRST, before the table:\n${head.join("\n")}`);
+});
+
+test("#1298 MUTATION: swap two boxes' layer-2 inputs and the words follow the inputs, not the box", async () => {
+  const before = (await driveLinks([], { 3: ["FAILED"], 4: ["REACHABLE"] })).linkLayer.lines;
+  const after = (await driveLinks([], { 3: ["REACHABLE"], 4: ["FAILED"] })).linkLayer.lines;
+  assert.ok(before.includes("OFF THE NETWORK (no layer-2 answer from a11y-worker-3: check cable and power)"), before.join("\n"));
+  assert.ok(after.includes("OFF THE NETWORK (no layer-2 answer from a11y-worker-4: check cable and power)"), after.join("\n"));
+  assert.ok(after.some((l) => l.startsWith("ON THE NETWORK, worker not answering (a11y-worker-3 ")), after.join("\n"));
+  assert.ok(!after.some((l) => l.startsWith("OFF THE NETWORK") && l.includes("a11y-worker-3")));
+});
+
+test("#1298: a control plane that cannot be asked is `unknown (control plane unreachable)` for every silent box, never OFF", async () => {
+  const refused = await driveLinks([2], { 3: ["FAILED"], 4: ["REACHABLE"] }, { run: (() => ({ status: 255, stdout: "" })) as unknown as typeof spawnSync });
+  const shown = refused.linkLayer.lines.join("\n");
+  for (const box of ["a11y-worker-3", "a11y-worker-4"]) {
+    assert.ok(refused.linkLayer.lines.some((l) =>
+      l.startsWith(`unknown (control plane unreachable) for ${box}: ssh exit 255, ssh's own connection failure`)), shown);
+  }
+  assert.ok(!refused.linkLayer.lines.some((l) => /^(OFF|ON) THE NETWORK/.test(l)),
+    "the fixture's neighbour lines were never read, so neither answer may appear");
+  const untold = await driveLinks([], { 3: ["FAILED"] }, {
+    controlPlane: () => { throw new Error("A11Y_CONTROL_HOST is required and has no default -- see the README"); },
+  });
+  assert.match(untold.linkLayer.lines[0],
+    /^unknown \(control plane unreachable\) for a11y-worker-3: this shell was never told where it is \(A11Y_CONTROL_HOST is required and has no default\)$/);
+});
+
+test("#1298 as amended: UNKNOWN holds a fleet write exactly as OFF does, and the hold names each list separately", async () => {
+  const mixed = await driveLinks([2], { 3: ["FAILED"], 4: ["REACHABLE"], 5: ["STALE"] });
+  assert.deepEqual(mixed.linkLayer.gate, { hold: true, off: ["a11y-worker-3"], unknown: ["a11y-worker-5"] });
+  assert.ok(mixed.linkLayer.lines.includes("fleet write: HOLD — off the network: a11y-worker-3; unknown: a11y-worker-5"),
+    mixed.linkLayer.lines.join("\n"));
+  const unknownOnly = await driveLinks([], { 5: ["STALE"] });
+  assert.deepEqual(unknownOnly.linkLayer.gate, { hold: true, off: [], unknown: ["a11y-worker-5"] }, "no verdict is not permission");
+  const allOn = await driveLinks([2], { 4: ["REACHABLE"] });
+  assert.deepEqual(allOn.linkLayer.gate, { hold: false, off: [], unknown: [] });
+  assert.match(allOn.linkLayer.lines[allOn.linkLayer.lines.length - 1], /^fleet write: may proceed/);
+});
+
+test("#1298: a fleet where every box answers asks nothing at layer 2 and prints nothing new", async () => {
+  let asked = 0;
+  const status = await fleetStatus({
+    workers: () => [inventoryBox(2), inventoryBox(3)],
+    probe: async (w) => ({ ...fakeProbe(w.name, "ready"), url: w.url }),
+    linkRead: () => { asked += 1; return new Map(); },
+  });
+  assert.equal(asked, 0, "the read costs an ssh and twelve seconds, so a healthy fleet must not pay it");
+  assert.deepEqual(status.linkLayer, { lines: [], gate: null });
+  assert.deepEqual(renderHead(status).slice(0, 1), [renderHead({ ...status, linkLayer: { lines: [] } })[0]]);
+});
+
+test("#1298: one ssh to the control plane with its own key and BatchMode, and only IPv4 addresses reach its shell", () => {
+  const reading = controlPlaneReading({ "192.0.2.3": ["FAILED"], "192.0.2.4": ["REACHABLE"] });
+  readLinkLayer([inventoryBox(3), inventoryBox(4)], reading);
+  assert.equal(reading.calls.length, 1, "one connection for every silent box, not one each");
+  const [command, ...args] = reading.calls[0];
+  assert.equal(command, "ssh");
+  assert.equal(args[args.indexOf("-i") + 1], "/nonexistent/key");
+  assert.ok(args.includes("BatchMode=yes"), "an unauthorised key must fail, not wait on a prompt nobody sees");
+  assert.ok(args.includes("root@control.invalid"));
+  assert.match(args[args.length - 1], /for a in 192\.0\.2\.3 192\.0\.2\.4; do ping -c 1 -W 1/);
+  assert.throws(() => neighbourScript(["192.0.2.1;reboot"]), /not IPv4 addresses, refusing/);
+
+  let ran = 0;
+  const byHostname = readLinkLayer([{ name: "a11y-worker-9", url: "http://a11y-worker-9:8765" }],
+    { run: (() => { ran += 1; return { status: 0, stdout: "" }; }) as unknown as typeof spawnSync, controlPlane: reading.controlPlane });
+  assert.equal(byHostname.get("a11y-worker-9")?.verdict, LINK.NO_VERDICT,
+    "a hostname is in no neighbour table, so reading its absence as OFF would be a false walk");
+  assert.equal(ran, 0, "and with nothing askable there is no ssh at all");
 });

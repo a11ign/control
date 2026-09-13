@@ -40,6 +40,9 @@
 # which is the honest output: it says the tool could not tell, in a file whose entire purpose is telling
 # someone which errand to run.
 #
+# `fleet:status` applies this same rule to any box that does not answer `/health` (`linkVerdictOf` in
+# `packages/control/src/fleet-status.mjs`, #1298): only REACHABLE and FAILED are answers. Change one, read the other.
+#
 # ## Why three vantage points
 #
 # `a11y-control` and `a11y-lab` are unprivileged containers on `pve-micro`; the hypervisor is a separate

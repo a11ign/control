@@ -23,7 +23,7 @@
  * visibility, already on every box, read by no code anywhere in this repo until now. That is why this
  * command needs no worker-side change and therefore no redeploy.
  *
- * ## The two questions it answers that a per-worker curl cannot
+ * ## The three questions it answers that a per-worker curl cannot
  *
  * - **Which box is degrading?** `assessWorker` judges on the RECOVERY RATE, not failures, because the
  *   worker's own retry absorbs faults and `failures` stays 0 while a guest runs at three times the cost
@@ -31,7 +31,11 @@
  * - **Are these boxes still interchangeable?** `fleetConsistency` compares the fields that are in the
  *   CAPTURE CACHE KEY. A split fleet does not error; it just stops hitting the cache, "which reads as
  *   ordinary churn rather than as a split fleet".
+ * - **Is a box that does not answer on the network at all?** (#1298) The control plane's neighbour table
+ *   says OFF THE NETWORK, ON THE NETWORK, or that it cannot tell -- printed before the table, because a
+ *   loose cable and a dead worker look identical from the capture port.
  */
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -47,6 +51,7 @@ import { configuredWorkers, workersFromInventory, workerNamesFromInventory, port
 import { assessWorker } from "../../worker-fleet/src/worker-health.mjs";
 import { fleetConsistency, describeMismatches } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 
 /**
  * as `doctor`.
@@ -373,9 +378,272 @@ export function consistencyVerdict({ consistent, compared, total, mismatches = [
     line: `fleet CONSISTENT ${across} — these workers are interchangeable for capture` };
 }
 
+// --- #1298: IS A BOX THAT DOES NOT ANSWER ON THE NETWORK AT ALL? ---
+
+/**
+ * THE LINK-LAYER READ'S WINDOW. On a send, Linux moves a STALE neighbour entry to DELAY, waits
+ * `delay_first_probe_time` (5 s by default) for a confirmation, then sends `ucast_solicit` (3) probes a
+ * second apart before FAILED -- roughly nine seconds from the ping to an answer. Twelve polls a second
+ * apart cover that, and the read is paid only when a box did not answer `/health`.
+ */
+const NEIGHBOUR_POLLS = 12;
+const NEIGHBOUR_READ_TIMEOUT_MS = 45_000;
+/** ssh's own exit status for a connection it could not make, as distinct from the remote command's. */
+const SSH_OWN_FAILURE = 255;
+/** The injection guard for `neighbourScript`, not tidiness: that string is parsed by a remote shell. */
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+/**
+ * THE FOUR LAYER-2 ANSWERS for a box that did not answer `/health` -- #1298, amended by `ceo` 2026-09-13.
+ *
+ * The chairman's direction: "We need to be able to easily determine when a machine is offline." During
+ * #918's rollout a worker with a loose Ethernet cable read `EHOSTDOWN` on the capture port and UNREACHABLE
+ * to the provisioning play -- the signature of a powered-off box, a wedged NIC, a wrong address and a
+ * firewall alike -- and nothing said "this box is not on the network at all" before a key install was
+ * attempted on it.
+ *
+ * FOUR, NOT THREE. `on` and `off` are the two answers the link layer gives. `unasked` is the control plane
+ * not being there to ask. `noVerdict` is asking and getting a cached entry that never settled: measured
+ * 2026-09-13 by `fleet-link-view.yml`, 8 of 10 HEALTHY boxes still read STALE after a probe, so folding it
+ * into either answer would send somebody on the wrong errand.
+ */
+export const LINK = Object.freeze({ ON: "on", OFF: "off", NO_VERDICT: "noVerdict", UNASKED: "unasked" });
+
+/** @typedef {{ verdict: string, detail: string }} LinkAnswer */
+/** @typedef {Map<string, LinkAnswer>} LinkAnswers */
+
+/**
+ * One box's answer from its neighbour-table lines over the polling window, oldest first.
+ *
+ * ONLY `REACHABLE` AND `FAILED` ARE ANSWERS -- the rule `fleet-link-view.yml` measured its way to -- and the
+ * LAST one seen is reported, because the question is whether the box is on the wire now. An address that
+ * never appeared at all was never resolved from the control plane, so it is not on that segment: that is
+ * no verdict, never OFF. Not seen is not absent.
+ *
+ * @param {string[]} lines `ip neigh show <address>` per poll, "" where the table had no entry
+ * @returns {LinkAnswer}
+ */
+export function linkVerdictOf(lines) {
+  const states = lines.map((line) => line.trim().split(/\s+/).pop() ?? "").filter(Boolean);
+  const answer = states.filter((state) => state === "REACHABLE" || state === "FAILED").pop();
+  if (answer === "REACHABLE") return { verdict: LINK.ON, detail: answer };
+  if (answer === "FAILED") return { verdict: LINK.OFF, detail: answer };
+  if (!states.length) {
+    return { verdict: LINK.NO_VERDICT,
+      detail: "never in the control plane's neighbour table, so not on its segment" };
+  }
+  return { verdict: LINK.NO_VERDICT,
+    detail: `last read ${states[states.length - 1]}, a cached entry that never settled` };
+}
+
+/**
+ * The command the control plane runs: one ping per address so the kernel re-resolves it, then each
+ * address's neighbour entry once a second. Every address has matched `IPV4` before it is interpolated.
+ *
+ * @param {string[]} addresses
+ * @returns {string}
+ */
+export function neighbourScript(addresses) {
+  const refused = addresses.filter((address) => !IPV4.test(address));
+  if (refused.length) {
+    throw new Error(`neighbourScript: not IPv4 addresses, refusing to send them to a shell: ${refused.join(", ")}`);
+  }
+  const list = addresses.join(" ");
+  return `for a in ${list}; do ping -c 1 -W 1 "$a" >/dev/null 2>&1 & done; i=0; `
+    + `while [ "$i" -lt ${NEIGHBOUR_POLLS} ]; do for a in ${list}; do `
+    + `printf '%s|%s\\n' "$a" "$(ip neigh show "$a")"; done; `
+    + "sleep 1; i=$((i+1)); done; wait";
+}
+
+/**
+ * `address|neighbour line`, one per poll, into each address's lines in order.
+ *
+ * @param {string} stdout
+ * @returns {Map<string, string[]>}
+ */
+export function parseNeighbourPolls(stdout) {
+  /** @type {Map<string, string[]>} */
+  const polls = new Map();
+  for (const line of stdout.split("\n")) {
+    const bar = line.indexOf("|");
+    if (bar < 0) continue;
+    const address = line.slice(0, bar);
+    polls.set(address, [...(polls.get(address) ?? []), line.slice(bar + 1)]);
+  }
+  return polls;
+}
+
+/** @param {string} url */
+function addressOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (error) {
+    return `${url} (${/** @type {Error} */ (error).message})`;
+  }
+}
+
+/** @returns {{ host: string, key: string }} */
+function controlPlaneFromEnvironment() {
+  return { host: requireControlPlaneHost(), key: requireControlPlaneKey() };
+}
+
+/**
+ * One ssh to the control plane for every address, or the reason it could not be asked.
+ *
+ * @param {string[]} addresses
+ * @param {{ run: typeof spawnSync, controlPlane: () => { host: string, key: string } }} deps
+ * @returns {{ unasked: string | null, polls: Map<string, string[]> }}
+ */
+function askControlPlane(addresses, { run, controlPlane }) {
+  /** @type {{ host: string, key: string }} */
+  let target;
+  try {
+    target = controlPlane();
+  } catch (error) {
+    const why = String(/** @type {Error} */ (error).message ?? error).split(" -- ")[0];
+    return { unasked: `this shell was never told where it is (${why})`, polls: new Map() };
+  }
+  const result = run("ssh", ["-i", target.key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+    "-o", "ConnectTimeout=10", `root@${target.host}`, neighbourScript(addresses)],
+  { encoding: "utf8", timeout: NEIGHBOUR_READ_TIMEOUT_MS });
+  if (result.error) return { unasked: `ssh did not complete (${result.error.message})`, polls: new Map() };
+  if (result.status !== 0) {
+    const own = result.status === SSH_OWN_FAILURE ? ", ssh's own connection failure" : "";
+    return { unasked: `ssh exit ${result.status}${own}`, polls: new Map() };
+  }
+  return { unasked: null, polls: parseNeighbourPolls(String(result.stdout ?? "")) };
+}
+
+/**
+ * @param {Map<string, string[]>} polls
+ * @param {string} address
+ * @returns {LinkAnswer}
+ */
+function answerFor(polls, address) {
+  const lines = polls.get(address);
+  return lines ? linkVerdictOf(lines)
+    : { verdict: LINK.NO_VERDICT, detail: "the read returned nothing for this address" };
+}
+
+/**
+ * Asks the control plane's neighbour table about the boxes that did not answer `/health`.
+ *
+ * FROM THE CONTROL PLANE, because it sits on the workers' segment and this shell may not: the operator Mac
+ * could not resolve most of the fleet at layer 2. The ssh call is built from `control-plane-host.mjs` the
+ * way `lab-pipeline.mjs` builds its own, since `fleet-playbook.mjs`'s helper is private to that file.
+ *
+ * NEVER THROWS, for the reason `probeWorker` does not: a report on which box is missing must not be taken
+ * down by the question it asks about that box.
+ *
+ * @param {{ name: string, url: string }[]} rows
+ * @param {{ run?: typeof spawnSync, controlPlane?: () => { host: string, key: string } }} [deps]
+ * @returns {LinkAnswers} keyed by row name
+ */
+export function readLinkLayer(rows, { run = spawnSync, controlPlane = controlPlaneFromEnvironment } = {}) {
+  /** @type {LinkAnswers} */
+  const answers = new Map();
+  /** @type {{ name: string, address: string }[]} */
+  const askable = [];
+  for (const { name, url } of rows) {
+    const address = addressOf(url);
+    if (IPV4.test(address)) askable.push({ name, address });
+    else answers.set(name, { verdict: LINK.NO_VERDICT, detail: `named by hostname (${address}), which no neighbour table lists` });
+  }
+  if (!askable.length) return answers;
+  const { unasked, polls } = askControlPlane(askable.map(({ address }) => address), { run, controlPlane });
+  for (const { name, address } of askable) {
+    answers.set(name, unasked === null ? answerFor(polls, address) : { verdict: LINK.UNASKED, detail: unasked });
+  }
+  return answers;
+}
+
+/** @param {string} name a row name, `<inventory name>  <address>` when the inventory supplied it */
+function inventoryName(name) {
+  return String(name).split(/\s+/)[0];
+}
+
+/**
+ * The words, one line per box. The four never share a line: they are four different errands.
+ *
+ * @param {string} name
+ * @param {LinkAnswer} link
+ * @returns {string}
+ */
+export function linkLine(name, { verdict, detail }) {
+  if (verdict === LINK.OFF) return `OFF THE NETWORK (no layer-2 answer from ${name}: check cable and power)`;
+  if (verdict === LINK.ON) {
+    return `ON THE NETWORK, worker not answering (${name} answers at layer 2: the machine is on the wire, `
+      + "the worker on it is not serving)";
+  }
+  if (verdict === LINK.UNASKED) return `unknown (control plane unreachable) for ${name}: ${detail}`;
+  return `unknown (no layer-2 verdict for ${name}: ${detail})`;
+}
+
+/** What a person can do about OFF, and what layer 2 cannot tell them -- #1298's "the message says so". */
+const OFF_ADVICE = [
+  "  Layer 2 cannot tell a powered-off box, an OS that is not up, and a running machine whose link is down",
+  "  (#918: a loose cable, uptime 1303 min throughout). Try `npm run fleet:wake -- <name>` once; if it stays",
+  "  OFF it is a walk to the machine. Report it to the chairman by inventory name before anything else is tried.",
+];
+
+/**
+ * The link-layer lines, printed FIRST, and the gate a fleet write reads -- #1298 as amended.
+ *
+ * UNKNOWN GATES EXACTLY AS OFF DOES (`ceo`, 2026-09-13): a write proceeds only when every box that did not
+ * answer reads a positive ON, and a HOLD names the OFF boxes and the UNKNOWN boxes in separate lists,
+ * because one is a walk to a machine and the other is a better read.
+ *
+ * @param {{ name: string, link: LinkAnswer }[]} asked the boxes that did not answer, with their answers
+ * @returns {{ lines: string[], gate: { hold: boolean, off: string[], unknown: string[] } | null }}
+ */
+export function linkLayerReport(asked) {
+  if (!asked.length) return { lines: [], gate: null };
+  const named = asked.map(({ name, link }) => ({ name: inventoryName(name), link }));
+  const off = named.filter(({ link }) => link.verdict === LINK.OFF).map(({ name }) => name);
+  const unknown = named.filter(({ link }) => link.verdict !== LINK.OFF && link.verdict !== LINK.ON)
+    .map(({ name }) => name);
+  const hold = off.length > 0 || unknown.length > 0;
+  const gateLine = hold
+    ? `fleet write: HOLD — off the network: ${off.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}`
+    : "fleet write: may proceed — every box that did not answer is ON THE NETWORK, so it is the worker, not the wire";
+  return {
+    lines: [...named.map(({ name, link }) => linkLine(name, link)), ...(off.length ? OFF_ADVICE : []), gateLine],
+    gate: { hold, off, unknown },
+  };
+}
+
+/**
+ * @param {WorkerRow[]} rows
+ * @param {(rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers>} linkRead
+ */
+async function linkLayerFor(rows, linkRead) {
+  const silent = rows.filter((row) => row.state === "unreachable");
+  if (!silent.length) return linkLayerReport([]);
+  const answers = await linkRead(silent);
+  return linkLayerReport(silent.map((row) => ({
+    name: row.name,
+    link: answers.get(row.name) ?? { verdict: LINK.NO_VERDICT, detail: "the read returned nothing for this box" },
+  })));
+}
+
+/**
+ * What a reader sees first: the link-layer lines for any box that did not answer, THEN the table -- #1298's
+ * "prints that FIRST". A function rather than two writes in `main`, so the order is asserted, not hoped.
+ *
+ * @param {{ rows: WorkerRow[], linkLayer: { lines: string[] } }} status
+ * @returns {string[]}
+ */
+export function renderHead(status) {
+  const table = renderTable(status.rows);
+  if (!status.linkLayer.lines.length) return table;
+  return [...status.linkLayer.lines.map((line) => `  ${line}`), "", ...table];
+}
+
 /**
  * @param {{ workers?: () => { name: string, url: string }[],
- *           probe?: (worker: { name: string, url: string }) => Promise<any> }} [deps] injectable ONLY so a
+ *           probe?: (worker: { name: string, url: string }) => Promise<any>,
+ *           linkRead?: (rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers> }} [deps]
+ *   injectable ONLY so a
  *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
  *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
  *   the verdict holds the function and leaves the CALL unheld, which is where the 19.7 hours happened.
@@ -385,6 +653,8 @@ export async function fleetStatus(deps) {
   const workers = (deps?.workers ?? fleetToProbe)();
   const probes = await Promise.all(workers.map(deps?.probe ?? probeWorker));
   const rows = summarise(probes);
+  // #1298: only the boxes that did not answer are asked about at LAYER 2, so a healthy fleet pays nothing.
+  const linkLayer = await linkLayerFor(rows, deps?.linkRead ?? readLinkLayer);
   const guests = probes
     .filter((p) => p.reachable)
     // `policy: undefined`, not null. `fleetConsistency` takes `policy?: Record<string, unknown>` -- an
@@ -408,7 +678,7 @@ export async function fleetStatus(deps) {
   // `rows` carries each box's `stateOf`, which this verdict had no way to see until #1029. Passing it
   // is the whole fix: the two halves were both computed here and never crossed.
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows });
-  return { rows, comparedAgree: consistent, verdict, mismatches, codes, compared,
+  return { rows, linkLayer, comparedAgree: consistent, verdict, mismatches, codes, compared,
     reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
@@ -425,7 +695,7 @@ async function main() {
   if (process.argv.includes("--json")) {
     process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
   } else {
-    process.stdout.write(`\n${renderTable(status.rows).join("\n")}\n\n`);
+    process.stdout.write(`\n${renderHead(status).join("\n")}\n\n`);
     // "reachable" said more than it measured. This probes ONE channel — HTTP :8765 — and a worker can serve
     // it perfectly while being unmanageable: on 2026-08-23 all four reported reachable and CONSISTENT while
     // `ansible-playbook deploy.yml` answered UNREACHABLE on every one, because the tailnet ACL grants
