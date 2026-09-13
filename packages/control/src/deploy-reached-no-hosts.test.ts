@@ -83,7 +83,8 @@ const DISPATCHED_ELSEWHERE: Record<string, string> = {
     + "is proven (`roles/worker/`'s README says not to delete either until then), reachable from no script.",
   "collect-logs.yml":
     "ORPHAN — no npm script runs it and no wrapper names it, so it cannot be dispatched at all. Wire it up "
-    + "or delete it; that is a backlog row, not something to fix by widening this test.",
+    + "or delete it; that is #1216, not something to fix by widening this test. Filed by #1196: this said "
+    + "\"a backlog row\" and named none, so nobody could tell a deferral from an omission.",
   "update-origin-remote.yml":
     "#325's scripted fleet-remote change for the org transfer -- a deliberate ONE-TIME operation run by "
     + "hand on transfer day, never through the routine deploy wrapper. Wiring it into `fleet-playbook.mjs` "
