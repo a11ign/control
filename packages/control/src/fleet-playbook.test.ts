@@ -58,8 +58,18 @@ test("only the named playbooks are runnable, and they are names rather than path
   // it rolls a box's WINDOWS BUILD back. It earns its place the same way -- a feature update that slipped
   // the appliance policy had no remote repair at all -- and it is fenced harder than anything else here:
   // one named worker or nothing, and a read-only dry run unless `--apply` (tests below).
+  // `collect-logs.yml` joined on 2026-09-13 (#1216) and is the LEAST destructive entry, which is why it
+  // needs saying rather than passing unremarked: it is READ-ONLY on the guest -- it fetches `server.log`,
+  // one rotation back, and NVDA's two logs, and writes only to the control plane. It is in this list
+  // because it targets `a11y_workers`, not because it is dangerous: the `lab:*` scripts skip this wrapper
+  // because their plays are `hosts: localhost`, and THAT is the line. An allowlist whose membership rule
+  // is "how risky does this look" admits the next thing that looks safe.
+  //
+  // It earns a place at all because `/diagnostics` -- which already serves NVDA's log and `nvda-old.log`
+  // -- is an endpoint ON the worker, so it cannot answer for a worker that has died, and `lab:log` and
+  // `lab:fetch` are both localhost. This is the only route to a dead worker's `server.log`.
   assert.deepEqual(PLAYBOOKS, ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml",
-    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml"]);
+    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml", "collect-logs.yml"]);
   // `provision.yml` stays REFUSED and that is not an oversight: it is the UTM/PowerShell provisioning
   // playbook, a different file from `provision-role.yml`, and only the role one should be reachable from
   // a laptop. Two files one character apart, one allowed and one not, is exactly what an allowlist is for.

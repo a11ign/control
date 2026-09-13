@@ -125,8 +125,12 @@ const CHECKOUT = CONTROL_PLANE_CHECKOUT;
 // `os-rollback.yml` (#921) is the one entry that changes a box's OPERATING SYSTEM, so it is also the one
 // that refuses to run without `--limit=<one worker>` and does nothing but read without `--apply`
 // (`osRollbackRefusal` below, and the playbook's own guards).
+// `collect-logs.yml` (#1216) is READ-ONLY on the guest -- it fetches `server.log`, its one rotation back,
+// and NVDA's two logs, and writes only to the control plane. It is here rather than as a bare
+// `ansible-playbook` script because it targets `a11y_workers`: the `lab:*` scripts skip this wrapper
+// because their plays are `hosts: localhost`, and that is the line, not how simple the playbook is.
 const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml",
-  "control-host-install.yml", "os-rollback.yml"];
+  "control-host-install.yml", "os-rollback.yml", "collect-logs.yml"];
 
 /** Exactly one worker, by name -- what `os-rollback.yml` needs where every other playbook takes a list. */
 const ONE_WORKER = /^a11y-worker-[0-9]{1,3}$/;
