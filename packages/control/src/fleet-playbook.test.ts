@@ -14,8 +14,10 @@ import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
-  pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames }
+  pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
+  inventorySources, inventoryReadScript, parseInventoryReads }
   from "./fleet-playbook.mjs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
   for (const ref of ["afec73d", "65ead9b1c2d3e4f5", "main", "v8-feature-schema", "origin/main", "v1.2.3"]) {
@@ -737,6 +739,91 @@ test("#1313: main() CALLS the layer-2 gate, on the inventory, before the control
   assert.ok(mainBody.indexOf("await enforceLinkGate(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
     "the gate must run before the control plane's checkout moves");
   assert.match(source, /"--allow-offline="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
-  assert.match(source, /fleetStatus\(\{ workers: \(\) => workers \}\)/, "the gate is asked of an injected fleet");
-  assert.match(source, /const workers = namedInventoryWorkers\(\);/, "and that fleet is the inventory, not A11Y_WORKERS");
+  assert.match(source, /inventorySources\(ansibleCfgText\)/, "the fleet comes from the sources ansible.cfg lists");
+  assert.match(source, /ssh\(inventoryReadScript\(paths\)/, "read on the control plane, where the playbook runs, not this checkout");
+});
+
+// --- #1343 review (worker-judge, not convinced): the gate reads the CONTROL PLANE's inventory, and cannot-know refuses ---
+
+const ANSIBLE_CFG = readFileSync(new URL("../ansible/ansible.cfg", import.meta.url), "utf8");
+const GROUP_VARS = readFileSync(new URL("../ansible/group_vars/a11y_workers.yml", import.meta.url), "utf8");
+const INSTALLED = "/etc/a11ign/inventory.yml";
+/** An inventory shaped like the real one, on documentation addresses. */
+const inventoryOf = (hosts: number[]) => ["all:", "  children:", "    a11y_workers:", "      hosts:",
+  ...hosts.flatMap((n) => [`        a11y-worker-${n}:`, `          ansible_host: 192.0.2.${n}`])].join("\n") + "\n";
+type GateStatus = NonNullable<Parameters<typeof linkGateFor>[0]["status"]>;
+type Fleet = { name: string, url: string }[];
+
+/** `linkGateFor` with the real ansible.cfg and group_vars, recording which sources were read and which boxes were asked. */
+const driveGate = (chosen: string, reads: () => { path: string, text: string }[], hold?: (workers: Fleet) => string[]) => {
+  const asked: Fleet[] = [];
+  const readPaths: string[][] = [];
+  const status: GateStatus = async ({ workers }) => {
+    asked.push(workers());
+    const off = hold ? hold(workers()) : [];
+    return { linkLayer: { lines: off.map((name) => `OFF THE NETWORK (no layer-2 answer from ${name}: check cable and power)`),
+      gate: off.length ? { hold: true, off, unknown: [] } : null } };
+  };
+  const result = linkGateFor({ chosen, argv: [], ansibleCfgText: ANSIBLE_CFG, groupVarsText: GROUP_VARS, status,
+    readInventories: (paths) => { readPaths.push(paths); return reads(); } });
+  return { result, asked, readPaths };
+};
+
+test("#1343: the gate's sources are ansible.cfg's own -- installed first, the in-tree fallback in the control plane's checkout", () => {
+  assert.deepEqual(inventorySources(ANSIBLE_CFG), [INSTALLED, `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`]);
+  assert.throws(() => inventorySources("[defaults]\n"), /no `inventory =` line/);
+  assert.throws(() => inventorySources("inventory = /etc/x;reboot\n"), /not a plain path/);
+  assert.throws(() => inventorySources("inventory = ../../etc/shadow\n"), /not a plain path/);
+  assert.match(inventoryReadScript([INSTALLED]),
+    /^if \[ -f \/etc\/a11ign\/inventory\.yml \]; then echo '==> \/etc\/a11ign\/inventory\.yml'; cat \/etc\/a11ign\/inventory\.yml; fi$/);
+  assert.deepEqual(parseInventoryReads("==> /a\nall:\n==> /b\nx: 1"), [{ path: "/a", text: "all:\n" }, { path: "/b", text: "x: 1\n" }]);
+  assert.deepEqual(parseInventoryReads(""), [], "no source existed prints nothing, which is no reads -- not an empty one");
+});
+
+test("#1343 BLOCKER: no inventory on the control plane REFUSES deploy and provision, and asks nobody", async () => {
+  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+    const { result, asked } = driveGate(chosen, () => []);
+    const { refusal, notice } = await result;
+    assert.match(String(refusal), /cannot know which boxes this playbook targets -- no inventory exists at \/etc\/a11ign\/inventory\.yml or /,
+      `${chosen}: zero boxes asked must refuse, never read as nothing held; got ${refusal}`);
+    assert.match(String(refusal), /npm run fleet:inventory-install/, "and it says how to get an inventory there");
+    assert.equal(notice, null);
+    assert.equal(asked.length, 0, "there is no fleet to ask about, so the layer-2 read must not run");
+  }
+});
+
+test("#1343: a malformed inventory, a workerless one and an unreachable control plane refuse, each in its own words", async () => {
+  const malformed = await driveGate("provision-role.yml",
+    () => [{ path: INSTALLED, text: inventoryOf([2]).replace("ansible_host: 192.0.2.2", "ansible_host: 192.0.2.2 trailing") }]).result;
+  assert.match(String(malformed.refusal),
+    /\/etc\/a11ign\/inventory\.yml was refused by the inventory parser: .*looks like a host entry but does not parse/, String(malformed.refusal));
+  const workerless = await driveGate("deploy.yml",
+    () => [{ path: INSTALLED, text: "all:\n  children:\n    a11y_control:\n      hosts: {}\n" }]).result;
+  assert.match(String(workerless.refusal),
+    /\/etc\/a11ign\/inventory\.yml was refused by the inventory parser: no hosts found under a11y_workers\.hosts/, String(workerless.refusal));
+  assert.doesNotMatch(String(workerless.refusal), /does not parse|no inventory exists/, "three causes, three wordings");
+  const unreachable = await driveGate("deploy.yml", () => { throw new Error("ssh to the control plane failed: Connection timed out"); }).result;
+  assert.match(String(unreachable.refusal),
+    /the control plane's inventory could not be read \(ssh to the control plane failed: Connection timed out\)\. Could not ask is not may proceed/);
+});
+
+test("#1343: a readable inventory asks exactly its workers by inventory name, merges identical sources, and a HOLD among them refuses", async () => {
+  const both = [{ path: INSTALLED, text: inventoryOf([2, 3]) },
+    { path: `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`, text: inventoryOf([2, 3]) }];
+  const held = driveGate("deploy.yml", () => both, (workers) => [workers[0].name]);
+  const { refusal } = await held.result;
+  assert.equal(held.readPaths[0][0], INSTALLED, "the installed inventory is read first, as ansible.cfg orders it");
+  assert.deepEqual(held.asked[0].map(({ name }) => name), ["a11y-worker-2", "a11y-worker-3"],
+    "identical sources merge, as Ansible merges them, and each box is named as --allow-offline takes it");
+  assert.match(held.asked[0][0].url, /^http:\/\/192\.0\.2\.2:\d+$/);
+  assert.match(String(refusal), /off the network: +a11y-worker-2\n/, String(refusal));
+  const clear = await driveGate("deploy.yml", () => both).result;
+  assert.deepEqual(clear, { refusal: null, notice: null, lines: [] }, "and the same fleet with nothing silent dispatches as today");
+});
+
+test("#1343: a repair playbook reads no inventory and asks no box", async () => {
+  const { result, readPaths, asked } = driveGate("recover.yml", () => { throw new Error("recover.yml must not read the inventory"); });
+  assert.deepEqual(await result, { refusal: null, notice: null, lines: [] });
+  assert.equal(readPaths.length, 0);
+  assert.equal(asked.length, 0);
 });

@@ -79,8 +79,9 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
-import { inventoryWorkerUrls, namedInventoryWorkers } from "../../worker-fleet/src/fleet-env.mjs";
-import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
+import { inventoryWorkerUrls, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
+  from "../../worker-fleet/src/fleet-env.mjs";
+import { CONTROL_PLANE_CHECKOUT, CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 
 /**
@@ -980,36 +981,155 @@ export function linkGate({ chosen, gate, allowOffline }) {
     + "--allow-offline. Ansible will report them UNREACHABLE, and that is the expected result." };
 }
 
+/** A plain path, as `ansible.cfg` lists them: nothing a remote shell would read as more than a path. */
+const INVENTORY_PATH_SHAPE = /^[\w./-]+$/;
+/** The header one remote read prints before each inventory source it found. */
+const INVENTORY_HEADER = "==> ";
+/** A `cat` of one or two small files; minutes would mean the control plane is not answering. */
+const INVENTORY_READ_TIMEOUT_MS = 60_000;
+
 /**
- * #1313: THE GATE, ASKED OF THE FLEET THIS RUN WILL TOUCH, before the control plane is asked to move.
+ * #1343 REVIEW: WHERE THE PLAYBOOK'S INVENTORY LIVES, read from `ansible.cfg` rather than restated.
  *
- * THE INVENTORY, NOT `A11Y_WORKERS`, for the reason `guardProtocolChange` gives: Ansible takes its hosts from
- * `inventory.yml` whatever the environment says, so a stale variable that omits a dead box would pass this
- * gate while the playbook targets that box. `namedInventoryWorkers` pairs each address with the inventory
- * name `--allow-offline=` takes.
+ * The playbook runs ON the control plane with `ANSIBLE_CONFIG=ansible.cfg` (`startPlaybookUnit`), whose
+ * `inventory =` line lists the installed file first and the in-tree file as the migration fallback, and
+ * Ansible MERGES every listed source that exists. A relative entry is relative to that config's directory in
+ * the control plane's checkout. The first version of this gate read THIS machine's in-tree file -- gitignored,
+ * absent where the fleet is driven from -- and read its absence as "nothing held" (worker-judge, not convinced).
  *
- * COULD NOT ASK IS NOT MAY PROCEED: if the read itself throws, the write is refused and says why. And zero
- * boxes asked is SAID, because it holds nothing for a reason that is not "every box answered".
+ * @param {string} ansibleCfgText
+ * @returns {string[]} absolute paths on the control plane, in the config's order
+ */
+export function inventorySources(ansibleCfgText) {
+  const listed = /^\s*inventory\s*=\s*(.+?)\s*$/m.exec(ansibleCfgText)?.[1];
+  if (!listed) throw new Error("ansible.cfg declares no `inventory =` line, so there is no inventory to read");
+  return listed.split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+    if (!INVENTORY_PATH_SHAPE.test(entry) || entry.split("/").includes("..")) {
+      throw new Error(`ansible.cfg inventory entry is not a plain path: ${entry}`);
+    }
+    return entry.startsWith("/") ? entry : `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/${entry}`;
+  });
+}
+
+/**
+ * One remote read of every source that exists, each under its header. The paths have passed
+ * `inventorySources`' shape check, because this string is parsed by a remote shell.
+ *
+ * @param {string[]} paths
+ * @returns {string}
+ */
+export function inventoryReadScript(paths) {
+  return paths.map((path) => `if [ -f ${path} ]; then echo '${INVENTORY_HEADER}${path}'; cat ${path}; fi`).join("; ");
+}
+
+/**
+ * @param {string} stdout what `inventoryReadScript` printed
+ * @returns {{ path: string, text: string }[]} one entry per source that existed
+ */
+export function parseInventoryReads(stdout) {
+  /** @type {{ path: string, text: string }[]} */
+  const reads = [];
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith(INVENTORY_HEADER)) reads.push({ path: line.slice(INVENTORY_HEADER.length), text: "" });
+    else if (reads.length) reads[reads.length - 1].text += `${line}\n`;
+  }
+  return reads;
+}
+
+/**
+ * The fleet the playbook will target, or the refusal saying why it cannot be known.
+ *
+ * THREE CAUSES, THREE WORDINGS, ALL REFUSING: no source existed, a malformed host line, or no workers listed --
+ * the last two in the parser's own words. `namedInventoryWorkers` returns `[]` for every one of them, which is why this parses
+ * directly -- and why none of them may read as "nothing held": could not ask is not may proceed.
+ *
+ * @param {{ chosen: string, reads: { path: string, text: string }[], sources: string[], groupVarsText: string }} input
+ * @returns {{ workers: { name: string, url: string }[], refusal: string | null }}
+ */
+export function gateFleet({ chosen, reads, sources, groupVarsText }) {
+  const refuse = (/** @type {string} */ why) => ({ workers: [], refusal: `REFUSING ${chosen}: the layer-2 gate `
+    + `cannot know which boxes this playbook targets -- ${why}. Could not ask is not may proceed.\n`
+    + "  Install the inventory on the control plane with `npm run fleet:inventory-install`, then re-run." });
+  if (!reads.length) return refuse(`no inventory exists at ${sources.join(" or ")} on the control plane`);
+  const port = portFromGroupVars(groupVarsText);
+  /** @type {Map<string, string>} */
+  const byUrl = new Map();
+  for (const { path, text } of reads) {
+    try {
+      const urls = workersFromInventory(text, { port });
+      const names = workerNamesFromInventory(text, { port });
+      for (const url of urls) byUrl.set(url, names[url] ?? url.replace(/^https?:\/\//, ""));
+    } catch (error) {
+      // THE PARSER'S OWN WORDS, never a label of mine: it throws for a malformed host line AND for an empty
+      // worker group, and calling both "does not parse" was the wrong errand for the second.
+      return refuse(`${path} was refused by the inventory parser: ${String(/** @type {Error} */ (error).message).split("\n")[0]}`);
+    }
+  }
+  if (!byUrl.size) {
+    return refuse(`${reads.map(({ path }) => path).join(" and ")} ${reads.length === 1 ? "lists" : "list"} no ${WORKER_GROUP} hosts`);
+  }
+  return { workers: [...byUrl].map(([url, name]) => ({ name, url })), refusal: null };
+}
+
+/**
+ * #1313, AS THE REVIEW ASKED: THE WHOLE GATE, WITH ITS READS INJECTED, so the enforce path is driven by a test
+ * and not only its pure decision. `enforceLinkGate` is this plus the real reads and the exits.
+ *
+ * @param {{ chosen: string, argv: string[], ansibleCfgText: string, groupVarsText: string,
+ *           readInventories: (paths: string[]) => { path: string, text: string }[],
+ *           status?: (deps: { workers: () => { name: string, url: string }[] }) => Promise<{ linkLayer:
+ *             { lines: string[], gate: { hold: boolean, off: string[], unknown: string[] } | null } }> }} input
+ * @returns {Promise<{ refusal: string | null, notice: string | null, lines: string[] }>}
+ */
+export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText, readInventories, status = fleetStatus }) {
+  const allowOffline = allowOfflineNames(argv);
+  if (!LINK_GATED.includes(chosen)) return { ...linkGate({ chosen, gate: null, allowOffline }), lines: [] };
+  const couldNotAsk = (/** @type {unknown} */ error, /** @type {string} */ what) => ({ refusal: `REFUSING ${chosen}: `
+    + `${what} (${String(/** @type {Error} */ (error).message).split("\n")[0]}). Could not ask is not may proceed.`,
+  notice: null, lines: [] });
+  /** @type {{ workers: { name: string, url: string }[], refusal: string | null }} */
+  let fleet;
+  try {
+    const sources = inventorySources(ansibleCfgText);
+    fleet = gateFleet({ chosen, reads: readInventories(sources), sources, groupVarsText });
+  } catch (error) {
+    return couldNotAsk(error, "the control plane's inventory could not be read");
+  }
+  if (fleet.refusal) return { refusal: fleet.refusal, notice: null, lines: [] };
+  try {
+    const { linkLayer } = await status({ workers: () => fleet.workers });
+    return { ...linkGate({ chosen, gate: linkLayer.gate, allowOffline }), lines: linkLayer.lines };
+  } catch (error) {
+    return couldNotAsk(error, "the layer-2 gate could not be read");
+  }
+}
+
+/**
+ * #1313: THE GATE, ASKED OF THE FLEET THIS PLAYBOOK WILL TOUCH, before the control plane is asked to move.
+ *
+ * THE CONTROL PLANE'S INVENTORY, read over the same `ssh` every other step here uses: not `A11Y_WORKERS`, for
+ * `guardProtocolChange`'s reason (a stale variable would pass while Ansible targets the dead box), and not this
+ * checkout's in-tree file, which is gitignored and absent where the fleet is driven from. The error carries
+ * ssh's stderr, not its argv, so a refusal never prints the key path.
  *
  * @param {string} chosen
  */
 async function enforceLinkGate(chosen) {
-  const allowOffline = allowOfflineNames(process.argv.slice(2));
-  /** @type {{ lines: string[], gate: { hold: boolean, off: string[], unknown: string[] } | null }} */
-  let layer = { lines: [], gate: null };
-  if (LINK_GATED.includes(chosen)) {
-    const workers = namedInventoryWorkers();
-    if (!workers.length) process.stdout.write("  layer-2 gate: asked 0 boxes (no inventory.yml here), so it held nothing\n");
-    try {
-      layer = (await fleetStatus({ workers: () => workers })).linkLayer;
-    } catch (error) {
-      process.stderr.write(`REFUSING ${chosen}: the layer-2 gate could not be read `
-        + `(${/** @type {Error} */ (error).message}). Could not ask is not may proceed.\n`);
-      process.exit(2);
-    }
-  }
-  const { refusal, notice } = linkGate({ chosen, gate: layer.gate, allowOffline });
-  if (refusal || notice) process.stdout.write(`${layer.lines.map((line) => `  ${line}`).join("\n")}\n`);
+  const { refusal, notice, lines } = await linkGateFor({
+    chosen,
+    argv: process.argv.slice(2),
+    ansibleCfgText: readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"),
+    groupVarsText: readFileSync(resolve(ANSIBLE_DIR, "group_vars/a11y_workers.yml"), "utf8"),
+    readInventories: (paths) => {
+      try {
+        return parseInventoryReads(ssh(inventoryReadScript(paths), { capture: true, timeoutMs: INVENTORY_READ_TIMEOUT_MS }));
+      } catch (error) {
+        const stderr = String(/** @type {{ stderr?: unknown }} */ (error).stderr ?? "").trim().split("\n").pop();
+        throw new Error(`ssh to the control plane failed: ${stderr || "no stderr"}`, { cause: error });
+      }
+    },
+  });
+  if (lines.length) process.stdout.write(`${lines.map((line) => `  ${line}`).join("\n")}\n`);
   if (notice) process.stdout.write(`${notice}\n\n`);
   if (refusal) {
     process.stderr.write(`${refusal}\n`);
