@@ -54,7 +54,7 @@ export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
 import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 // RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
@@ -64,6 +64,8 @@ import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
+// #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
+import { fleetToProbe, probeWorker } from "./fleet-status.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
@@ -288,6 +290,47 @@ export function buildAssertion({ guests, pinned }) {
     + `rest. THE REPAIR IS A REBUILD (PXE + autounattend.xml): \`fleet:provision\` installs the ROLE, not `
     + `the OS, so it cannot make ${these} compliant and does not claim to.\n${census}`;
   return { refusal: unread === null ? refusal : `${refusal}\n${unread}`, notice: null };
+}
+
+/**
+ * #1204: THE GUESTS' BUILDS, OUT OF WHAT `/health` REPORTED. Pure, so the extraction is testable without
+ * a fleet -- the probes are passed in.
+ *
+ * A probe that did not reach the box yields `windowsVersion: null`, which `buildStates` classes as
+ * UNREADABLE rather than as agreement. *"I could not ask"* and *"it matches"* must not collapse, and the
+ * place they would collapse is here, in the mapping -- a missing field read as an empty string would land
+ * in `compliant` and report a box nobody reached as on the pin.
+ *
+ * @param {{ name: string, health?: Record<string, any> }[]} probes
+ * @returns {{ name: string, windowsVersion: string | null }[]}
+ */
+export function guestBuilds(probes) {
+  return probes.map((p) => ({
+    name: p.name,
+    windowsVersion: p.health?.environment?.windowsVersion ?? null,
+  }));
+}
+
+/**
+ * #1204: WHETHER THIS RUN IS GATED ON THE BUILD PIN, AND WHAT IT PRINTS. Pure and injected.
+ *
+ * #1084 built `buildAssertion` and its own header said the quiet part: **"NOTHING CALLS THIS YET, AND
+ * SAYING SO IS THE POINT … A function that is perfect and never reached is the defect this repository
+ * has hit three times in a week."** This is the call.
+ *
+ * SCOPED TO THE PROVISIONING PLAYBOOK, not applied to every run. `deploy.yml` pulls code onto boxes that
+ * already exist and `recover.yml` acts on a box that is already wedged -- refusing those on a build
+ * mismatch would block the repair paths, which is the same trade `fleet:deploy`'s own busy-worker guard
+ * makes in the other direction. The pin is about what a box PRODUCES, and provisioning is when a box
+ * joins the fleet that produces it.
+ *
+ * @param {{ chosen: string, inventoryText: string,
+ *           guests: {name: string, windowsVersion?: string | null}[] }} input
+ * @returns {{ refusal: string | null, notice: string | null }}
+ */
+export function buildGate({ chosen, inventoryText, guests }) {
+  if (chosen !== "provision-role.yml") return { refusal: null, notice: null };
+  return buildAssertion({ guests, pinned: pinnedBuild(inventoryText) });
 }
 
 /**
@@ -806,6 +849,92 @@ function requireCommitIsOnOrigin(ref, expected) {
   process.exit(2);
 }
 
+/**
+ * #1204: `inventory.yml`'s text, or empty when there is none.
+ *
+ * **THE FILE IS NOT IN THE REPOSITORY** — it holds real host addresses, and `fleetToProbe` already wraps
+ * its own read of it in a `try` for exactly this reason. A bare `readFileSync` here threw ENOENT on every
+ * run, which I found by driving it rather than by reading: a crash, not a refusal, on the path this row
+ * exists to make refuse.
+ *
+ * Empty text means `pinnedBuild` finds no pin, which `buildAssertion` already treats as a fourth state —
+ * LOUD on every run and non-refusing, because provisioning is how a drifted fleet gets its role back and
+ * a guard that blocks every run until somebody edits a control-plane file bricks the repair path. So the
+ * absent-inventory case lands in a state that was already designed, rather than needing a new one.
+ *
+ * @returns {string}
+ */
+function inventoryTextOrEmpty() {
+  try {
+    return readFileSync(fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)), "utf8");
+  } catch {
+    // Not swallowed: the empty string routes to `buildAssertion`'s NO PINNED IMAGE notice, which says on
+    // stdout that this run compared nothing and names the key to add.
+    return "";
+  }
+}
+
+/**
+ * #1204: THE BUILD PIN, ASKED BEFORE THE ROLE IS INSTALLED — the call #1084 said was missing.
+ *
+ * #1084 built `buildAssertion` and its own header named the gap: **"NOTHING CALLS THIS YET, AND SAYING
+ * SO IS THE POINT … A function that is perfect and never reached is the defect this repository has hit
+ * three times in a week."** This is the call, and it runs before any playbook touches a box, because a
+ * refusal that arrives mid-provision has already changed the guest it is refusing.
+ *
+ * PROBED OVER `/health`, the same reading `fleet:status` takes, rather than asking Ansible: the OS is a
+ * capture-cache key and the authoritative answer is what the worker reports about itself, not what the
+ * inventory says it should be. A box that cannot be reached lands in `unreadable` and is SAID, never
+ * counted as agreement.
+ *
+ * Extracted rather than inlined in `main`, which it took to 112 physical lines against a limit of 90.
+ *
+ * @param {string} chosen the playbook this run will execute
+ */
+async function enforceBuildPin(chosen) {
+  const gate = buildGate({
+    chosen,
+    inventoryText: inventoryTextOrEmpty(),
+    guests: guestBuilds(await Promise.all(fleetToProbe().map((w) => probeWorker(w)))),
+  });
+  if (gate.notice) process.stdout.write(`${gate.notice}\n\n`);
+  if (gate.refusal) {
+    process.stderr.write(`${gate.refusal}\n`);
+    process.exit(2);
+  }
+}
+
+/**
+ * A SHA IS NOT A REF THIS CAN DEPLOY, AND THE COMMENT SAYING SO WAS NOT A GUARD.
+ *
+ * `deploy.yml` fast-forwards each guest with `git merge --ff-only origin/{{ a11y_git_ref }}`, so the ref
+ * must be something `origin/<ref>` resolves to. `localBranch()`'s comment has recorded that since the run
+ * it cost -- "this repo has already spent a run on `-e ref=<sha>` becoming an unresolvable `origin/<sha>`"
+ * -- and it guarded only the DEFAULT. Passing `--ref=<sha>` explicitly walks straight past it, and
+ * 2026-09-06 spent another run doing exactly that: the checkout SUCCEEDS, the merge fails with a git
+ * message naming neither the flag nor the reason, and the deploy is a stack trace.
+ *
+ * A fact recorded in a comment is a fact somebody has to remember.
+ *
+ * EXTRACTED BY #1204, not rewritten: `main` sat at exactly the 90-line limit, so adding the build gate
+ * took it to 92 and the change had to pay for itself. This block was the most self-contained step in it.
+ *
+ * @param {string} ref
+ */
+function refuseCommitShapedRef(ref) {
+if (/^[0-9a-f]{7,40}$/i.test(ref)) {
+  process.stderr.write([
+    `REFUSING: --ref=${ref} looks like a COMMIT.`,
+    "This deploys by fast-forwarding each guest to `origin/<ref>`, which a commit does not resolve to.",
+    "The checkout would succeed and the merge would fail on a message that names neither the flag nor",
+    "the reason.",
+    "  Pass a BRANCH name. To deploy one commit, push it as a branch first.",
+    "",
+  ].join("\n"));
+  process.exit(2);
+}
+}
+
 async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
@@ -819,27 +948,7 @@ async function main() {
   // that was already correct.
   const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
 
-  // A SHA IS NOT A REF THIS CAN DEPLOY, AND THE COMMENT SAYING SO WAS NOT A GUARD.
-  //
-  // `deploy.yml` fast-forwards each guest with `git merge --ff-only origin/{{ a11y_git_ref }}`, so the
-  // ref must be something `origin/<ref>` resolves to. `localBranch()`'s comment has recorded that since
-  // the run it cost -- "this repo has already spent a run on `-e ref=<sha>` becoming an unresolvable
-  // `origin/<sha>`" -- and it guarded only the DEFAULT. Passing `--ref=<sha>` explicitly walks straight
-  // past it, and 2026-09-06 spent another run doing exactly that: the checkout SUCCEEDS, the merge fails
-  // with a git message naming neither the flag nor the reason, and the deploy is a stack trace.
-  //
-  // A fact recorded in a comment is a fact somebody has to remember.
-  if (/^[0-9a-f]{7,40}$/i.test(ref)) {
-    process.stderr.write([
-      `REFUSING: --ref=${ref} looks like a COMMIT.`,
-      "This deploys by fast-forwarding each guest to `origin/<ref>`, which a commit does not resolve to.",
-      "The checkout would succeed and the merge would fail on a message that names neither the flag nor",
-      "the reason.",
-      "  Pass a BRANCH name. To deploy one commit, push it as a branch first.",
-      "",
-    ].join("\n"));
-    process.exit(2);
-  }
+  refuseCommitShapedRef(ref);
 
   // #971: WHAT THAT REF MEANS ON ORIGIN, asked before anything is shipped. `null` when `origin/<ref>`
   // does not resolve, which `staleRefRefusal` refuses rather than reads as agreement.
@@ -864,6 +973,8 @@ async function main() {
       + "Not deploying.\n");
     process.exit(1);
   }
+
+  await enforceBuildPin(chosen);
 
   // A BOOTSTRAP PLAYBOOK RUNS FROM HERE. The playbook declares it; this reads the declaration.
   if (declaresBootstrap(chosen)) {

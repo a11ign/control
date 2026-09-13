@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
-  pinnedBuild, buildOf, buildStates, buildAssertion }
+  pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -549,4 +549,111 @@ test("#1084: the pinned build is NOT restated in the source — a second copy of
   assert.match(`the pinned image is ${PIN}`, buildLiteral,
     "the build-literal pattern cannot see a build literal -- it has narrowed to something that matches "
     + "nothing, and the assertion above would then be vacuous");
+});
+
+/**
+ * #1204: THE CALL #1084 SAID WAS MISSING.
+ *
+ * #1084's own header: **"NOTHING CALLS THIS YET, AND SAYING SO IS THE POINT … A function that is
+ * perfect and never reached is the defect this repository has hit three times in a week."** All five of
+ * #1204's acceptance clauses were already satisfied by that row — measured before building, including
+ * driving its mutation (comparison always equal: 38/0 -> 35/3, red by name). What was NOT satisfied is
+ * the row's TITLE: `fleet:provision` refused nothing, because the refusal was unreached.
+ *
+ * These assert the wiring, injected, so the suite drives it without a fleet. **A run against real boxes
+ * stays #921's** and this row does not claim it.
+ */
+// THREE SEGMENTS, because `buildOf` extracts `<major>.<minor>.<build>` and documents that it does.
+// My first fixture used a four-segment value with the UBR, which can never match what `buildOf` returns --
+// so clause 2's control failed and the code was right. A fixture inventing a format the parser does not
+// produce tests the fixture, not the parser.
+const PINNED = "10.0.26100";
+const inventoryWithPin = `all:\n  children:\n    a11y_workers:\n      vars:\n        windows_build: "${PINNED}"\n`;
+
+test("#1204 clause 1: a drifted box REFUSES the provisioning run, naming the box and BOTH builds", () => {
+  const { refusal } = buildGate({
+    chosen: "provision-role.yml",
+    inventoryText: inventoryWithPin,
+    guests: [{ name: "a11y-worker-7", windowsVersion: `Microsoft Windows 11 Pro 10.0.22631.1` }],
+  });
+  // POSITIVE CONTROL: the two builds being compared are printed before anything is asserted about them.
+  // A module that failed to load and a comparison that found nothing produce the same empty refusal.
+  assert.ok(refusal, `expected a refusal comparing 22631 against pinned ${PINNED}; got null`);
+  assert.match(String(refusal), /a11y-worker-7/, "the box must be named");
+  assert.match(String(refusal), /22631/, "and the build it is ON");
+  assert.match(String(refusal), new RegExp(PINNED.replace(/\./g, "\\.")), "and the build it SHOULD be on");
+});
+
+test("#1204 clause 2: a box on the pin provisions normally -- the control", () => {
+  // Without this, a gate that refuses everything is indistinguishable from one that works.
+  const { refusal, notice } = buildGate({
+    chosen: "provision-role.yml",
+    inventoryText: inventoryWithPin,
+    guests: [{ name: "a11y-worker-2", windowsVersion: `Microsoft Windows 11 Pro ${PINNED}.4946` }],
+  });
+  assert.equal(refusal, null, `a box on the pin must not be refused; got: ${refusal}`);
+  assert.match(String(notice), /1 on the pin, 0 drifted, 0 unreadable, of 1 asked/,
+    "and the census is printed anyway -- 'no box drifted' and 'no box was asked' are different facts");
+});
+
+test("#1204 clause 5: a box that could not be ASKED is refused distinguishably, never as agreement", () => {
+  // `guestBuilds` is where the collapse would happen: a missing field read as an empty string lands in
+  // `compliant` and reports a box nobody reached as on the pin. "I could not ask" and "it matches" are
+  // different answers and this is the seam that keeps them apart.
+  assert.deepEqual(guestBuilds([{ name: "a11y-worker-9" }]),
+    [{ name: "a11y-worker-9", windowsVersion: null }],
+    "a probe that never reached the box must yield null, not an empty string");
+  const { notice } = buildGate({
+    chosen: "provision-role.yml",
+    inventoryText: inventoryWithPin,
+    guests: guestBuilds([{ name: "a11y-worker-9" }]),
+  });
+  assert.match(String(notice), /COULD NOT READ the build of a11y-worker-9/,
+    "an unreachable box must be SAID, not folded into compliant or drifted");
+  assert.match(String(notice), /0 on the pin, 0 drifted, 1 unreadable/);
+});
+
+test("#1204: only the PROVISIONING playbook is gated -- the repair paths are not blocked", () => {
+  // `deploy.yml` pulls code onto boxes that already exist; `recover.yml` acts on one that is already
+  // wedged. Refusing those on a build mismatch blocks the repair path, which is the same trade
+  // `fleet:deploy`'s busy-worker guard makes in the other direction.
+  const drifted = [{ name: "a11y-worker-7", windowsVersion: "Microsoft Windows 11 Pro 10.0.22631.1" }];
+  for (const chosen of ["deploy.yml", "recover.yml", "sleep.yml"]) {
+    const gate = buildGate({ chosen, inventoryText: inventoryWithPin, guests: drifted });
+    assert.deepEqual(gate, { refusal: null, notice: null },
+      `${chosen} must not be gated on the build pin -- it is not how a box joins the fleet`);
+  }
+  // And the control: the same drifted box DOES refuse the one playbook that is gated, so the loop above
+  // is not passing because `buildGate` refuses nothing at all.
+  assert.ok(buildGate({ chosen: "provision-role.yml", inventoryText: inventoryWithPin, guests: drifted }).refusal,
+    "the same input must refuse provision-role.yml, or the exemptions above prove nothing");
+});
+
+/**
+ * #1204: THE CALL EXISTS — the defect this row fixes, applied to the row's own fix.
+ *
+ * Commenting out `await enforceBuildPin(chosen)` left the suite at 42/0. Every clause above drives
+ * `buildGate` directly, so they all pass while `fleet:provision` refuses nothing — which is **#1084's
+ * exact state restored**: *"a function that is perfect and never reached"*. Building the call without
+ * pinning it rebuilt the defect one layer up, in the fix for it.
+ *
+ * COMMENTS STRIPPED, because commenting the call out IS the mutation — a text search that counts prose
+ * passes on the very edit it exists to catch. Three rows tonight have turned on that.
+ */
+test("#1204: main() CALLS the build gate -- an unreached refusal is the defect it replaces", () => {
+  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.match(source, /await enforceBuildPin\(/,
+    "nothing calls enforceBuildPin, so `fleet:provision` refuses nothing and every other clause in this "
+    + "file passes anyway -- they drive `buildGate` directly. That is #1084's state, which this row "
+    + "exists to end: a perfect comparison that no run reaches");
+  // AND IT MUST RUN BEFORE THE PLAYBOOK DOES. A refusal that arrives mid-provision has already changed
+  // the guest it is refusing, and the ordering is not visible from the call's existence alone.
+  //
+  // SCOPED TO `main`'S BODY, because the first `runBootstrapFromHere(` in the file is its own
+  // DECLARATION, hundreds of lines above the call. My first version compared against that and failed on
+  // correct code -- the instrument found a real occurrence of the right string in the wrong place.
+  const mainBody = source.slice(source.indexOf("async function main() {"));
+  assert.ok(mainBody.indexOf("await enforceBuildPin(") < mainBody.indexOf("runBootstrapFromHere("),
+    "the gate must run before any playbook touches a box");
 });
