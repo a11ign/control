@@ -65,7 +65,7 @@ import { sandboxGitEnv } from "../../../scripts/git-env.mjs";
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
-import { fleetToProbe, probeWorker } from "./fleet-status.mjs";
+import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
@@ -79,7 +79,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
-import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
+import { inventoryWorkerUrls, namedInventoryWorkers } from "../../worker-fleet/src/fleet-env.mjs";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 
@@ -91,7 +91,8 @@ import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane
  * An unrecognised flag is otherwise IGNORED, so it runs the default and reports success.
  */
 refuseUnknownFlags(
-  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply"],
+  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply",
+    "--allow-offline="],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
@@ -908,6 +909,114 @@ async function enforceBuildPin(chosen) {
   }
 }
 
+/** #1313: the two playbooks that change what a box runs. Repair paths (`recover.yml`) and `sleep.yml` are not gated. */
+const LINK_GATED = ["deploy.yml", "provision-role.yml"];
+
+/**
+ * Every `--allow-offline=<name>`, in order. REPEATABLE, which `flagValue` (first match only) is not.
+ *
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+export function allowOfflineNames(argv) {
+  const prefix = "--allow-offline=";
+  return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
+}
+
+/**
+ * The refusal text for a HOLD with boxes still unnamed -- OFF and UNKNOWN in separate lists, because one is
+ * a walk to a machine and the other is a better read.
+ *
+ * @param {{ chosen: string, off: string[], unknown: string[], named: string[] }} held
+ * @returns {string}
+ */
+function holdRefusal({ chosen, off, unknown, named }) {
+  return [
+    `REFUSING ${chosen}: fleet:status holds this write at layer 2 (#1313).`,
+    `  off the network:  ${off.join(", ") || "none"}`,
+    `  unknown:          ${unknown.join(", ") || "none"}`,
+    ...(named.length ? [`  already named with --allow-offline: ${named.join(", ")}`] : []),
+    "  An OFF box goes to the chairman by inventory name before anything else is tried on it; one",
+    "  `npm run fleet:wake -- <name>` first. An UNKNOWN box needs a better read: `npm run fleet:link-view`.",
+    "  To proceed past them deliberately, name each one: --allow-offline=<name> (repeatable).",
+  ].join("\n");
+}
+
+/**
+ * #1313: A LAYER-2 HOLD REFUSES THE WRITE -- `ceo`'s ruling on #1311, the second half of #1298.
+ *
+ * #1298 made `fleet:status` print `fleet write: HOLD`. **A HOLD line nobody reads is the "recorded, unread,
+ * acted past" shape**, so `fleet:deploy` and `fleet:provision` read the gate themselves. UNKNOWN holds
+ * exactly as OFF does (the amendment on #1298), and the flag lifts the refusal only when EVERY held box is
+ * named -- a name for a box that was never held is refused, not quietly accepted.
+ *
+ * PURE, the way `buildGate` is, so every case is driven without a fleet; `enforceLinkGate` is the call.
+ *
+ * @param {{ chosen: string, gate: { hold: boolean, off: string[], unknown: string[] } | null,
+ *           allowOffline: string[] }} input
+ * @returns {{ refusal: string | null, notice: string | null }}
+ */
+export function linkGate({ chosen, gate, allowOffline }) {
+  if (!LINK_GATED.includes(chosen)) {
+    return { refusal: allowOffline.length
+      ? `refusing --allow-offline with --playbook=${chosen}: only ${LINK_GATED.join(" and ")} read the layer-2 gate.`
+      : null, notice: null };
+  }
+  const held = gate?.hold ? [...gate.off, ...gate.unknown] : [];
+  const stray = allowOffline.filter((name) => !held.includes(name));
+  if (stray.length) {
+    const why = held.length ? `not held (the hold is ${held.join(", ")})` : "no box is held";
+    return { refusal: `refusing --allow-offline=${stray.join(", --allow-offline=")}: ${why}. `
+      + "A name for a box that was never held would be accepted and ignored.", notice: null };
+  }
+  if (!gate?.hold) return { refusal: null, notice: null };
+  const unnamed = (/** @type {string[]} */ names) => names.filter((name) => !allowOffline.includes(name));
+  const off = unnamed(gate.off);
+  const unknown = unnamed(gate.unknown);
+  if (off.length || unknown.length) {
+    return { refusal: holdRefusal({ chosen, off, unknown, named: allowOffline }), notice: null };
+  }
+  return { refusal: null, notice: `  proceeding past a layer-2 HOLD: ${held.join(", ")}, each named with `
+    + "--allow-offline. Ansible will report them UNREACHABLE, and that is the expected result." };
+}
+
+/**
+ * #1313: THE GATE, ASKED OF THE FLEET THIS RUN WILL TOUCH, before the control plane is asked to move.
+ *
+ * THE INVENTORY, NOT `A11Y_WORKERS`, for the reason `guardProtocolChange` gives: Ansible takes its hosts from
+ * `inventory.yml` whatever the environment says, so a stale variable that omits a dead box would pass this
+ * gate while the playbook targets that box. `namedInventoryWorkers` pairs each address with the inventory
+ * name `--allow-offline=` takes.
+ *
+ * COULD NOT ASK IS NOT MAY PROCEED: if the read itself throws, the write is refused and says why. And zero
+ * boxes asked is SAID, because it holds nothing for a reason that is not "every box answered".
+ *
+ * @param {string} chosen
+ */
+async function enforceLinkGate(chosen) {
+  const allowOffline = allowOfflineNames(process.argv.slice(2));
+  /** @type {{ lines: string[], gate: { hold: boolean, off: string[], unknown: string[] } | null }} */
+  let layer = { lines: [], gate: null };
+  if (LINK_GATED.includes(chosen)) {
+    const workers = namedInventoryWorkers();
+    if (!workers.length) process.stdout.write("  layer-2 gate: asked 0 boxes (no inventory.yml here), so it held nothing\n");
+    try {
+      layer = (await fleetStatus({ workers: () => workers })).linkLayer;
+    } catch (error) {
+      process.stderr.write(`REFUSING ${chosen}: the layer-2 gate could not be read `
+        + `(${/** @type {Error} */ (error).message}). Could not ask is not may proceed.\n`);
+      process.exit(2);
+    }
+  }
+  const { refusal, notice } = linkGate({ chosen, gate: layer.gate, allowOffline });
+  if (refusal || notice) process.stdout.write(`${layer.lines.map((line) => `  ${line}`).join("\n")}\n`);
+  if (notice) process.stdout.write(`${notice}\n\n`);
+  if (refusal) {
+    process.stderr.write(`${refusal}\n`);
+    process.exit(2);
+  }
+}
+
 /**
  * A SHA IS NOT A REF THIS CAN DEPLOY, AND THE COMMENT SAYING SO WAS NOT A GUARD.
  *
@@ -945,6 +1054,7 @@ async function main() {
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply } = parseArgs();
   await guardProtocolChange(chosen);
+  await enforceLinkGate(chosen);
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
   // to a commit is the only comparison that settles "is it running my code?" — the first version compared

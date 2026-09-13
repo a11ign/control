@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
-  pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds }
+  pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames }
   from "./fleet-playbook.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -666,4 +666,77 @@ test("#1204: main() CALLS the build gate -- an unreached refusal is the defect i
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.ok(mainBody.indexOf("await enforceBuildPin(") < mainBody.indexOf("runBootstrapFromHere("),
     "the gate must run before any playbook touches a box");
+});
+
+// --- #1313: a layer-2 HOLD refuses fleet:deploy and fleet:provision unless each held box is named ---
+
+const HOLD = { hold: true, off: ["a11y-worker-3"], unknown: ["a11y-worker-5"] };
+
+test("#1313 ACCEPTANCE 1: a HOLD with one OFF and one UNKNOWN box refuses, naming both in separate lists", () => {
+  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+    const { refusal, notice } = linkGate({ chosen, gate: HOLD, allowOffline: [] });
+    assert.ok(refusal, `${chosen} must refuse a layer-2 HOLD`);
+    assert.match(String(refusal), /off the network: +a11y-worker-3\n/, String(refusal));
+    assert.match(String(refusal), /unknown: +a11y-worker-5\n/, "UNKNOWN holds exactly as OFF does, on its own line");
+    assert.equal(notice, null);
+  }
+});
+
+test("#1313 ACCEPTANCE 2: --allow-offline naming only one of the two still refuses, and names the other", () => {
+  const onlyOff = linkGate({ chosen: "deploy.yml", gate: HOLD, allowOffline: ["a11y-worker-3"] });
+  assert.match(String(onlyOff.refusal), /unknown: +a11y-worker-5\n/, String(onlyOff.refusal));
+  assert.match(String(onlyOff.refusal), /off the network: +none\n/);
+  assert.match(String(onlyOff.refusal), /already named with --allow-offline: a11y-worker-3/);
+  const onlyUnknown = linkGate({ chosen: "provision-role.yml", gate: HOLD, allowOffline: ["a11y-worker-5"] });
+  assert.match(String(onlyUnknown.refusal), /off the network: +a11y-worker-3\n/, String(onlyUnknown.refusal));
+});
+
+test("#1313 ACCEPTANCE 3: --allow-offline naming both dispatches, and says what it proceeds past", () => {
+  const both = linkGate({ chosen: "provision-role.yml", gate: HOLD, allowOffline: ["a11y-worker-5", "a11y-worker-3"] });
+  assert.equal(both.refusal, null, String(both.refusal));
+  assert.match(String(both.notice), /proceeding past a layer-2 HOLD: a11y-worker-3, a11y-worker-5/);
+});
+
+test("#1313 ACCEPTANCE 4: --allow-offline=<a box that is not held> is refused by name", () => {
+  const stray = linkGate({ chosen: "deploy.yml", gate: HOLD, allowOffline: ["a11y-worker-3", "a11y-worker-5", "a11y-worker-9"] });
+  assert.match(String(stray.refusal), /refusing --allow-offline=a11y-worker-9: not held \(the hold is a11y-worker-3, a11y-worker-5\)/,
+    String(stray.refusal));
+  const nothingHeld = linkGate({ chosen: "deploy.yml", gate: null, allowOffline: ["a11y-worker-9"] });
+  assert.match(String(nothingHeld.refusal), /refusing --allow-offline=a11y-worker-9: no box is held/);
+});
+
+test("#1313 clause 3: no hold, and no gate at all, dispatch exactly as today with no flag", () => {
+  assert.deepEqual(linkGate({ chosen: "deploy.yml", gate: null, allowOffline: [] }), { refusal: null, notice: null });
+  assert.deepEqual(linkGate({ chosen: "deploy.yml", gate: { hold: false, off: [], unknown: [] }, allowOffline: [] }),
+    { refusal: null, notice: null });
+  assert.ok(linkGate({ chosen: "deploy.yml", gate: HOLD, allowOffline: [] }).refusal,
+    "and the control: the same playbook DOES refuse a hold, so the two lines above are not passing because nothing refuses");
+});
+
+test("#1313: only deploy and provision are gated -- the repair paths are not blocked, and do not take --allow-offline", () => {
+  for (const chosen of ["recover.yml", "sleep.yml", "collect-logs.yml"]) {
+    assert.deepEqual(linkGate({ chosen, gate: HOLD, allowOffline: [] }), { refusal: null, notice: null },
+      `${chosen} acts on boxes that are already in trouble, so a hold must not block it`);
+    assert.match(String(linkGate({ chosen, gate: HOLD, allowOffline: ["a11y-worker-3"] }).refusal),
+      /only deploy\.yml and provision-role\.yml read the layer-2 gate/);
+  }
+});
+
+test("#1313: --allow-offline is repeatable, which flagValue is not", () => {
+  assert.deepEqual(allowOfflineNames(["--playbook=deploy.yml", "--allow-offline=a11y-worker-3", "--allow-offline=a11y-worker-5"]),
+    ["a11y-worker-3", "a11y-worker-5"]);
+  assert.deepEqual(allowOfflineNames(["--playbook=deploy.yml"]), []);
+});
+
+/** COMMENTS STRIPPED, for #1204's reason: commenting the call out IS the mutation a prose search agrees with. */
+test("#1313: main() CALLS the layer-2 gate, on the inventory, before the control plane is asked to move", () => {
+  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const mainBody = source.slice(source.indexOf("async function main() {"));
+  assert.match(mainBody, /await enforceLinkGate\(chosen\)/, "a perfect gate that no run reaches refuses nothing");
+  assert.ok(mainBody.indexOf("await enforceLinkGate(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
+    "the gate must run before the control plane's checkout moves");
+  assert.match(source, /"--allow-offline="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
+  assert.match(source, /fleetStatus\(\{ workers: \(\) => workers \}\)/, "the gate is asked of an injected fleet");
+  assert.match(source, /const workers = namedInventoryWorkers\(\);/, "and that fleet is the inventory, not A11Y_WORKERS");
 });
