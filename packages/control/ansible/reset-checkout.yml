@@ -2,8 +2,12 @@
 # Move every capture worker, and then the control plane, onto ONE named commit of the rewritten history.
 # Transfer step 8 (#63, #1547). Run by hand, once, from the control plane, never through `fleet:deploy`:
 #
+#     # 1. one worker first -- that worker only; the control plane is NOT moved by this run
+#     ansible-playbook reset-checkout.yml -e new_repo_url=https://github.com/a11ign/a11ign.git -e sha=<40-hex> -l a11y-worker-3
+#     # 2. then the full run -- every worker (a box already at <sha> is re-read, not harmed), then the control plane, last
 #     ansible-playbook reset-checkout.yml -e new_repo_url=https://github.com/a11ign/a11ign.git -e sha=<40-hex>
-#     ansible-playbook reset-checkout.yml -e new_repo_url=... -e sha=... -l a11y-worker-3     # one box first
+#     # the control plane alone, if it is ever needed separately
+#     ansible-playbook reset-checkout.yml -e new_repo_url=... -e sha=... -l localhost
 #
 # ## Why this exists
 #
@@ -30,13 +34,20 @@
 # matches no worker file), so the code the worker serves is unchanged. Step 9's `fleet:deploy` restarts
 # and proves the fleet.
 #
-# ## The commit must be a ref tip on the new origin
+# ## The preflight runs under ANY `-l`, because `--limit` applies to every play
 #
-# Refused before any box is touched: `git ls-remote <new_repo_url>` must list `sha` as the tip of some
-# branch or tag. That is a pure read that downloads nothing. It is stricter than "the origin has this
+# The preflight refuses before any box is touched: `sha` must be a full SHA, `new_repo_url` an https URL,
+# the control-plane key set, and `git ls-remote <new_repo_url>` must list `sha` as the tip of some branch or
+# tag. That last check is a pure read that downloads nothing. It is stricter than "the origin has this
 # commit", because a reachable commit that is not a tip is refused too. On the day the commit to name is the
-# rewritten `main`'s tip, which this rule accepts. Each box then re-proves presence with `cat-file` after
-# its own fetch, before it moves.
+# rewritten `main`'s tip, which this rule accepts.
+#
+# Ansible applies `--limit` to EVERY play, so `-l a11y-worker-3` skips both `hosts: localhost` plays. The
+# first version of this file therefore moved the documented first worker WITHOUT its preflight (reviewer,
+# #1553). So the preflight is written once, as the `&reset_preflight` block in the first play, and replayed
+# as the worker play's first step, delegated to `localhost` and `run_once`. A worker-limited run refuses
+# before touching its box exactly as the full run does. It is tagged `preflight` so it can be exercised
+# alone (`--tags preflight`). Each box then re-proves presence with `cat-file` after its own fetch.
 #
 # ## Order, and why the control plane goes last
 #
@@ -45,8 +56,9 @@
 # playbook runs from its checkout. It REFUSES a control-plane checkout with tracked changes rather than
 # discarding them, the same caution `lab-reset.yml` applies to the lab, because that machine is where the
 # operator works. If step 5 has already moved it by hand to `sha`, the move changes nothing and the read-back
-# still runs. The lab is not here: its jobs already `checkout --detach` a resolved commit (`tasks/run-job.yml`),
-# and step 7 (`update-origin-remote.yml`) re-points its remote.
+# still runs. A `-l <worker>` run never reaches it, by design (see the commands above). The lab is not here:
+# its jobs already `checkout --detach` a resolved commit (`tasks/run-job.yml`), and step 7
+# (`update-origin-remote.yml`) re-points its remote.
 #
 # Every git call runs with hooks disabled (`-c core.hooksPath=a11y-no-hooks`), on the workers for
 # `deploy.yml`'s reason, and on the control plane because a reset is a mechanical move, not authoring.
@@ -55,25 +67,46 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: -e sha= is required, as a full commit SHA
-      ansible.builtin.assert:
-        that:
-          - sha is defined
-          - sha is match('^[0-9a-f]{40}$')
-        fail_msg: >-
-          -e sha=<40 lowercase hex> is required, with no default. Name the rewritten main's tip on the new
-          origin (`git ls-remote <new_repo_url> refs/heads/main`). A reset to a guessed or abbreviated commit
-          is the one argument this playbook must never infer.
+    - name: Preflight -- the commit, the new origin, the key, and the ref-tip refusal
+      tags: [preflight]
+      block: &reset_preflight
+        - name: -e sha= is required, as a full commit SHA
+          ansible.builtin.assert:
+            that:
+              - sha is defined
+              - sha is match('^[0-9a-f]{40}$')
+            fail_msg: >-
+              -e sha=<40 lowercase hex> is required, with no default. Name the rewritten main's tip on the new
+              origin (`git ls-remote <new_repo_url> refs/heads/main`). A reset to a guessed or abbreviated
+              commit is the one argument this playbook must never infer.
 
-    - name: -e new_repo_url= is required
-      ansible.builtin.assert:
-        that:
-          - new_repo_url is defined
-          - new_repo_url | length > 0
-          - new_repo_url is match('^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$')
-        fail_msg: >-
-          -e new_repo_url=<https url ending .git> is required. Refusing to default it -- this sets every
-          box's origin, and a default is exactly the argument that silently falls back to a guess.
+        - name: -e new_repo_url= is required
+          ansible.builtin.assert:
+            that:
+              - new_repo_url is defined
+              - new_repo_url | length > 0
+              - new_repo_url is match('^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$')
+            fail_msg: >-
+              -e new_repo_url=<https url ending .git> is required. Refusing to default it -- this sets every
+              box's origin, and a default is exactly the argument that silently falls back to a guess.
+
+        - name: The control-plane key must be supplied
+          ansible.builtin.import_tasks: tasks/require-control-plane-key.yml
+
+        - name: Read the new origin's refs -- a read, before any write
+          ansible.builtin.command:
+            argv: [git, ls-remote, "{{ new_repo_url }}"]
+          register: new_origin_refs
+          changed_when: false
+
+        - name: REFUSE a commit that is not a ref tip on the new origin
+          ansible.builtin.assert:
+            that:
+              - new_origin_refs.stdout_lines | select('match', '^' ~ sha ~ '\s') | list | length > 0
+            fail_msg: >-
+              {{ sha }} is not the tip of any branch or tag on {{ new_repo_url }}. Nothing has been changed on
+              any box. Name the rewritten main's tip: `git ls-remote {{ new_repo_url }} refs/heads/main`.
+            success_msg: "{{ sha }} is a ref tip on {{ new_repo_url }}"
 
     - name: Refuse an inventory that resolved no workers
       ansible.builtin.assert:
@@ -85,24 +118,6 @@
           the control plane, where `/etc/a11ign/inventory.yml` is read, or install it with
           `npm run fleet:inventory-install`.
 
-    - name: The control-plane key must be supplied
-      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
-
-    - name: Read the new origin's refs -- a read, before any write
-      ansible.builtin.command:
-        argv: [git, ls-remote, "{{ new_repo_url }}"]
-      register: new_origin_refs
-      changed_when: false
-
-    - name: REFUSE a commit that is not a ref tip on the new origin
-      ansible.builtin.assert:
-        that:
-          - new_origin_refs.stdout_lines | select('match', '^' ~ sha ~ '\s') | list | length > 0
-        fail_msg: >-
-          {{ sha }} is not the tip of any branch or tag on {{ new_repo_url }}. Nothing has been changed on any
-          box. Name the rewritten main's tip: `git ls-remote {{ new_repo_url }} refs/heads/main`.
-        success_msg: "{{ sha }} is a ref tip on {{ new_repo_url }}"
-
 - name: Move every capture worker to the named commit on the new origin
   hosts: a11y_workers
   gather_facts: false
@@ -112,6 +127,14 @@
     a11y_port: "{{ a11y_port | default(8765) }}"
     reset_branch: "{{ a11y_git_ref | default('main') }}"
   pre_tasks:
+    # THE SAME PREFLIGHT, on localhost, before this worker is touched. A `-l <worker>` run skips the
+    # localhost play above, so without this the documented first-box run would move a worker unchecked.
+    - name: Preflight again, delegated -- `-l <worker>` skips the localhost play above
+      tags: [preflight]
+      delegate_to: localhost
+      run_once: true
+      block: *reset_preflight
+
     # SAME REFUSAL AS `deploy.yml` and `update-origin-remote.yml`: this rewrites the checkout a live
     # capture's worker process is running from.
     - name: Is this worker mid-capture
@@ -148,8 +171,8 @@
         function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
         Run "remote set-url" remote set-url origin '{{ new_repo_url }}'
         Run "fetch" fetch --quiet --prune origin
-        # PRESENCE, PROVED ON THIS BOX after its own fetch -- the localhost ref check read the new origin,
-        # not this checkout.
+        # PRESENCE, PROVED ON THIS BOX after its own fetch -- the preflight read the new origin, not this
+        # checkout.
         Run "cat-file" cat-file -e '{{ sha }}^{commit}'
         # A worker is an appliance: a modified tracked file is dirt, and `--force` discards it. Named first,
         # the same containment `deploy.yml` uses. Untracked files are never touched.
@@ -232,7 +255,7 @@
         chdir: "{{ reset_repo_root }}"
       changed_when: (control_before.stdout | trim) != sha
 
-    - name: Read the control plane's HEAD and origin back
+    - name: Read the control plane's HEAD back
       ansible.builtin.command:
         argv: [git, -c, core.hooksPath=a11y-no-hooks, rev-parse, HEAD]
         chdir: "{{ reset_repo_root }}"
