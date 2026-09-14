@@ -1,0 +1,259 @@
+---
+# Move every capture worker, and then the control plane, onto ONE named commit of the rewritten history.
+# Transfer step 8 (#63, #1547). Run by hand, once, from the control plane, never through `fleet:deploy`:
+#
+#     ansible-playbook reset-checkout.yml -e new_repo_url=https://github.com/a11ign/a11ign.git -e sha=<40-hex>
+#     ansible-playbook reset-checkout.yml -e new_repo_url=... -e sha=... -l a11y-worker-3     # one box first
+#
+# ## Why this exists
+#
+# The transfer's history purge force-pushes the repository, so every commit gets a new SHA and the old
+# history is gone from origin. Every routine path that moves a fleet checkout refuses exactly that:
+# `deploy.yml` fast-forwards each guest with `merge --ff-only`, and `fleet-playbook.mjs`'s control-plane
+# step does the same. That refusal is RIGHT for an ordinary deploy, where a guest that cannot fast-forward
+# has diverged and must fail loudly, and this playbook does not change it. It is wrong exactly once, on the
+# day the history itself is replaced. So this is a separate, one-time operation, not a flag on the deploy.
+#
+# ## What it does, per box
+#
+# Sets `origin` to the new URL, fetches, proves the commit is present, then moves the checkout to it with
+# `checkout --detach <sha>`, never `merge --ff-only` and never `pull`. It reads `HEAD` back, and a box whose
+# `HEAD` is not `sha` fails the run by name.
+#
+# ON A WORKER THE LOCAL BRANCH MOVES TOO. `deploy.yml` later runs `checkout {{ a11y_git_ref | default('main') }}`
+# and then `merge --ff-only origin/<that branch>`. A worker left on a detached `sha` while its local `main`
+# still points into the OLD history would put that old history back on the next deploy, and the fast-forward
+# would refuse again. So after the detach, `branch --force` puts the local branch on `sha` and the worker
+# checks it out: HEAD is `sha`, on the branch the next deploy expects.
+#
+# It does NOT restart the worker process. The purge rewrites commits, not the worker's source (its pattern
+# matches no worker file), so the code the worker serves is unchanged. Step 9's `fleet:deploy` restarts
+# and proves the fleet.
+#
+# ## The commit must be a ref tip on the new origin
+#
+# Refused before any box is touched: `git ls-remote <new_repo_url>` must list `sha` as the tip of some
+# branch or tag. That is a pure read that downloads nothing. It is stricter than "the origin has this
+# commit", because a reachable commit that is not a tip is refused too. On the day the commit to name is the
+# rewritten `main`'s tip, which this rule accepts. Each box then re-proves presence with `cat-file` after
+# its own fetch, before it moves.
+#
+# ## Order, and why the control plane goes last
+#
+# Workers first, one at a time, halting on the first failure (`serial: 1`, `any_errors_fatal`), so a
+# failure leaves one box to inspect rather than a split fleet. The control plane goes LAST, because this
+# playbook runs from its checkout. It REFUSES a control-plane checkout with tracked changes rather than
+# discarding them, the same caution `lab-reset.yml` applies to the lab, because that machine is where the
+# operator works. If step 5 has already moved it by hand to `sha`, the move changes nothing and the read-back
+# still runs. The lab is not here: its jobs already `checkout --detach` a resolved commit (`tasks/run-job.yml`),
+# and step 7 (`update-origin-remote.yml`) re-points its remote.
+#
+# Every git call runs with hooks disabled (`-c core.hooksPath=a11y-no-hooks`), on the workers for
+# `deploy.yml`'s reason, and on the control plane because a reset is a mechanical move, not authoring.
+
+- name: Validate the commit, the new origin and the inventory before touching any box
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: -e sha= is required, as a full commit SHA
+      ansible.builtin.assert:
+        that:
+          - sha is defined
+          - sha is match('^[0-9a-f]{40}$')
+        fail_msg: >-
+          -e sha=<40 lowercase hex> is required, with no default. Name the rewritten main's tip on the new
+          origin (`git ls-remote <new_repo_url> refs/heads/main`). A reset to a guessed or abbreviated commit
+          is the one argument this playbook must never infer.
+
+    - name: -e new_repo_url= is required
+      ansible.builtin.assert:
+        that:
+          - new_repo_url is defined
+          - new_repo_url | length > 0
+          - new_repo_url is match('^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$')
+        fail_msg: >-
+          -e new_repo_url=<https url ending .git> is required. Refusing to default it -- this sets every
+          box's origin, and a default is exactly the argument that silently falls back to a guess.
+
+    - name: Refuse an inventory that resolved no workers
+      ansible.builtin.assert:
+        that:
+          - groups['a11y_workers'] is defined
+          - groups['a11y_workers'] | length > 0
+        fail_msg: >-
+          No host matched `a11y_workers`, so the worker play below would do NOTHING and exit 0. Run this from
+          the control plane, where `/etc/a11ign/inventory.yml` is read, or install it with
+          `npm run fleet:inventory-install`.
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+    - name: Read the new origin's refs -- a read, before any write
+      ansible.builtin.command:
+        argv: [git, ls-remote, "{{ new_repo_url }}"]
+      register: new_origin_refs
+      changed_when: false
+
+    - name: REFUSE a commit that is not a ref tip on the new origin
+      ansible.builtin.assert:
+        that:
+          - new_origin_refs.stdout_lines | select('match', '^' ~ sha ~ '\s') | list | length > 0
+        fail_msg: >-
+          {{ sha }} is not the tip of any branch or tag on {{ new_repo_url }}. Nothing has been changed on any
+          box. Name the rewritten main's tip: `git ls-remote {{ new_repo_url }} refs/heads/main`.
+        success_msg: "{{ sha }} is a ref tip on {{ new_repo_url }}"
+
+- name: Move every capture worker to the named commit on the new origin
+  hosts: a11y_workers
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    a11y_port: "{{ a11y_port | default(8765) }}"
+    reset_branch: "{{ a11y_git_ref | default('main') }}"
+  pre_tasks:
+    # SAME REFUSAL AS `deploy.yml` and `update-origin-remote.yml`: this rewrites the checkout a live
+    # capture's worker process is running from.
+    - name: Is this worker mid-capture
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        timeout: 5
+      delegate_to: localhost
+      register: reset_busy_check
+      failed_when: false
+      changed_when: false
+
+    - name: REFUSE to reset a checkout underneath a capture
+      when:
+        - reset_busy_check.json.busy | default(false) | bool
+        - not (a11y_force_reset | default(false) | bool)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is CAPTURING right now. Nothing has been changed on it, and the run stops
+          here. Wait for it, or `-e a11y_force_reset=true` if you genuinely mean to reset it anyway.
+  tasks:
+    - name: Read the origin and HEAD before touching anything
+      ansible.windows.win_shell: |
+        git -c core.hooksPath=a11y-no-hooks remote get-url origin
+        git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
+      args:
+        chdir: "{{ a11y_repo_path }}"
+      register: reset_before
+      changed_when: false
+
+    - name: Set the new origin, fetch, prove the commit is here, and move to it
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = "Stop"
+        function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
+        Run "remote set-url" remote set-url origin '{{ new_repo_url }}'
+        Run "fetch" fetch --quiet --prune origin
+        # PRESENCE, PROVED ON THIS BOX after its own fetch -- the localhost ref check read the new origin,
+        # not this checkout.
+        Run "cat-file" cat-file -e '{{ sha }}^{commit}'
+        # A worker is an appliance: a modified tracked file is dirt, and `--force` discards it. Named first,
+        # the same containment `deploy.yml` uses. Untracked files are never touched.
+        $dirty = git -c core.hooksPath=a11y-no-hooks status --porcelain --untracked-files=no
+        if ($dirty) { Write-Output "discarding local modifications on this guest:"; Write-Output $dirty }
+        Run "checkout --detach" -c advice.detachedHead=false checkout --quiet --force --detach '{{ sha }}'
+        # THE BRANCH THE NEXT DEPLOY CHECKS OUT moves onto the new history too; see the header.
+        Run "branch --force" branch --force {{ reset_branch }} '{{ sha }}'
+        Run "checkout branch" checkout --quiet {{ reset_branch }}
+        git -c core.hooksPath=a11y-no-hooks remote get-url origin
+        git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
+      args:
+        chdir: "{{ a11y_repo_path }}"
+      register: reset_after
+      changed_when: true
+
+    - name: The worker's HEAD is the named commit, on the new origin
+      ansible.builtin.assert:
+        that:
+          - (reset_after.stdout_lines | last | trim) == sha
+          - (reset_after.stdout_lines[-2] | trim) == new_repo_url
+        fail_msg: >-
+          {{ inventory_hostname }}: HEAD is {{ reset_after.stdout_lines | last | trim }} and origin is
+          {{ reset_after.stdout_lines[-2] | trim }}, not {{ sha }} on {{ new_repo_url }}. The run stops here;
+          investigate this box by hand before deploying to it.
+        success_msg: >-
+          {{ inventory_hostname }}: HEAD {{ sha }} on {{ reset_branch }} (was
+          {{ reset_before.stdout_lines | last | trim }}), origin {{ new_repo_url }}
+
+- name: Move the control plane's checkout to the named commit, last
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    reset_repo_root: "{{ playbook_dir }}/../../.."
+  tasks:
+    - name: What is modified in the control plane's checkout
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, status, --porcelain, --untracked-files=no]
+        chdir: "{{ reset_repo_root }}"
+      register: control_dirty
+      changed_when: false
+
+    - name: REFUSE to reset a control-plane checkout with tracked changes
+      when: (control_dirty.stdout | trim) != ''
+      ansible.builtin.fail:
+        msg: >-
+          The control plane's checkout has tracked changes, and this playbook discards nothing there:
+          {{ control_dirty.stdout | trim }}. Every worker has already been moved and read back. Deal with
+          these changes by hand, then re-run with `-l localhost`.
+
+    - name: Read the control plane's HEAD before moving it
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, rev-parse, HEAD]
+        chdir: "{{ reset_repo_root }}"
+      register: control_before
+      changed_when: false
+
+    - name: Set the new origin on the control plane
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, remote, set-url, origin, "{{ new_repo_url }}"]
+        chdir: "{{ reset_repo_root }}"
+      changed_when: true
+
+    - name: Fetch the new origin on the control plane
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, fetch, --quiet, --prune, origin]
+        chdir: "{{ reset_repo_root }}"
+      changed_when: false
+
+    - name: Prove the commit is present on the control plane
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, cat-file, -e, "{{ sha }}^{commit}"]
+        chdir: "{{ reset_repo_root }}"
+      changed_when: false
+
+    - name: Move the control plane's checkout to the commit, detached
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, -c, advice.detachedHead=false, checkout, --quiet, --detach, "{{ sha }}"]
+        chdir: "{{ reset_repo_root }}"
+      changed_when: (control_before.stdout | trim) != sha
+
+    - name: Read the control plane's HEAD and origin back
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, rev-parse, HEAD]
+        chdir: "{{ reset_repo_root }}"
+      register: control_after
+      changed_when: false
+
+    - name: Read the control plane's origin back
+      ansible.builtin.command:
+        argv: [git, -c, core.hooksPath=a11y-no-hooks, remote, get-url, origin]
+        chdir: "{{ reset_repo_root }}"
+      register: control_origin_after
+      changed_when: false
+
+    - name: The control plane's HEAD is the named commit, on the new origin
+      ansible.builtin.assert:
+        that:
+          - (control_after.stdout | trim) == sha
+          - (control_origin_after.stdout | trim) == new_repo_url
+        fail_msg: >-
+          The control plane: HEAD is {{ control_after.stdout | trim }} and origin is
+          {{ control_origin_after.stdout | trim }}, not {{ sha }} on {{ new_repo_url }}. Investigate by hand
+          before running any fleet playbook from it.
+        success_msg: >-
+          The control plane: HEAD {{ sha }} (was {{ control_before.stdout | trim }}), origin {{ new_repo_url }}

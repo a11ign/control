@@ -86,6 +86,11 @@ const DISPATCHED_ELSEWHERE: Record<string, string> = {
     + "hand on transfer day, never through the routine deploy wrapper. Wiring it into `fleet-playbook.mjs` "
     + "would make an org-move-only command reachable from the same surface as every ordinary deploy, "
     + "which is exactly the wrong affordance for something that must never run twice by accident.",
+  "reset-checkout.yml":
+    "one-time, run by hand at transfer step 8 (#1547, #63): it moves every worker and the control plane onto "
+    + "a named commit of the REWRITTEN history, which `deploy.yml`'s `--ff-only` rightly refuses. Reachable "
+    + "from the routine deploy wrapper, a history reset would sit one typo away from every ordinary deploy, "
+    + "for the same reason update-origin-remote.yml is kept off it.",
 };
 
 test("every a11y_workers playbook is dispatched by the wrapper (and so refuses) or is declared elsewhere", () => {
