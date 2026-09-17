@@ -677,6 +677,57 @@
             this writes would then describe a partial run. Re-run rather than trusting it.
         argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages", "--", "--update"]
         timeout: 900
+      # #1614 needs axe-core run over the corpus's calibration pages "under #914's rules", and no route
+      # existed: the catalogue had no job that installs a browser (the provisioning playbooks are for
+      # WORKERS, and a hand install over ssh is the lab write `ceo` declined at #1626's 13:4xZ). The npm
+      # packages (`@axe-core/playwright`, `playwright`) were already present; the browser and its apt
+      # libraries were not (measured on the lab, #1626, Debian 12 x86_64).
+      #
+      # ONE COMMAND DOES BOTH HALVES. `playwright install --with-deps` downloads the pinned Chromium AND
+      # apt-installs the system libraries it needs to actually launch (not just unpack) -- on Debian 12
+      # this measured as libnss3, libnspr4, libatk1.0-0, libatk-bridge2.0-0, libdrm2, libxkbcommon0,
+      # libxcomposite1, libxdamage1, libxfixes3, libxrandr2, libgbm1, libpango-1.0-0, libcairo2, libasound2
+      # and fonts-liberation (#1626's own dependency audit; the exact set is Playwright's own for the OS it
+      # detects, not a list this repo controls). IDEMPOTENT: a second run skips a Chromium already at the
+      # pinned revision. FAILS LOUDLY if the download host is unreachable or apt cannot install: the
+      # command's own non-zero exit is the ansible task's failure, with no wrapper swallowing it.
+      #
+      # WHAT IT WRITES, WHERE: the Chromium binary under `PLAYWRIGHT_BROWSERS_PATH`
+      # (`/opt/a11ign/playwright-browsers`, pinned here rather than left at Playwright's per-user cache
+      # default, because axe-calibration below must find the SAME install regardless of which account runs
+      # it -- `lab-job.test.ts` asserts both jobs' `setenv` name the identical path). `axe-calibration.mjs`
+      # reads `chromium.executablePath()` under this same variable as its own install marker (#1626): no
+      # separate marker file to go stale independently of whether the binary is actually there.
+      #
+      # THE EXACT REMOVAL: `rm -rf /opt/a11ign/playwright-browsers`, then (only if nothing else on the box
+      # needs them) `apt-get remove --purge` the package list above. Nothing here automates that removal --
+      # apt state shared with the rest of the box is not this job's to touch on a whim.
+      install-axe-browser:
+        argv: ["/usr/bin/node", "node_modules/playwright/cli.js", "install", "--with-deps", "chromium"]
+        setenv: ["PLAYWRIGHT_BROWSERS_PATH=/opt/a11ign/playwright-browsers"]
+        timeout: 1800
+      # Runs axe-core over #1614's own population (46 conformant calibration pages, derived from the
+      # corpus's role/publishedClaim fields -- never a URL list, which `axe-calibration.test.ts`'s
+      # #1626 MUTATION covers). REFUSES if `install-axe-browser` has not put a Chromium where this job
+      # looks (the SAME `PLAYWRIGHT_BROWSERS_PATH` below). Writes one JSON to
+      # `runs/axe-calibration/results.json`: per page, the URL, axe-core's version, the browser's version,
+      # how long the page took, and its violated criteria and rule ids -- or, for a page axe could not
+      # examine, that failure recorded on its own record rather than the page silently missing from the
+      # file. Exit 1 means at least one page failed this way; re-run before trusting a file with any.
+      axe-calibration:
+        exitMeanings:
+          "1": >-
+            at least one calibration page could not be examined (a navigation failure, or axe itself
+            throwing) -- its own record in the written JSON says which and why. The other pages' results
+            are still written and still trustworthy; re-run to get a clean file before using this as a
+            baseline.
+          "2": >-
+            REFUSED before any page was scanned -- either install-axe-browser has not put a Chromium at
+            PLAYWRIGHT_BROWSERS_PATH (the printed message names the exact path checked), or a fatal error
+            aborted the run before it could examine anything. Nothing was written.
+        argv: ["/usr/bin/node", "packages/lab/scripts/axe-calibration.mjs"]
+        setenv: ["PLAYWRIGHT_BROWSERS_PATH=/opt/a11ign/playwright-browsers"]
+        timeout: 3600
       # WHAT STATE IS THE CORPUS IN? The question that had no command, so it was answered by opening an
       # SSH shell on this box and running ad-hoc Python -- about eight times on 2026-08-25, one of which
       # read the wrong field and reported `captured: 0` while `lab:status` correctly said 85.
