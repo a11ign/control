@@ -267,13 +267,13 @@ separate, each domain's blast radius is bounded by what that one key can reach.
    a machine holding either private key is being retired, generate a FRESH keypair for its replacement and
    revoke the old public key from the fleet/host side — do not copy the private file. A copied private key
    is a second machine that can silently lose the "exactly one machine holds both" property ADR 0012 and
-   `docs/roles/README.md`'s "Credentials" section both rely on.
+   `packages/agent-org/docs/roles/README.md`'s "Credentials" section both rely on.
 5. **Revoking access** is the mirror of step 2 or 3: remove the public key from
    `administrators_authorized_keys` (fleet) or the host's authorized-keys (lab), then re-provision the
    fleet side so the removal actually lands rather than sitting uncommitted.
 
 **What this section deliberately does not do.** It does not name a host, an IP, a filename or a fingerprint
-— see `docs/roles/README.md`'s "Credentials are the single point of failure" section for why: this project
+— see `packages/agent-org/docs/roles/README.md`'s "Credentials are the single point of failure" section for why: this project
 treats a credential's existence and its domain as documentable, and its exact reachability material as the
 one thing that must survive only on the machine that holds it today.
 
