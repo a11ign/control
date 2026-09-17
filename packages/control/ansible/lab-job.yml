@@ -665,15 +665,13 @@
       # Same, with --update: rewrites the baseline. Separate job because it WRITES a claim that every
       # finding it records is correct, and that is a deliberate act, not a side effect of checking.
       rules-real-pages-update:
-        # Same script, same gateVerdict/exitCodeFor contract as rules-real-pages above -- and the same
-        # ASSERTED-vs-REFERRED ambiguity in "1" (#364): this fires on either, and this variant WRITES the
-        # finding into the baseline regardless of which one it was, since its whole purpose is recording
-        # the current findings.
+        # Same script as rules-real-pages above, but NOT the same exit contract: this path calls
+        # `updateBaseline` directly (`process.exitCode = updateBaseline(current, pages)`), which returns
+        # only 0 or 2 -- there is no gateVerdict/exitCodeFor here and no ASSERTED-vs-REFERRED "1", because
+        # the --update path has no "asserted finding" state to signal (ceo's ruling, #1511, 2026-09-14
+        # ~02:05Z). It WRITES the finding into the baseline regardless of which one it was, since its whole
+        # purpose is recording the current findings -- see updateBaseline's own doc comment for the "0".
         exitMeanings:
-          "1": >-
-            a NEW finding appeared on a real, conformant page and was written into the baseline regardless.
-            Whether it is a genuine conformance-claim violation or referral noise is printed above (search
-            for ASSERTED / REFERRED); this code fires on either.
           "2": >-
             INCONCLUSIVE -- fewer real pages were examined than the audit's own population; the baseline
             this writes would then describe a partial run. Re-run rather than trusting it.
