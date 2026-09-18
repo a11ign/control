@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus, LINK, linkVerdictOf,
-  readLinkLayer, neighbourScript, renderHead, failedRead } from "./fleet-status.mjs";
+  readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe } from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -524,4 +524,62 @@ test("#1323: a child that STARTED but hit a real error -- output past maxBuffer 
   const neverStartedRead = failedRead(neverStarted);
   assert.equal(neverStartedRead?.verdict, LINK.UNASKED);
   assert.match(neverStartedRead?.detail ?? "", /ssh could not be started/);
+});
+
+// --- #1356: fleetToProbe asks the CONTROL PLANE's inventory, never a checkout's own inventory.yml ---
+
+/** Saves/restores A11Y_WORKER(S) around `fn`, so this suite never depends on the ambient shell's env. */
+function withNoConfiguredWorkers(fn: () => void) {
+  const saved = { A11Y_WORKER: process.env.A11Y_WORKER, A11Y_WORKERS: process.env.A11Y_WORKERS };
+  delete process.env.A11Y_WORKER;
+  delete process.env.A11Y_WORKERS;
+  try {
+    fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+
+test("#1356: fleetToProbe asks the control plane's inventory, and pairs the inventory NAME with the address", () => {
+  withNoConfiguredWorkers(() => {
+    const workers = fleetToProbe({
+      readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
+    });
+    assert.deepEqual(workers, [{ name: "a11y-worker-2  192.0.2.2:8765", url: "http://192.0.2.2:8765" }]);
+  });
+});
+
+test("#1356: fleetToProbe does not double the address when the inventory names none", () => {
+  withNoConfiguredWorkers(() => {
+    const workers = fleetToProbe({
+      readFleet: () => ({ refusal: null, workers: [{ name: "192.0.2.2:8765", url: "http://192.0.2.2:8765" }] }),
+    });
+    assert.deepEqual(workers, [{ name: "192.0.2.2:8765", url: "http://192.0.2.2:8765" }],
+      "controlPlaneFleet already falls back to the bare address as the name -- printing it twice would be new noise");
+  });
+});
+
+test("#1356: fleetToProbe THROWS naming which of the three causes it was -- never a silently empty table, "
+  + "and never a checkout's own inventory.yml", () => {
+  withNoConfiguredWorkers(() => {
+    assert.throws(
+      () => fleetToProbe({ readFleet: () => ({ refusal: "no inventory exists at /etc/a11ign/inventory.yml on the control plane", workers: [] }) }),
+      /No fleet to report on: A11Y_WORKERS is unset, and no inventory exists at \/etc\/a11ign\/inventory\.yml/);
+    assert.throws(
+      () => fleetToProbe({ readFleet: () => ({ refusal: "the control plane could not be reached (Connection timed out)", workers: [] }) }),
+      /No fleet to report on: A11Y_WORKERS is unset, and the control plane could not be reached/);
+  });
+});
+
+test("#1356: A11Y_WORKER(S) still wins first, and never even calls the control plane", () => {
+  const saved = process.env.A11Y_WORKERS;
+  process.env.A11Y_WORKERS = "http://REDACTED-INTERNAL-ADDRESS:8765";
+  try {
+    let called = false;
+    const workers = fleetToProbe({ readFleet: () => { called = true; return { refusal: null, workers: [] }; } });
+    assert.equal(called, false, "naming workers means you are managing them -- the control plane is not asked");
+    assert.deepEqual(workers, [{ name: "REDACTED-INTERNAL-ADDRESS:8765", url: "http://REDACTED-INTERNAL-ADDRESS:8765" }]);
+  } finally {
+    if (saved === undefined) delete process.env.A11Y_WORKERS; else process.env.A11Y_WORKERS = saved;
+  }
 });

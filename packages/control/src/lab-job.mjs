@@ -54,8 +54,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWorkersServe } from "../../worker-fleet/src/code-drift.mjs";
-import { inventoryWorkerUrls } from "../../worker-fleet/src/fleet-env.mjs";
 import { codeVersion, workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
+// #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
+// job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same
+// credential this read needs), so asking it directly costs nothing this job was not already paying.
+import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
@@ -184,6 +187,23 @@ function dispatchToAnsible(forwarded) {
 }
 
 /**
+ * #1356: THE POOL a capture-bearing job checks against, pure -- given an explicit `workers` list or the
+ * control plane's own resolved fleet. `run` below is this plus the real exit.
+ * @param {string} job
+ * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} input
+ * @returns {{ pool: string[], refusal: null } | { pool: null, refusal: string }}
+ */
+export function poolFor(job, { workers, readFleet }) {
+  if (workers) return { pool: workers, refusal: null };
+  const fleet = readFleet();
+  if (fleet.refusal) {
+    return { pool: null, refusal: `REFUSING ${job}: could not learn which boxes it will dispatch to -- `
+      + `${fleet.refusal}. Could not ask is not may proceed.` };
+  }
+  return { pool: fleet.workers.map((w) => w.url), refusal: null };
+}
+
+/**
  * Check the fleet, then dispatch — every dependency injectable, so a test can drive the DECISION without
  * a real fleet, a real ansible-playbook, or a real `process.exit`.
  *
@@ -200,12 +220,14 @@ function dispatchToAnsible(forwarded) {
  * @param {string[]} argv
  * @param {{ catalogueText?: string, workers?: string[], expected?: string,
  *           checkFleet?: (expected: string, workers: string[], options: object) => Promise<void>,
- *           dispatch?: (forwarded: string[]) => void }} [deps]
+ *           dispatch?: (forwarded: string[]) => void,
+ *           readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null } }} [deps]
  */
 export async function run(argv, {
   catalogueText, workers, expected,
   checkFleet = assertWorkersServe,
   dispatch = dispatchToAnsible,
+  readFleet = readControlPlaneFleet,
 } = {}) {
   // Stripped before forwarding: `ansible-playbook` does not recognise this flag and would refuse the
   // whole command line with it still attached, and it is this file's own concern, not the playbook's.
@@ -216,7 +238,17 @@ export async function run(argv, {
   if (job && !isDescribeOnly(argv)) {
     const catalogue = catalogueText ?? readFileSync(CATALOGUE, "utf8");
     if (captureBearingJobs(catalogue).includes(job)) {
-      const pool = workers ?? inventoryWorkerUrls();
+      // #1356: the CONTROL PLANE's own inventory when `workers` was not given directly -- never a
+      // checkout's `inventory.yml`, gitignored and absent here just as it was on the control plane's own
+      // persistent checkout (#1670). `poolFor` refuses in ITS OWN words before `checkFleet` ever runs,
+      // rather than handing it an empty pool that reads as "no workers were given" -- a real but less
+      // specific claim.
+      const resolved = poolFor(job, { workers, readFleet });
+      if (resolved.pool === null) {
+        process.stderr.write(`${resolved.refusal}\n`);
+        return process.exit(3);
+      }
+      const pool = resolved.pool;
       const hash = expected ?? codeVersion(workerSourceDir());
       await checkFleet(hash, pool, { when: "before dispatching to the lab", allow: allowStale,
         bareMetalUrls: pool });

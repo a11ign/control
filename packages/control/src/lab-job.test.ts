@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run } from "./lab-job.mjs";
+import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor } from "./lab-job.mjs";
 
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
 
@@ -115,6 +115,48 @@ test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool i
     assert.deepEqual(seen.checked?.[1], ["http://203.0.113.107:8765", "http://203.0.113.59:8765"]);
     assert.equal((seen.checked?.[2] as { when?: string })?.when, "before dispatching to the lab");
     assert.deepEqual(seen.dispatched, ["-e", "job=capture-only", "-e", "only=route-title-stale+"]);
+  });
+});
+
+test("#1356: with no `workers` given, poolFor resolves the pool from the CONTROL PLANE's own inventory, "
+  + "never a checkout's inventory.yml", () => {
+  const resolved = poolFor("capture-only", {
+    readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
+  });
+  assert.deepEqual(resolved, { pool: ["http://192.0.2.2:8765"], refusal: null });
+});
+
+test("#1356: an explicit `workers` list wins, and the control plane is never asked", () => {
+  let called = false;
+  const resolved = poolFor("capture-only", {
+    workers: ["http://203.0.113.107:8765"],
+    readFleet: () => { called = true; return { refusal: null, workers: [] }; },
+  });
+  assert.deepEqual(resolved, { pool: ["http://203.0.113.107:8765"], refusal: null });
+  assert.equal(called, false);
+});
+
+test("#1356: a control plane that could not be asked REFUSES in its own words, naming the job -- pure, "
+  + "so `run` can exit on it without this test ever touching process.exit", () => {
+  const resolved = poolFor("capture-only", {
+    readFleet: () => ({ refusal: "no inventory exists at /etc/a11ign/inventory.yml on the control plane", workers: [] }),
+  });
+  assert.equal(resolved.pool, null);
+  assert.match(String(resolved.refusal), /^REFUSING capture-only: could not learn which boxes it will dispatch to -- /);
+  assert.match(String(resolved.refusal), /no inventory exists at \/etc\/a11ign\/inventory\.yml/);
+});
+
+test("#1356: with no `workers` given, a capture-bearing job's pool comes from the CONTROL PLANE's own "
+  + "inventory, never a checkout's inventory.yml -- through run() itself", () => {
+  const seen: { checked?: unknown[] } = {};
+  return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
+    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef",
+    readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
+    checkFleet: async (expected, workers, options) => { seen.checked = [expected, workers, options]; },
+    dispatch: () => {},
+  }).then(() => {
+    assert.deepEqual(seen.checked?.[1], ["http://192.0.2.2:8765"]);
+    assert.deepEqual((seen.checked?.[2] as { bareMetalUrls?: unknown })?.bareMetalUrls, ["http://192.0.2.2:8765"]);
   });
 });
 

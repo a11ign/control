@@ -36,8 +36,7 @@
  *   loose cable and a dead worker look identical from the capture port.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2): this file has zero
 // cross-package dependents, so keeping it in the published worker-fleet package while it reads control's
@@ -46,12 +45,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // cross the boundary the SANCTIONED way, relative, exactly like `fleet-playbook.mjs` and `lab-job.mjs`
 // already do.
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
-import { configuredWorkers, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
-  from "../../worker-fleet/src/fleet-env.mjs";
+import { configuredWorkers } from "../../worker-fleet/src/fleet-env.mjs";
 import { assessWorker } from "../../worker-fleet/src/worker-health.mjs";
 import { fleetConsistency, describeMismatches } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
+import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 
 /**
  * as `doctor`.
@@ -67,38 +66,38 @@ const MS_PER_SECOND = 1000;
 const SECONDS_PER_MINUTE = 60;
 
 /**
- * The fleet, from the environment if it names one, otherwise from the inventory.
+ * The fleet, from the environment if it names one, otherwise from the CONTROL PLANE's own inventory.
  *
  * Both, because the two are used at different moments: `A11Y_WORKERS` is what a run has set, and the
- * inventory is the durable definition. Falling back rather than requiring the env var means this works
- * in a fresh shell, which is when you most want to ask what the fleet is doing.
+ * control plane's inventory is the durable definition. Falling back rather than requiring the env var
+ * means this works in a fresh shell, which is when you most want to ask what the fleet is doing.
+ *
+ * #1356: NEVER a checkout's own `inventory.yml` — gitignored, and absent on the operator host that
+ * actually drives the fleet. A READ-ONLY reporter, so a refusal here is a thrown error naming WHICH of
+ * the three causes it was (no source, unparseable, or unreachable), never a silently empty table.
+ *
+ * @param {{ readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null } }} [deps]
  */
-export function fleetToProbe() {
+export function fleetToProbe({ readFleet = readControlPlaneFleet } = {}) {
   const named = configuredWorkers();
   if (named.length) return named;
-  try {
-    const inventory = readFileSync(fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)), "utf8");
-    const groupVars = readFileSync(
-      fileURLToPath(new URL("../ansible/group_vars/a11y_workers.yml", import.meta.url)), "utf8");
-    const port = portFromGroupVars(groupVars);
-    // The INVENTORY NAME beside the address, because every command that acts on a worker takes the name
-    // (`fleet:deploy --limit=a11y-worker-4`, `fleet:sleep`, `lab:job -e worker=`) while this report showed
-    // only the address. On 2026-08-24 that cost a wrong action: this table named .224 as the box whose Edge
-    // had drifted, and .224 is a11y-worker-FIVE — so `fleet:sleep --limit=a11y-worker-4` put a healthy
-    // machine to sleep and left the drifted one serving. A report and a command that cannot be matched up
-    // is a report you have to translate, and translation is where the mistake goes.
-    const names = workerNamesFromInventory(inventory, { port });
-    return workersFromInventory(inventory, { port })
-      .map((url) => ({
-        name: names[url] ? `${names[url]}  ${url.replace(/^https?:\/\//, "")}` : url.replace(/^https?:\/\//, ""),
-        url,
-      }));
-  } catch (error) {
-    throw new Error(
-      "No fleet to report on: A11Y_WORKERS is unset and the inventory could not be read "
-      + `(${/** @type {Error} */ (error).message}). Set one, or add a host to packages/control/ansible/inventory.yml.`,
-      { cause: error });
+  const fleet = readFleet();
+  if (fleet.refusal) {
+    throw new Error(`No fleet to report on: A11Y_WORKERS is unset, and ${fleet.refusal}. Set A11Y_WORKERS, `
+      + "or fix the control plane's inventory (`npm run fleet:inventory-install`).");
   }
+  // The INVENTORY NAME beside the address, because every command that acts on a worker takes the name
+  // (`fleet:deploy --limit=a11y-worker-4`, `fleet:sleep`, `lab:job -e worker=`) while this report showed
+  // only the address. On 2026-08-24 that cost a wrong action: this table named .224 as the box whose Edge
+  // had drifted, and .224 is a11y-worker-FIVE — so `fleet:sleep --limit=a11y-worker-4` put a healthy
+  // machine to sleep and left the drifted one serving. A report and a command that cannot be matched up
+  // is a report you have to translate, and translation is where the mistake goes.
+  return fleet.workers.map(({ name, url }) => {
+    const address = url.replace(/^https?:\/\//, "");
+    // `controlPlaneFleet` already falls back to the bare address AS the name when the inventory names
+    // none -- do not then print it twice.
+    return { name: name === address ? address : `${name}  ${address}`, url };
+  });
 }
 
 /**

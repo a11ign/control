@@ -15,9 +15,10 @@ import { fileURLToPath } from "node:url";
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
-  inventorySources, inventoryReadScript, parseInventoryReads }
+  inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict }
   from "./fleet-playbook.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
   for (const ref of ["afec73d", "65ead9b1c2d3e4f5", "main", "v8-feature-schema", "origin/main", "v1.2.3"]) {
@@ -826,4 +827,56 @@ test("#1343: a repair playbook reads no inventory and asks no box", async () => 
   assert.deepEqual(await result, { refusal: null, notice: null, lines: [] });
   assert.equal(readPaths.length, 0);
   assert.equal(asked.length, 0);
+});
+
+// --- #1356: guardProtocolChange asks the CONTROL PLANE's inventory, never a checkout's own inventory.yml ---
+
+test("#1356: protocolGuardVerdict refuses in its OWN words when the fleet could not be resolved -- never "
+  + "falling through to protocolVerdict's \"no worker answered\", which implies a silent fleet rather than "
+  + "an operator host with no address to try", () => {
+  const refused = protocolGuardVerdict({
+    chosen: "deploy.yml", local: "19", allowed: false, served: [],
+    fleet: { workers: [], refusal: "no inventory exists at /etc/a11ign/inventory.yml on the control plane" },
+  });
+  assert.equal(refused.refuse, true);
+  assert.match(refused.message, /^REFUSING deploy\.yml: could not learn which boxes this deploy will touch -- /);
+  assert.match(refused.message, /no inventory exists at \/etc\/a11ign\/inventory\.yml/);
+  assert.doesNotMatch(refused.message, /no worker answered/, "this is a DIFFERENT failure -- never asked, not asked and silent");
+});
+
+test("#1356: protocolGuardVerdict asks the CONTROL PLANE's own workers -- a real fleet with no local "
+  + "inventory.yml still gets a real answer, matching #1343's own review shape", () => {
+  const fleet = { workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" },
+    { name: "a11y-worker-3", url: "http://192.0.2.3:8765" }], refusal: null };
+  const agree = protocolGuardVerdict({
+    chosen: "deploy.yml", local: "19", allowed: false, fleet,
+    served: [{ worker: "http://192.0.2.2:8765", protocol: "19" }, { worker: "http://192.0.2.3:8765", protocol: "19" }],
+  });
+  assert.equal(agree.refuse, false);
+  assert.equal(agree.message, "", "the fleet agrees, so there is nothing to say");
+
+  const differ = protocolGuardVerdict({
+    chosen: "deploy.yml", local: "19", allowed: false, fleet,
+    served: [{ worker: "http://192.0.2.2:8765", protocol: "18" }, { worker: "http://192.0.2.3:8765", protocol: "18" }],
+  });
+  assert.equal(differ.refuse, true);
+  assert.match(differ.message, /REFUSING TO DEPLOY: this checkout has CAPTURE_PROTOCOL_VERSION = 19/);
+  assert.match(differ.message, /asked 2 worker\(s\) from the control plane's inventory\.$/,
+    "the source is the control plane's inventory, never a checkout's own inventory.yml");
+});
+
+test("#1356 MUTATION TARGET: fleet.refusal must be checked before protocolVerdict runs, or an unresolved "
+  + "fleet (served: []) reads as protocolVerdict's OWN empty-fleet case instead of this guard's own", () => {
+  // Reproduces the original defect exactly: no `fleet.refusal` check at all, `served` stays `[]` because
+  // there were no workers to ask, and `protocolVerdict` alone decides -- "no worker answered /health",
+  // which is a real but DIFFERENT claim from "this host had no inventory to ask in the first place".
+  const unresolved = protocolVerdict({ local: "19", served: [], allowed: false, source: "CAPTURE_PROTOCOL_VERSION" });
+  assert.equal(unresolved.refuse, true, "protocolVerdict alone still refuses (the gate held before this fix too)");
+  assert.match(unresolved.message, /no worker answered \/health/, "but for the WRONG reason without #1356's guard");
+
+  const guarded = protocolGuardVerdict({
+    chosen: "deploy.yml", local: "19", allowed: false, served: [],
+    fleet: { workers: [], refusal: "no inventory exists at /etc/a11ign/inventory.yml on the control plane" },
+  });
+  assert.doesNotMatch(guarded.message, /no worker answered/, "#1356's own refusal must win instead");
 });

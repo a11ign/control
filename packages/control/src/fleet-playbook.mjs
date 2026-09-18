@@ -55,7 +55,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { networkInterfaces } from "node:os";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
@@ -79,10 +78,19 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
-import { inventoryWorkerUrls, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
-  from "../../worker-fleet/src/fleet-env.mjs";
-import { CONTROL_PLANE_CHECKOUT, CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
+// #1356: THE SHARED SHAPE, moved out of this file so every other operator-host reader of "which boxes are
+// the fleet" (fleet-status.mjs, fleet-wake.mjs, fleet-discover.mjs, lab-job.mjs) can ask the control
+// plane's own inventory the same way, instead of a checkout's `inventory.yml` -- gitignored, and absent
+// on the machine that actually drives the fleet. `onTheControlPlane`/`sshToControlPlane` are re-exported
+// below at their PRE-#1356 names (`onTheControlPlane`, and `ssh` via the local wrapper above) so nothing
+// that already imports them from this file changes.
+import { onTheControlPlane, sshToControlPlane, inventorySources, inventoryReadScript, parseInventoryReads,
+  controlPlaneFleet, readControlPlaneFleet } from "./control-plane-fleet.mjs";
+// Re-exported at this file's own PRE-#1356 names -- every existing `import { inventorySources, ... } from
+// "./fleet-playbook.mjs"` (this file's own tests) keeps working unchanged.
+export { inventorySources, inventoryReadScript, parseInventoryReads };
 
 /**
  * `--serial=` and `--limit=` decide how many of twelve machines an operation touches at once, and
@@ -396,50 +404,17 @@ const PLAYBOOK_TIMEOUT_MS = { "provision-role.yml": 4 * 60 * 60 * 1000, "os-roll
 const DEFAULT_PLAYBOOK_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
- * ARE WE ALREADY ON THE CONTROL PLANE?
- *
- * `lab:pipeline` dispatches itself to the control plane as a systemd unit and re-runs there with
- * `--local`, so every stage of a fleet-bearing pipeline executes ON the box this script otherwise SSHes
- * to. Root-to-root over the lab key is not authorised there — nor should it be — and the failure reads
- * `Permission denied (publickey,password)`, which looks like a broken key rather than a machine talking
- * to itself.
- *
- * Detected from the interfaces rather than the hostname: `A11Y_CONTROL_HOST` is an address, a hostname
- * may not resolve to it, and the question being asked is literally "is that address mine".
- *
- * @param {Record<string, {address?: string}[] | undefined>} [interfaces] injectable, so this is testable
- *        off the control plane — the alternative is a function whose only test is running it there
- * @param {string} [host]
- * @returns {boolean}
- */
-function onTheControlPlane(interfaces = networkInterfaces(), host = CONTROL_PLANE) {
-  return Object.values(interfaces).flat().some((iface) => iface?.address === host);
-}
-
-/**
+ * ONE SSH TO THE CONTROL PLANE, at THIS file's own default timeout -- `sshToControlPlane`
+ * (`control-plane-fleet.mjs`, #1356) is the shared transport every operator-host reader now uses, and
+ * this is the thin wrapper that keeps THIS file's own long-running calls (a provision, a checkout move)
+ * at their existing 30-minute default rather than the shared module's short, read-a-file-sized one.
+ * `onTheControlPlane`'s local-shortcut and the key/host resolution live in the shared module now; this
+ * wrapper adds nothing but the default.
  * @param {string} command
  * @param {{ capture?: boolean, timeoutMs?: number }} [options]
  */
 function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS } = {}) {
-  // Locally when this IS the control plane. `sh -c` and not the ssh path, because ssh to yourself needs a
-  // key you should not have to install to talk to your own filesystem.
-  if (onTheControlPlane()) {
-    return execFileSync("sh", ["-c", `cd /root && ${command}`], {
-      encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
-    });
-  }
-  // requireControlPlaneKey(), not the raw env var: no default (see control-plane-host.mjs, #85), and
-  // calling it here rather than caching a module-level constant is what keeps the return type `string`
-  // rather than `string | undefined` at the point this array needs a real path.
-  const args = ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-    // The connection must survive a long silent stretch: an NVDA install prints nothing for minutes and a
-    // dropped SSH would read as a failed provision. Keepalives are cheap and the alternative is a
-    // diagnosis of the wrong thing.
-    "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=20",
-    `root@${CONTROL_PLANE}`, command];
-  return execFileSync("ssh", args, {
-    encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
-  });
+  return sshToControlPlane(command, { capture, timeoutMs });
 }
 
 /**
@@ -533,6 +508,32 @@ function parseArgs() {
 }
 
 /**
+ * THE DECISION, pure -- given the local version, the resolved fleet (or its own refusal), and what those
+ * workers serve. `guardProtocolChange` below is this plus the real reads, the real health probe, and the
+ * exit, matching `linkGateFor`/`enforceLinkGate`'s own split (#1343).
+ *
+ * #1356: `fleet.refusal` -- no source, unparseable, or unreachable -- is reported in ITS OWN words and
+ * refuses BEFORE `protocolVerdict` ever runs, never falling through to "no worker answered /health": that
+ * message implies the fleet went quiet, when a checkout with no control-plane inventory never had an
+ * address to try in the first place. Could not ask is not may proceed.
+ *
+ * @param {{ chosen: string, local: string | null,
+ *           fleet: { workers: { name: string, url: string }[], refusal: string | null },
+ *           served: { worker: string, protocol: string | number | null }[], allowed: boolean }} input
+ * @returns {{ refuse: boolean, message: string }}
+ */
+export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }) {
+  if (fleet.refusal) {
+    return { refuse: true, message: `REFUSING ${chosen}: could not learn which boxes this deploy will `
+      + `touch -- ${fleet.refusal}. Could not ask is not may proceed.` };
+  }
+  const verdict = protocolVerdict({ local, served, allowed, source: PROTOCOL_VERSION_FILE });
+  if (!verdict.message) return { refuse: verdict.refuse, message: "" };
+  return { refuse: verdict.refuse,
+    message: `${verdict.message}  asked ${fleet.workers.length} worker(s) from the control plane's inventory.` };
+}
+
+/**
  * Would this deploy change the protocol the fleet is serving? — asked BEFORE anything is pushed.
  *
  * Only `deploy.yml` ships worker code. `sleep.yml` and `provision-role.yml` cannot move
@@ -541,10 +542,17 @@ function parseArgs() {
  * Imported from the worker package rather than restated here: the version lives beside the capture code,
  * and a second copy of "what the current protocol is" is precisely the fact-stated-twice shape.
  *
+ * #1356: `readFleet` is INJECTABLE, defaulting to the real `readControlPlaneFleet` -- called lazily,
+ * inside the body, after the `chosen !== "deploy.yml"` early return, so every OTHER playbook does not pay
+ * for a control-plane ssh round trip it never needed. A test drives this with a fake `readFleet` returning
+ * either `{ workers, refusal: null }` or a refusal, the same shape `linkGateFor` already tests with
+ * injected reads (#1343).
+ *
  * @param {string} chosen the playbook about to run
+ * @param {{ readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null } }} [deps]
  * @returns {Promise<void>} resolves if the deploy may proceed; exits the process if not
  */
-async function guardProtocolChange(chosen) {
+async function guardProtocolChange(chosen, { readFleet = readControlPlaneFleet } = {}) {
   if (chosen !== "deploy.yml") return;
   // READ AS TEXT, NEVER IMPORTED. `capture-core.mjs` imports guidepup, which throws
   // `No available supported screen readers` at import on any host without one — and on a Mac VoiceOver
@@ -553,24 +561,21 @@ async function guardProtocolChange(chosen) {
   // machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
   const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(
     readFileSync(resolve(workerSourceDir(), PROTOCOL_VERSION_FILE), "utf8"))?.[1] ?? null;
-  // THE INVENTORY, DIRECTLY — deliberately not `resolveWorkerPool`, and this is the one place that is
-  // right. That resolver answers "which workers should I use", and honours `A11Y_WORKER(S)` first because
-  // naming workers means you are managing them. This guard asks a different question: "am I about to
-  // change the protocol on the machines THIS DEPLOY WILL TOUCH", and Ansible takes its hosts from
-  // inventory.yml regardless of anything in the environment. An env var left set would point the guard at
-  // machines the deploy is not going to reach, and pass.
+  // THE CONTROL PLANE'S OWN INVENTORY, DIRECTLY — deliberately not `resolveWorkerPool`, and this is the
+  // one place that is right. That resolver answers "which workers should I use", and honours
+  // `A11Y_WORKER(S)` first because naming workers means you are managing them. This guard asks a different
+  // question: "am I about to change the protocol on the machines THIS DEPLOY WILL TOUCH", and Ansible
+  // takes its hosts from the control plane's inventory regardless of anything in the environment. An env
+  // var left set would point the guard at machines the deploy is not going to reach, and pass.
   //
-  // The SOURCE is still reported, because "the fleet agrees" means nothing until you know which fleet was
-  // asked. It is a literal here precisely because there is no choice being made.
-  const urls = inventoryWorkerUrls();
-  const source = "inventory.yml";
-  const verdict = protocolVerdict({
-    local,
-    served: await servedProtocols(urls),
-    allowed: process.argv.includes("--allow-protocol-change"),
-    source: PROTOCOL_VERSION_FILE,
+  // #1356: NEVER a checkout's own `inventory.yml` — gitignored, and absent on the operator host that
+  // actually drives the fleet.
+  const fleet = readFleet();
+  const served = fleet.refusal ? [] : await servedProtocols(fleet.workers.map((w) => w.url));
+  const verdict = protocolGuardVerdict({
+    chosen, local, fleet, served, allowed: process.argv.includes("--allow-protocol-change"),
   });
-  if (verdict.message) process.stdout.write(`${verdict.message}  asked ${urls.length} worker(s) from ${source}.\n`);
+  if (verdict.message) process.stdout.write(`${verdict.message}\n`);
   if (verdict.refuse) process.exit(3);
 }
 
@@ -981,94 +986,27 @@ export function linkGate({ chosen, gate, allowOffline }) {
     + "--allow-offline. Ansible will report them UNREACHABLE, and that is the expected result." };
 }
 
-/** A plain path, as `ansible.cfg` lists them: nothing a remote shell would read as more than a path. */
-const INVENTORY_PATH_SHAPE = /^[\w./-]+$/;
-/** The header one remote read prints before each inventory source it found. */
-const INVENTORY_HEADER = "==> ";
 /** A `cat` of one or two small files; minutes would mean the control plane is not answering. */
 const INVENTORY_READ_TIMEOUT_MS = 60_000;
 
-/**
- * #1343 REVIEW: WHERE THE PLAYBOOK'S INVENTORY LIVES, read from `ansible.cfg` rather than restated.
- *
- * The playbook runs ON the control plane with `ANSIBLE_CONFIG=ansible.cfg` (`startPlaybookUnit`), whose
- * `inventory =` line lists the installed file first and the in-tree file as the migration fallback, and
- * Ansible MERGES every listed source that exists. A relative entry is relative to that config's directory in
- * the control plane's checkout. The first version of this gate read THIS machine's in-tree file -- gitignored,
- * absent where the fleet is driven from -- and read its absence as "nothing held" (worker-judge, not convinced).
- *
- * @param {string} ansibleCfgText
- * @returns {string[]} absolute paths on the control plane, in the config's order
- */
-export function inventorySources(ansibleCfgText) {
-  const listed = /^\s*inventory\s*=\s*(.+?)\s*$/m.exec(ansibleCfgText)?.[1];
-  if (!listed) throw new Error("ansible.cfg declares no `inventory =` line, so there is no inventory to read");
-  return listed.split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
-    if (!INVENTORY_PATH_SHAPE.test(entry) || entry.split("/").includes("..")) {
-      throw new Error(`ansible.cfg inventory entry is not a plain path: ${entry}`);
-    }
-    return entry.startsWith("/") ? entry : `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/${entry}`;
-  });
-}
+// #1356: `inventorySources`, `inventoryReadScript`, `parseInventoryReads` and the pure fleet-resolution
+// logic MOVED to `control-plane-fleet.mjs`, imported above -- every operator-host reader needs the exact
+// same shape `gateFleet` pioneered here (#1343), not a second copy of it. `gateFleet` below is now this
+// file's own WORDING wrapped around the shared, generic resolver.
 
 /**
- * One remote read of every source that exists, each under its header. The paths have passed
- * `inventorySources`' shape check, because this string is parsed by a remote shell.
- *
- * @param {string[]} paths
- * @returns {string}
- */
-export function inventoryReadScript(paths) {
-  return paths.map((path) => `if [ -f ${path} ]; then echo '${INVENTORY_HEADER}${path}'; cat ${path}; fi`).join("; ");
-}
-
-/**
- * @param {string} stdout what `inventoryReadScript` printed
- * @returns {{ path: string, text: string }[]} one entry per source that existed
- */
-export function parseInventoryReads(stdout) {
-  /** @type {{ path: string, text: string }[]} */
-  const reads = [];
-  for (const line of stdout.split("\n")) {
-    if (line.startsWith(INVENTORY_HEADER)) reads.push({ path: line.slice(INVENTORY_HEADER.length), text: "" });
-    else if (reads.length) reads[reads.length - 1].text += `${line}\n`;
-  }
-  return reads;
-}
-
-/**
- * The fleet the playbook will target, or the refusal saying why it cannot be known.
- *
- * THREE CAUSES, THREE WORDINGS, ALL REFUSING: no source existed, a malformed host line, or no workers listed --
- * the last two in the parser's own words. `namedInventoryWorkers` returns `[]` for every one of them, which is why this parses
- * directly -- and why none of them may read as "nothing held": could not ask is not may proceed.
+ * The fleet the playbook will target, or the refusal saying why it cannot be known -- `gateFleet`'s own
+ * words (`REFUSING {chosen}: the layer-2 gate ...`) wrapped around `controlPlaneFleet`'s generic reason.
  *
  * @param {{ chosen: string, reads: { path: string, text: string }[], sources: string[], groupVarsText: string }} input
  * @returns {{ workers: { name: string, url: string }[], refusal: string | null }}
  */
 export function gateFleet({ chosen, reads, sources, groupVarsText }) {
-  const refuse = (/** @type {string} */ why) => ({ workers: [], refusal: `REFUSING ${chosen}: the layer-2 gate `
-    + `cannot know which boxes this playbook targets -- ${why}. Could not ask is not may proceed.\n`
-    + "  Install the inventory on the control plane with `npm run fleet:inventory-install`, then re-run." });
-  if (!reads.length) return refuse(`no inventory exists at ${sources.join(" or ")} on the control plane`);
-  const port = portFromGroupVars(groupVarsText);
-  /** @type {Map<string, string>} */
-  const byUrl = new Map();
-  for (const { path, text } of reads) {
-    try {
-      const urls = workersFromInventory(text, { port });
-      const names = workerNamesFromInventory(text, { port });
-      for (const url of urls) byUrl.set(url, names[url] ?? url.replace(/^https?:\/\//, ""));
-    } catch (error) {
-      // THE PARSER'S OWN WORDS, never a label of mine: it throws for a malformed host line AND for an empty
-      // worker group, and calling both "does not parse" was the wrong errand for the second.
-      return refuse(`${path} was refused by the inventory parser: ${String(/** @type {Error} */ (error).message).split("\n")[0]}`);
-    }
-  }
-  if (!byUrl.size) {
-    return refuse(`${reads.map(({ path }) => path).join(" and ")} ${reads.length === 1 ? "lists" : "list"} no ${WORKER_GROUP} hosts`);
-  }
-  return { workers: [...byUrl].map(([url, name]) => ({ name, url })), refusal: null };
+  const result = controlPlaneFleet({ reads, sources, groupVarsText });
+  if (!result.refusal) return result;
+  return { workers: [], refusal: `REFUSING ${chosen}: the layer-2 gate cannot know which boxes this `
+    + `playbook targets -- ${result.refusal}. Could not ask is not may proceed.\n`
+    + "  Install the inventory on the control plane with `npm run fleet:inventory-install`, then re-run." };
 }
 
 /**
