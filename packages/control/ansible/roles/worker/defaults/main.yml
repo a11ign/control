@@ -12,7 +12,7 @@
 # one thing nobody is watching when it breaks: `fleet:deploy` pulls into a checkout the guest
 # already has, so the fleet keeps running and only GROWING it fails. #325/#63 flip this, with
 # every other PRODUCT_REPO site, on the day the transfer happens.
-worker_repo_url: https://github.com/DanBeckDev/a11y-witness.git
+worker_repo_url: https://github.com/a11ign/a11ign.git
 worker_repo_path: 'C:\Users\witness\a11y-witness'
 worker_task_name: a11ysrv
 worker_check_task_name: a11ycheck
