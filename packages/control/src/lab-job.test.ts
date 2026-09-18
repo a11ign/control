@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { captureBearingJobs, extraVars, run } from "./lab-job.mjs";
+import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run } from "./lab-job.mjs";
 
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
 
@@ -216,4 +216,20 @@ test("no -e job= at all runs straight to dispatch — the same as no job was eve
     assert.equal(checked, false);
     assert.deepEqual(dispatched, []);
   });
+});
+
+test("#1670: the ansible-playbook argv never hardcodes -i, so ansible.cfg's own inventory fallback "
+  + "(/etc/a11ign/inventory.yml,inventory.yml) applies", () => {
+  // MEASURED 2026-09-17 on the control plane's own persistent checkout: no in-tree
+  // packages/control/ansible/inventory.yml (a plain `git pull` deletes it, gitignored) and
+  // /etc/a11ign/inventory.yml present and correct. An explicit -i on the command line REPLACES
+  // ansible.cfg's `inventory =` setting rather than falling back to it (Ansible's own documented CLI
+  // precedence), so a hardcoded `-i packages/control/ansible/inventory.yml` asked for the one copy that
+  // checkout did not have and refused "no host matched" even though the durable copy was right there.
+  const args = ansiblePlaybookArgs(["-e", "job=train"]);
+  assert.ok(!args.includes("-i"),
+    "an explicit -i replaces ansible.cfg's inventory fallback list rather than falling back to it -- "
+    + "this argv must never carry one");
+  assert.deepEqual(args, ["packages/control/ansible/lab-job.yml", "-e", "job=train"],
+    "the playbook path and every forwarded arg must still reach ansible-playbook, in order");
 });

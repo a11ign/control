@@ -154,12 +154,31 @@ const jobNamed = (argv) => extraVars(argv).job;
 const isDescribeOnly = (argv) => extraVars(argv).describe !== undefined;
 
 /**
+ * The `ansible-playbook` argv `dispatchToAnsible` runs, pulled out so a test can read it without spawning
+ * anything real.
+ *
+ * #1670: NO `-i` HERE, DELIBERATELY. An explicit `-i` on the command line REPLACES `ansible.cfg`'s own
+ * `inventory =` setting rather than falling back to it (Ansible's documented CLI precedence), and that
+ * setting is `/etc/a11ign/inventory.yml,inventory.yml` precisely so a checkout with no in-tree
+ * `inventory.yml` (gitignored; a plain `git pull` deletes it, per `ansible.cfg`'s own header) still
+ * resolves the fleet from the durable, installed copy. A hardcoded `-i` pointed at the in-tree path alone
+ * asked for the one copy every fresh checkout and worktree does not have, and refused with "no host
+ * matched" on the control plane's own persistent checkout even though `/etc/a11ign/inventory.yml` was
+ * present and correct. `ANSIBLE_CONFIG` (read where this is spawned) is what makes that fallback list
+ * apply at all.
+ * @param {string[]} forwarded
+ * @returns {string[]}
+ */
+export function ansiblePlaybookArgs(forwarded) {
+  return ["packages/control/ansible/lab-job.yml", ...forwarded];
+}
+
+/**
  * The SAME command a human would type — `ANSIBLE_CONFIG` matters, exactly as `lab-pipeline.mjs` states.
  * @param {string[]} forwarded
  */
 function dispatchToAnsible(forwarded) {
-  const result = spawnSync("ansible-playbook",
-    ["-i", "packages/control/ansible/inventory.yml", "packages/control/ansible/lab-job.yml", ...forwarded],
+  const result = spawnSync("ansible-playbook", ansiblePlaybookArgs(forwarded),
     { cwd: REPO, stdio: "inherit", env: { ...process.env, ANSIBLE_CONFIG } });
   process.exit(result.status ?? 1);
 }
