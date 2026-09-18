@@ -808,6 +808,30 @@ test("#1343: a malformed inventory, a workerless one and an unreachable control 
     /the control plane's inventory could not be read \(ssh to the control plane failed: Connection timed out\)\. Could not ask is not may proceed/);
 });
 
+// #1362, worker-judge's should-fix on #1343's convinced verdict: `gateFleet` (now wrapping
+// `controlPlaneFleet`, #1356) SKIPS a source the inventory parser refuses, rather than refusing the
+// gate, is a real risk with no test against it -- only "malformed as the ONLY source" was pinned above.
+// A malformed source BESIDE a good one must still refuse, in EITHER order: this is stricter than
+// Ansible, which merely skips an unparseable source, and refusing is the safe direction to keep.
+const IN_TREE = `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`;
+const MALFORMED = inventoryOf([9]).replace("ansible_host: 192.0.2.9", "ansible_host: 192.0.2.9 trailing");
+
+test("#1362: a malformed source beside a good one refuses the gate, in EITHER order, and asks 0 boxes", async () => {
+  const goodFirst = await driveGate("provision-role.yml",
+    () => [{ path: INSTALLED, text: inventoryOf([2, 3]) }, { path: IN_TREE, text: MALFORMED }]);
+  assert.match(String((await goodFirst.result).refusal),
+    new RegExp(`${IN_TREE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} was refused by the inventory parser`),
+    String((await goodFirst.result).refusal));
+  assert.equal(goodFirst.asked.length, 0, "a malformed source anywhere in the list must stop the ask, never merge the good boxes alone");
+
+  const malformedFirst = await driveGate("provision-role.yml",
+    () => [{ path: INSTALLED, text: MALFORMED }, { path: IN_TREE, text: inventoryOf([2, 3]) }]);
+  assert.match(String((await malformedFirst.result).refusal),
+    new RegExp(`${INSTALLED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} was refused by the inventory parser`),
+    String((await malformedFirst.result).refusal));
+  assert.equal(malformedFirst.asked.length, 0);
+});
+
 test("#1343: a readable inventory asks exactly its workers by inventory name, merges identical sources, and a HOLD among them refuses", async () => {
   const both = [{ path: INSTALLED, text: inventoryOf([2, 3]) },
     { path: `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`, text: inventoryOf([2, 3]) }];
