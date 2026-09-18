@@ -495,15 +495,25 @@ function controlPlaneFromEnvironment() {
  * those are no verdict, never "control plane unreachable", which would send somebody to check a network
  * path that worked. The gate holds on every one of them alike; only the errand differs.
  *
- * @param {{ error?: NodeJS.ErrnoException, status: number | null }} result what `spawnSync` returned
+ * `error` alone does not mean ssh never started -- output past `maxBuffer` (`ENOBUFS`) and a few other
+ * failures arrive as a real `error` on a child that DID run. Only a spawn that never ran has `pid` 0
+ * (the shape #1301 settled on for the identical mistake in `describeSpawnFailure`), so "ssh could not be
+ * started" is `error && !pid`, never `error` alone -- otherwise every one of those reads as `UNASKED`
+ * and renders `unknown (control plane unreachable)` for boxes ssh never failed to ask about.
+ *
+ * @param {{ error?: NodeJS.ErrnoException, status: number | null, pid?: number }} result what `spawnSync` returned
  * @returns {LinkAnswer | null} null when the read succeeded
  */
-export function failedRead({ error, status }) {
+export function failedRead({ error, status, pid }) {
   if (error?.code === "ETIMEDOUT") {
     return { verdict: LINK.NO_VERDICT, detail: `the read did not finish within ${NEIGHBOUR_READ_TIMEOUT_MS / MS_PER_SECOND} s, `
       + "so whether the control plane answered is not known" };
   }
-  if (error) return { verdict: LINK.UNASKED, detail: `ssh could not be started (${error.message})` };
+  if (error && !pid) return { verdict: LINK.UNASKED, detail: `ssh could not be started (${error.message})` };
+  if (error) {
+    return { verdict: LINK.NO_VERDICT, detail: `ssh started (pid ${pid}) but the read failed locally `
+      + `(${error.code ?? error.message}), so whether the control plane answered is not known` };
+  }
   if (status === SSH_OWN_FAILURE) return { verdict: LINK.UNASKED, detail: "ssh exit 255, ssh's own connection failure" };
   if (status === null) {
     return { verdict: LINK.NO_VERDICT, detail: "ssh was killed before the read finished, so whether the control plane answered is not known" };

@@ -3,7 +3,7 @@
 // table at all — it is the "two states reported as one" shape this project keeps paying for.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus, LINK, linkVerdictOf,
   readLinkLayer, neighbourScript, renderHead, failedRead } from "./fleet-status.mjs";
@@ -499,4 +499,29 @@ test("#1311 review: a control plane that ANSWERED and failed the read is no verd
   assert.match(neverStarted.linkLayer.lines[0], /^unknown \(control plane unreachable\) for a11y-worker-3: ssh could not be started/,
     "ssh never starting is the one other case where the control plane was genuinely never asked");
   assert.equal(failedRead({ status: 0 }), null, "and a clean read is not a failure");
+});
+
+test("#1323: a child that STARTED but hit a real error -- output past maxBuffer -- is no verdict, never "
+  + "`ssh could not be started`, though it carries an `error` the same as a spawn that never ran", () => {
+  // A REAL spawnSync, not a hand-built error -- #1311's second verdict found the original mistake exactly
+  // this way (5654132234): the other real results (ENOENT, ETIMEDOUT, exit 1, exit 255, SIGKILL, exit 0)
+  // all read correctly, and only ENOBUFS -- a child that DID start -- was misread as "never started".
+  const overflowed = spawnSync(process.execPath,
+    ["-e", 'process.stdout.write("x".repeat(100000)); setTimeout(() => {}, 5000)'],
+    { encoding: "utf8", maxBuffer: 1024 });
+  assert.equal((overflowed.error as { code?: string } | undefined)?.code, "ENOBUFS", "the fixture must really overflow maxBuffer");
+  assert.ok((overflowed.pid ?? 0) > 0, "a child that ran has a real pid, unlike a spawn that never started");
+
+  const read = failedRead(overflowed);
+  assert.equal(read?.verdict, LINK.NO_VERDICT, "ssh started, so this is not the control-plane-unreachable case");
+  assert.match(read?.detail ?? "", /ssh started \(pid \d+\)/);
+  assert.match(read?.detail ?? "", /ENOBUFS/, "it must name the code, not just say the read failed");
+  assert.doesNotMatch(read?.detail ?? "", /could not be started/);
+
+  // MUTATION TARGET (#1323): a spawn that genuinely never started (pid 0) must still read this way.
+  const neverStarted = spawnSync("/definitely/not/a/real/command-1323", []);
+  assert.equal(neverStarted.pid, 0, "the fixture must really never start");
+  const neverStartedRead = failedRead(neverStarted);
+  assert.equal(neverStartedRead?.verdict, LINK.UNASKED);
+  assert.match(neverStartedRead?.detail ?? "", /ssh could not be started/);
 });
