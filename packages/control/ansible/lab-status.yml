@@ -88,6 +88,56 @@
       ansible.builtin.debug:
         msg: "{{ units.stdout_lines | default(['(no a11y-job-* units — nothing has run since boot)']) }}"
 
+    # #866: "lab:status already knows; what is missing is anything that reports it." The list above already
+    # carries every unit's state, and a `failed` line sits among `active`/`inactive` ones with nothing to
+    # mark it out -- a reader has to notice the word themselves. These four tasks name it instead: which
+    # units are failed, parsed in `lab-failed-units.mjs` rather than in Jinja regex so the one place that
+    # decides "is this line a failure" is unit-tested, then when each one entered that state, then the
+    # report -- once for a person reading this play's output, once as one-line JSON for `lab-watch.mjs`
+    # (#866) to read through ansible's own `json` stdout callback without scraping the debug block below.
+    - name: Failed unit names, parsed in tested code rather than inline Jinja
+      ansible.builtin.command:
+        argv: [node, packages/control/src/lab-failed-units.mjs, --list-failed]
+        stdin: "{{ units.stdout | default('') }}"
+        chdir: "{{ lab_repo_path }}"
+      register: failed_names
+      changed_when: false
+      failed_when: false
+
+    - name: When each failed unit entered that state
+      ansible.builtin.command:
+        argv: [systemctl, show, "-p", ActiveEnterTimestamp, "--value", "{{ item }}"]
+      loop: "{{ failed_names.stdout_lines | default([]) }}"
+      register: failed_unit_shows
+      changed_when: false
+      failed_when: false
+
+    - name: "Failed units — name, state and age"
+      ansible.builtin.command:
+        argv: [node, packages/control/src/lab-failed-units.mjs, --report]
+        stdin: "{{ failed_unit_shows.results | default([]) | to_json }}"
+        chdir: "{{ lab_repo_path }}"
+      register: failed_report
+      changed_when: false
+      failed_when: false
+
+    - name: "Failed units"
+      ansible.builtin.debug:
+        msg: "{{ failed_report.stdout_lines | default(['(could not compute the failed-unit report)']) }}"
+
+    - name: "Failed units, as JSON (for lab-watch.mjs)"
+      ansible.builtin.command:
+        argv: [node, packages/control/src/lab-failed-units.mjs, --report, --json]
+        stdin: "{{ failed_unit_shows.results | default([]) | to_json }}"
+        chdir: "{{ lab_repo_path }}"
+      register: failed_report_json
+      changed_when: false
+      failed_when: false
+
+    - name: "Failed units, as JSON"
+      ansible.builtin.debug:
+        msg: "{{ failed_report_json.stdout | default('{}') }}"
+
     # SubState first and separately, for the reason `run-job.yml` documents: with `--remain-after-exit` an
     # exited unit reads `active` forever, so `is-active` cannot tell finished from running, and `Result`
     # is populated while a job is still going.
