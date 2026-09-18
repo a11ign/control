@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { magicPacket, inventoryPathFor } from "./fleet-wake.mjs";
+import { magicPacket } from "./fleet-wake.mjs";
 
 test("a magic packet is 6 x 0xFF then the MAC sixteen times", () => {
   const packet = magicPacket("00:1a:2b:3c:4d:5e");
@@ -32,38 +32,5 @@ test("anything that is not a MAC is refused, not padded into a packet nobody wil
   }
 });
 
-// --- #1683: the DURABLE inventory copy is tried first, matching ansible.cfg's own stated precedence ---
-
-test("#1683: when the durable copy exists, it wins -- no checkout inventory.yml needed at all", () => {
-  const path = inventoryPathFor({
-    installed: "/etc/a11ign/inventory.yml", inTree: "/checkout/packages/control/ansible/inventory.yml",
-    exists: (p) => p === "/etc/a11ign/inventory.yml",
-  });
-  assert.equal(path, "/etc/a11ign/inventory.yml");
-});
-
-test("#1683: with no durable copy, the in-tree checkout path is the fallback -- today's exact behaviour, unchanged", () => {
-  const path = inventoryPathFor({
-    installed: "/etc/a11ign/inventory.yml", inTree: "/checkout/packages/control/ansible/inventory.yml",
-    exists: () => false,
-  });
-  assert.equal(path, "/checkout/packages/control/ansible/inventory.yml");
-});
-
-test("#1683 MUTATION TARGET: the durable path must be CHECKED, not assumed -- a machine with neither must "
-  + "still fall through to the in-tree path (main()'s own ENOENT refusal reads it), never claim the "
-  + "durable one exists unconditionally", () => {
-  let checked = "";
-  const path = inventoryPathFor({
-    installed: "/etc/a11ign/inventory.yml", inTree: "/checkout/packages/control/ansible/inventory.yml",
-    exists: (p) => { checked = p; return false; },
-  });
-  assert.equal(checked, "/etc/a11ign/inventory.yml", "the durable path must actually be asked about");
-  assert.equal(path, "/checkout/packages/control/ansible/inventory.yml");
-});
-
-test("#1683: the real defaults name the same durable path ansible.cfg's own first-listed source does, "
-  + "and the real in-tree path this file always read", () => {
-  const path = inventoryPathFor({ exists: () => false });
-  assert.match(path, /packages\/control\/ansible\/inventory\.yml$/);
-});
+// #1683's own "durable copy first" tests moved to control-plane-fleet.test.ts -- `inventoryPathFor` now
+// lives there (shared with fleet-discover.mjs, #1684), not restated here.

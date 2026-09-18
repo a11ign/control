@@ -12,8 +12,9 @@
 // `fleet:wake`, `fleet:discover`, `lab:job` -- can ask the same way instead of restating it, or reading a
 // file that is not there.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
@@ -174,4 +175,23 @@ export function readControlPlaneFleet({
     return { workers: [], refusal: `the control plane could not be reached (${stderr || /** @type {Error} */ (error).message})` };
   }
   return controlPlaneFleet({ reads, sources, groupVarsText });
+}
+
+/**
+ * #1683/#1684: THE DURABLE COPY FIRST, exactly the precedence `ansible.cfg`'s own `inventory =` line
+ * states (`/etc/a11ign/inventory.yml,inventory.yml`) -- a plain LOCAL file read either way, never ssh,
+ * never a credential. This is what lets a zero-credential reader (`fleet-wake.mjs`) or one with no
+ * stated credential restriction of its own (`fleet-discover.mjs`) find a fleet on a machine, like the
+ * lab, that carries no in-tree checkout copy -- without either file gaining ssh/control-plane knowledge
+ * the way `readControlPlaneFleet` above needs. Falls back to the in-tree checkout path unchanged, so a
+ * laptop checkout with nothing installed at `/etc/a11ign` behaves exactly as it always has.
+ * @param {{ installed?: string, inTree?: string, exists?: (p: string) => boolean }} [paths]
+ * @returns {string}
+ */
+export function inventoryPathFor({
+  installed = "/etc/a11ign/inventory.yml",
+  inTree = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)),
+  exists = existsSync,
+} = {}) {
+  return exists(installed) ? installed : inTree;
 }

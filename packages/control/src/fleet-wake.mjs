@@ -24,8 +24,8 @@
  * start its own workers because of an install problem in something unrelated.
  */
 import { createSocket } from "node:dgram";
-import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.mjs's
 // header for why. `fleet-discover.mjs` moved alongside it, so that import stays local; the other two
@@ -33,6 +33,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { inventoryHosts } from "./fleet-discover.mjs";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+// #1683/#1684: SHARED, not restated -- both this file and fleet-discover.mjs need "the durable copy
+// first, the in-tree checkout second", and defining it here would make fleet-discover.mjs (which this
+// file already imports `inventoryHosts` from) import back FROM here, a cycle. `control-plane-fleet.mjs`
+// is neither's dependent, so it is the shared home.
+import { inventoryPathFor } from "./control-plane-fleet.mjs";
 
 /**
  * takes no flags: it wakes every box in the inventory.
@@ -133,23 +138,6 @@ export async function wakeFleet(workers, { port = 8765, broadcast, deadlineMs = 
     return { ...w, state: "timeout" };
   }));
   return results;
-}
-
-/**
- * #1683: the DURABLE copy first, exactly the precedence `ansible.cfg`'s own `inventory =` line states
- * (`/etc/a11ign/inventory.yml,inventory.yml`) -- never ssh, never a credential, a plain local file read
- * either way, which is the whole reason this file can stay zero-credential while still finding a fleet on
- * a machine (the lab) that carries no in-tree checkout copy. Falls back to the in-tree path unchanged, so
- * a laptop checkout with nothing installed at `/etc/a11ign` behaves exactly as it always has.
- * @param {{ installed?: string, inTree?: string, exists?: (p: string) => boolean }} [paths]
- * @returns {string}
- */
-export function inventoryPathFor({
-  installed = "/etc/a11ign/inventory.yml",
-  inTree = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)),
-  exists = existsSync,
-} = {}) {
-  return exists(installed) ? installed : inTree;
 }
 
 async function main() {
