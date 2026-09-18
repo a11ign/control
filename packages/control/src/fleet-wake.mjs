@@ -24,7 +24,7 @@
  * start its own workers because of an install problem in something unrelated.
  */
 import { createSocket } from "node:dgram";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.mjs's
@@ -135,9 +135,26 @@ export async function wakeFleet(workers, { port = 8765, broadcast, deadlineMs = 
   return results;
 }
 
+/**
+ * #1683: the DURABLE copy first, exactly the precedence `ansible.cfg`'s own `inventory =` line states
+ * (`/etc/a11ign/inventory.yml,inventory.yml`) -- never ssh, never a credential, a plain local file read
+ * either way, which is the whole reason this file can stay zero-credential while still finding a fleet on
+ * a machine (the lab) that carries no in-tree checkout copy. Falls back to the in-tree path unchanged, so
+ * a laptop checkout with nothing installed at `/etc/a11ign` behaves exactly as it always has.
+ * @param {{ installed?: string, inTree?: string, exists?: (p: string) => boolean }} [paths]
+ * @returns {string}
+ */
+export function inventoryPathFor({
+  installed = "/etc/a11ign/inventory.yml",
+  inTree = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)),
+  exists = existsSync,
+} = {}) {
+  return exists(installed) ? installed : inTree;
+}
+
 async function main() {
   const wanted = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const inventory = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url));
+  const inventory = inventoryPathFor();
   // `inventory.yml` is gitignored (real addresses, restored from the secrets store at bring-up) --
   // absence is now a state a fresh clone hits routinely, not an edge case, so it gets a named error
   // rather than an uncaught ENOENT stack. Same message shape as `fleet-status.mjs`'s `fleetToProbe()`.
