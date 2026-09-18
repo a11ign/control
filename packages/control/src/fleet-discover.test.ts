@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { reconcile, inventoryHosts, normaliseMac, enrol } from "./fleet-discover.mjs";
+import { reconcile, inventoryHosts, normaliseMac, enrol, writeEnrolments } from "./fleet-discover.mjs";
 import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
 const health = { code: "abc", environment: { screenReaderVersion: "2026.1.1" } };
@@ -198,4 +198,49 @@ test("inventoryHosts is group-aware too, or discover reports the lab as a sleepi
   // And the MACs still parse — wake.yml sends its magic packet to these, and a host read without its mac
   // is SKIPPED by wake rather than woken.
   assert.ok(hosts.every((h) => h.mac), "every declared worker still has its mac");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// #1684: `--enroll` writes to the IN-TREE inventory unconditionally (the "draft for a human to review"
+// candidate off #1684's own list, needing no new write capability), while the READ half now resolves
+// the durable copy first (#1683's own precedence, shared via control-plane-fleet.mjs). Those two paths
+// can disagree -- a worker already declared in the durable copy but never synced into the in-tree draft
+// -- so `enrol`'s duplicate check takes a THIRD input, `alsoKnown`, for exactly that gap.
+
+test("#1684: a mac known only via alsoKnown (the durable copy) is treated as a MOVE, not re-enrolled "
+  + "under a second, colliding name", () => {
+  const { text, added, skipped } = enrol(EXAMPLE_INVENTORY,
+    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21",
+    [{ name: "a11y-worker-9", mac: "aa:bb:cc:dd:ee:ff" }]);
+
+  assert.deepEqual(added, [], "already known elsewhere -- nothing new to add");
+  assert.deepEqual(skipped, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff" }]);
+  assert.equal(text, EXAMPLE_INVENTORY, "skipped means the in-tree draft is untouched");
+});
+
+test("#1684: alsoKnown also protects the NAME a fresh enrolment picks, not only the mac dedup", () => {
+  // Without folding alsoKnown's names into nextWorkerName's search, a worker whose mac IS new could still
+  // be handed a name the durable copy already uses for a different machine.
+  const declaredNames = inventoryHosts(EXAMPLE_INVENTORY).map((h) => h.name);
+  const { text, added } = enrol(EXAMPLE_INVENTORY,
+    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:fe", health }], "2026-08-21",
+    declaredNames.map((name) => ({ name, mac: null })).concat([{ name: "a11y-worker-99", mac: null }]));
+
+  assert.equal(added.length, 1);
+  assert.equal(added[0].name, "a11y-worker-100", "must skip past every name alsoKnown named too");
+  assert.ok(workersFromInventory(text).includes("http://REDACTED-INTERNAL-ADDRESS:8765"));
+});
+
+test("#1684 MUTATION TARGET: with no alsoKnown, enrol behaves exactly as it always did -- the new "
+  + "parameter must default to empty, never silently require a caller to pass it", () => {
+  const withDefault = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21");
+  const withExplicitEmpty = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21", []);
+  assert.deepEqual(withDefault, withExplicitEmpty);
+});
+
+test("#1684: --enroll refuses cleanly when the in-tree write target does not exist, rather than an "
+  + "uncaught ENOENT stack -- the state #1684's own Open-check measured on the lab", () => {
+  const missing = fileURLToPath(new URL("../ansible/no-such-inventory.yml", import.meta.url));
+  const result = writeEnrolments(missing, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }]);
+  assert.deepEqual(result, { added: [], skipped: [] });
 });

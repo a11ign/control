@@ -50,6 +50,10 @@ import { networkInterfaces } from "node:os";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
+// #1684: shared with fleet-wake.mjs (#1683) -- same "durable copy first" precedence ansible.cfg's own
+// `inventory =` line states, for the READ half only. See main()'s own comment for why the WRITE half
+// (`--enroll`) does not use this.
+import { inventoryPathFor } from "./control-plane-fleet.mjs";
 
 /**
  * `--enroll` WRITES to inventory.yml; mistyped, it scans and quietly enrols nothing.
@@ -315,10 +319,14 @@ export function enrolmentBlock({ name, ip, mac, health, today }) {
  * @param {string} text
  * @param {Array<{ip: string, mac: string|null, health: object}>} unknowns
  * @param {string} today
+ * @param {Array<{name: string, mac: string|null}>} [alsoKnown] (#1684) hosts declared somewhere OTHER
+ *        than `text` (the durable copy, when the write target `text` came from is the in-tree file and
+ *        the two have drifted) -- folded into the duplicate check so a worker already enrolled there is
+ *        never re-added under a second, colliding name.
  * @returns {{text: string, added: Array<{name: string, ip: string, mac: string|null}>, skipped: Array<{ip: string, mac: string}>}}
  */
-export function enrol(text, unknowns, today) {
-  const declared = inventoryHosts(text);
+export function enrol(text, unknowns, today, alsoKnown = []) {
+  const declared = [...inventoryHosts(text), ...alsoKnown];
   const knownMacs = new Set(declared.map((host) => host.mac).filter(Boolean));
   const names = declared.map((host) => host.name);
   const added = [];
@@ -429,11 +437,24 @@ function render(/** @type {any} */ findings) {
  *
  * @param {string} inventoryPath
  * @param {Array<{ip: string, mac: string|null, health: object}>} unknowns
+ * @param {Array<{name: string, mac: string|null}>} [alsoKnown] see `enrol`'s own param doc
  */
-function writeEnrolments(inventoryPath, unknowns) {
+export function writeEnrolments(inventoryPath, unknowns, alsoKnown = []) {
   const today = new Date().toISOString().slice(0, 10);
-  const before = readFileSync(inventoryPath, "utf8");
-  const { text, added, skipped } = enrol(before, unknowns, today);
+  let before;
+  try {
+    before = readFileSync(inventoryPath, "utf8");
+  } catch (error) {
+    // #1684: `--enroll` writes to the IN-TREE path deliberately (see main()'s comment) -- a machine that
+    // can still READ the fleet (the durable copy exists) but has never had this checkout path either can
+    // reconcile but cannot enrol, and that is a different, actionable state from "nothing answered".
+    process.stdout.write(`\n  COULD NOT ENROL: ${inventoryPath} could not be read `
+      + `(${/** @type {Error} */ (error).message}). --enroll writes a local draft at the in-tree checkout `
+      + "path for a human to review, per #1684 -- create the file (or copy it from a machine that has "
+      + "one), or drop --enroll to just see what was found.\n");
+    return { added: [], skipped: [] };
+  }
+  const { text, added, skipped } = enrol(before, unknowns, today, alsoKnown);
 
   if (added.length) writeFileSync(inventoryPath, text, "utf8");
 
@@ -461,7 +482,27 @@ async function main() {
   const port = Number(arg("port") || DEFAULT_PORT);
 
   const inventoryPath = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url));
-  const declared = inventoryHosts(readFileSync(inventoryPath, "utf8"));
+  // #1684: THE DURABLE COPY FIRST for the READ half, the same precedence #1683 gave fleet-wake.mjs -- a
+  // machine with no in-tree inventory.yml (the lab, measured 2026-09-18: ABSENT) still finds declared
+  // hosts, MAC included. `readControlPlaneFleet` (#1356) cannot serve this file: it resolves {name, url}
+  // pairs over ssh and drops the MAC entirely, which Wake-on-LAN and `reconcile`'s move-detection need.
+  //
+  // The WRITE half (`--enroll`, in `writeEnrolments` below) stays pointed at the IN-TREE path,
+  // unconditionally -- ceo's own candidate list on #1684 named "write a local draft (as today) for a
+  // human to review" as the option needing no new capability, and it is the one this takes. Writing
+  // instead to whatever `inventoryPathFor()` resolves for READING would, on a machine like the lab, land
+  // in a durable copy that is LOCAL TO THAT MACHINE and not the one the control plane's own playbooks
+  // read -- a write nothing would ever apply, which is worse than today's draft-then-review path.
+  const readPath = inventoryPathFor({ inTree: inventoryPath });
+  let declaredText;
+  try {
+    declaredText = readFileSync(readPath, "utf8");
+  } catch (error) {
+    process.stderr.write(`No fleet to reconcile against: inventory could not be read from ${readPath} `
+      + `(${/** @type {Error} */ (error).message}). Restore it from the secrets store, or add a host.\n`);
+    process.exit(2);
+  }
+  const declared = inventoryHosts(declaredText);
 
   process.stderr.write(`scanning ${subnet}.1-${LAST_HOST_IN_SUBNET} on :${port} ...\n`);
   const discovered = await scan(subnet, port);
@@ -477,7 +518,7 @@ async function main() {
       + `${Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ")}\n`);
   }
   const enrolled = process.argv.includes("--enroll")
-    ? writeEnrolments(inventoryPath, /** @type {any[]} */ (findings.filter((f) => f.state === "unknown")))
+    ? writeEnrolments(inventoryPath, /** @type {any[]} */ (findings.filter((f) => f.state === "unknown")), declared)
     : { added: [], skipped: [] };
 
   // Exit 1 only on a MISMATCH — a moved or unknown worker is something to act on. An absent one is not:
