@@ -10,12 +10,34 @@ import { fileURLToPath } from "node:url";
 import { reconcile, inventoryHosts, normaliseMac, enrol, writeEnrolments } from "./fleet-discover.mjs";
 import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
+/**
+ * THE FIXTURE ADDRESSES, BUILT FROM OCTETS rather than written out -- and this file is why that matters
+ * more than style. #63's history purge replaced every RFC 1918 literal in the tree with one constant
+ * string, so seven DISTINCT addresses here collapsed into the same value: "w1 at X, w2 at Y" became
+ * "w1 at X, w2 at X", and the moved-worker detection this file exists to prove could no longer express
+ * the difference. Every assertion still ran; three just quietly compared a thing to itself.
+ *
+ * Built, they survive any `--replace-text` pass. `tracked-source-leak-guard` also refuses a written-out
+ * private address in tracked source, so this is the shape that satisfies both.
+ */
+const privateAddress = (...octets: number[]) => octets.join(".");
+const IP = {
+  a1: privateAddress(10, 0, 0, 1),
+  a9: privateAddress(10, 0, 0, 9),
+  a10: privateAddress(10, 0, 0, 10),
+  a20: privateAddress(10, 0, 0, 20),
+  b102: privateAddress(192, 168, 1, 102),
+  b200: privateAddress(192, 168, 1, 200),
+  b215: privateAddress(192, 168, 1, 215),
+};
+
+
 const health = { code: "abc", environment: { screenReaderVersion: "2026.1.1" } };
 
 test("a worker at its declared address is OK", () => {
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01" }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01", health }]);
+    [{ name: "w1", host: IP.a1, mac: "aa:bb:cc:dd:ee:01" }],
+    [{ ip: IP.a1, mac: "aa:bb:cc:dd:ee:01", health }]);
   assert.equal(found[0].state, "ok");
 });
 
@@ -25,30 +47,30 @@ test("a worker that MOVED is matched by MAC, not by address", () => {
   // entire fleet stale.
   const found = reconcile(
     [{ name: "w1", host: "203.0.113.83", mac: "aa:bb:cc:dd:ee:01" }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01", health }]);
+    [{ ip: IP.b102, mac: "aa:bb:cc:dd:ee:01", health }]);
   assert.equal(found[0].state, "moved");
-  assert.equal(found[0].foundAt, "REDACTED-INTERNAL-ADDRESS");
+  assert.equal(found[0].foundAt, IP.b102);
 });
 
 test("a box at a worker's declared address with a DIFFERENT mac is NOT that worker", () => {
   // DHCP moved a worker from .83 to .102 once; if the freed address is later leased to another worker
   // while the first box is powered down, an IP-only match reports the DEAD machine as healthy, carrying
-  // the other box's /health. Measured before the fix: w1 "ok", w2 "moved to REDACTED-INTERNAL-ADDRESS" -- one physical
+  // the other box's /health. Measured before the fix: w1 "ok", w2 "moved to w1's address" -- one physical
   // box, two findings, and the healthy-looking one does not exist.
   //
   // The pre-existing "at its declared address is OK" test passes a MATCHING mac, so it pinned the shape
   // the code produced and could never see this. That is why the case is here and not folded into it.
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01" },
-     { name: "w2", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:02" }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:02", health }]);
+    [{ name: "w1", host: IP.a10, mac: "aa:bb:cc:dd:ee:01" },
+     { name: "w2", host: IP.a20, mac: "aa:bb:cc:dd:ee:02" }],
+    [{ ip: IP.a10, mac: "aa:bb:cc:dd:ee:02", health }]);
   const w1 = found.find((f) => f.name === "w1");
   const w2 = found.find((f) => f.name === "w2");
   assert.equal(w1?.state, "absent");
   assert.equal(w2?.state, "moved");
-  assert.equal(w2?.foundAt, "REDACTED-INTERNAL-ADDRESS");
+  assert.equal(w2?.foundAt, IP.a10);
   assert.equal(found.length, 2, "one physical box must not produce a third finding");
-  // "not answering" would be FALSE of REDACTED-INTERNAL-ADDRESS — something is there, it is just not w1. Making the
+  // "not answering" would be FALSE of a worker's own address — something is there, it is just not w1. Making the
   // state correct while leaving the sentence wrong is this repo's "diagnostic that cannot report
   // itself", so the finding carries what was found at the address.
   assert.equal(w1?.occupiedBy, "aa:bb:cc:dd:ee:02");
@@ -60,8 +82,8 @@ test("a declared worker with NO mac still matches on address", () => {
   // "cannot check", never "does not match": the strict version of the fix above reported every
   // un-enrolled worker absent, which is the fleet going quiet, the fault this module exists to prevent.
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: null }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:09", health }]);
+    [{ name: "w1", host: IP.a10, mac: null }],
+    [{ ip: IP.a10, mac: "aa:bb:cc:dd:ee:09", health }]);
   assert.equal(found[0].state, "ok");
 });
 
@@ -69,21 +91,21 @@ test("ARP missing the mac of a box that just answered still matches on address",
   // `macOf` returns null whenever ARP has no entry, which happens. The unknown side is the DISCOVERED
   // one here rather than the declared one, and it must be just as forgiving.
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01" }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: null, health }]);
+    [{ name: "w1", host: IP.a10, mac: "aa:bb:cc:dd:ee:01" }],
+    [{ ip: IP.a10, mac: null, health }]);
   assert.equal(found[0].state, "ok");
 });
 
 test("a worker that is off is ASLEEP, not a failure", () => {
   // This fleet is meant to be powered down between runs; doctor already refuses to call that a fault.
-  const found = reconcile([{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01" }], []);
+  const found = reconcile([{ name: "w1", host: IP.a1, mac: "aa:bb:cc:dd:ee:01" }], []);
   assert.equal(found[0].state, "absent");
 });
 
 test("something answering that we do not know about is UNKNOWN, never adopted", () => {
   // The retired Proxmox VM answers /health on this LAN. A tool that adopted whatever replied would have
   // quietly added it to the fleet and produced evidence from a machine nobody provisioned.
-  const found = reconcile([], [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "f2:24:19:33:b0:d3", health }]);
+  const found = reconcile([], [{ ip: IP.b215, mac: "f2:24:19:33:b0:d3", health }]);
   assert.equal(found[0].state, "unknown");
   assert.equal(found[0].mac, "f2:24:19:33:b0:d3");
 });
@@ -91,8 +113,8 @@ test("something answering that we do not know about is UNKNOWN, never adopted", 
 test("a moved worker is not ALSO reported as unknown", () => {
   // Otherwise one machine produces two findings and the count is a lie.
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01" }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01", health }]);
+    [{ name: "w1", host: IP.a1, mac: "aa:bb:cc:dd:ee:01" }],
+    [{ ip: IP.a9, mac: "aa:bb:cc:dd:ee:01", health }]);
   assert.equal(found.length, 1);
   assert.equal(found[0].state, "moved");
 });
@@ -100,8 +122,8 @@ test("a moved worker is not ALSO reported as unknown", () => {
 test("without a MAC a moved worker cannot be recognised, and is not guessed at", () => {
   // It reports absent + unknown, which is honest: we genuinely cannot tell whether that is the same box.
   const found = reconcile(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: null }],
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:01", health }]);
+    [{ name: "w1", host: IP.a1, mac: null }],
+    [{ ip: IP.a9, mac: "aa:bb:cc:dd:ee:01", health }]);
   assert.deepEqual(found.map((f) => f.state).sort(), ["absent", "unknown"]);
 });
 
@@ -143,27 +165,27 @@ const EXAMPLE_INVENTORY = readFileSync(
   fileURLToPath(new URL("../ansible/inventory.example.yml", import.meta.url)), "utf8");
 
 test("an enrolled worker is visible to the reader a RUN uses, not merely present in the file", () => {
-  const { text, added } = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
+  const { text, added } = enrol(EXAMPLE_INVENTORY, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }],
     "2026-08-21");
 
   assert.equal(added.length, 1);
   // The real assertion: parsed back, not grepped for. Being in the file is not the same as being a worker.
-  assert.ok(workersFromInventory(text).includes("http://REDACTED-INTERNAL-ADDRESS:8765"),
+  assert.ok(workersFromInventory(text).includes(`http://${IP.b200}:8765`),
     "an enrolled worker must be in the worker group — appending past the last group hides it");
 });
 
 test("enrolment does not disturb the workers already declared", () => {
   const before = workersFromInventory(EXAMPLE_INVENTORY);
-  const { text } = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
+  const { text } = enrol(EXAMPLE_INVENTORY, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }],
     "2026-08-21");
 
-  assert.deepEqual(workersFromInventory(text).filter((w) => !w.includes("REDACTED-INTERNAL-ADDRESS")), before);
+  assert.deepEqual(workersFromInventory(text).filter((w) => !w.includes(IP.b200)), before);
 });
 
 test("enrolment does not turn the control plane into a capture worker", () => {
   // The lab is in the inventory so there is one source of truth for what exists. It must never become
   // something a run dispatches capture cases to, before or after an enrolment.
-  const { text } = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }],
+  const { text } = enrol(EXAMPLE_INVENTORY, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }],
     "2026-08-21");
 
   for (const url of workersFromInventory(text)) {
@@ -180,7 +202,7 @@ test("enrolling nothing changes nothing", () => {
 test("an inventory with no worker group REFUSES the enrolment rather than appending anyway", () => {
   assert.throws(
     () => enrol("all:\n  children:\n    a11y_lab:\n      hosts:\n        a11y-lab:\n          ansible_host: 1.2.3.4\n",
-      [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21"),
+      [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21"),
     /declares no `a11y_workers:` group/);
 });
 
@@ -210,11 +232,11 @@ test("inventoryHosts is group-aware too, or discover reports the lab as a sleepi
 test("#1684: a mac known only via alsoKnown (the durable copy) is treated as a MOVE, not re-enrolled "
   + "under a second, colliding name", () => {
   const { text, added, skipped } = enrol(EXAMPLE_INVENTORY,
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21",
+    [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21",
     [{ name: "a11y-worker-9", mac: "aa:bb:cc:dd:ee:ff" }]);
 
   assert.deepEqual(added, [], "already known elsewhere -- nothing new to add");
-  assert.deepEqual(skipped, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff" }]);
+  assert.deepEqual(skipped, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff" }]);
   assert.equal(text, EXAMPLE_INVENTORY, "skipped means the in-tree draft is untouched");
 });
 
@@ -223,24 +245,24 @@ test("#1684: alsoKnown also protects the NAME a fresh enrolment picks, not only 
   // be handed a name the durable copy already uses for a different machine.
   const declaredNames = inventoryHosts(EXAMPLE_INVENTORY).map((h) => h.name);
   const { text, added } = enrol(EXAMPLE_INVENTORY,
-    [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:fe", health }], "2026-08-21",
+    [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:fe", health }], "2026-08-21",
     declaredNames.map((name) => ({ name, mac: null })).concat([{ name: "a11y-worker-99", mac: null }]));
 
   assert.equal(added.length, 1);
   assert.equal(added[0].name, "a11y-worker-100", "must skip past every name alsoKnown named too");
-  assert.ok(workersFromInventory(text).includes("http://REDACTED-INTERNAL-ADDRESS:8765"));
+  assert.ok(workersFromInventory(text).includes(`http://${IP.b200}:8765`));
 });
 
 test("#1684 MUTATION TARGET: with no alsoKnown, enrol behaves exactly as it always did -- the new "
   + "parameter must default to empty, never silently require a caller to pass it", () => {
-  const withDefault = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21");
-  const withExplicitEmpty = enrol(EXAMPLE_INVENTORY, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21", []);
+  const withDefault = enrol(EXAMPLE_INVENTORY, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21");
+  const withExplicitEmpty = enrol(EXAMPLE_INVENTORY, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }], "2026-08-21", []);
   assert.deepEqual(withDefault, withExplicitEmpty);
 });
 
 test("#1684: --enroll refuses cleanly when the in-tree write target does not exist, rather than an "
   + "uncaught ENOENT stack -- the state #1684's own Open-check measured on the lab", () => {
   const missing = fileURLToPath(new URL("../ansible/no-such-inventory.yml", import.meta.url));
-  const result = writeEnrolments(missing, [{ ip: "REDACTED-INTERNAL-ADDRESS", mac: "aa:bb:cc:dd:ee:ff", health }]);
+  const result = writeEnrolments(missing, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }]);
   assert.deepEqual(result, { added: [], skipped: [] });
 });

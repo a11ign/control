@@ -1,3 +1,8 @@
+# ADDRESSES ARE RFC 5737 DOCUMENTATION ADDRESSES (192.0.2.0/24, TEST-NET-1), changed 2026-09-18.
+# They used to be RFC 1918 private ones, which #63's history purge redacted to a single constant
+# string -- leaving every host in this example pointing at the same non-address and the tests that
+# read it unable to tell two workers apart. A documentation range is what an EXAMPLE should have
+# carried anyway: it is reserved, never routable, and the leak guards allow it by name.
 # EXAMPLE — placeholder addresses only. The real `inventory.yml` is gitignored and restored from the
 # secrets store at bring-up on the control plane; see CLAUDE.md and packages/control/ansible/README.md.
 #
@@ -16,35 +21,35 @@ all:
     a11y_workers:
       hosts:
         a11y-worker-2:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.12
           mac: "00:00:00:00:00:12"
 
         a11y-worker-3:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.13
           mac: "00:00:00:00:00:13"
 
         a11y-worker-4:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.14
           mac: "00:00:00:00:00:14"
 
         a11y-worker-5:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.15
           mac: "00:00:00:00:00:15"
 
         a11y-worker-6:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.16
           mac: "00:00:00:00:00:16"
 
         a11y-worker-7:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.17
           mac: "00:00:00:00:00:17"
 
         a11y-worker-8:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.18
           mac: "00:00:00:00:00:18"
 
         a11y-worker-9:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.19
           mac: "00:00:00:00:00:19"
 
         # a11y-worker-10 — REJOINED 2026-09-09, withdrawn 2026-09-07. It never needed the console visit.
@@ -61,24 +66,24 @@ all:
         # Full record in `docs/operational-lessons.md`. The real `inventory.yml` carries the identical
         # comment; change BOTH together, or `inventory-example-parity.test.ts` fails and says so.
         a11y-worker-10:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.20
           mac: "00:00:00:00:00:20"
 
         a11y-worker-11:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.21
           mac: "00:00:00:00:00:21"
 
     a11y_control:
       hosts:
         a11y-control:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.2
 
     a11y_lab:
       hosts:
         a11y-lab:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.3
 
     a11y_hypervisor:
       hosts:
         pve-micro:
-          ansible_host: REDACTED-INTERNAL-ADDRESS
+          ansible_host: 192.0.2.1

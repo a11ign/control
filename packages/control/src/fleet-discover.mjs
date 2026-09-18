@@ -237,7 +237,7 @@ export function reconcile(declared, discovered) {
     //
     // But "not answering" and "a DIFFERENT box is answering here" are different answers, and the MAC
     // check above turns the second into the first unless it is carried. An operator reading "ASLEEP?
-    // REDACTED-INTERNAL-ADDRESS not answering" beside a live worker at REDACTED-INTERNAL-ADDRESS is being told something false about the
+    // one address not answering" beside a live worker at another address is being told something false about the
     // one address they are looking at -- the "diagnostic that cannot report itself" shape, introduced by
     // the very fix that made the state correct.
     const impostor = discovered.find((d) => d.ip === entry.host);
