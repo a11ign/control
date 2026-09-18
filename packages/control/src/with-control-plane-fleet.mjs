@@ -25,6 +25,7 @@
 // warning and falls through to the child's own existing default (a local inventory.yml, or empty) --
 // exactly today's behaviour, never a new hard failure.
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 
@@ -63,4 +64,8 @@ async function main() {
   process.exit(status ?? 1);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
+// REALPATH'D: `import.meta.url` is resolved through symlinks by Node's ESM loader and `process.argv[1]`
+// is not -- reaching this file through npm's `.bin` symlink or similar would otherwise silently skip
+// `main()` and exit 0, with no error and no output (`#1086`'s own ratchet, matching every other CLI entry
+// in this repo, e.g. `doctor.mjs`, `check-worker-code.mjs`).
+if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) await main();
