@@ -378,3 +378,9 @@ which served the previous code for another hour. A reboot always picks up pushed
   is macOS-only. Since `gate:isolation` is the FIRST leg of `release:gate`, its failure stops the chain and
   the model-quality gates behind it never run. Until that check skips as honestly as its neighbour, run
   `gate:isolation` on a Mac and the remaining legs on the lab, which is where the Python venv lives.
+- **An ad-hoc `-a`/`-e` value that starts with `\a` gets silently corrupted.** Ansible's own `k=v` splitter
+  for ad-hoc `-a`/`-e` arguments reads a leading `\a` as a Python-style escape (bell, `chr(7)`), not a
+  literal backslash-a — a Windows path like `\administrators_authorized_keys` or `...\a11y-witness` becomes
+  `\x07dministrators_authorized_keys` or `...\x0711y-witness`, with no error. This is why every path in
+  this repo's own Ansible usage lives in playbook YAML (`packages/control/ansible/*.yml`), never passed
+  via the ad-hoc CLI: paths live in YAML, which the `k=v` splitter never touches.
