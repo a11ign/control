@@ -53,8 +53,13 @@
     # win_lineinfile just created the real file. Resolve the variable ONCE, here, and give every task
     # below the same resolved literal, so no module gets to read it differently from another.
     - name: Resolve %ProgramData% once
+      # A pure read, so it must run for real even under --check: win_shell has no check-mode support and
+      # is SKIPPED there by default, which left `set_fact` below resolving `programdata.stdout` against a
+      # skipped task's result dict instead of a string -- caught running this against a real worker in
+      # --check mode (`object of type 'dict' has no attribute 'stdout'`), not by reading the play.
       ansible.windows.win_shell: Write-Output $env:ProgramData
       changed_when: false
+      check_mode: false
       register: programdata
 
     - name: Set the one path every task below uses
