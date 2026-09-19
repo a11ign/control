@@ -74,6 +74,17 @@
       Values: "{{ worker_quiet_policy }}"
     script: *apply_dwords
 
+- name: Feature updates may not reach this box outside a provisioning decision
+  # #921. Separate task, separate variable, from `worker_quiet_policy` above: that list is about the
+  # foreground desktop, this one is about what Windows Update is allowed to install. Same `apply_dwords`
+  # script -- every entry here carries its own `path:`, exactly like `NoAutoRebootWithLoggedOnUsers`.
+  become: true
+  ansible.windows.win_powershell:
+    parameters:
+      Path: ''
+      Values: "{{ worker_update_deferral_policy }}"
+    script: *apply_dwords
+
 - name: Refuse to call this provisioned if a policy value did not land
   # Read back, in one call. The batched writes above are only safe BECAUSE this exists: a loop of
   # `win_regedit` fails loudly on the value it could not write, and a batched script could not without
@@ -86,8 +97,9 @@
       Edge: "{{ worker_edge_policy }}"
       Update: "{{ worker_edge_update_policy }}"
       Quiet: "{{ worker_quiet_policy }}"
+      Deferral: "{{ worker_update_deferral_policy }}"
     script: |
-      param($EdgePath, $UpdatePath, $Edge, $Update, $Quiet)
+      param($EdgePath, $UpdatePath, $Edge, $Update, $Quiet, $Deferral)
       $Ansible.Changed = $false
       $wrong = @()
       function Check($p, $name, $want) {
@@ -96,14 +108,15 @@
         if ($null -eq $cur -or [int]$cur -ne [int]$want) { return "$p\$name is '$cur', wanted '$want'" }
         return $null
       }
-      foreach ($v in $Edge)   { $r = Check $EdgePath   $v.name $v.value; if ($r) { $wrong += $r } }
-      foreach ($v in $Update) { $r = Check $UpdatePath $v.name $v.value; if ($r) { $wrong += $r } }
-      foreach ($v in $Quiet)  { $r = Check $v.path     $v.name $v.value; if ($r) { $wrong += $r } }
+      foreach ($v in $Edge)     { $r = Check $EdgePath   $v.name $v.value; if ($r) { $wrong += $r } }
+      foreach ($v in $Update)   { $r = Check $UpdatePath $v.name $v.value; if ($r) { $wrong += $r } }
+      foreach ($v in $Quiet)    { $r = Check $v.path     $v.name $v.value; if ($r) { $wrong += $r } }
+      foreach ($v in $Deferral) { $r = Check $v.path     $v.name $v.value; if ($r) { $wrong += $r } }
       if ($wrong.Count -gt 0) {
         $Ansible.Failed = $true
         "policy values did not land: " + ($wrong -join '; ')
       } else {
-        "all $($Edge.Count + $Update.Count + $Quiet.Count) policy values verified"
+        "all $($Edge.Count + $Update.Count + $Quiet.Count + $Deferral.Count) policy values verified"
       }
 
 # --- HKCU from here down. NO `become` — see the header. ---

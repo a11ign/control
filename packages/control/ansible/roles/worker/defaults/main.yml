@@ -194,6 +194,29 @@ worker_quiet_policy:
     name: NoAutoRebootWithLoggedOnUsers
     value: 1
 
+# #921: a Windows FEATURE update reached a11y-worker-4 (2026-09-11) and a11y-worker-3 (2026-09-19)
+# although `NoAutoRebootWithLoggedOnUsers` above was already set on both. That key only holds the REBOOT;
+# it does nothing to stop the update from installing and then landing at the next reboot ANY box takes
+# for any reason. This is the separate lever that keeps a feature update from installing at all -- quality
+# and security updates are deliberately left unrestricted, so `DeferQualityUpdatesPeriodInDays` is not set.
+#
+# NOT the same trap as `worker_edge_update_policy` (`diagnostics.mjs`'s `edgeUpdaterState` comment):
+# EdgeUpdate's ADMX policies are Microsoft-documented as effective only on an AD-domain-joined machine,
+# which none of these are, and writing `UpdateDefault=0` there read back clean while Edge updated itself
+# anyway. Windows Update for Business's OWN policy set is a different subsystem with no such restriction --
+# it is the same `WindowsUpdate` registry tree as `NoAutoRebootWithLoggedOnUsers` immediately above, which
+# this fleet's own operational history already proved takes effect standalone (the 94-minute-run incident:
+# the reboot did not happen). `provision.yml`'s read-back proves the value LANDED; only running fleet-wide
+# without a third occurrence proves it HELD -- read back as evidence of the first, not a claim of the
+# second.
+worker_update_deferral_policy:
+  - path: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    name: DeferFeatureUpdates
+    value: 1
+  - path: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    name: DeferFeatureUpdatesPeriodInDays
+    value: 365
+
 # Per-USER suggestion surfaces. These live in HKCU, which is why the tasks that write them must not be
 # becomed to SYSTEM -- see tasks/policy.yml.
 worker_content_delivery_values:
