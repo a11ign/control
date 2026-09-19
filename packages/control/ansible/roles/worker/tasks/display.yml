@@ -11,6 +11,18 @@
 # real URL and sha256 by hand -- see #1567. This file provisions the mode on all ten guests today; it
 # gains the driver task the moment that value exists.
 #
+# ## The Add-Type source below is a plain quoted string, never a here-string
+#
+# A PowerShell here-string's closing `'@` must be the FIRST character on its line -- and inside a YAML
+# block scalar (`script: |`), a line less indented than the block is what ENDS the block scalar. Column 1
+# is always less indented than everything else here, so `'@` silently closed the YAML long before the
+# PowerShell did: `ansible-yaml-parses.test.ts` caught it as a parse failure, not a runtime one, the first
+# time this was written with `@' … '@`. The README's own "gotchas" section already warns `win_shell` off
+# here-strings for a different reason (Ansible parses them as module arguments); this is a second, PS +
+# YAML-only trap that only bites `win_powershell`'s `script:` block, and only when the payload spans
+# multiple lines. The C# below has no embedded single quotes, so an ordinary multi-line `'...'` string
+# says the same thing without a terminator YAML can misread.
+#
 # ## Why P/Invoke rather than an Ansible module
 #
 # `ansible.windows` ships nothing for display resolution -- the collection's own module index has no
@@ -33,7 +45,7 @@
       Height: "{{ worker_display_mode.height }}"
     script: |
       param($Width, $Height)
-      Add-Type -TypeDefinition @'
+      Add-Type -TypeDefinition '
         using System;
         using System.Runtime.InteropServices;
         namespace A11yDisplay {
@@ -77,7 +89,7 @@
             public static extern int ChangeDisplaySettings(ref DEVMODE devMode, int flags);
           }
         }
-'@
+      '
 
       $ENUM_CURRENT_SETTINGS = -1
       $DM_PELSWIDTH = 0x00080000
