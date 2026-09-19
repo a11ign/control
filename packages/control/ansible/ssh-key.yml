@@ -48,6 +48,19 @@
       delegate_to: localhost
       run_once: true
 
+    # `win_lineinfile` expands `%ProgramData%` itself; `win_acl_inheritance` and `win_acl` do not — they
+    # take it as a literal, nonexistent path, and fail "does not exist on the host" on a box where
+    # win_lineinfile just created the real file. Resolve the variable ONCE, here, and give every task
+    # below the same resolved literal, so no module gets to read it differently from another.
+    - name: Resolve %ProgramData% once
+      ansible.windows.win_shell: Write-Output $env:ProgramData
+      changed_when: false
+      register: programdata
+
+    - name: Set the one path every task below uses
+      ansible.builtin.set_fact:
+        ssh_key_path: "{{ programdata.stdout | trim }}\\ssh\\administrators_authorized_keys"
+
     # Three stock modules instead of a PowerShell block, and this is the shape to prefer: no custom code
     # at all, and every one of them honours `--check`, which the script did not. The script computed
     # `changed` correctly but wrote unconditionally, so a dry run installed a key.
@@ -61,7 +74,7 @@
       # the key itself, so re-running is a no-op rather than a duplicate line.
       become: true
       community.windows.win_lineinfile:
-        path: '%ProgramData%\ssh\administrators_authorized_keys'
+        path: "{{ ssh_key_path }}"
         line: "{{ a11y_operator_key | trim }}"
         regex: "^{{ a11y_operator_key | trim | regex_escape }}$"
         state: present
@@ -77,7 +90,7 @@
     - name: Stop the key file inheriting anything
       become: true
       ansible.windows.win_acl_inheritance:
-        path: '%ProgramData%\ssh\administrators_authorized_keys'
+        path: "{{ ssh_key_path }}"
         state: absent
         # Do NOT copy the inherited ACEs down before removing inheritance — that is exactly what would
         # preserve the non-admin write sshd objects to.
@@ -86,7 +99,7 @@
     - name: Only Administrators and SYSTEM may write it
       become: true
       ansible.windows.win_acl:
-        path: '%ProgramData%\ssh\administrators_authorized_keys'
+        path: "{{ ssh_key_path }}"
         user: "{{ item }}"
         rights: FullControl
         type: allow
