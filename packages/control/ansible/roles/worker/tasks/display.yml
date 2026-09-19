@@ -1,0 +1,123 @@
+---
+# #1567: the display mode the fleet pins. `ceo`'s #1561 ruling (b) -- the capture window is what a real
+# display holds, so the display is what gets pinned -- and `worker_display_mode` in `defaults/main.yml`
+# carries the value (1024x768 by default) the same way `worker_edge_version` carries the browser build.
+#
+# THE DRIVER HALF OF THIS ROW IS NOT HERE YET. #1567 also fixes workers 7-11's error-43 display adapter
+# with a GPU driver install, but no verifiable Intel package exists for the exact build workers 2-6 run
+# (31.0.101.2115 -- no version history or checksum on Intel's own page, the direct-mirror file 403s, and
+# third-party mirrors have no official checksum to verify a fleet-wide SYSTEM-privilege install against).
+# Pending a ruling on substituting the current official build (31.0.101.2141) once a person sources a
+# real URL and sha256 by hand -- see #1567. This file provisions the mode on all ten guests today; it
+# gains the driver task the moment that value exists.
+#
+# ## Why P/Invoke rather than an Ansible module
+#
+# `ansible.windows` ships nothing for display resolution -- the collection's own module index has no
+# `win_display*` entry. `Set-DisplayResolution`-style cmdlets are a third-party module this fleet does
+# not install. `ChangeDisplaySettings`/`EnumDisplaySettings` (user32.dll) are the primitives every such
+# module wraps, so this calls them directly rather than adding a dependency to reach two functions.
+#
+# ## Why one self-verifying task rather than apply-then-verify
+#
+# `policy.yml`'s separate trailing verify task earns its keep there by checking FOUR registry lists in one
+# combined read-back -- one extra SSH round trip buys verification of everything policy.yml wrote. A
+# single width/height pair does not have that economy: reading it back in the SAME PowerShell process that
+# just set it is both cheaper and more direct evidence (no second remote call in which something else
+# could intervene), so the set and the "did it land" check are one task, not two.
+- name: The display mode the fleet pins
+  become: true
+  ansible.windows.win_powershell:
+    parameters:
+      Width: "{{ worker_display_mode.width }}"
+      Height: "{{ worker_display_mode.height }}"
+    script: |
+      param($Width, $Height)
+      Add-Type -TypeDefinition @'
+        using System;
+        using System.Runtime.InteropServices;
+        namespace A11yDisplay {
+          [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+          public struct DEVMODE {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public short dmSpecVersion;
+            public short dmDriverVersion;
+            public short dmSize;
+            public short dmDriverExtra;
+            public int dmFields;
+            public int dmPositionX;
+            public int dmPositionY;
+            public int dmDisplayOrientation;
+            public int dmDisplayFixedOutput;
+            public short dmColor;
+            public short dmDuplex;
+            public short dmYResolution;
+            public short dmTTOption;
+            public short dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public short dmLogPixels;
+            public int dmBitsPerPel;
+            public int dmPelsWidth;
+            public int dmPelsHeight;
+            public int dmDisplayFlags;
+            public int dmDisplayFrequency;
+            public int dmICMMethod;
+            public int dmICMIntent;
+            public int dmMediaType;
+            public int dmDitherType;
+            public int dmReserved1;
+            public int dmReserved2;
+            public int dmPanningWidth;
+            public int dmPanningHeight;
+          }
+          public class NativeMethods {
+            [DllImport("user32.dll")]
+            public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+            [DllImport("user32.dll")]
+            public static extern int ChangeDisplaySettings(ref DEVMODE devMode, int flags);
+          }
+        }
+'@
+
+      $ENUM_CURRENT_SETTINGS = -1
+      $DM_PELSWIDTH = 0x00080000
+      $DM_PELSHEIGHT = 0x00100000
+      $CDS_UPDATEREGISTRY = 0x01
+      $DISP_CHANGE_SUCCESSFUL = 0
+
+      $mode = New-Object A11yDisplay.DEVMODE
+      $mode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mode)
+      if (-not [A11yDisplay.NativeMethods]::EnumDisplaySettings($null, $ENUM_CURRENT_SETTINGS, [ref]$mode)) {
+        $Ansible.Failed = $true
+        return "EnumDisplaySettings could not read the current display mode"
+      }
+
+      if ($mode.dmPelsWidth -eq $Width -and $mode.dmPelsHeight -eq $Height) {
+        $Ansible.Changed = $false
+        "already $Width`x$Height"
+      } elseif ($Ansible.CheckMode) {
+        $Ansible.Changed = $true
+        "would set $($mode.dmPelsWidth)x$($mode.dmPelsHeight) to $Width`x$Height"
+      } else {
+        $mode.dmPelsWidth = $Width
+        $mode.dmPelsHeight = $Height
+        $mode.dmFields = $DM_PELSWIDTH -bor $DM_PELSHEIGHT
+        $result = [A11yDisplay.NativeMethods]::ChangeDisplaySettings([ref]$mode, $CDS_UPDATEREGISTRY)
+        if ($result -ne $DISP_CHANGE_SUCCESSFUL) {
+          $Ansible.Failed = $true
+          return "ChangeDisplaySettings returned $result (wanted $DISP_CHANGE_SUCCESSFUL) setting $Width`x$Height"
+        }
+        # PROVE IT, IN THE SAME PROCESS THAT JUST WROTE IT -- the same "read back or it didn't happen"
+        # rule policy.yml's own trailing verify task follows, here folded into one remote call because
+        # there is one value pair to check rather than four lists.
+        $after = New-Object A11yDisplay.DEVMODE
+        $after.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($after)
+        [void][A11yDisplay.NativeMethods]::EnumDisplaySettings($null, $ENUM_CURRENT_SETTINGS, [ref]$after)
+        if ($after.dmPelsWidth -ne $Width -or $after.dmPelsHeight -ne $Height) {
+          $Ansible.Failed = $true
+          return "ChangeDisplaySettings reported success but the mode reads $($after.dmPelsWidth)x" +
+            "$($after.dmPelsHeight) back, not $Width`x$Height"
+        }
+        $Ansible.Changed = $true
+        "set to $Width`x$Height"
+      }

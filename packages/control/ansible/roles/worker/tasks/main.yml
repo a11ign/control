@@ -6,6 +6,8 @@
 #   packages  node, git and the repo — literally everything else needs them
 #   account   the worker identity must exist before a task can name it as a principal
 #   policy    machine and user policy; independent of the rest, cheap, and the thing that drifts
+#   display   the pinned display mode (#1567); independent of policy and edge, grouped with them as
+#             another machine-environment setting the capture cache key depends on
 #   edge      the browser BUILD, after policy because policy is not the mechanism that holds it: the
 #             EdgeUpdate policies are documented as domain-join only, and these boxes are standalone
 #   firewall  the port must be open before anything can verify /health across the network
@@ -39,6 +41,10 @@
 - name: Machine and user policy
   ansible.builtin.import_tasks: policy.yml
   tags: [policy]
+
+- name: Display mode, pinned to one setting across the fleet
+  ansible.builtin.import_tasks: display.yml
+  tags: [display]
 
 - name: Edge, pinned to one build across the fleet
   ansible.builtin.import_tasks: edge-version.yml

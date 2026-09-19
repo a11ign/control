@@ -217,6 +217,23 @@ worker_update_deferral_policy:
     name: DeferFeatureUpdatesPeriodInDays
     value: 365
 
+# #1567: ONE DISPLAY MODE ON ALL TEN GUESTS. `ceo`'s #1561 ruling (b): the capture window is what a real
+# display holds, so the display is what gets pinned -- the same reasoning `worker_edge_version` already
+# applies to the browser build, pointed at the screen instead.
+#
+# 1024x768 by default, because the calibration corpus and every capture on workers 2-6 already sit
+# there -- the value is not chosen here, it is read off what already exists. A wider mode needs a read
+# showing it holds on every adapter (#1567's done-when 5) before this changes.
+#
+# Declared here, in `defaults/main.yml`, rather than hardcoded in `tasks/display.yml`, for the same
+# reason `worker_edge_version` lives here and not in `edge-version.yml`: this file is already an
+# `$ENVIRONMENT_FILES` entry for the provision stamp, so a value declared here enters `provisionRevision`
+# for free, and a task file that only reads it needs no entry of its own (see
+# `provision-stamp-inputs.test.ts`'s EXEMPT reasoning for `display.yml`).
+worker_display_mode:
+  width: 1024
+  height: 768
+
 # Per-USER suggestion surfaces. These live in HKCU, which is why the tasks that write them must not be
 # becomed to SYSTEM -- see tasks/policy.yml.
 worker_content_delivery_values:
