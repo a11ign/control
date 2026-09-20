@@ -3,13 +3,47 @@
 # display holds, so the display is what gets pinned -- and `worker_display_mode` in `defaults/main.yml`
 # carries the value (1024x768 by default) the same way `worker_edge_version` carries the browser build.
 #
-# THE DRIVER HALF OF THIS ROW IS NOT HERE YET. #1567 also fixes workers 7-11's error-43 display adapter
-# with a GPU driver install, but no verifiable Intel package exists for the exact build workers 2-6 run
-# (31.0.101.2115 -- no version history or checksum on Intel's own page, the direct-mirror file 403s, and
-# third-party mirrors have no official checksum to verify a fleet-wide SYSTEM-privilege install against).
-# Pending a ruling on substituting the current official build (31.0.101.2141) once a person sources a
-# real URL and sha256 by hand -- see #1567. This file provisions the mode on all ten guests today; it
-# gains the driver task the moment that value exists.
+# THE DRIVER HALF, below the mode task. Workers 7-11's Intel UHD Graphics 630
+# (`PCI\VEN_8086&DEV_3E91&SUBSYS_83EF103C&REV_00`) runs Microsoft's Basic Display Adapter with
+# `CM_PROB_FAILED_POST_START` (error 43); no Intel package is staged in any of their five driver stores
+# (orchestrator's sizing read, #1567 2026-09-14T09:56:11Z). Workers 2-6 already run Intel Corporation
+# 31.0.101.2115 (2022-11-16), but Intel does not archive that exact file or publish a checksum for it, and
+# a third-party mirror's hash is not something this role will pin for a SYSTEM-privilege fleet-wide
+# install (#1567 2026-09-19T14:22:40Z). `ceo`'s ruling (#1567, 2026-09-19T14:40:36Z) pins the CURRENT
+# official package instead (31.0.101.2141), sourced and hashed by a person through Intel's real Download
+# Center -- never a value taken from a mirror or invented here. The chairman sourced the URL from Intel's
+# own Download Center and hashed the download; this checkout's own session independently re-fetched the
+# same URL and got the identical sha256 (#1782), and running it a third time while writing this file
+# reproduced it again.
+#
+# GATED PER ADAPTER, NOT FLEET-WIDE. This task only fires where the live read below shows something other
+# than an Intel driver with no problem code, so workers 2-6 -- already `CM_PROB_NONE` on Intel -- are never
+# touched by it and stay on 2115. `fleet-consistency.mjs`'s `MUST_MATCH` has no GPU-driver-version field,
+# only `provisionRevision` (a hash of this role's own declared files), which stays equal fleet-wide as long
+# as one `defaults/main.yml` provisions everyone -- so 2-6 staying on 2115 while 7-11 land on 2141 does not
+# split the fleet (ceo, #1567 2026-09-19T14:40:36Z).
+#
+# NO AUTOMATIC REBOOT, AND `-overwrite` IS DELIBERATELY LEFT OFF. `-b` is omitted so the installer
+# completes without restarting anything on its own (installation_readme.txt, section VII); this role
+# performs the reboot itself, through `win_reboot`, so it is visible to Ansible rather than sprung by the
+# installer mid-play. `-overwrite` exists to let a silent install proceed over a NEWER Intel driver than
+# the one being installed -- not our case here, since the gate only fires when the adapter is NOT already
+# a problem-free Intel driver, so there is nothing to regress from. Passing it unconditionally would let a
+# future re-run silently downgrade a driver that had since been updated by some other route, with nothing
+# to show that happened -- the same "two faults must not print the same word" reasoning `edge-version.yml`
+# already applies to `ALLOWDOWNGRADE`.
+#
+# EXIT CODES 17/18 ARE TREATED AS FAILURES, NOT SUCCESSES, AND THIS IS THE LOAD-BEARING LINE IN THIS FILE.
+# The package's own `installation_readme.txt` (section VIII) documents 2 and 14 as "successful, reboot
+# needed" -- a software-controlled restart, safe for `win_reboot` to perform remotely. 17 and 18 mean the
+# installer is SHUTTING THE BOX DOWN, and section III says that when a firmware update runs, "it is highly
+# recommended to perform a full system shutdown ... the user should manually power the system back on".
+# This fleet is bare-metal with nobody guaranteed on site; a box that powers off expecting a human to press
+# its button is a box this role cannot bring back. So 17/18 fail the task loudly rather than being folded
+# into the same reboot handling as 2/14 -- a green result here must not be the thing that leaves a worker
+# dark. Nothing in the 2026-09-14 sizing read suggests these integrated adapters carry a firmware payload,
+# but the read never ruled it out either, and "probably doesn't apply" is not a justification for treating
+# 17/18 the same as 2/14 when the failure mode is a machine nobody can walk over to.
 #
 # ## The Add-Type source below is a plain quoted string, never a here-string
 #
@@ -133,3 +167,96 @@
         $Ansible.Changed = $true
         "set to $Width`x$Height"
       }
+
+- name: What the display adapter's driver actually is
+  become: true
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $dev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Select-Object -First 1
+      $drv = Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceClass='DISPLAY'" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+      "$(if ($dev) { [string]$dev.Problem } else { '(absent)' })|" +
+        "$(if ($drv) { $drv.DriverProviderName } else { '(absent)' })|" +
+        "$(if ($drv) { $drv.DriverVersion } else { '(absent)' })"
+  changed_when: false
+  check_mode: false
+  register: display_driver_state
+
+- name: Whether this adapter already has a problem-free Intel driver
+  ansible.builtin.set_fact:
+    # `.split('|')` reads the pipe-joined string above -- see the task's own header comment for why this
+    # is gated per adapter rather than fleet-wide.
+    display_driver_ok: >-
+      {{ (display_driver_state.output | first).split('|')[0] == 'CM_PROB_NONE'
+         and 'Intel' in (display_driver_state.output | first).split('|')[1] }}
+
+- name: What it would do
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: display adapter problem {{ (display_driver_state.output | first).split('|')[0] }},
+      driver {{ (display_driver_state.output | first).split('|')[1] }} {{ (display_driver_state.output | first).split('|')[2] }}
+      {{ '— already a problem-free Intel driver' if display_driver_ok
+         else '— would install ' ~ worker_display_driver_url }}
+
+- name: Refuse to install a display driver on a worker that is mid-capture
+  # Same shape and same reason as edge-version.yml's own health check: installing means the display
+  # subsystem changes under whatever NVDA and the browser are doing, and a busy worker must not have that
+  # sprung on it.
+  when: not display_driver_ok
+  delegate_to: localhost
+  become: false
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:{{ worker_port }}/health"
+    return_content: true
+  register: display_driver_worker_health
+  failed_when: display_driver_worker_health.json.busy | default(true)
+
+- name: Fetch the pinned Intel display driver installer
+  # Only when it would change something: this is a ~280 MB download onto a box that may be mid-corpus.
+  when: not display_driver_ok
+  become: true
+  ansible.windows.win_get_url:
+    url: "{{ worker_display_driver_url }}"
+    dest: "{{ worker_display_driver_path }}"
+    checksum: "{{ worker_display_driver_sha256 }}"
+    checksum_algorithm: sha256
+    force: false
+
+- name: Install it silently, without a reboot the installer sprung itself
+  # `-overwrite` deliberately absent; exit-code handling in the task's own header comment.
+  when: not display_driver_ok
+  become: true
+  ansible.windows.win_command: >-
+    {{ worker_display_driver_path }} -s --report C:\Windows\Temp\IntelGFX-install-{{ worker_display_driver_version }}.log
+  register: display_driver_install
+  failed_when: display_driver_install.rc not in [0, 2, 14]
+  changed_when: true
+
+- name: Reboot if the install asked for a software-controlled restart
+  when: not display_driver_ok and display_driver_install.rc in [2, 14]
+  become: true
+  ansible.windows.win_reboot:
+    reboot_timeout: 600
+
+- name: Refuse to call this provisioned unless the adapter reads clean afterwards
+  when: not display_driver_ok
+  become: true
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $dev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Select-Object -First 1
+      $drv = Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceClass='DISPLAY'" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+      $problem = if ($dev) { [string]$dev.Problem } else { '(absent)' }
+      $provider = if ($drv) { $drv.DriverProviderName } else { '(absent)' }
+      if ($problem -ne 'CM_PROB_NONE' -or $provider -notlike '*Intel*') {
+        $Ansible.Failed = $true
+        return "display adapter problem $problem, provider $provider — expected CM_PROB_NONE and an Intel driver"
+      }
+      "$provider $($drv.DriverVersion), $problem"
+  register: display_driver_proof
+
+- name: Say what the display adapter is on
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: {{ display_driver_proof.output | first }}"
