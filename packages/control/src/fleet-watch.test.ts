@@ -1,3 +1,7 @@
+// no-token: gh -- every test below drives pure functions or `watch()` with an injected `getStatus`/
+// `read`/`write`; none of them calls `main()`, so fleet-watch.mjs's own `execFileSync("gh", ...)` (only
+// reached from `main()` under `--post`) is never exercised here.
+//
 // #1815: "the fleet is the org's scarcest resource and the only major subsystem with no eyes on it."
 // Every test below is fixture-driven -- a fake `fleetStatus`, a fake clock, an in-memory `read`/`write` --
 // so none of it needs the fleet, matching `lab-watch.test.ts`'s own reasoning for the identical shape one
