@@ -258,5 +258,15 @@
   register: display_driver_proof
 
 - name: Say what the display adapter is on
+  # `display_driver_proof` is only REGISTERED when `not display_driver_ok` (the task above it shares
+  # that guard) -- on workers 2-6, already a problem-free Intel driver, it is a skipped result with no
+  # `.output`, and reading it unconditionally failed strict templating there, touching a worker this
+  # role must leave alone. `display_driver_state` (unconditional, above) already has the pre-existing
+  # reading for exactly that case; the two are read in the same "provider version, problem" shape so
+  # the message does not depend on which branch produced it.
   ansible.builtin.debug:
-    msg: "{{ inventory_hostname }}: {{ display_driver_proof.output | first }}"
+    msg: >-
+      {{ inventory_hostname }}: {{ display_driver_proof.output | first if not display_driver_ok else
+         ((display_driver_state.output | first).split('|')[1] ~ ' ' ~
+          (display_driver_state.output | first).split('|')[2] ~ ', ' ~
+          (display_driver_state.output | first).split('|')[0]) }}
