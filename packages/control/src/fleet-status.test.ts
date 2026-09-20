@@ -158,14 +158,16 @@ test("a warming worker's `/health.readiness` reaches the row -- the row this clo
   assert.equal(row.readiness?.reason, "not ready: noBlockingDialog");
 });
 
-test("a worker blocked by a dialog is told to log in at the console and dismiss it", () => {
-  // The runbook's own remedy (nvda-worker-runbook.md's "0 phrases" row): a modal dialog never clears
-  // itself and never surfaces over SSH.
+test("a worker blocked by a dialog is told to RESTART IT, not to visit a console", () => {
+  // THE ADVICE WAS "log in at the console" AND IT COST REAL DAYS. True when written; then #1733 made
+  // `prepareDesktop` clear a blocker instead of only recording it -- but that self-heal runs AT THE
+  // START OF A CAPTURE, and a blocked worker reports `not ready`, so it is never dispatched one. The
+  // fix is gated behind the fault it fixes, and only a restart escapes that.
   const out = warmingAdvice([{ name: "a11y-worker-4 1.2.3.4", state: "warming",
     readiness: { reason: "not ready: noBlockingDialog", blockingDialogs: [{ message: "PhoneExperienceHost" }] } }]);
   assert.match(out, /a11y-worker-4/, "it must name WHICH box");
   assert.match(out, /PhoneExperienceHost/, "and quote the dialog's own text, not just that one exists");
-  assert.match(out, /log in at the console/i);
+  assert.match(out, /fleet:recover/, "the remedy must be a command, over SSH, that a session can run");
 });
 
 test("a worker stuck on ForegroundLockTimeout is pointed at the fix script", () => {
@@ -175,10 +177,36 @@ test("a worker stuck on ForegroundLockTimeout is pointed at the fix script", () 
     "the runbook's named fix for the row's dominant cause (row 226) must be the command printed");
 });
 
-test("a worker with no dialog sampled yet but a known foreground holder names who holds it", () => {
+test("a foreground holder names WHO holds it and the command that clears it", () => {
   const out = warmingAdvice([{ name: "a11y-worker-2 x", state: "warming",
     readiness: { reason: "not ready: noForegroundBlocker", foregroundBlockedBy: "explorer.exe" } }]);
   assert.match(out, /explorer\.exe/, "WHO holds the foreground, not just that something does");
+  assert.match(out, /fleet:recover -- --limit=a11y-worker-2/,
+    "and the limit must name THIS box, so the reader never has to compose the command");
+});
+
+/**
+ * THE REMEDY MUST BE RUNNABLE BY THE SESSION READING IT -- measured three times, all the same toast.
+ *
+ * `a11y-worker-4` held 4.9 days. `a11y-worker-10` 4.6 days, withdrawn from the fleet on a note claiming
+ * it answered neither /health nor SSH nor ICMP -- two of those three were false. `a11y-worker-3` on
+ * 2026-09-20, cleared in 53 seconds by `fleet:recover --limit=a11y-worker-3`.
+ *
+ * THE THIRD ONE WAS COST BY THIS FUNCTION. `orchestrator` diagnosed it correctly, read the old sentence
+ * out of `fleet:status`, and told the chairman the box "needs a console login" -- so nine healthy
+ * workers idled behind a remedy the session already had permission to run.
+ */
+test("no warming remedy sends a session to a console before trying the command it can run", () => {
+  const cases = [
+    { reason: "not ready: noForegroundBlocker", foregroundBlockedBy: "ShellExperienceHost" },
+    { reason: "not ready: noBlockingDialog", blockingDialogs: [{ message: "New notification" }] },
+  ];
+  for (const readiness of cases) {
+    const out = warmingAdvice([{ name: "a11y-worker-3 x", state: "warming", readiness }]);
+    assert.match(out, /fleet:recover/, `${readiness.reason} must name the runnable remedy`);
+    assert.doesNotMatch(out, /^[^]*log in at the console[^]*fleet:recover/,
+      "the console must never be offered BEFORE the command that works over SSH");
+  }
 });
 
 test("a browser misconfiguration quotes the worker's own error, not just the check name", () => {
