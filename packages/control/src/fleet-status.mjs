@@ -204,6 +204,10 @@ export function summarise(probes) {
       degradedReason: assessment.reason,
       activity: activityOf(probe),
       error: probe.error ?? null,
+      // The worker's OWN diagnosis, not re-derived from `ready: false`. `/health.readiness` already names
+      // the failed check and, for a dialog, its own text -- see `warmingAdvice`, which turns this into the
+      // same fault-plus-fix-command shape `degradedAdvice` gives DEGRADED.
+      readiness: probe.health?.readiness ?? null,
     };
   });
 }
@@ -246,6 +250,68 @@ export function degradedAdvice(rows) {
     + "  saying where; the phase table says which phase.\n";
 }
 
+/**
+ * The fix command for one WARMING worker's own diagnosis -- the runbook's "0 phrases,
+ * `afterStart.lastSpoken` empty" row (docs/nvda-worker-runbook.md#debugging-error-string--real-cause),
+ * matched by the same failed-check names `readiness()` already puts in `reason`, rather than re-derived
+ * from `ready: false` alone.
+ *
+ * Checked in the runbook's own likelihood order: a blocking dialog first (it names itself), then the
+ * foreground-lock-timeout fix that clears the commonest cause, then a foreground holder with no dialog
+ * sampled yet, then a browser config problem, and only then the generic fallback.
+ *
+ * @param {{ reason?: string | null, blockingDialogs?: {title?: string, message?: string}[],
+ *           foregroundBlockedBy?: string | null, browserConfigError?: string | null }} readiness
+ * @returns {string}
+ */
+function warmingRemedy(readiness) {
+  const reason = readiness.reason ?? "";
+  if (readiness.blockingDialogs?.length) {
+    const text = readiness.blockingDialogs.map((d) => d.message || d.title).filter(Boolean).join(" / ");
+    return `A modal dialog is blocking input on the guest desktop (${text || "no dialog text captured"}). `
+      + "It never clears itself and never surfaces over SSH -- log in at the console and dismiss it there.";
+  }
+  if (/\bforegroundLockTimeout\b/.test(reason)) {
+    return "ForegroundLockTimeout is not 0 in the live session, so Edge cannot take the foreground. Run "
+      + "`packages/worker-fleet/src/provisioning/apply-foreground-lock-timeout.ps1` in the interactive "
+      + "session and re-capture.";
+  }
+  if (readiness.foregroundBlockedBy) {
+    return `${readiness.foregroundBlockedBy} holds the foreground, so Edge cannot take it -- log in at `
+      + "the console and clear it there; it never surfaces over SSH.";
+  }
+  if (/\bbrowserConfigured\b/.test(reason)) {
+    return `A11Y_BROWSER is misconfigured on this guest (${readiness.browserConfigError ?? "no detail reported"}) `
+      + "-- fix the worker's environment and redeploy.";
+  }
+  if (/\bbrowser\b/.test(reason)) {
+    return "The browser check itself failed -- reinstall/reprovision this guest: "
+      + "`npm run fleet:provision -- --limit=<name>`.";
+  }
+  return `See docs/nvda-worker-runbook.md#debugging-error-string--real-cause for "${reason}".`;
+}
+
+/**
+ * What to DO about a worker stuck WARMING, or "" when none is. `stateOf` has said WARMING since this file
+ * existed, and until now that is all a reader ever saw -- exactly the "state a reader must interpret" gap
+ * DEGRADED already got a remedy for. `readiness.reason` is read here, never re-derived, so this cannot
+ * disagree with what `/health` itself diagnosed.
+ *
+ * @param {Array<{name: string, state?: string,
+ *   readiness?: {reason?: string | null, blockingDialogs?: {title?: string, message?: string}[],
+ *                foregroundBlockedBy?: string | null, browserConfigError?: string | null} | null}>
+ *   | undefined} rows
+ * @returns {string}
+ */
+export function warmingAdvice(rows) {
+  const stuck = (rows ?? []).filter((r) => r?.state === "warming" && r.readiness?.reason);
+  if (!stuck.length) return "";
+  return stuck.map((row) => {
+    const name = String(row.name).split(/\s+/)[0];
+    return `  ${name} WARMING: ${row.readiness?.reason}\n  ${warmingRemedy(/** @type {any} */ (row.readiness))}\n`;
+  }).join("");
+}
+
 /** @param {WorkerRow[]} rows */
 function renderTable(rows) {
   const width = (/** @type {(row: WorkerRow) => unknown} */ pick) =>
@@ -272,6 +338,11 @@ function renderTable(rows) {
     // A degraded worker still SERVES, so it is a line under the row rather than a state: pulling it
     // from a small pool costs more throughput than it saves, and the run retires it on its own terms.
     if (row.degraded) lines.push(`  ${" ".repeat(nameWidth)}  -> ${row.degradedReason}`);
+    // Same shape for WARMING: the reason is right under the row it explains, and the fix command follows
+    // in `warmingAdvice`'s block -- a reader should never have to scroll to connect a state to its cause.
+    if (row.state === "warming" && row.readiness?.reason) {
+      lines.push(`  ${" ".repeat(nameWidth)}  -> ${row.readiness.reason}`);
+    }
   }
   return lines;
 }
@@ -757,6 +828,8 @@ async function main() {
     // evidence problem, and it has its own remedy.
     const degraded = degradedAdvice(status.rows);
     if (degraded) process.stdout.write(degraded);
+    const warming = warmingAdvice(status.rows);
+    if (warming) process.stdout.write(warming);
     if (status.codes.length > 1) {
       const byCode = status.codes.map((c) =>
         `${c.slice(0, 12)} on ${status.rows.filter((r) => r.code === c).length}`);

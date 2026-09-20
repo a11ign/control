@@ -5,8 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
-import { stateOf, activityOf, summarise, degradedAdvice, consistencyVerdict, fleetStatus, LINK, linkVerdictOf,
-  readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe } from "./fleet-status.mjs";
+import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
+  linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe } from "./fleet-status.mjs";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -143,6 +143,82 @@ test("every degraded worker is named, not just the first", () => {
   assert.match(out, /2 worker\(s\) DEGRADED/);
   assert.match(out, /a11y-worker-6, a11y-worker-9/);
   assert.doesNotMatch(out, /a11y-worker-2/, "a healthy box must not be named as degraded");
+});
+
+test("a warming worker's `/health.readiness` reaches the row -- the row this closes", () => {
+  // Before this, `stateOf` said "warming" and stopped: `/health.readiness` already carries the failed
+  // check and, for a dialog, its own text, and nothing here read it. Row #44's own acceptance: name the
+  // fault and the fix, not a state the reader has to interpret.
+  const [row] = summarise([{
+    name: "w4", url: "http://REDACTED-INTERNAL-ADDRESS:8765", reachable: true,
+    health: { ready: false, busy: false,
+      readiness: { reason: "not ready: noBlockingDialog", blockingDialogs: [{ message: "PhoneExperienceHost" }] } },
+  }]);
+  assert.equal(row.state, "warming");
+  assert.equal(row.readiness?.reason, "not ready: noBlockingDialog");
+});
+
+test("a worker blocked by a dialog is told to log in at the console and dismiss it", () => {
+  // The runbook's own remedy (nvda-worker-runbook.md's "0 phrases" row): a modal dialog never clears
+  // itself and never surfaces over SSH.
+  const out = warmingAdvice([{ name: "a11y-worker-4 1.2.3.4", state: "warming",
+    readiness: { reason: "not ready: noBlockingDialog", blockingDialogs: [{ message: "PhoneExperienceHost" }] } }]);
+  assert.match(out, /a11y-worker-4/, "it must name WHICH box");
+  assert.match(out, /PhoneExperienceHost/, "and quote the dialog's own text, not just that one exists");
+  assert.match(out, /log in at the console/i);
+});
+
+test("a worker stuck on ForegroundLockTimeout is pointed at the fix script", () => {
+  const out = warmingAdvice([{ name: "a11y-worker-2 x", state: "warming",
+    readiness: { reason: "not ready: foregroundLockTimeout" } }]);
+  assert.match(out, /apply-foreground-lock-timeout\.ps1/,
+    "the runbook's named fix for the row's dominant cause (row 226) must be the command printed");
+});
+
+test("a worker with no dialog sampled yet but a known foreground holder names who holds it", () => {
+  const out = warmingAdvice([{ name: "a11y-worker-2 x", state: "warming",
+    readiness: { reason: "not ready: noForegroundBlocker", foregroundBlockedBy: "explorer.exe" } }]);
+  assert.match(out, /explorer\.exe/, "WHO holds the foreground, not just that something does");
+});
+
+test("a browser misconfiguration quotes the worker's own error, not just the check name", () => {
+  const out = warmingAdvice([{ name: "a11y-worker-2 x", state: "warming",
+    readiness: { reason: "not ready: browserConfigured", browserConfigError: "A11Y_BROWSER=chrome is not supported" } }]);
+  assert.match(out, /A11Y_BROWSER=chrome is not supported/);
+});
+
+test("an unmatched reason still points at the runbook rather than saying nothing", () => {
+  const out = warmingAdvice([{ name: "a11y-worker-2 x", state: "warming",
+    readiness: { reason: "not ready: someFutureCheck" } }]);
+  assert.match(out, /docs\/nvda-worker-runbook\.md/);
+  assert.match(out, /someFutureCheck/);
+});
+
+test("no warming advice for a ready, busy or unreachable worker -- state gates it, not the presence of a reason", () => {
+  // The mutation this guards: dropping the `state === "warming"` filter would fire on any row that
+  // happens to carry a stale `readiness.reason` object, e.g. one left over from before a box recovered.
+  const out = warmingAdvice([
+    { name: "a11y-worker-2 x", state: "ready", readiness: { reason: "not ready: noBlockingDialog" } },
+    { name: "a11y-worker-3 y", state: "busy", readiness: { reason: "not ready: noBlockingDialog" } },
+  ]);
+  assert.equal(out, "");
+});
+
+test("no warming advice when there is nothing to advise -- never an empty heading", () => {
+  assert.equal(warmingAdvice([{ name: "a11y-worker-2 x", state: "warming", readiness: null }]), "");
+  assert.equal(warmingAdvice([]), "");
+  assert.equal(warmingAdvice(undefined as never), "");
+});
+
+test("every warming worker is named, not just the first", () => {
+  const out = warmingAdvice([
+    { name: "a11y-worker-6 x", state: "warming", readiness: { reason: "not ready: noBlockingDialog" } },
+    { name: "a11y-worker-9 y", state: "warming", readiness: { reason: "not ready: foregroundLockTimeout" } },
+    { name: "a11y-worker-2 z", state: "ready", readiness: { reason: "not ready: noBlockingDialog" } },
+  ]);
+  assert.match(out, /a11y-worker-6/);
+  assert.match(out, /a11y-worker-9/);
+  assert.doesNotMatch(out, /a11y-worker-2\b/, "a ready box must not be named as warming");
 });
 
 /**
