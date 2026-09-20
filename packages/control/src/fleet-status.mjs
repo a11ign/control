@@ -264,12 +264,17 @@ export function degradedAdvice(rows) {
  *           foregroundBlockedBy?: string | null, browserConfigError?: string | null }} readiness
  * @returns {string}
  */
-function warmingRemedy(readiness) {
+function warmingRemedy(readiness, workerName = "") {
   const reason = readiness.reason ?? "";
   if (readiness.blockingDialogs?.length) {
     const text = readiness.blockingDialogs.map((d) => d.message || d.title).filter(Boolean).join(" / ");
+    // SAME CORRECTION AS THE FOREGROUND BRANCH BELOW, for the same reason: `dismissBlockingDialogs` runs
+    // at capture start and a blocked worker is never sent a capture. Try the restart first; it is one
+    // command over SSH and it is what actually cleared the three recorded cases.
     return `A modal dialog is blocking input on the guest desktop (${text || "no dialog text captured"}). `
-      + "It never clears itself and never surfaces over SSH -- log in at the console and dismiss it there.";
+      + "A restart clears it over SSH: `npm run fleet:recover -- --limit=<name>` (~1 min). The "
+      + "capture-time dismissal cannot help -- it runs only when a capture starts, and a blocked worker "
+      + "is never dispatched one. Only if a restart does not clear it is this a console visit.";
   }
   if (/\bforegroundLockTimeout\b/.test(reason)) {
     return "ForegroundLockTimeout is not 0 in the live session, so Edge cannot take the foreground. Run "
@@ -277,8 +282,31 @@ function warmingRemedy(readiness) {
       + "session and re-capture.";
   }
   if (readiness.foregroundBlockedBy) {
-    return `${readiness.foregroundBlockedBy} holds the foreground, so Edge cannot take it -- log in at `
-      + "the console and clear it there; it never surfaces over SSH.";
+    // `npm run fleet:recover`, NOT A CONSOLE LOGIN, AND THE OLD ADVICE COST REAL DAYS.
+    //
+    // This branch said "log in at the console and clear it there; it never surfaces over SSH" and that
+    // was true when written. #1733 then made `prepareDesktop` CLEAR a foreground holder instead of only
+    // recording it -- but that self-heal runs AT THE START OF A CAPTURE, and a held worker reports
+    // `not ready`, so no capture is ever dispatched to it. THE FIX IS GATED BEHIND THE FAULT IT FIXES.
+    // What does clear it is a restart, which `recover.yml` does over SSH and which is EXEMPT from the
+    // busy-worker refusal precisely because it exists for a box that is busy AND wedged.
+    //
+    // MEASURED THREE TIMES, same `ShellExperienceHost` / "New notification" toast: `a11y-worker-4` held
+    // 4.9 days, `a11y-worker-10` 4.6 days (withdrawn from the fleet on a note that said it answered
+    // neither /health nor SSH nor ICMP -- two of those three were false), and `a11y-worker-3` on
+    // 2026-09-20, cleared in 53 seconds by `fleet:recover --limit=a11y-worker-3`.
+    //
+    // THE ADVICE IS WHAT COST THE THIRD ONE. `orchestrator` diagnosed it correctly, read this sentence
+    // out of `fleet:status`, and reported to the chairman that the box "needs a console login" -- so
+    // nine healthy workers idled behind a remedy it already had permission to run.
+    // `-- --limit=`, WITH THE npm SEPARATOR. Without it npm eats the flag and the script runs
+    // against the WHOLE fleet -- a printed command that does not do what it says is worse than
+    // none, and this one would have rebooted ten boxes instead of the one named above it.
+    const limit = workerName ? ` -- --limit=${workerName}` : " -- --limit=<name>";
+    return `${readiness.foregroundBlockedBy} holds the foreground, so Edge cannot take it. A restart `
+      + `clears it OVER SSH: \`npm run fleet:recover${limit}\` (~1 min). Do NOT wait for the capture-time `
+      + "self-heal -- `prepareDesktop` clears a holder only when a capture STARTS, and a held worker is "
+      + "never dispatched one. Only if a restart does not clear it is this a console visit.";
   }
   if (/\bbrowserConfigured\b/.test(reason)) {
     return `A11Y_BROWSER is misconfigured on this guest (${readiness.browserConfigError ?? "no detail reported"}) `
@@ -308,7 +336,7 @@ export function warmingAdvice(rows) {
   if (!stuck.length) return "";
   return stuck.map((row) => {
     const name = String(row.name).split(/\s+/)[0];
-    return `  ${name} WARMING: ${row.readiness?.reason}\n  ${warmingRemedy(/** @type {any} */ (row.readiness))}\n`;
+    return `  ${name} WARMING: ${row.readiness?.reason}\n  ${warmingRemedy(/** @type {any} */ (row.readiness), name)}\n`;
   }).join("");
 }
 
