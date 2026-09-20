@@ -1,0 +1,46 @@
+[Unit]
+# A TRIGGER, NOT THE JOB ITSELF. `run-job.yml`'s own manual dispatch names the job's transient unit
+# `a11y-job-corpus-snapshot` -- a static unit sharing that exact name would permanently refuse every
+# future `systemd-run --unit=a11y-job-corpus-snapshot` with "Unit ... already exists", which is how a
+# manual dispatch would break the moment this file landed. Verified on the agent host before writing this:
+# a static unit and a transient `systemd-run --unit=` of the same name collide with exactly that message.
+# So this unit's OWN name is deliberately different from the job it starts, and its only job is to start
+# the SAME transient unit a manual dispatch would, under the SAME name -- so `npm run lab:status -- -e
+# job=corpus-snapshot` and `journalctl -u a11y-job-corpus-snapshot` see one history, whichever door started
+# the run.
+Description=a11y: dispatch corpus-snapshot as a11y-job-corpus-snapshot
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/a11y
+
+# CLEAR A STALE HANDLE FIRST, exactly as `run-job.yml`'s own two tasks do before every dispatch: a unit
+# left `failed` or `exited` from the last run is just an unreaped handle, and `systemd-run --unit=` refuses
+# to reuse the name until it is cleared. `-` makes both non-fatal -- the common case is no prior unit at
+# all, which `systemctl` answers by erroring, not by succeeding quietly.
+ExecStartPre=-/usr/bin/systemctl reset-failed a11y-job-corpus-snapshot
+ExecStartPre=-/usr/bin/systemctl stop a11y-job-corpus-snapshot
+
+# THE SAME MECHANISM MANUAL DISPATCH USES, not a reimplementation of it: `--remain-after-exit` so the
+# handle stays inspectable afterward -- `npm run lab:status -- -e job=corpus-snapshot` reads a scheduled
+# run's result exactly as it reads a manual one -- never `--collect` (see `run-job.yml`'s own note on why
+# a collected unit's exit code vanishes with it), and the same `RuntimeMaxSec` ceiling and argv as
+# `lab-job.yml`'s `corpus-snapshot` catalogue entry.
+#
+# NO `--wait`. It was here first, and it HANGS this trigger forever: `--wait` waits for the started unit
+# to be DEACTIVATED, and `--remain-after-exit` is what keeps a successful unit from ever deactivating --
+# the two options fight, and `--wait` loses silently, sitting in `activating (start)` with the job already
+# `exited`/`success` underneath it. Measured firing this by hand on the lab before choosing this shape:
+# `a11y-corpus-snapshot.service` stuck `activating` 3+ minutes after `a11y-job-corpus-snapshot` had already
+# finished. Without `--wait`, `systemd-run` enqueues the job and returns immediately, so THIS unit's own
+# exit code says only "the job was started", never "the job succeeded" -- read the job's own result
+# (`journalctl -u a11y-job-corpus-snapshot`, `lab:status -- -e job=corpus-snapshot`) for that, exactly as a
+# manual dispatch already requires.
+ExecStart=/usr/bin/systemd-run --unit=a11y-job-corpus-snapshot --remain-after-exit \
+  --description="corpus-snapshot (scheduled)" \
+  --working-directory=/opt/a11y \
+  --property=RuntimeMaxSec=3600 \
+  --property=ReadWritePaths=/srv/a11y-runs \
+  --setenv=PYTHONUNBUFFERED=1 \
+  --setenv=PYTHONDONTWRITEBYTECODE=1 \
+  -- /usr/bin/npm run corpus:snapshot

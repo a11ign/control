@@ -1,0 +1,18 @@
+[Unit]
+# THE CORPUS'S FIRST DEFENCE, ON A CLOCK -- #1795, split from #43. `corpus-snapshot` and `corpus-backup`
+# were dispatchable ONLY BY HAND (`npm run lab:job -- -e job=corpus-snapshot`), so the corpus that cannot
+# be rebuilt from source had no defence that did not depend on somebody remembering to run it.
+Description=a11y: fire the corpus snapshot job daily
+
+[Timer]
+# DAILY, IN THE BOX'S OWN CLOCK -- verified UTC on this host (`timedatectl show -p Timezone`), stated
+# explicitly so a future change of the box's zone does not silently move the schedule.
+OnCalendar=*-*-* 03:00:00 UTC
+# A box that was off or rebooting at 03:00 fires the missed run at the next boot instead of skipping the
+# day entirely -- the same property `a11ign-work-tick.timer` relies on.
+Persistent=true
+AccuracySec=1min
+Unit=a11y-corpus-snapshot.service
+
+[Install]
+WantedBy=timers.target

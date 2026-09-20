@@ -1,0 +1,132 @@
+---
+# Install the daily corpus-snapshot and corpus-backup timers on the lab, so protecting the corpus does
+# not depend on somebody remembering to dispatch them by hand.
+#
+#     ansible-playbook corpus-schedule.yml
+#
+# ## What this closes, and what it deliberately does not
+#
+# #1795, split from #43. `corpus-snapshot` and `corpus-backup` have been dispatchable since #1795's own
+# catalogue entries in `lab-job.yml` landed (`npm run lab:job -- -e job=corpus-snapshot`), but only BY
+# HAND -- nothing fired either one without an operator remembering to. That is this repo's own rule
+# failed on the highest-value operation it protects: several thousand captures, NOT reproducible
+# (`browserVersion` is a capture cache key), that `corpus-snapshot.mjs`'s own header calls "the most
+# expensive artifact in the repo and the only one with no copy".
+#
+# It does NOT decide where `corpus-backup` sends its copy -- that is #1042, a separate, undecided
+# question. The backup timer is installed and enabled regardless; its scheduled firing will exit
+# non-zero until #1042 lands, which `corpus-backup.mjs` documents as the correct behaviour rather than a
+# silent local-only success. `a11y-corpus-backup.service`'s own header says the same thing.
+#
+# ## Two trigger units per job, never the job's own transient name
+#
+# `run-job.yml`'s manual dispatch names the job's own transient unit `a11y-job-<name>` (`systemd-run
+# --unit=a11y-job-corpus-snapshot`, for instance). A STATIC unit installed under that exact name would
+# permanently refuse every future manual dispatch of the same job with "Unit ... already exists" --
+# verified on the agent host before this was written: a transient `systemd-run --unit=` collides with a
+# static unit of the same name and cannot start at all, dead or alive. So each `.timer` here fires a
+# small, separately-named `.service` (`a11y-corpus-snapshot.service`, not `a11y-job-corpus-snapshot`)
+# whose only job is to start the SAME transient unit a manual dispatch would, under the SAME name --
+# reusing `run-job.yml`'s own stale-handle cleanup and `--remain-after-exit` choice. See
+# `files/a11y-corpus-snapshot.service` for the argument in full.
+#
+# ## Installed by the catalogue, verified by a real firing
+#
+# `npm run lab:job` and this playbook both write files; neither writes state that survives only in
+# somebody's head. This one is idempotent -- running it twice changes nothing the second time -- and it
+# stops short of forcing a run: enabling `a11y-corpus-snapshot.timer` schedules the job, it does not run
+# it. #1795's Acceptance is a REAL firing, quoted on the row, which this playbook does not itself produce
+# -- proving it needs either waiting for 03:00Z or a one-off `systemctl start a11y-corpus-snapshot.service`
+# on the lab, the same command the timer itself will run at the scheduled time. Making that automatic here
+# would mean every re-run of this playbook (a config drift check, a fresh deploy) kicks off an hour-long
+# corpus operation as a side effect of installing a clock -- which is a heavier default than "add a
+# timer" should carry.
+#
+# THE LAB MUST BE IN THE INVENTORY, AND AN EMPTY INVENTORY MUST NOT READ AS SUCCESS.
+#
+# `ansible-playbook` prints `skipping: no hosts matched`, an EMPTY PLAY RECAP, and **exits 0**. So this
+# could match zero hosts, install nothing and report success -- measured 2026-09-06 in a fresh worktree,
+# where `lab:fetch` returned exit 0 having reached no host at all. `inventory.yml` is gitignored, so any
+# checkout that has not been given one resolves nothing.
+#
+# THIS PLAY RUNS ON `localhost`, which is always available, precisely so it can speak when the real play
+# cannot. A guard living inside the `a11y_lab` play would be skipped by the very condition it exists to
+# report -- the bootstrap shape `inventory-install.yml` already had to solve.
+- name: The lab must be in the inventory before anything claims to have run
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Refuse an inventory that resolved no lab
+      ansible.builtin.assert:
+        that:
+          - groups['a11y_lab'] is defined
+          - groups['a11y_lab'] | length > 0
+        fail_msg: >-
+          No host matched `a11y_lab`, so this command would have done NOTHING and exited 0.
+          `inventory.yml` is gitignored, so a fresh checkout or a worktree does not have one.
+          Fix it with one of: run this from a checkout that has
+          `packages/control/ansible/inventory.yml`; or install the durable copy this machine can
+          always read, `npm run fleet:inventory-install`, which puts it at /etc/a11ign/inventory.yml
+          where `ansible.cfg` looks first.
+        success_msg: "inventory resolved {{ groups['a11y_lab'] | default([]) | length }} lab host(s)"
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Install the corpus timers on the lab
+  hosts: a11y_lab
+  gather_facts: false
+  vars:
+    corpus_timer_units:
+      - a11y-corpus-snapshot.timer
+      - a11y-corpus-snapshot.service
+      - a11y-corpus-backup.timer
+      - a11y-corpus-backup.service
+
+  tasks:
+    - name: Install the unit files
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ corpus_timer_units }}"
+      register: corpus_units_installed
+
+    - name: Pick up any unit that changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: corpus_units_installed.results | selectattr('changed') | list | length > 0
+
+    # The `.timer` units are enabled and started; their paired `.service` units are neither -- a service
+    # with no `[Install]` block and no timer naming it would otherwise just sit there, but enabling it
+    # directly would let a stray `systemctl start a11y-corpus-snapshot.service` (rather than
+    # `.timer`) look like the intended way to fire one, when the intended way is the timer itself, or a
+    # `systemctl start` on the SAME unit the timer uses -- see `files/a11y-corpus-snapshot.timer`'s
+    # `Unit=` line, which already says which service each timer runs.
+    - name: Enable and start the timers
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - a11y-corpus-snapshot.timer
+        - a11y-corpus-backup.timer
+      register: corpus_timers_started
+
+    - name: Read the schedule back over systemd's own view, not the files just written
+      ansible.builtin.command:
+        argv: [systemctl, list-timers, "a11y-corpus-*", "--no-legend"]
+      changed_when: false
+      register: corpus_timers_listed
+
+    - name: Both timers must show a NEXT firing -- installed and enabled is not the same as scheduled
+      ansible.builtin.assert:
+        that:
+          - "'a11y-corpus-snapshot.timer' in corpus_timers_listed.stdout"
+          - "'a11y-corpus-backup.timer' in corpus_timers_listed.stdout"
+        fail_msg: >-
+          `systemctl list-timers 'a11y-corpus-*'` on {{ inventory_hostname }} does not list both timers:
+          {{ corpus_timers_listed.stdout }}
+        success_msg: "{{ corpus_timers_listed.stdout }}"
