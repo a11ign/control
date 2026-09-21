@@ -146,13 +146,44 @@ const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml
 const ONE_WORKER = /^a11y-worker-[0-9]{1,3}$/;
 
 /**
- * THE TWO REFUSALS THAT BELONG TO AN OS CHANGE, and to nothing else in this allowlist (#921).
+ * Playbooks whose `--limit` must name exactly ONE worker, never the fleet and never a list (#1829).
+ *
+ * `os-rollback.yml` earned this first (#921): it changes a box's OS. `recover.yml` joins it for a
+ * different reason that lands on the same shape -- it is EXEMPT from the capturing-worker guard on
+ * purpose (`busy-worker-guard.test.ts`; "the fault it exists for cannot be reached any other way"), so
+ * omitting `--limit` does not just widen a deploy, it makes a worker a DIFFERENT session is mid-capture on
+ * right now reachable by a reboot that guard would otherwise have refused.
+ *
+ * The other playbook with this exact exemption (see `DISPATCHED_ELSEWHERE` in
+ * `deploy-reached-no-hosts.test.ts`, whose own name is deliberately not spelled out here -- that test
+ * asserts this file never names it) has the identical exposure but no entry in `PLAYBOOKS` and never has
+ * had one; it is dispatched as a bare `ansible-playbook` call on the control plane, so this file cannot
+ * refuse it before it runs. Its own play asserts the same one-host rule directly, which is the only place
+ * left that sees every invocation of it.
+ */
+const ONE_WORKER_REQUIRED = ["os-rollback.yml", "recover.yml"];
+
+/**
+ * Why EACH entry in `ONE_WORKER_REQUIRED` needs it -- one playbook, one reason, never restated as one.
+ * @type {Record<string, string>}
+ */
+const ONE_WORKER_REASON = {
+  "os-rollback.yml": "it changes ONE box's operating system",
+  "recover.yml": "it kills the worker process and reboots, exempt from the capturing-worker guard on "
+    + "purpose -- an omitted or fleet-wide --limit could reboot a box a DIFFERENT session is mid-capture "
+    + "on right now",
+};
+
+/**
+ * THE REFUSALS THAT BELONG TO THE MOST DESTRUCTIVE ENTRIES, and to nothing else in this allowlist (#921,
+ * #1829).
  *
  * `--limit` is optional everywhere else because omitting it means "the fleet", which is what a deploy
- * wants. For a Windows rollback, "the fleet" is the one target that must never be expressible, so the
- * flag is required and must name exactly ONE worker. `--apply` is the switch that turns the playbook's
- * read-only dry run into the change; on any other playbook it would be accepted and ignored, which is the
- * silently-discarded-flag shape `refuseUnknownFlags` exists for, so it is refused there by name.
+ * wants. For the playbooks in `ONE_WORKER_REQUIRED`, "the fleet" is the one target that must never be
+ * expressible, so the flag is required and must name exactly ONE worker. `--apply` is the switch that
+ * turns `os-rollback.yml`'s read-only dry run into the change; on any other playbook it would be accepted
+ * and ignored, which is the silently-discarded-flag shape `refuseUnknownFlags` exists for, so it is
+ * refused there by name.
  *
  * @param {{ chosen: string, limitFlag: string | undefined, apply: boolean }} args
  * @returns {string | null} the refusal to print, or null when the combination is allowed
@@ -161,8 +192,8 @@ function osRollbackRefusal({ chosen, limitFlag, apply }) {
   if (apply && chosen !== "os-rollback.yml") {
     return `refusing --apply with --playbook=${chosen}: only os-rollback.yml has a change it holds back.`;
   }
-  if (chosen === "os-rollback.yml" && !ONE_WORKER.test(limitFlag ?? "")) {
-    return "refusing os-rollback.yml without --limit=<one worker>: it changes ONE box's operating system, "
+  if (ONE_WORKER_REQUIRED.includes(chosen) && !ONE_WORKER.test(limitFlag ?? "")) {
+    return `refusing ${chosen} without --limit=<one worker>: ${ONE_WORKER_REASON[chosen]}, `
       + `and "${limitFlag ?? "(no --limit, i.e. the whole fleet)"}" is not one worker.`;
   }
   return null;

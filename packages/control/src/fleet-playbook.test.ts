@@ -271,13 +271,53 @@ test("an OS rollback names exactly ONE worker, and --apply belongs to it alone (
   assert.equal(osRollbackRefusal({ chosen: "os-rollback.yml", limitFlag: "a11y-worker-4", apply: false }), null);
   assert.equal(osRollbackRefusal({ chosen: "os-rollback.yml", limitFlag: "a11y-worker-4", apply: true }), null);
   // Accepted and ignored would be the silently-discarded flag this repo refuses everywhere else.
+  // `recover.yml` is excluded from the "nothing required" half below -- #1829 gave it the identical
+  // one-worker requirement for a different reason, and its own test just below covers it.
   for (const chosen of PLAYBOOKS.filter((name) => name !== "os-rollback.yml")) {
     assert.match(osRollbackRefusal({ chosen, limitFlag: "a11y-worker-4", apply: true }) ?? "",
       /refusing --apply/, chosen);
+  }
+  for (const chosen of PLAYBOOKS.filter((name) => !["os-rollback.yml", "recover.yml"].includes(name))) {
     assert.equal(osRollbackRefusal({ chosen, limitFlag: undefined, apply: false }), null, chosen);
   }
   assert.ok(PLAYBOOK_TIMEOUT_MS["os-rollback.yml"] > DEFAULT_PLAYBOOK_TIMEOUT_MS,
     "a rollback runs inside a restart that can take most of an hour; the default ceiling would kill it");
+});
+
+test("recover.yml names exactly ONE worker too, and for a different reason than os-rollback (#1829)", () => {
+  // Gap 2 of #1817's precondition list (#1829): `recover.yml` is EXEMPT from the capturing-worker guard on
+  // purpose (busy-worker-guard.test.ts), so "no --limit" here does not just mean "the whole fleet" the way
+  // it does for `deploy.yml` -- it means a box a DIFFERENT session is mid-capture on is reachable by the
+  // one playbook built to reboot through that guard.
+  for (const limitFlag of [undefined, "a11y_workers", "a11y-worker-3,a11y-worker-4", ""]) {
+    const refusal = osRollbackRefusal({ chosen: "recover.yml", limitFlag, apply: false }) ?? "";
+    assert.match(refusal, /without --limit=<one worker>/, JSON.stringify(limitFlag));
+    assert.match(refusal, /mid-capture on right now/,
+      "recover.yml's refusal must say WHY -- a different reason from os-rollback.yml's, not a copy of it");
+  }
+  assert.equal(osRollbackRefusal({ chosen: "recover.yml", limitFlag: "a11y-worker-4", apply: false }), null);
+  // recover.yml has no --apply switch of its own; passing the flag anyway is still refused, same as any
+  // other playbook that is not os-rollback.yml.
+  assert.match(osRollbackRefusal({ chosen: "recover.yml", limitFlag: "a11y-worker-4", apply: true }) ?? "",
+    /refusing --apply/);
+});
+
+test("recover.yml and restart.yml each assert their OWN one-host rule, before anything they do -- #1829", () => {
+  // Neither playbook has a JS-side test that can see this: `restart.yml` has no `fleet-playbook.mjs` entry
+  // to refuse it upstream at all, and `recover.yml`'s upstream refusal (above) is a SEPARATE code path from
+  // its own play. Nothing else in this suite would notice either assert going missing, which is exactly
+  // the mutation this test exists to catch.
+  for (const [name, firstChangePattern] of [
+    ["recover.yml", /Kill the worker process outright/],
+    ["restart.yml", /Restart and wait for it to serve/],
+  ] as const) {
+    const play = readFileSync(fileURLToPath(new URL(`../ansible/${name}`, import.meta.url)), "utf8");
+    const executable = play.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+    const guard = executable.search(/ansible_play_hosts_all \| length == 1/);
+    const firstChange = executable.search(firstChangePattern);
+    assert.ok(guard > 0, `${name} must assert ansible_play_hosts_all | length == 1`);
+    assert.ok(firstChange > guard, `${name}'s one-host guard must come before the first task that acts`);
+  }
 });
 
 test("the rollback playbook refuses before it acts, and its dry run is itself (#921)", () => {

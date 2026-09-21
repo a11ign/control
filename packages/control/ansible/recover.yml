@@ -31,9 +31,27 @@
 # `vitals.uptimeMinutes` is the one field that can tell a restart that happened from one that was
 # reported. It is read before and after, and the play fails if it did not fall.
 - name: Recover wedged workers
+  # #1829: `target`/`--limit` omitted means the whole fleet, same as every other playbook -- except this
+  # one is EXEMPT from the capturing-worker guard on purpose (deploy.yml's own comment: "the deliberate
+  # exception in the other direction"), so an omitted or fleet-wide target here can reboot a box a
+  # DIFFERENT session is mid-capture on right now. `fleet-playbook.mjs`'s `osRollbackRefusal` refuses that
+  # upstream for `npm run fleet:recover`; the assert below is the same refusal for a bare
+  # `ansible-playbook recover.yml`, which that JS layer never sees.
   hosts: "{{ target | default('a11y_workers') }}"
   gather_facts: false
   tasks:
+    - name: Exactly ONE worker, or nothing
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          recover.yml was given {{ ansible_play_hosts_all | length }} worker(s). It kills the worker
+          process and reboots -- exempt from the capturing-worker guard on purpose -- so a second
+          session's own capture on a DIFFERENT box must never be caught in the same run. Name one worker
+          with target=<worker> (or --limit=<worker>); several at once, or the whole fleet, is not a thing
+          this playbook does.
+      run_once: true
+
     - name: How long has the worker been up BEFORE we touch it
       ansible.builtin.uri:
         url: "http://{{ ansible_host }}:8765/health"

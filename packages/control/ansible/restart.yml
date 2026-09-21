@@ -1,8 +1,15 @@
 ---
-# Restart the worker on one box or all of them.
+# Restart the worker on one named box.
 #
 #     ansible-playbook restart.yml -l a11y-worker-2
-#     ansible-playbook restart.yml
+#
+# #1829: ONE WORKER ONLY, never the whole fleet -- `-l` is REQUIRED (the play asserts it), which narrowed
+# this from restarting all of them in one run. This playbook is exempt from the capturing-worker guard on
+# purpose (deploy.yml's own comment: "the deliberate exception in the other direction"), and an omitted
+# `-l` used to mean "reboot every worker, including whichever one a different session is mid-capture on
+# right now" -- correct for a lone operator, unsafe the moment a second session can dispatch a capture of
+# its own. Restarting several boxes is still possible; it is no longer one invocation, so it is never an
+# accident.
 #
 # The remedy for the wedge: `/health` answers but every capture returns 429 "a capture is already in
 # progress", because a previous capture hung and `busy` was never released. From outside that is
@@ -15,9 +22,23 @@
 # whole worker process is a different thing: `startScreenReader` cold-starts a clean NVDA on the next
 # capture, which is the supported path.
 - name: Restart the capture workers
+  # Unlike recover.yml this has no `fleet-playbook.mjs` entry at all -- there is no JS layer that could
+  # ever refuse a missing `-l` before this runs, so the assert below is the only guard that sees every call.
   hosts: a11y_workers
   gather_facts: false
   tasks:
+    - name: Exactly ONE worker, or nothing
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          restart.yml was given {{ ansible_play_hosts_all | length }} worker(s). It is exempt from the
+          capturing-worker guard on purpose, so a second session's own capture on a DIFFERENT box must
+          never be caught in the same run. Name one worker with -l <worker>; several at once, or the whole
+          fleet, is not a thing this playbook does -- restart each worker you mean to touch in its own
+          invocation.
+      run_once: true
+
     - name: Restart and wait for it to serve
       ansible.builtin.import_tasks: tasks/restart-worker.yml
 

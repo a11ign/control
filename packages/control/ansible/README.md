@@ -9,7 +9,7 @@ ansible-galaxy collection install -r requirements.yml   # BOTH collections; see 
 cd packages/control/ansible
 ansible-playbook deploy.yml                     # git pull + npm install + restart + PROVE it took
 ansible-playbook deploy.yml -l a11y-worker-3    # one box
-ansible-playbook restart.yml                    # the remedy for a wedged worker
+ansible-playbook restart.yml -l a11y-worker-3   # the remedy for a wedged worker -- one box; -l is required (#1829)
 ansible-playbook provision.yml                  # drives the PowerShell (today's path)
 ansible-playbook provision-role.yml             # the ported role (see "The role" below)
 ansible-playbook collect-logs.yml               # every worker's logs, into runs/worker-logs/

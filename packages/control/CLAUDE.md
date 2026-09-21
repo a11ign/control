@@ -47,7 +47,7 @@ npm run fleet:status                                                # what every
 
 `fleet:provision --serial=0` (all at once) is right here because `provisionRevision` is a MUST_MATCH cache key — a canary box IS the failure mode. [Why →](docs/operational-lessons.md#fleetprovision---serial0-and-the-sre-workbook)
 
-`fleet:deploy`/`fleet:provision` REFUSE a worker that is capturing (a HARD fail, `-e a11y_force_deploy=true` overrides) — `recover.yml`/`restart.yml` are exempt, since they act on a worker that is busy AND wedged. `fleet:status` surfaces a **degraded** guest: the fault that produces zero failures because the worker's own retry absorbs every recovery. [Why the hard fail →](docs/operational-lessons.md#fleetdeployfleetprovision-refuse-a-capturing-worker)
+`fleet:deploy`/`fleet:provision` REFUSE a worker that is capturing (a HARD fail, `-e a11y_force_deploy=true` overrides) — `recover.yml`/`restart.yml` are exempt, since they act on a worker that is busy AND wedged, but only against **one named worker** (`target=<worker>`/`-l <worker>`, required since #1829 — omitting it used to reach the whole fleet, including a box a different session is mid-capture on). `fleet:status` surfaces a **degraded** guest: the fault that produces zero failures because the worker's own retry absorbs every recovery. [Why the hard fail →](docs/operational-lessons.md#fleetdeployfleetprovision-refuse-a-capturing-worker)
 
 **Long lab work runs through Ansible, not through a shell.** Training, dataset builds, abstention sweeps and
 real-page captures are named jobs, dispatched with fixed argv and supervised by systemd:
