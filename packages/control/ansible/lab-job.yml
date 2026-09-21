@@ -929,7 +929,9 @@
           "1": >-
             either no destination is configured (`A11Y_CORPUS_REMOTE` unset on the lab) or the copy did
             not read back. Those need opposite work and the message says which: the first is a decision
-            nobody has made, the second is a failed backup. Never treat it as "nothing to back up".
+            nobody has made, the second is a failed backup. Never treat it as "nothing to back up" --
+            `npm run corpus:release` is the OTHER, already-working route (GitHub Releases on the private
+            `a11ign/corpus-backups`, verified by download), unaffected by this job's own exit code (#1042).
         argv: ["/usr/bin/npm", "run", "corpus:backup"]
         timeout: 7200
       corpus-backup-verify:
