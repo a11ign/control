@@ -1,3 +1,8 @@
+// no-token: gh -- every #1839 test below drives pure functions (fleetHoldUntil/activeFleetHolds/
+// allowHoldNumbers/sequenceHoldGate) or reads fleet-playbook.mjs's own source text; none calls
+// enforceSequenceHold or readFleetGatedIssues, so fleet-playbook.mjs's own `execFileSync("gh", ...)`
+// (only reached from those two) is never exercised here. Same shape as fleet-watch.test.ts's own
+// declaration, one file over.
 /**
  * The ref reaches a remote shell, so its SHAPE is the containment.
  *
