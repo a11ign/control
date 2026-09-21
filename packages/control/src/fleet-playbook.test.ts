@@ -973,6 +973,17 @@ test("#1839: Fleet-hold-until: parses bare and under a heading, and requires sec
   assert.equal(fleetHoldUntil("Fleet-hold-until: tomorrow"), null);
 });
 
+test("#1839: a digit-shaped but non-existent calendar date fails open, rather than being silently repaired to a LATER one", () => {
+  // reviewer, #1841: `Date.parse("2026-02-31T04:00:00Z")` returns 2026-03-03 rather than NaN -- the wrong
+  // direction of error for a HOLD (a typo would silently EXTEND the window rather than clearing it).
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-02-31T04:00:00Z"), null, "February has no 31st");
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-02-29T04:00:00Z"), null, "2026 is not a leap year");
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2024-02-29T04:00:00Z"), "2024-02-29T04:00:00Z", "2024 IS a leap year -- must not over-refuse a real date");
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-04-31T04:00:00Z"), null, "April has 30 days");
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-13-01T04:00:00Z"), null, "there is no month 13");
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-01-00T04:00:00Z"), null, "there is no day 0");
+});
+
 test("#1839: activeFleetHolds compares PARSED time, not lexical text -- the trap a timestamp sets that a date does not", () => {
   // "T10:30Z" sorts AFTER "T10:30:15Z" lexically ('Z' > ':'), which would read a hold expiring at :15 as
   // still live at :20 if compared as text. fleetHoldUntil already refuses the no-seconds shape outright,

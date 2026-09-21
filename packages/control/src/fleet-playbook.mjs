@@ -1142,13 +1142,24 @@ async function enforceLinkGate(chosen) {
  * A MALFORMED TIMESTAMP IS NOT A HOLD -- it fails OPEN, matching `notBeforeDate`'s own rule for a
  * malformed date: a typo must leave the row visible to a human, never hide a live sequence silently.
  *
+ * DIGIT-SHAPED IS NOT CALENDAR-VALID, and `Date.parse` silently ROLLS OVER a date that does not exist
+ * rather than refusing it -- `2026-02-31T04:00:00Z` parses to 2026-03-03, three days later than typed.
+ * That is the wrong direction of error for a HOLD: a typo would silently EXTEND a live sequence's window
+ * rather than failing open the way this function's own rule requires. So the matched text is round-
+ * tripped through `Date` and compared back against itself; a date `Date` had to repair is refused, not
+ * silently accepted with a different meaning than its author typed (reviewer, #1841).
+ *
  * @param {string | null | undefined} body
  * @returns {string | null}
  */
 export function fleetHoldUntil(body) {
   const m = /^[ \t]*#{0,6}[ \t]*Fleet-hold-until:[ \t]*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)[ \t]*$/im
     .exec(String(body ?? ""));
-  return m ? m[1] : null;
+  if (!m) return null;
+  const candidate = m[1];
+  const parsed = new Date(candidate);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 19) === candidate.slice(0, 19) ? candidate : null;
 }
 
 /**
