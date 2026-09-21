@@ -45,128 +45,34 @@
 # but the read never ruled it out either, and "probably doesn't apply" is not a justification for treating
 # 17/18 the same as 2/14 when the failure mode is a machine nobody can walk over to.
 #
-# ## The Add-Type source below is a plain quoted string, never a here-string
+# ## Why this runs through `run-interactive.yml`, not a direct `win_powershell` task
 #
-# A PowerShell here-string's closing `'@` must be the FIRST character on its line -- and inside a YAML
-# block scalar (`script: |`), a line less indented than the block is what ENDS the block scalar. Column 1
-# is always less indented than everything else here, so `'@` silently closed the YAML long before the
-# PowerShell did: `ansible-yaml-parses.test.ts` caught it as a parse failure, not a runtime one, the first
-# time this was written with `@' … '@`. The README's own "gotchas" section already warns `win_shell` off
-# here-strings for a different reason (Ansible parses them as module arguments); this is a second, PS +
-# YAML-only trap that only bites `win_powershell`'s `script:` block, and only when the payload spans
-# multiple lines. The C# below has no embedded single quotes, so an ordinary multi-line `'...'` string
-# says the same thing without a terminator YAML can misread.
-#
-# ## Why P/Invoke rather than an Ansible module
+# It used to be a `win_powershell` task here, run straight over the SSH connection like the rest of this
+# file. Live against the real fleet (#1567, 2026-09-21) it failed on all 10 hosts at the very first call:
+# `EnumDisplaySettings could not read the current display mode`, and NOT only under `become`/SYSTEM --
+# the same call failed as the console-session `witness` account too. `tasks/run-interactive.yml`'s own
+# header already names the reason for a different API (`SystemParametersInfo`): SSH does not attach to the
+# interactive window station, so a GDI call that needs one fails regardless of which account runs it.
+# `EnumDisplaySettings`/`ChangeDisplaySettings` are exactly that class of call. The fix is the same
+# mechanism `provision.yml` already uses for `provision-nvda-worker.ps1` -- a one-shot scheduled task with
+# `logon_type: interactive_token`, which attaches to the session the auto-logon already established -- so
+# the P/Invoke itself moved out to `set-display-mode.ps1`, a real file `run-interactive.yml` can `&`-invoke,
+# rather than staying inline here where only a direct module call could run it.
 #
 # `ansible.windows` ships nothing for display resolution -- the collection's own module index has no
-# `win_display*` entry. `Set-DisplayResolution`-style cmdlets are a third-party module this fleet does
-# not install. `ChangeDisplaySettings`/`EnumDisplaySettings` (user32.dll) are the primitives every such
-# module wraps, so this calls them directly rather than adding a dependency to reach two functions.
+# `win_display*` entry, which is why that script reaches `user32.dll` by P/Invoke rather than a module.
 #
-# ## Why one self-verifying task rather than apply-then-verify
-#
-# `policy.yml`'s separate trailing verify task earns its keep there by checking FOUR registry lists in one
-# combined read-back -- one extra SSH round trip buys verification of everything policy.yml wrote. A
-# single width/height pair does not have that economy: reading it back in the SAME PowerShell process that
-# just set it is both cheaper and more direct evidence (no second remote call in which something else
-# could intervene), so the set and the "did it land" check are one task, not two.
+# The trade: the old `win_powershell` task supported `ansible-playbook --check`; a scheduled task run
+# through `run-interactive.yml` does not, the same as every other interactive step in this role.
 - name: The display mode the fleet pins
-  become: true
-  ansible.windows.win_powershell:
-    parameters:
-      Width: "{{ worker_display_mode.width }}"
-      Height: "{{ worker_display_mode.height }}"
-    script: |
-      param($Width, $Height)
-      Add-Type -TypeDefinition '
-        using System;
-        using System.Runtime.InteropServices;
-        namespace A11yDisplay {
-          [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
-          public struct DEVMODE {
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
-            public short dmSpecVersion;
-            public short dmDriverVersion;
-            public short dmSize;
-            public short dmDriverExtra;
-            public int dmFields;
-            public int dmPositionX;
-            public int dmPositionY;
-            public int dmDisplayOrientation;
-            public int dmDisplayFixedOutput;
-            public short dmColor;
-            public short dmDuplex;
-            public short dmYResolution;
-            public short dmTTOption;
-            public short dmCollate;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
-            public short dmLogPixels;
-            public int dmBitsPerPel;
-            public int dmPelsWidth;
-            public int dmPelsHeight;
-            public int dmDisplayFlags;
-            public int dmDisplayFrequency;
-            public int dmICMMethod;
-            public int dmICMIntent;
-            public int dmMediaType;
-            public int dmDitherType;
-            public int dmReserved1;
-            public int dmReserved2;
-            public int dmPanningWidth;
-            public int dmPanningHeight;
-          }
-          public class NativeMethods {
-            [DllImport("user32.dll")]
-            public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
-            [DllImport("user32.dll")]
-            public static extern int ChangeDisplaySettings(ref DEVMODE devMode, int flags);
-          }
-        }
-      '
-
-      $ENUM_CURRENT_SETTINGS = -1
-      $DM_PELSWIDTH = 0x00080000
-      $DM_PELSHEIGHT = 0x00100000
-      $CDS_UPDATEREGISTRY = 0x01
-      $DISP_CHANGE_SUCCESSFUL = 0
-
-      $mode = New-Object A11yDisplay.DEVMODE
-      $mode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mode)
-      if (-not [A11yDisplay.NativeMethods]::EnumDisplaySettings($null, $ENUM_CURRENT_SETTINGS, [ref]$mode)) {
-        $Ansible.Failed = $true
-        return "EnumDisplaySettings could not read the current display mode"
-      }
-
-      if ($mode.dmPelsWidth -eq $Width -and $mode.dmPelsHeight -eq $Height) {
-        $Ansible.Changed = $false
-        "already $Width`x$Height"
-      } elseif ($Ansible.CheckMode) {
-        $Ansible.Changed = $true
-        "would set $($mode.dmPelsWidth)x$($mode.dmPelsHeight) to $Width`x$Height"
-      } else {
-        $mode.dmPelsWidth = $Width
-        $mode.dmPelsHeight = $Height
-        $mode.dmFields = $DM_PELSWIDTH -bor $DM_PELSHEIGHT
-        $result = [A11yDisplay.NativeMethods]::ChangeDisplaySettings([ref]$mode, $CDS_UPDATEREGISTRY)
-        if ($result -ne $DISP_CHANGE_SUCCESSFUL) {
-          $Ansible.Failed = $true
-          return "ChangeDisplaySettings returned $result (wanted $DISP_CHANGE_SUCCESSFUL) setting $Width`x$Height"
-        }
-        # PROVE IT, IN THE SAME PROCESS THAT JUST WROTE IT -- the same "read back or it didn't happen"
-        # rule policy.yml's own trailing verify task follows, here folded into one remote call because
-        # there is one value pair to check rather than four lists.
-        $after = New-Object A11yDisplay.DEVMODE
-        $after.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($after)
-        [void][A11yDisplay.NativeMethods]::EnumDisplaySettings($null, $ENUM_CURRENT_SETTINGS, [ref]$after)
-        if ($after.dmPelsWidth -ne $Width -or $after.dmPelsHeight -ne $Height) {
-          $Ansible.Failed = $true
-          return "ChangeDisplaySettings reported success but the mode reads $($after.dmPelsWidth)x" +
-            "$($after.dmPelsHeight) back, not $Width`x$Height"
-        }
-        $Ansible.Changed = $true
-        "set to $Width`x$Height"
-      }
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/run-interactive.yml"
+  vars:
+    interactive_name: a11y-display-mode
+    interactive_command: >-
+      $env:A11Y_DISPLAY_WIDTH = '{{ worker_display_mode.width }}';
+      $env:A11Y_DISPLAY_HEIGHT = '{{ worker_display_mode.height }}';
+      & "{{ worker_repo_path }}\packages\worker-fleet\src\provisioning\set-display-mode.ps1"
+    interactive_timeout: 60
 
 - name: What the display adapter's driver actually is
   become: true
