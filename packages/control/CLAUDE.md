@@ -49,6 +49,8 @@ npm run fleet:status                                                # what every
 
 `fleet:deploy`/`fleet:provision` REFUSE a worker that is capturing (a HARD fail, `-e a11y_force_deploy=true` overrides) — `recover.yml`/`restart.yml` are exempt, since they act on a worker that is busy AND wedged, but only against **one named worker** (`target=<worker>`/`-l <worker>`, required since #1829 — omitting it used to reach the whole fleet, including a box a different session is mid-capture on). `fleet:status` surfaces a **degraded** guest: the fault that produces zero failures because the worker's own retry absorbs every recovery. [Why the hard fail →](docs/operational-lessons.md#fleetdeployfleetprovision-refuse-a-capturing-worker)
 
+A multi-round SAME-BUILD sequence (every round must land on one worker build, e.g. #781) needs its own hold BETWEEN captures, when no worker is actually `busy` and the check above says nothing. Write **`Fleet-hold-until: <ISO-8601 UTC timestamp, with seconds>`** in the row's body (an OPEN row carrying `fleet-gated`) and `fleet:deploy`/`fleet:provision` refuse until that time passes or the row closes — self-clearing either way, unlike the row-comment sentence that lost #1767's and #1768's baselines to ordinary merge cadence. `--allow-hold=<row>` overrides, one row at a time, repeatable, and refuses a number that names a row not currently holding anything. [#1839 →](https://github.com/a11ign/a11ign/issues/1839)
+
 **Long lab work runs through Ansible, not through a shell.** Training, dataset builds, abstention sweeps and
 real-page captures are named jobs, dispatched with fixed argv and supervised by systemd:
 

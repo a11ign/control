@@ -101,7 +101,7 @@ export { inventorySources, inventoryReadScript, parseInventoryReads };
  */
 refuseUnknownFlags(
   ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply",
-    "--allow-offline="],
+    "--allow-offline=", "--allow-hold="],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
@@ -1107,6 +1107,191 @@ async function enforceLinkGate(chosen) {
 }
 
 /**
+ * #1839: A MULTI-ROUND SAME-BUILD CAPTURE SEQUENCE HELD ITS OWN `fleet:deploy`/`fleet:provision` WINDOW
+ * IN A ROW COMMENT, TWICE, AND LOST -- #1767 and #1768 both had their baseline moved out from under them
+ * by an ordinary merge landing between rounds. Neither was anyone ignoring the hold: the sentence lived
+ * in a row comment, and nothing that runs a deploy reads row comments. `.claude/rules/agent-practices.md`
+ * names the shape -- "a condition recorded in prose that nothing can evaluate" -- and #1839's own body
+ * says none of that file's three machine-readable shapes (`blockedBy`, a date, an `answer:<session>`
+ * label) expresses "waiting on an ACTION". This is the fourth.
+ *
+ * THE FIELD: `Fleet-hold-until: <ISO-8601 UTC timestamp>` in an OPEN row's body, scoped to `fleet-gated`
+ * -- the label #1839's own open-check query used, and the only population a fleet hold could ever apply
+ * to (a row whose acceptance needs the fleet). Modelled on `waiting-condition.mjs`'s `Not-before:`
+ * (same declared-body-field pattern `Acceptance:`/`Closes:` proved first), but carrying a full
+ * timestamp rather than a date: a capture round's window is minutes to hours wide, not a whole day.
+ *
+ * SELF-CLEARING, TWICE OVER, exactly the property `blocked` lacks and `Not-before:` has: the hold lapses
+ * the moment `now` passes the timestamp, with no edit to anyone's row, and it vanishes again the moment
+ * the row closes, because the query below asks only `--state open`. A hold that outlives its sequence
+ * does not need a human to remember it.
+ */
+
+/**
+ * The `Fleet-hold-until:` line, or `null` -- same grammar as `notBeforeDate` (`waiting-condition.mjs`):
+ * an optional `#{0,6}` heading prefix, because this row's own convention already writes `Not-before:` and
+ * `Acceptance:` both bare and under a `## ` heading, and a bare-line-only regex would silently read a
+ * headed one as absent (#1822's exact shape, one field over).
+ *
+ * SECONDS REQUIRED, not optional. A `Not-before:` date is always ten characters, so lexical comparison
+ * is chronological comparison for free -- a timestamp is not: `T10:30Z` sorts AFTER `T10:30:15Z`
+ * lexically (`Z` > `:`), which would read a later-declared, earlier-expiring hold as still live. Fixing
+ * that by comparing PARSED time (`activeFleetHolds` below) removes the trap either way; requiring
+ * seconds here as well means a malformed field is refused as a whole rather than half-parsed.
+ *
+ * A MALFORMED TIMESTAMP IS NOT A HOLD -- it fails OPEN, matching `notBeforeDate`'s own rule for a
+ * malformed date: a typo must leave the row visible to a human, never hide a live sequence silently.
+ *
+ * @param {string | null | undefined} body
+ * @returns {string | null}
+ */
+export function fleetHoldUntil(body) {
+  const m = /^[ \t]*#{0,6}[ \t]*Fleet-hold-until:[ \t]*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)[ \t]*$/im
+    .exec(String(body ?? ""));
+  return m ? m[1] : null;
+}
+
+/**
+ * Every row still holding the fleet, RIGHT NOW -- pure, over issues the caller has already scoped to
+ * `--state open --label fleet-gated` (`readFleetGatedIssues` below is the one real read).
+ *
+ * `nowMs` is INJECTED rather than read here with `Date.now()`, the same reason `todayIso` takes `now` as
+ * a parameter in `waiting-condition.mjs`: a test moves the clock without threading it through every call.
+ *
+ * COMPARED AS PARSED TIME, never lexically -- see `fleetHoldUntil`'s own comment on why a timestamp
+ * (unlike a ten-character date) cannot be compared as text.
+ *
+ * @param {{number?: number, body?: string}[]} issues
+ * @param {number} nowMs
+ * @returns {{number: number, until: string}[]}
+ */
+export function activeFleetHolds(issues, nowMs) {
+  const holds = [];
+  for (const issue of issues ?? []) {
+    const until = fleetHoldUntil(issue?.body);
+    if (until === null) continue;
+    if (Date.parse(until) > nowMs) holds.push({ number: Number(issue.number), until });
+  }
+  return holds;
+}
+
+/**
+ * Every `--allow-hold=<row>`, in order -- REPEATABLE, matching `allowOfflineNames` above for the
+ * identical reason (`flagValue` reads only the first match).
+ *
+ * @param {string[]} argv
+ * @returns {number[]}
+ */
+export function allowHoldNumbers(argv) {
+  const prefix = "--allow-hold=";
+  return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => Number(argument.slice(prefix.length)));
+}
+
+/**
+ * The refusal text for one or more active holds, naming each row and the timestamp it clears at --
+ * `holdRefusal`'s own shape, one field over.
+ *
+ * @param {{ chosen: string, unnamed: {number: number, until: string}[] }} held
+ * @returns {string}
+ */
+function sequenceHoldRefusal({ chosen, unnamed }) {
+  return [
+    `REFUSING ${chosen}: a fleet-hold sequence is active (#1839).`,
+    ...unnamed.map(({ number, until }) => `  held by #${number} until ${until}`),
+    "  This protects a multi-round same-build capture sequence -- deploying or provisioning now would",
+    "  strand it the way #1767 and #1768 did, purely from ordinary merge cadence. Read the row before",
+    "  proceeding: it names what it is protecting and when the hold clears itself.",
+    "  To proceed past it deliberately, name each one: --allow-hold=<row> (repeatable).",
+  ].join("\n");
+}
+
+/**
+ * #1839: THE DECISION, pure -- given which rows currently hold the fleet and which the operator named.
+ * `linkGate`'s own shape, one gate over: only `deploy.yml` and `provision-role.yml` read it (the two
+ * playbooks LINK_GATED already names, for the identical reason -- they are what CHANGES what a box
+ * runs, and a mid-sequence deploy is what stranded #1767 and #1768), a name for a row that is not
+ * holding anything is refused rather than silently accepted, and proceeding past a real hold says so
+ * rather than staying quiet about it.
+ *
+ * @param {{ chosen: string, holds: {number: number, until: string}[], allowHold: number[] }} input
+ * @returns {{ refusal: string | null, notice: string | null }}
+ */
+export function sequenceHoldGate({ chosen, holds, allowHold }) {
+  if (!LINK_GATED.includes(chosen)) {
+    return { refusal: allowHold.length
+      ? `refusing --allow-hold with --playbook=${chosen}: only ${LINK_GATED.join(" and ")} read the fleet-hold gate.`
+      : null, notice: null };
+  }
+  const heldNumbers = holds.map((h) => h.number);
+  const stray = allowHold.filter((n) => !heldNumbers.includes(n));
+  if (stray.length) {
+    const why = heldNumbers.length ? `not held (the hold is #${heldNumbers.join(", #")})` : "no row holds the fleet";
+    return { refusal: `refusing --allow-hold=${stray.join(", --allow-hold=")}: ${why}. `
+      + "A number for a row that is not holding the fleet would be accepted and ignored.", notice: null };
+  }
+  const unnamed = holds.filter((h) => !allowHold.includes(h.number));
+  if (unnamed.length) return { refusal: sequenceHoldRefusal({ chosen, unnamed }), notice: null };
+  if (holds.length === 0) return { refusal: null, notice: null };
+  return { refusal: null, notice: `  proceeding past a fleet-hold sequence: ${holds.map((h) => `#${h.number}`).join(", ")}, `
+    + "each named with --allow-hold." };
+}
+
+/**
+ * The rows that could be holding the fleet, RIGHT NOW -- `gh issue list`, scoped exactly as #1839's own
+ * open-check does: `--state open --label fleet-gated`, because that is the only population a fleet hold
+ * could ever apply to (a row whose acceptance needs the fleet).
+ *
+ * NO `--repo`, matching every other `gh` call in this org (`work-gate.mjs` and its neighbours): `gh`
+ * resolves the repository from the checkout's own git remote, and stating it again here would be a
+ * second copy of a fact one `git remote` already carries.
+ *
+ * @returns {{number: number, body: string}[]}
+ */
+function readFleetGatedIssues() {
+  return JSON.parse(execFileSync("gh",
+    ["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100"],
+    { encoding: "utf8" }));
+}
+
+/**
+ * #1839: THE GATE, ASKED BEFORE THE CONTROL PLANE IS TOLD TO MOVE -- `enforceLinkGate`'s own shape.
+ *
+ * `readIssues`/`nowMs` INJECTABLE so the IO is driven by a test, matching `linkGateFor`/`enforceLinkGate`
+ * (#1313, "as the review asked").
+ *
+ * FAILS CLOSED on a `gh` failure -- "Could not ask is not may proceed" is this file's own rule already,
+ * stated identically in `protocolGuardVerdict` and `gateFleet` for the same reason: a fleet hold that
+ * silently reads as absent because GitHub was unreachable is the exact defect this row exists to remove,
+ * one layer down.
+ *
+ * @param {string} chosen
+ * @param {{ readIssues?: () => {number: number, body: string}[], nowMs?: number }} [deps]
+ */
+async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, nowMs = Date.now() } = {}) {
+  const allowHold = allowHoldNumbers(process.argv.slice(2));
+  if (!LINK_GATED.includes(chosen)) {
+    const { refusal } = sequenceHoldGate({ chosen, holds: [], allowHold });
+    if (refusal) { process.stderr.write(`${refusal}\n`); process.exit(2); }
+    return;
+  }
+  let issues;
+  try {
+    issues = readIssues();
+  } catch (error) {
+    process.stderr.write(`REFUSING ${chosen}: could not ask whether a fleet-hold sequence is active (`
+      + `${String(/** @type {Error} */ (error).message).split("\n")[0]}). Could not ask is not may proceed.\n`);
+    process.exit(2);
+    return;
+  }
+  const { refusal, notice } = sequenceHoldGate({ chosen, holds: activeFleetHolds(issues, nowMs), allowHold });
+  if (notice) process.stdout.write(`${notice}\n\n`);
+  if (refusal) {
+    process.stderr.write(`${refusal}\n`);
+    process.exit(2);
+  }
+}
+
+/**
  * A SHA IS NOT A REF THIS CAN DEPLOY, AND THE COMMENT SAYING SO WAS NOT A GUARD.
  *
  * `deploy.yml` fast-forwards each guest with `git merge --ff-only origin/{{ a11y_git_ref }}`, so the ref
@@ -1144,6 +1329,7 @@ async function main() {
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply } = parseArgs();
   await guardProtocolChange(chosen);
   await enforceLinkGate(chosen);
+  await enforceSequenceHold(chosen);
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
   // to a commit is the only comparison that settles "is it running my code?" — the first version compared

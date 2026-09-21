@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
-  inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict }
+  inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
+  fleetHoldUntil, activeFleetHolds, allowHoldNumbers, sequenceHoldGate }
   from "./fleet-playbook.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
@@ -943,4 +944,137 @@ test("#1356 MUTATION TARGET: fleet.refusal must be checked before protocolVerdic
     fleet: { workers: [], refusal: "no inventory exists at /etc/a11ign/inventory.yml on the control plane" },
   });
   assert.doesNotMatch(guarded.message, /no worker answered/, "#1356's own refusal must win instead");
+});
+
+// --- #1839: a fleet-hold sequence refuses fleet:deploy/fleet:provision unless each holding row is named ---
+//
+// #1767 and #1768 both wrote "holding fleet:deploy for this whole span" in a row comment, and an ordinary
+// merge cadence deployed straight through it -- twice. Nothing that runs a deploy reads row comments.
+// This is the same shape #1313 already solved one gate over (a HOLD nobody names is a hold nobody honours,
+// and a name for something that is not held must be refused rather than silently accepted), so these tests
+// largely mirror #1313's own ACCEPTANCE tests above, field for field.
+
+test("#1839: Fleet-hold-until: parses bare and under a heading, and requires seconds", () => {
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-09-22T04:00:00Z"), "2026-09-22T04:00:00Z");
+  assert.equal(fleetHoldUntil("## Fleet-hold-until: 2026-09-22T04:00:00Z"), "2026-09-22T04:00:00Z",
+    "#1822's exact trap one field over: a headed field must not read as absent");
+  assert.equal(fleetHoldUntil("some prose\nFleet-hold-until: 2026-09-22T04:00:00Z\nmore prose"),
+    "2026-09-22T04:00:00Z");
+  assert.equal(fleetHoldUntil(null), null);
+  assert.equal(fleetHoldUntil(undefined), null);
+  assert.equal(fleetHoldUntil("no field here at all"), null);
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-09-22T04:00Z"), null,
+    "no seconds -- a malformed field is not a hold, it fails OPEN rather than half-parsing");
+  assert.equal(fleetHoldUntil("Fleet-hold-until: tomorrow"), null);
+});
+
+test("#1839: activeFleetHolds compares PARSED time, not lexical text -- the trap a timestamp sets that a date does not", () => {
+  // "T10:30Z" sorts AFTER "T10:30:15Z" lexically ('Z' > ':'), which would read a hold expiring at :15 as
+  // still live at :20 if compared as text. fleetHoldUntil already refuses the no-seconds shape outright,
+  // but the comparison itself must still be by parsed time -- two full timestamps three seconds apart are
+  // adjacent lexically too, and only a parse tells them apart correctly under a millisecond `now`.
+  const until = "2026-09-21T10:30:15Z";
+  const justBefore = Date.parse("2026-09-21T10:30:14.900Z");
+  const justAfter = Date.parse("2026-09-21T10:30:15.100Z");
+  assert.equal(activeFleetHolds([{ number: 1, body: `Fleet-hold-until: ${until}` }], justBefore).length, 1,
+    "still held one hundred ms before the horizon");
+  assert.equal(activeFleetHolds([{ number: 1, body: `Fleet-hold-until: ${until}` }], justAfter).length, 0,
+    "cleared one hundred ms after it");
+});
+
+test("#1839: activeFleetHolds returns only unexpired rows, and ignores a body with no field", () => {
+  const now = Date.parse("2026-09-21T12:00:00Z");
+  const issues = [
+    { number: 1768, body: "holding fleet:deploy\nFleet-hold-until: 2026-09-21T22:00:00Z" },
+    { number: 1700, body: "Fleet-hold-until: 2026-09-21T06:00:00Z" }, // already in the past
+    { number: 1701, body: "no hold field on this row" },
+  ];
+  assert.deepEqual(activeFleetHolds(issues, now), [{ number: 1768, until: "2026-09-21T22:00:00Z" }]);
+});
+
+test("#1839: --allow-hold is repeatable, which flagValue is not", () => {
+  assert.deepEqual(allowHoldNumbers(["--playbook=deploy.yml", "--allow-hold=1768", "--allow-hold=1767"]), [1768, 1767]);
+  assert.deepEqual(allowHoldNumbers(["--playbook=deploy.yml"]), []);
+});
+
+const ONE_HOLD = [{ number: 1768, until: "2026-09-21T22:00:00Z" }];
+
+test("#1839 ACCEPTANCE 1: an active hold with no --allow-hold refuses, naming the row and its horizon", () => {
+  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+    const { refusal, notice } = sequenceHoldGate({ chosen, holds: ONE_HOLD, allowHold: [] });
+    assert.ok(refusal, `${chosen} must refuse an active fleet-hold sequence`);
+    assert.match(String(refusal), /held by #1768 until 2026-09-21T22:00:00Z/, String(refusal));
+    assert.equal(notice, null);
+  }
+});
+
+test("#1839 ACCEPTANCE 2 (MUTATION): declare a hold, a deploy refuses; clear the hold, a deploy proceeds", () => {
+  // "declare a hold": a row is holding the fleet.
+  const held = sequenceHoldGate({ chosen: "deploy.yml", holds: ONE_HOLD, allowHold: [] });
+  assert.ok(held.refusal, "a declared hold must refuse the deploy");
+
+  // "clear the hold" the way the mechanism actually clears -- no row it can no longer see, because either
+  // its horizon passed (activeFleetHolds would no longer return it) or the row closed (readFleetGatedIssues
+  // would no longer return it, `--state open`). Both collapse to the same input at this pure layer: no holds.
+  const cleared = sequenceHoldGate({ chosen: "deploy.yml", holds: [], allowHold: [] });
+  assert.equal(cleared.refusal, null, "a cleared hold must let the deploy proceed");
+  assert.equal(cleared.notice, null, "and say nothing extra when there was never anything to proceed past");
+});
+
+test("#1839 ACCEPTANCE 3: --allow-hold naming only a DIFFERENT row still refuses the real one", () => {
+  const wrongName = sequenceHoldGate({ chosen: "deploy.yml", holds: ONE_HOLD, allowHold: [1767] });
+  assert.match(String(wrongName.refusal), /refusing --allow-hold=1767: not held \(the hold is #1768\)/, String(wrongName.refusal));
+});
+
+test("#1839 ACCEPTANCE 4: --allow-hold naming the held row dispatches, and says what it proceeds past", () => {
+  const named = sequenceHoldGate({ chosen: "provision-role.yml", holds: ONE_HOLD, allowHold: [1768] });
+  assert.equal(named.refusal, null, String(named.refusal));
+  assert.match(String(named.notice), /proceeding past a fleet-hold sequence: #1768/);
+});
+
+test("#1839 ACCEPTANCE 5: --allow-hold=<a row that is not holding anything> is refused by number", () => {
+  const stray = sequenceHoldGate({ chosen: "deploy.yml", holds: ONE_HOLD, allowHold: [1768, 9999] });
+  assert.match(String(stray.refusal), /refusing --allow-hold=9999: not held \(the hold is #1768\)/, String(stray.refusal));
+  const nothingHeld = sequenceHoldGate({ chosen: "deploy.yml", holds: [], allowHold: [9999] });
+  assert.match(String(nothingHeld.refusal), /refusing --allow-hold=9999: no row holds the fleet/);
+});
+
+test("#1839: only deploy and provision are gated -- repair paths are not blocked, and do not take --allow-hold", () => {
+  for (const chosen of ["recover.yml", "sleep.yml", "collect-logs.yml"]) {
+    assert.deepEqual(sequenceHoldGate({ chosen, holds: ONE_HOLD, allowHold: [] }), { refusal: null, notice: null },
+      `${chosen} acts on boxes already in trouble, or on nothing that changes what a box runs, so a hold must not block it`);
+    assert.match(String(sequenceHoldGate({ chosen, holds: ONE_HOLD, allowHold: [1768] }).refusal),
+      /only deploy\.yml and provision-role\.yml read the fleet-hold gate/);
+  }
+});
+
+test("#1839: no hold at all, and no flag, dispatches exactly as today", () => {
+  assert.deepEqual(sequenceHoldGate({ chosen: "deploy.yml", holds: [], allowHold: [] }), { refusal: null, notice: null });
+  assert.ok(sequenceHoldGate({ chosen: "deploy.yml", holds: ONE_HOLD, allowHold: [] }).refusal,
+    "and the control: the same playbook DOES refuse an active hold, so the line above is not passing because nothing refuses");
+});
+
+/** COMMENTS STRIPPED, #1204's own reason: commenting the call out IS the mutation a prose search agrees with. */
+test("#1839: main() CALLS the fleet-hold gate, before the control plane is asked to move", () => {
+  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const mainBody = source.slice(source.indexOf("async function main() {"));
+  assert.match(mainBody, /await enforceSequenceHold\(chosen\)/, "a perfect gate that no run reaches refuses nothing");
+  assert.ok(mainBody.indexOf("await enforceSequenceHold(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
+    "the gate must run before the control plane's checkout moves");
+  assert.match(source, /"--allow-hold="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
+  assert.match(source, /"issue", "list", "--state", "open", "--label", "fleet-gated"/,
+    "scoped to the same population #1839's own open-check query used");
+});
+
+test("#1839: a gh failure refuses rather than reading as no hold -- \"could not ask\" is not \"may proceed\"", () => {
+  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function enforceSequenceHold(");
+  assert.ok(start > -1, "enforceSequenceHold must exist");
+  const body = source.slice(start, source.indexOf("\n}\n", start));
+  assert.match(body, /catch \(error\)/, "a gh failure must be caught, not left to crash the whole run uncaught");
+  assert.match(body, /Could not ask is not may proceed/,
+    "enforceSequenceHold must fail CLOSED on a gh error, matching every other gate in this file "
+    + "(protocolGuardVerdict, gateFleet) rather than silently deploying through an unreachable GitHub");
+  assert.match(body, /process\.exit\(2\)/, "the catch branch must actually exit refusing, not just print and fall through");
 });
