@@ -52,7 +52,7 @@ export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
  * during one afternoon".
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -1257,14 +1257,39 @@ export function sequenceHoldGate({ chosen, holds, allowHold }) {
  * resolves the repository from the checkout's own git remote, and stating it again here would be a
  * second copy of a fact one `git remote` already carries.
  *
+ * A FAILURE CARRIES `tokenSet`: whether the environment `gh` actually ran in held a token. It is
+ * `ghEnvironment`'s own answer, not a second derivation of it, so a blank token file (which `ghEnvironment`
+ * and bootstrap's `[ ! -s ]` both treat as absent) is tokenless here too. The earlier `existsSync` called
+ * it credentialed and passed gh's `gh auth login` hint through (reviewer-2 on #1910).
+ *
+ * @param {{ env?: NodeJS.ProcessEnv, readToken?: () => string, run?: typeof execFileSync }} [deps]
  * @returns {{number: number, body: string}[]}
  */
-function readFleetGatedIssues() {
-  return JSON.parse(execFileSync("gh",
-    ["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100"],
-    // stderr PIPED, not inherited: on a tokenless control plane gh's own text is "please run: gh auth
-    // login", which is the wrong advice for a root box (#1875) -- `fleetHoldReadRefusal` says what to do.
-    { encoding: "utf8", env: ghEnvironment(process.env, readGhTokenFile), stdio: ["ignore", "pipe", "pipe"] }));
+export function readFleetGatedIssues({ env = process.env, readToken = readGhTokenFile, run = execFileSync } = {}) {
+  const ghEnv = ghEnvironment(env, readToken);
+  try {
+    return JSON.parse(String(run("gh",
+      ["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100"],
+      // stderr PIPED, not inherited: on a tokenless control plane gh's own text is "please run: gh auth
+      // login", which is the wrong advice for a root box (#1875) -- `fleetHoldReadRefusal` says what to do.
+      { encoding: "utf8", env: ghEnv, stdio: ["ignore", "pipe", "pipe"] })));
+  } catch (error) {
+    throw Object.assign(/** @type {Error} */ (error), { tokenSet: Boolean(ghEnv.GH_TOKEN) });
+  }
+}
+
+/**
+ * #1875: whether a failed fleet-hold read had a token, from the stamp `readFleetGatedIssues` puts on its
+ * failure. With no stamp the credential was never classified: the token file was unreadable
+ * (`readGhTokenFile` rethrows everything but ENOENT) or the reader was injected. That reads as PRESENT, so
+ * the refusal keeps gh's own reason rather than claiming a file is missing when it is not.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function tokenSetOf(error) {
+  const stamped = /** @type {{ tokenSet?: unknown } | null} */ (error)?.tokenSet;
+  return typeof stamped === "boolean" ? stamped : true;
 }
 
 /**
@@ -1320,8 +1345,8 @@ export function fleetHoldReadRefusal({ chosen, error, tokenSet }) {
   const lead = `REFUSING ${chosen}: could not ask whether a fleet-hold sequence is active`;
   const stderr = String(error.stderr ?? "");
   if (!tokenSet && stderr.includes("gh auth login")) {
-    return `${lead}: this host has no GitHub credential -- GH_TOKEN is unset and ${GH_TOKEN_FILE} does `
-      + "not exist. Write the read-only token there (root:root 0600, never in git); it is read into "
+    return `${lead}: this host has no GitHub credential -- GH_TOKEN is unset and ${GH_TOKEN_FILE} `
+      + "is missing or empty. Write the read-only token there (root:root 0600, never in git); it is read into "
       + "GH_TOKEN for this check (#1875). Could not ask is not may proceed.";
   }
   const ghSaid = stderr.trim().split("\n").filter(Boolean).at(-1)
@@ -1354,9 +1379,9 @@ async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, 
   try {
     issues = readIssues();
   } catch (error) {
-    // EXISTENCE, not a second read: an unreadable file already failed the read above, and re-reading it
-    // here would throw past this refusal.
-    const tokenSet = Boolean(process.env.GH_TOKEN) || existsSync(GH_TOKEN_FILE);
+    // The read's own answer (`tokenSetOf`), never a re-read: an unreadable file already failed above, and
+    // re-reading it here would throw past this refusal.
+    const tokenSet = tokenSetOf(error);
     process.stderr.write(`${fleetHoldReadRefusal({ chosen, error: /** @type {any} */ (error), tokenSet })}\n`);
     process.exit(2);
     return;

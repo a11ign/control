@@ -22,7 +22,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
   fleetHoldUntil, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
-  GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal }
+  GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf }
   from "./fleet-playbook.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
@@ -1140,4 +1140,51 @@ test("#1875: with a credential present, the refusal keeps gh's own reason -- an 
 
   const noStderr = fleetHoldReadRefusal({ chosen: "deploy.yml", tokenSet: true, error: { message: "spawnSync gh ENOENT" } });
   assert.match(noStderr, /\(spawnSync gh ENOENT\)/, "no stderr at all (gh missing, #1870) falls back to the error's own first line");
+});
+
+// reviewer-2 on #1910, 6d466546: `enforceSequenceHold` derived `tokenSet` from `existsSync`, so a blank token
+// file -- no token by `ghEnvironment`'s own reading, absent by bootstrap's `[ ! -s ]` -- took the credentialed
+// branch and passed gh's `gh auth login` hint through. Driven through the REAL reader, so the flag the
+// refusal reads is the one the read derived, not a value this test chose.
+/** What `enforceSequenceHold` would print for a read that fails with gh's unauthenticated text. */
+function refusalAfterRead(env: NodeJS.ProcessEnv, readToken: () => string): { refusal: string; ranWith: NodeJS.ProcessEnv } {
+  let ranWith: NodeJS.ProcessEnv = {};
+  const run = ((_cmd: string, _args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+    ranWith = opts.env;
+    throw Object.assign(new Error("Command failed: gh issue list"), { stderr: GH_UNAUTHENTICATED });
+  }) as never;
+  try {
+    readFleetGatedIssues({ env, readToken, run });
+  } catch (error) {
+    return { refusal: fleetHoldReadRefusal({ chosen: "deploy.yml", error: error as never, tokenSet: tokenSetOf(error) }), ranWith };
+  }
+  throw new Error("the injected gh always fails, so the read must throw");
+}
+
+test("#1875: a BLANK token file is no credential -- the refusal names the file and this row, never gh auth login", () => {
+  for (const blank of ["", "  \n"]) {
+    const { refusal, ranWith } = refusalAfterRead({ PATH: "/usr/bin" }, () => blank);
+    assert.equal("GH_TOKEN" in ranWith, false, "gh ran tokenless, which is the state the refusal must describe");
+    assert.ok(refusal.includes(GH_TOKEN_FILE), `the refusal must name ${GH_TOKEN_FILE}: ${refusal}`);
+    assert.match(refusal, /#1875/);
+    assert.match(refusal, /is missing or empty/, "true of a blank file, where \"does not exist\" was not");
+    assert.doesNotMatch(refusal, /gh auth login/);
+  }
+});
+
+test("#1875 CONTROL: a non-blank token file, or an explicit GH_TOKEN, is a credential -- gh's own reason is kept", () => {
+  // The positive control for the test above: the same failing gh, with a token supplied, must NOT be
+  // reported as a missing file, or a refusal that always names the file would pass it.
+  const fromFile = refusalAfterRead({ PATH: "/usr/bin" }, () => "github_pat_fixture\n");
+  assert.equal(fromFile.ranWith.GH_TOKEN, "github_pat_fixture");
+  assert.ok(!fromFile.refusal.includes(GH_TOKEN_FILE), fromFile.refusal);
+  const explicit = refusalAfterRead({ GH_TOKEN: "set-by-caller" }, () => { throw new Error("must not be read"); });
+  assert.ok(!explicit.refusal.includes(GH_TOKEN_FILE), explicit.refusal);
+});
+
+test("#1875: a failure nobody classified (an unreadable token file, an injected reader) reads as credentialed", () => {
+  assert.equal(tokenSetOf(new Error("EACCES: permission denied")), true,
+    "an unreadable file exists, so the refusal keeps gh's reason rather than calling it missing");
+  assert.equal(tokenSetOf(Object.assign(new Error("x"), { tokenSet: false })), false);
+  assert.equal(tokenSetOf(null), true);
 });
