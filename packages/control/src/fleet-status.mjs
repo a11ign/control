@@ -376,6 +376,42 @@ function renderTable(rows) {
 }
 
 /**
+ * THE FIELD AXIS OF THE SAME QUESTION — #1997. `null` when field coverage is no objection.
+ *
+ * Two cannot-asks, one shape. `undefined` coverage is a caller that never asked which fields were
+ * compared; a non-empty `unchecked` is a field the guests were asked about and NONE of them answered.
+ * Both are reported as UNKNOWN and both name what to do about it, because "fix the fleet" and "pass the
+ * coverage" are different instructions and a reader cannot guess which one they are looking at.
+ *
+ * A field reported by ONE guest of ten is deliberately NOT a gap here: it was compared, on the guests
+ * that have it, which is the rolling-deploy case `fleetConsistency`'s absent-skip rule exists for. That
+ * partial coverage still weakens the headline is true and is #2019, not this function's ruling to make.
+ *
+ * @param {{ compared: string[], unchecked: string[] } | undefined} fields
+ * @param {string} across the `across N of M` clause, so both lines still report what WAS measured
+ * @returns {{ state: "UNKNOWN", line: string } | null}
+ */
+function fieldCoverageGap(fields, across) {
+  const readsAsAgreement = "A field no guest reports draws no values to disagree about, so it reads "
+    + "exactly like a field every guest agrees on";
+  if (fields === undefined) {
+    return { state: "UNKNOWN",
+      line: `fleet UNKNOWN — the environments agree ${across}, and no field coverage was supplied, so `
+        + `WHICH fields were compared was never asked. ${readsAsAgreement} — pass `
+        + "`fleetConsistency`'s `fields`" };
+  }
+  if (fields.unchecked.length === 0) return null;
+  const total = fields.compared.length + fields.unchecked.length;
+  const missing = fields.unchecked.length;
+  return { state: "UNKNOWN",
+    line: `fleet UNKNOWN — the environments agree ${across} on ${fields.compared.length} of ${total} `
+      + `fields, and ${missing} ${missing === 1 ? "was" : "were"} compared on NO guest: `
+      + `${fields.unchecked.join(", ")}. `
+      + `${readsAsAgreement}, so this is not a consistent fleet until the guests report it. Deploy them `
+      + "(`npm run fleet:deploy`), or take the field out of `MUST_MATCH`" };
+}
+
+/**
  * THE CONSISTENCY VERDICT, WITH ITS DENOMINATOR — #920.
  *
  * NAMED `consistencyVerdict`, NOT `fleetVerdict`, and the first version was the second. `fleetVerdict`
@@ -433,11 +469,29 @@ function renderTable(rows) {
  * `busy` IS NOT A FAULT. A worker mid-capture is the system working, and refusing a healthy fleet under
  * load is the easy wrong fix; only `warming` and `unreachable` may hold the headline down.
  *
+ * **AND THE SAME CLASS A FOURTH TIME, ONE FIELD OVER -- #1997.** Every ruling above is about which BOXES
+ * were compared, or whether a compared box can WORK. None of them asked which FIELDS were compared. A
+ * `MUST_MATCH` entry that no guest reports draws no values, so `fleetConsistency` finds nothing to
+ * disagree about and this function called the fleet interchangeable: measured 2026-09-22T20:09Z, at the
+ * merge of #1953 that added the field, `displayMode` was compared on 0 of 10 guests while this line read
+ * `fleet CONSISTENT across 10 of 10`. The sentence #1953 was filed about printed again at #1953's own
+ * code, because the instance was fixed and the class was not.
+ *
+ * **Ruling: a field compared on nobody is `UNKNOWN`, not `CONSISTENT` with a footnote.** The third
+ * precedent above is this row's argument verbatim -- "NO READINESS SUPPLIED IS CANNOT ASK, NOT 'ALL
+ * READY'" -- and nothing here gates on the state (the exit code is `reachable === 0`, and
+ * `linkGateFor` reads only `linkLayer`), so the cost of the pessimistic answer is an honest headline
+ * rather than a blocked capture. The deploy that closes the gap is the remedy, and the line names it.
+ * A caveat line under a CONSISTENT headline was the alternative, and it loses on the one thing that
+ * matters here: the word is what a reader takes away, which is why #920 refused it as a substring.
+ *
  * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[],
- *           rows?: { name?: string, state?: string }[] }} input `rows` carries each box's `stateOf`
+ *           rows?: { name?: string, state?: string }[],
+ *           fields?: { compared: string[], unchecked: string[] } }} input `rows` carries each box's
+ *   `stateOf`, `fields` `fleetConsistency`'s field coverage. Neither has a default, for the same reason.
  * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
  */
-export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows }) {
+export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows, fields }) {
   const across = `across ${compared} of ${total}`;
   if (compared === 0) {
     return { state: "UNKNOWN",
@@ -462,6 +516,11 @@ export function consistencyVerdict({ consistent, compared, total, mismatches = [
       line: `fleet UNKNOWN — the environments agree ${across}, and no readiness was supplied, so whether `
         + "these boxes can capture was never asked. A consistent environment is not a usable fleet" };
   }
+  // WHICH FIELDS AGREED IS A SECOND CANNOT-ASK, and it gets the same treatment as the readiness one
+  // above: no default, because a caller that did not pass `fleetConsistency`'s coverage has not asked
+  // which fields the comparison was about, and answering the permissive way is how #1997 happened.
+  const coverage = fieldCoverageGap(fields, across);
+  if (coverage) return coverage;
   // NAMED, NEVER COUNTED. "blocked" and "blocked on a11y-worker-4, warming" are different instructions:
   // one sends a reader to `fleet:status` again, the other sends them to a box.
   const blocked = rows.filter((row) => row.state === "warming" || row.state === "unreachable");
@@ -790,7 +849,7 @@ export async function fleetStatus(deps) {
     // OPTIONAL field, meaning "this probe did not collect one", which is exactly true here since
     // `/health` carries no policy block. `null` would be a claim that it collected an empty policy.
     .map((p) => ({ worker: p.url, environment: p.health?.environment, policy: undefined }));
-  const { consistent, mismatches, compared } = fleetConsistency(guests);
+  const { consistent, mismatches, compared, fields } = fleetConsistency(guests);
   // WHICH CODE EACH BOX SERVES, COMPARED — the column has been printed since this file existed and
   // nothing ever read it. A fleet part-way through a deploy shows two hashes, and that is the ONLY
   // symptom it has: `consistent` above cannot see it, because `workerCode` is deliberately outside
@@ -806,8 +865,11 @@ export async function fleetStatus(deps) {
   // `verdict` is the answer; this is one of its inputs.
   // `rows` carries each box's `stateOf`, which this verdict had no way to see until #1029. Passing it
   // is the whole fix: the two halves were both computed here and never crossed.
-  const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows });
-  return { rows, linkLayer, comparedAgree: consistent, verdict, mismatches, codes, compared,
+  // `fields` is the same crossing one axis over (#1997): the coverage was computed here and never
+  // reached the verdict, so a field no guest reported was indistinguishable from one they all agree on.
+  const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
+    fields });
+  return { rows, linkLayer, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
     reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
