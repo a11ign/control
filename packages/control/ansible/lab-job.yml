@@ -3,7 +3,13 @@
 #
 #     ansible-playbook lab-job.yml -e job=train
 #     ansible-playbook lab-job.yml -e job=sweep -e model=runs/model-candidate
-#     ansible-playbook lab-job.yml -e job=capture-real-pages -e role=training -e shard=0/4 -e worker=a11y-worker-2
+#     ansible-playbook lab-job.yml -e job=capture-real-pages -e role=training -e shard=0/4
+#     ansible-playbook lab-job.yml -e job=evidence-check -e only=media-autoplay-audio -e worker=a11y-worker-2
+#
+# The `capture-real-pages` line carried `-e worker=a11y-worker-2` until #1956, and that job has REFUSED
+# `-e worker=` since it moved to the whole fleet — the file's first example was a command the file itself
+# rejects. `evidence-check` is where a named worker belongs now (#1948): optional there, and it aims a
+# narrowed read at one box rather than spreading it across the pool.
 #
 # ## Named jobs, never a command
 #
@@ -512,8 +518,16 @@
       # were run by hand today, which is the same reason `evidence-check` and `export` are here.
       #
       # `gate:stability` captures 6 canary pages 5 times each and compares by CONTENT, so it needs a worker
-      # and takes ~25 min. One worker, like evidence-check and for the same reason: it is asking whether the
-      # PIPELINE is deterministic, and a second guest is a second variable.
+      # and takes ~25 min. ONE worker, REQUIRED, and the reason is this job's own rather than a shared one:
+      # it asks whether the PIPELINE is deterministic, so a second guest is a second variable and the
+      # question cannot be asked across a pool at all.
+      #
+      # This said "one worker, like evidence-check and for the same reason" (#1956). `evidence-check` moved
+      # to the fleet pool and the comparison went stale where a reader meets it FIRST, 700 lines before the
+      # refusal that says otherwise. It is stated on `stability`'s own terms now, because restating another
+      # entry's design is what let it drift: since #1948 `evidence-check` takes an OPTIONAL `-e worker=`,
+      # which is one box for a different reason — aiming a narrowed read at a named guest, not removing a
+      # variable — so the comparison would now be wrong in a second way.
       stability:
         params: {worker: required}
         # fleetVerdict/exitCodeFor, same 0/1/2 contract as gateVerdict -- see rules-gate's entry above for
