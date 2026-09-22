@@ -108,15 +108,13 @@
               any box. Name the rewritten main's tip: `git ls-remote {{ new_repo_url }} refs/heads/main`.
             success_msg: "{{ sha }} is a ref tip on {{ new_repo_url }}"
 
-    - name: Refuse an inventory that resolved no workers
-      ansible.builtin.assert:
-        that:
-          - groups['a11y_workers'] is defined
-          - groups['a11y_workers'] | length > 0
-        fail_msg: >-
-          No host matched `a11y_workers`, so the worker play below would do NOTHING and exit 0. Run this from
-          the control plane, where `/etc/a11ign/inventory.yml` is read, or install it with
-          `npm run fleet:inventory-install`.
+    - name: The workers must be in the inventory
+      # ONE SPELLING, shared with every other playbook here -- see the include for what a
+      # zero-host run costs and why the remedy names a machine (#1980).
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
 
 - name: Move every capture worker to the named commit on the new origin
   hosts: a11y_workers

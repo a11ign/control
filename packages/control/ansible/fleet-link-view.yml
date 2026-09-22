@@ -56,17 +56,28 @@
     # Same guard, same reason as every other playbook here: `inventory.yml` is gitignored, so a checkout
     # that has not been given one matches no hosts, prints an EMPTY PLAY RECAP and EXITS 0 -- a diagnosis
     # that reached nothing, reported as success, during an incident.
-    - name: Refuse an inventory that resolved no hosts to ask
-      ansible.builtin.assert:
-        that:
-          - groups['a11y_control'] is defined
-          - groups['a11y_control'] | length > 0
-          - groups['a11y_workers'] is defined
-          - groups['a11y_workers'] | length > 0
-        fail_msg: >-
-          No host matched `a11y_control`, or no worker matched `a11y_workers`, so this command would have
-          asked NOTHING and exited 0. `inventory.yml` is gitignored; run this from a checkout that has one.
-        success_msg: >-
+    #
+    # TWO INCLUDES RATHER THAN ONE FOUR-CLAUSE ASSERT, and that is the point of sharing the spelling: the
+    # old single assert could only say "`a11y_control` OR `a11y_workers` matched nothing", leaving the
+    # reader to work out which. Each include names the group it refused.
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control
+
+    - name: And the workers this asks about
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
+
+    # The counts the two asserts above cannot carry between them: this play asks the lab and the
+    # hypervisor too, and neither is required (a checkout with no hypervisor entry is a valid, smaller
+    # fleet) -- so they are REPORTED here rather than asserted anywhere.
+    - name: What this will ask, and of how many
+      ansible.builtin.debug:
+        msg: >-
           asking {{ groups['a11y_control'] | length }} control host(s), {{ groups['a11y_lab'] | default([]) | length }}
           lab host(s) and {{ groups['a11y_hypervisor'] | default([]) | length }} hypervisor(s) about
           {{ groups['a11y_workers'] | length }} worker address(es)

@@ -1,0 +1,73 @@
+---
+# ONE SPELLING OF THE ZERO-HOST REFUSAL — #1980.
+#
+#     - name: The lab must be in the inventory
+#       ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+#       vars:
+#         inventory_group: a11y_lab
+#         inventory_group_noun: lab
+#
+# ## What it refuses, and why it cannot live inside the play it protects
+#
+# `ansible-playbook` prints `skipping: no hosts matched`, an EMPTY PLAY RECAP, and **exits 0**. So every
+# command in this directory could fetch nothing, stop nothing, reset nothing and report success —
+# measured 2026-09-06 in a fresh worktree, where `lab:fetch` returned exit 0 having reached no host at
+# all, and a file already sitting in `runs/fetched/` from an earlier run made it look like it had worked.
+# That is `fleet:deploy` exiting 0 having deployed to zero hosts, arriving in the lab commands by the same
+# door: `inventory.yml` is gitignored (#54), so any checkout that has not been given one resolves nothing.
+#
+# The caller includes this from a play on `localhost`, which is always available, precisely so it can
+# speak when the real play cannot. A guard living inside the `a11y_lab` play would be skipped by the very
+# condition it exists to report — the bootstrap shape `inventory-install.yml` already had to solve. This
+# sits beside `require-control-plane-key.yml` for the same reason and in the same position: both are
+# preconditions settled on localhost before anything opens an SSH connection.
+#
+# ## Why it is ONE file, and what ten copies cost
+#
+# This guard was hand-copied into ten playbooks. Measured 2026-09-22 at `9faee29ef`: SEVEN of them told
+# the reader to "install the durable copy THIS MACHINE can always read", one named the control plane
+# correctly, one named the install without saying where it lands, and one offered no install at all.
+# Ten spellings of one sentence is how one of them can be right and seven wrong with nothing noticing,
+# and the guard's own argument is that a refusal which explains nothing "gets distrusted, then bypassed"
+# — a refusal that explains the WRONG THING is one step worse. `inventory-outlives-a-pull.test.ts`
+# refuses a hand-written zero-host guard anywhere in this directory, so the eleventh playbook cannot
+# acquire an eighth spelling by copy-paste.
+#
+# ## The remedy below names a machine deliberately
+#
+# `npm run fleet:inventory-install` does not install anything on the machine that just read this refusal.
+# `inventory-install.yml` declares `# a11y_bootstrap: true`, and `fleet-playbook.mjs` honours that in
+# `runBootstrapFromHere()` by spawning `ansible-playbook -i root@${CONTROL_PLANE},` — so it runs FROM
+# here AGAINST the control plane, and `/etc/a11ign/inventory.yml` appears THERE. That is the playbook
+# working as designed (a bootstrap must not depend on what it bootstraps), and it is also the second
+# half of why the old wording could not be followed: `inventory_source: "{{ playbook_dir }}/inventory.yml"`
+# is read `delegate_to: localhost`, so the command needs the in-tree copy this refusal says is missing.
+#
+# Measured on the agent host, where every session in this org types these commands: `hostname` is
+# `agents`, `/etc/a11ign/` does not exist, and `sudo -n true` reports interactive authentication is
+# required. So the old sentence named a command that targets another box and a local path this account
+# cannot write — while the remedy that does work was one clause earlier and read as the lesser option.
+- name: "Refuse an inventory that resolved no {{ inventory_group_noun }}"
+  ansible.builtin.assert:
+    that:
+      - groups[inventory_group] is defined
+      - groups[inventory_group] | length > 0
+    fail_msg: >-
+      No host matched `{{ inventory_group }}`, so this command would have done NOTHING and exited 0.
+      `inventory.yml` is gitignored, so a fresh checkout or a worktree does not have one.
+      THE FIX THAT WORKS ON THE MACHINE YOU ARE TYPING ON is to give this checkout the file: copy
+      `packages/control/ansible/inventory.yml` from a checkout that has one, or restore it from
+      wherever this fleet's addresses are kept.
+      `npm run fleet:inventory-install` is NOT that. It is a bootstrap: it runs from here AGAINST THE
+      CONTROL PLANE and writes /etc/a11ign/inventory.yml THERE, reading this checkout's copy to do it —
+      so it needs the file that is missing and it changes nothing about this machine. Run it once you
+      have one, to stop the control plane's next `git pull` taking the fleet definition with it.
+    # `| default([])` IS LOAD-BEARING. Ansible finalises BOTH messages before deciding which to print, so
+    # a bare `groups[inventory_group]` here throws inside the filter when the group is absent — which is
+    # precisely the case this guard exists for — and the failure becomes "object of type 'dict' has no
+    # attribute 'a11y_lab'" instead of the sentence above it. Committed that way first, which is
+    # CLAUDE.md's own recorded shape: a guard that stops the job and explains nothing gets distrusted,
+    # then bypassed.
+    success_msg: >-
+      inventory resolved {{ groups[inventory_group] | default([]) | length }}
+      {{ inventory_group_noun }} host(s)

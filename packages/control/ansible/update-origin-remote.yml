@@ -63,19 +63,13 @@
     # own header names the shape: `ansible-playbook` prints `skipping: no hosts matched` and exits 0, so a
     # play against an empty `a11y_lab` group would report success having reached nothing. Checked HERE, on
     # `localhost`, which runs regardless of what the real play would have skipped.
-    - name: Refuse an inventory that resolved no lab
-      ansible.builtin.assert:
-        that:
-          - groups['a11y_lab'] is defined
-          - groups['a11y_lab'] | length > 0
-        fail_msg: >-
-          No host matched `a11y_lab`, so the lab play below would have done NOTHING and exited 0.
-          Run this from a checkout that has `packages/control/ansible/inventory.yml`, or install the
-          durable copy with `npm run fleet:inventory-install`.
-
-    # AND THE KEY THAT CONNECTS TO IT -- #255, same reasoning `lab-reset.yml` already states: a missing
-    # inventory does nothing and exits 0, a missing key connects as whatever a default guessed. Both are
-    # preconditions settled on `localhost` before anything opens an SSH connection.
+    - name: The lab must be in the inventory
+      # ONE SPELLING, shared with every other playbook here -- see the include for what a
+      # zero-host run costs and why the remedy names a machine (#1980).
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_lab
+        inventory_group_noun: lab
     - name: The control-plane key must be supplied
       ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
 

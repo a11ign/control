@@ -56,29 +56,13 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Refuse an inventory that resolved no lab
-      ansible.builtin.assert:
-        that:
-          - groups['a11y_lab'] is defined
-          - groups['a11y_lab'] | length > 0
-        fail_msg: >-
-          No host matched `a11y_lab`, so this command would have done NOTHING and exited 0.
-          `inventory.yml` is gitignored, so a fresh checkout or a worktree does not have one.
-          Fix it with one of: run this from a checkout that has
-          `packages/control/ansible/inventory.yml`; or install the durable copy this machine can
-          always read, `npm run fleet:inventory-install`, which puts it at /etc/a11ign/inventory.yml
-          where `ansible.cfg` looks first.
-        # `| default([])` IS LOAD-BEARING. Ansible finalises BOTH messages before deciding which to
-        # print, so a bare `groups['a11y_lab']` here throws inside the filter when the group is absent —
-        # which is precisely the case this guard exists for — and the failure becomes
-        # "object of type 'dict' has no attribute 'a11y_lab'" instead of the sentence below it. Committed
-        # that way first, which is CLAUDE.md's own recorded shape: a guard that stops the job and explains
-        # nothing gets distrusted, then bypassed.
-        success_msg: "inventory resolved {{ groups['a11y_lab'] | default([]) | length }} lab host(s)"
-
-    # AND THE KEY THAT CONNECTS TO IT -- #255. Same play, because both are preconditions that must be
-    # settled on localhost before anything opens an SSH connection, and both fail in the same direction:
-    # a missing inventory does nothing and exits 0, a missing key connects as whatever a default guessed.
+    - name: The lab must be in the inventory
+      # ONE SPELLING, shared with every other playbook here -- see the include for what a
+      # zero-host run costs and why the remedy names a machine (#1980).
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_lab
+        inventory_group_noun: lab
     - name: The control-plane key must be supplied
       ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
 

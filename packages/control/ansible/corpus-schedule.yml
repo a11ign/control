@@ -56,19 +56,13 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Refuse an inventory that resolved no lab
-      ansible.builtin.assert:
-        that:
-          - groups['a11y_lab'] is defined
-          - groups['a11y_lab'] | length > 0
-        fail_msg: >-
-          No host matched `a11y_lab`, so this command would have done NOTHING and exited 0.
-          `inventory.yml` is gitignored, so a fresh checkout or a worktree does not have one.
-          Fix it with one of: run this from a checkout that has
-          `packages/control/ansible/inventory.yml`; or install the durable copy this machine can
-          always read, `npm run fleet:inventory-install`, which puts it at /etc/a11ign/inventory.yml
-          where `ansible.cfg` looks first.
-        success_msg: "inventory resolved {{ groups['a11y_lab'] | default([]) | length }} lab host(s)"
+    - name: The lab must be in the inventory
+      # ONE SPELLING, shared with every other playbook here -- see the include for what a
+      # zero-host run costs and why the remedy names a machine (#1980).
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_lab
+        inventory_group_noun: lab
 
     - name: The control-plane key must be supplied
       ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
