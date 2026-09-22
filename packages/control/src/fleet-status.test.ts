@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe } from "./fleet-status.mjs";
-import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
+import { fleetConsistency, MUST_MATCH } from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -260,15 +260,30 @@ test("every warming worker is named, not just the first", () => {
  * Driven through the REAL `fleetConsistency`, not a stub: the defect this row found is a predicate that
  * filters before it counts, and a stub would take the filtering out of the test along with the defect.
  */
-// The REAL `MUST_MATCH` field names. The first version of this fixture wrote `os` for the Windows build,
-// which `fleetConsistency` does not compare — so a box on a different build read as agreeing and two
-// tests failed. That failure was the fixture being wrong, and it is exactly the shape of the defect: a
-// field nobody compares is a difference nobody sees.
+// The REAL `MUST_MATCH` field names, DERIVED. The first version of this fixture wrote `os` for the Windows
+// build, which `fleetConsistency` does not compare — so a box on a different build read as agreeing and
+// two tests failed. That failure was the fixture being wrong, and it is exactly the shape of the defect:
+// a field nobody compares is a difference nobody sees.
+//
+// #1997 is that lesson one step further in. The hand-written version named FIVE of the ten `MUST_MATCH`
+// fields, so every guest here reported none of the other five and the verdict called them interchangeable
+// anyway — the defect under test, sitting in the fixture of the test that was supposed to catch it.
+// Derived from the list, a field added there is reported by these guests without editing this line, and
+// a fleet that reports nothing cannot be mistaken for one that agrees.
 const env = (windowsVersion: string) => ({
-  browserVersion: "151.0.0", screenReaderVersion: "2024.4", windowsVersion, architecture: "x64",
-  captureProtocol: 12,
+  ...Object.fromEntries(MUST_MATCH.map(({ path }) => [path, `same-${path}`])),
+  windowsVersion, architecture: "x64", captureProtocol: 12,
 });
 const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n}:8765`, environment: env(os) });
+
+/**
+ * The field coverage a fully-reporting fleet yields — every `MUST_MATCH` field compared, none unchecked.
+ *
+ * For the cases below that drive `consistencyVerdict` DIRECTLY rather than through `fleetConsistency`:
+ * #1997 gave `fields` no default for the same reason #1029 gave `rows` none, so a case that omits it is
+ * UNKNOWN about coverage and can no longer assert anything about readiness or agreement.
+ */
+const COMPARED_EVERYTHING = { compared: MUST_MATCH.map(({ path }) => path), unchecked: [] };
 
 /**
  * The verdict `fleetStatus` would print over these guests, out of an inventory of `total`.
@@ -278,9 +293,12 @@ const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n
  * they are about instead of about readiness.
  */
 const verdictOver = (guests: ReturnType<typeof box>[], total: number) => {
-  const { consistent, mismatches, compared } = fleetConsistency(guests);
+  const { consistent, mismatches, compared, fields } = fleetConsistency(guests);
   const rows = guests.map((g) => ({ name: g.worker, state: "ready" }));
-  return consistencyVerdict({ consistent, compared, total, mismatches, rows });
+  // `fields` for the same reason `rows` is here (#1997): the verdict has no default for either, so a
+  // helper that omitted it would make every case below UNKNOWN about coverage instead of about its own
+  // subject.
+  return consistencyVerdict({ consistent, compared, total, mismatches, rows, fields });
 };
 
 test("YESTERDAY, EXACTLY: nine agreeing boxes and one that did not answer is NOT consistent", () => {
@@ -351,7 +369,11 @@ test("the deprecated `consistent` field carries the CORRECTED answer, never the 
 
 // --- #1029: a clean environment comparison is not a usable fleet ---
 
-const ENVIRONMENT = { windows: "10.0.26100", arch: "x64", nvda: "2024.4", edge: "152.0.1", provisionRevision: "r7" };
+// DERIVED from `MUST_MATCH`, and it used to be five keys of which exactly ONE (`provisionRevision`) was a
+// field this compares -- `windows`, `arch`, `nvda` and `edge` are not `MUST_MATCH` paths, so these guests
+// reported 1 of 10 fields and the verdict below still read CONSISTENT. #1997's fix turns that into
+// UNKNOWN, which is how a fixture that had been describing a fleet nobody could compare was found.
+const ENVIRONMENT = Object.fromEntries(MUST_MATCH.map(({ path }) => [path, `same-${path}`]));
 
 /** A probe as `probeWorker` returns one, with only the readiness dial to turn. */
 const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreachable") =>
@@ -364,11 +386,18 @@ const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreacha
       progress: {},
     });
 
-const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[]) => {
+const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[], environment = ENVIRONMENT) => {
   const workers = states.map((_, i) => ({ name: `a11y-worker-${i + 2}`, url: `http://a11y-worker-${i + 2}:8765` }));
   return fleetStatus({
     workers: () => workers,
-    probe: async (w) => fakeProbe(w.name, states[workers.indexOf(w)]),
+    probe: async (w) => {
+      const probe = fakeProbe(w.name, states[workers.indexOf(w)]);
+      // #1997: the ONE dial this adds, so a case can drive the REAL `fleetStatus` over guests that do not
+      // report a field. The defect was never inside `consistencyVerdict` -- coverage was computed in
+      // `fleetStatus` and never crossed to the verdict, which is #1029's lesson verbatim, so a case that
+      // drove only the pure function would hold the function and leave the CALL unheld.
+      return probe.health ? { ...probe, health: { ...probe.health, environment } } : probe;
+    },
     // #1311 review: injected so a test that ever drives an "unreachable" box here fails loudly rather than
     // ssh-ing to the real control plane from a shell that knows where it is -- structural, not a URL's spelling.
     linkRead: () => { throw new Error("a unit test reached the real layer-2 read: inject linkRead"); },
@@ -412,6 +441,7 @@ test("#1029: the existing verdicts are unchanged -- this is an addition, not a r
   assert.equal(consistencyVerdict({ consistent: true, compared: 9, total: 10, rows }).state, "UNKNOWN");
   assert.equal(consistencyVerdict({
     consistent: true, compared: 4, total: 4, rows: [{ name: "a", state: "ready" }],
+    fields: COMPARED_EVERYTHING,
   }).state, "CONSISTENT", "and an all-ready, all-agreeing fleet still reads CONSISTENT");
 });
 
@@ -426,9 +456,93 @@ test("#1029: a caller that supplies NO readiness gets UNKNOWN, never a permissiv
     "and it says WHICH question went unasked, so the caller knows what to pass rather than what to retry");
   assert.match(verdict.line, /environments agree across 4 of 4/,
     "while still reporting the fact it DID measure -- refusing to answer is not refusing to report");
-  assert.equal(consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [] }).state, "CONSISTENT",
-    "and an EXPLICIT empty list is a different statement from no list at all: it says the caller asked "
-    + "and found nobody blocked, which is exactly the distinction `undefined` versus `[]` exists to make");
+  assert.equal(consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [],
+    fields: COMPARED_EVERYTHING }).state, "CONSISTENT",
+  "and an EXPLICIT empty list is a different statement from no list at all: it says the caller asked "
+  + "and found nobody blocked, which is exactly the distinction `undefined` versus `[]` exists to make");
+});
+
+// --- #1997: a MUST_MATCH field NO guest reports is CANNOT ASK, not ALL AGREE ---
+
+/** The same environment, with one field deleted -- the only difference between the pair below. */
+const reportingAllBut = (field: string) => {
+  const { [field]: removed, ...rest } = ENVIRONMENT;
+  assert.equal(typeof removed, "string", `the fixture must HOLD ${field} for deleting it to mean anything`);
+  return rest;
+};
+
+test("#1997: THE PAIR -- a field every guest agrees on and a field NO guest reports read differently", async () => {
+  // Measured 2026-09-22T20:09Z on the live fleet, at `3ae7846f8` (the merge of #1953, which added
+  // `displayMode` to MUST_MATCH): nine fields at 10/10 guests, `displayMode` at 0/10, and this line read
+  // `fleet CONSISTENT across 10 of 10 -- these workers are interchangeable for capture`. The display was
+  // still not compared, and it was the same sentence #1953 was filed about. `compared` counts GUESTS,
+  // never FIELDS, so nothing in the verdict could see it.
+  //
+  // BOTH HALVES ARE `comparedAgree: true` OVER THE SAME FOUR GUESTS. That is why one assertion is not
+  // enough: the defect is that these two fleets produced the IDENTICAL verdict, so a case that drove
+  // either one alone passed with the defect present.
+  const everything = await driveFleet(["ready", "ready", "ready", "ready"]);
+  const blind = await driveFleet(["ready", "ready", "ready", "ready"], reportingAllBut("displayMode"));
+
+  assert.equal(everything.verdict.state, "CONSISTENT");
+  assert.match(everything.verdict.line, /^fleet CONSISTENT across 4 of 4 — /);
+
+  assert.equal(blind.comparedAgree, true, "the comparison itself is untouched -- absent is still not a mismatch");
+  assert.equal(blind.verdict.state, "UNKNOWN", "but a field compared on nobody is not agreement about it");
+  assert.match(blind.verdict.line, /displayMode/,
+    "NAMED, never counted: '1 field was not compared' sends a reader back to fleet:status, and "
+    + "'displayMode was not compared' sends them to the deploy that would report it");
+  assert.doesNotMatch(blind.verdict.line, /CONSISTENT/,
+    "not even as a substring -- #920's rule, because the word is what a reader takes away");
+  assert.equal(blind.consistent, false,
+    "and the deprecated compatibility field follows the verdict, so a script reading `--json` gets it too");
+});
+
+test("#1997: the coverage reaches the JSON, with both lists, so a caller can act on which field it was", async () => {
+  // A conclusion that changes what happens next belongs in a field, not only in a sentence: the remedy for
+  // this state is a deploy of one named field, and a reader parsing `--json` cannot grep a prose line for
+  // which one.
+  const blind = await driveFleet(["ready", "ready"], reportingAllBut("displayMode"));
+  assert.deepEqual(blind.fields.unchecked, ["displayMode"]);
+  assert.ok(blind.fields.compared.includes("browserVersion"),
+    "and WHAT WAS compared is named too -- the positive control for the list above, which would otherwise "
+    + "be satisfied by a reading that compared nothing at all");
+});
+
+test("#1997: a caller that supplies NO coverage gets UNKNOWN, never a permissive CONSISTENT", () => {
+  // The same tiebreak #1029 settled for `rows`, one door over: "nobody told me which fields were
+  // compared" is CANNOT ASK, not "all of them". There is exactly one production caller and it passes
+  // `fields`, so this changes no real verdict -- it closes the door through which #1997 walked in.
+  const verdict = consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [] });
+  assert.equal(verdict.state, "UNKNOWN");
+  assert.match(verdict.line, /no field coverage was supplied/,
+    "and it says WHICH question went unasked, so the caller knows what to pass rather than what to retry");
+  assert.match(verdict.line, /environments agree across 4 of 4/,
+    "while still reporting what it DID measure -- refusing to answer is not refusing to report");
+});
+
+test("#1997: the UNKNOWN line names the deploy that closes it, and its denominator", () => {
+  // A verdict a reader cannot act on gets read once. The remedy is the deploy that makes the guests report
+  // the field -- or dropping the field -- and both are one command or one decision, not a runbook.
+  const { state, line } = consistencyVerdict({
+    consistent: true, compared: 10, total: 10, rows: [],
+    fields: { compared: MUST_MATCH.slice(1).map(({ path }) => path), unchecked: [MUST_MATCH[0].path] },
+  });
+  assert.equal(state, "UNKNOWN");
+  assert.match(line, /9 of 10 fields/, "the FIELD denominator, beside the guest one -- #920's shape, one axis over");
+  assert.match(line, /fleet:deploy/);
+});
+
+test("#1997: a field one guest of many reports is COMPARED, and the fleet still reads CONSISTENT", () => {
+  // The line this row deliberately does not cross. `fleetConsistency`'s absent-skip rule exists so a
+  // rolling deploy does not flag the guest it has not reached yet, and a field the deploy HAS reached on
+  // one guest has been compared -- on the guests that have it. Turning that into UNKNOWN would make every
+  // mid-deploy fleet unknown over a field the check can already see. #2019 asks whether partial coverage
+  // should weaken the headline; this asserts that today it does not, so the change is one axis wide.
+  const verdict = consistencyVerdict({
+    consistent: true, compared: 10, total: 10, rows: [], fields: COMPARED_EVERYTHING,
+  });
+  assert.equal(verdict.state, "CONSISTENT");
 });
 
 // --- #1298: a box that does not answer /health says FIRST, in words, whether it is on the network ---
