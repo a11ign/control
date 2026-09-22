@@ -93,9 +93,17 @@
 # `MonitorFromPoint`/`GetMonitorInfoW` and passes it explicitly, and `ChangeDisplaySettings` became
 # `ChangeDisplaySettingsEx`, which is the form that can take a name.
 #
-# Keep the interactive route. Both faults were real, and the second was hidden behind the first: in
-# session 0 every display call fails whatever device you name, so nothing about the device argument could
-# have been seen until #1833 had put the script somewhere a named call could succeed.
+# Keep the interactive route. Both faults were real, and the second could not have been separated from
+# the first until the first was fixed -- but NOT for the reason this paragraph used to give. It claimed
+# that "in session 0 every display call fails whatever device you name", and nobody has measured a NAMED
+# display call in session 0: this role's own session-0 account (`tasks/run-interactive.yml`) names
+# `SystemParametersInfo`, guidepup's NVDA start, and `become_user`'s profile writes, and no display-mode
+# call at all.
+#
+# The real reason is simpler and is measured: the script only ever made EMPTY-named calls, and in
+# session 0 the run failed for the session's reason as well. Two candidate causes, one symptom, and no
+# way to tell them apart -- so #1833 removing the session variable is what left a single explanation
+# standing, not any property of session 0 that anyone has read.
 #
 # ## THE MODE IS PINNED LAST, AFTER THE DRIVER, AND THAT ORDER IS LOAD-BEARING (#1955)
 #
