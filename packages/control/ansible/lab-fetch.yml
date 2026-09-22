@@ -320,6 +320,30 @@
           {{ playbook_dir }}/../../../runs/fetched/{{ out | default('candidate') }}.{{ artifact
              }}{{ (lab_fetch_src | splitext)[1] | default('.json', true) }}
 
+    # AND THE DIRECTORY MUST EXIST BEFORE ANYTHING TOUCHES IT — the first fetch in a checkout, which is
+    # exactly the case a new session is in, had none.
+    #
+    # `runs/` is gitignored, so `runs/fetched/` exists in the primary checkout and in every worktree that
+    # has fetched once, and is absent nowhere else. The stale-sibling task below runs `find` over it, and
+    # `find` exits 1 on a directory that is not there — so the task fails AFTER the slurp has already
+    # succeeded, and the artefact is read off the lab and then thrown away. Measured 2026-09-22 in a fresh
+    # worktree mid-#1929; the message is `No such file or directory`, which reads as a broken playbook
+    # rather than "this checkout has never fetched". The workaround was a `mkdir -p` nobody is told about.
+    #
+    # BEFORE the find and not merely before the copy, because both need it and only one of them announces
+    # that it does: `copy` to a dest whose parent is absent is the next failure in line, so guarding the
+    # `find` alone would move the error rather than remove it. One task settles both.
+    #
+    # `delegate_to: localhost` for the same reason the two tasks below carry it: this play's hosts are the
+    # LAB, and the destination is a path under this checkout. Created on the lab it would be the wrong
+    # box's directory, and the local one would still be missing.
+    - name: The destination directory must exist before anything reads or writes inside it
+      ansible.builtin.file:
+        path: "{{ lab_fetch_dest | dirname }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
     # CLEAR THE SAME ARTIFACT UNDER A DIFFERENT EXTENSION FIRST, or a stale one outlives its replacement.
     #
     # The destination is named after the artifact's REAL extension, which is right and is why this is
