@@ -52,8 +52,9 @@ export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
  * during one afternoon".
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
@@ -1261,7 +1262,71 @@ export function sequenceHoldGate({ chosen, holds, allowHold }) {
 function readFleetGatedIssues() {
   return JSON.parse(execFileSync("gh",
     ["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100"],
-    { encoding: "utf8" }));
+    // stderr PIPED, not inherited: on a tokenless control plane gh's own text is "please run: gh auth
+    // login", which is the wrong advice for a root box (#1875) -- `fleetHoldReadRefusal` says what to do.
+    { encoding: "utf8", env: ghEnvironment(process.env, readGhTokenFile), stdio: ["ignore", "pipe", "pipe"] }));
+}
+
+/**
+ * #1875: WHERE THE CONTROL PLANE'S GITHUB CREDENTIAL LIVES -- `ceo`'s ruling of 2026-09-22 on that row. A
+ * fine-grained PAT minted by `a11ign-ai-workers` with public-repositories read-only access and NO
+ * permissions: the fleet-hold read is of a public repo's open issues, so the token exists only because
+ * `gh` refuses to run unauthenticated, and a leak of it can write nothing anywhere. `root:root 0600`,
+ * never in git, the same posture as the fleet SSH key beside it. `homedir()` rather than a literal
+ * `/root`, because a `systemd-run` unit is not promised a `HOME` and `homedir()` falls back to the passwd
+ * entry.
+ */
+export const GH_TOKEN_FILE = join(homedir(), ".config", "a11y-witness", "gh-token");
+
+/** @returns {string} the token file's contents, or "" when it is absent or unreadable. */
+function readGhTokenFile() {
+  try {
+    return readFileSync(GH_TOKEN_FILE, "utf8");
+  } catch (error) {
+    // ABSENT IS AN ANSWER, not a swallowed error: the refusal below names this file when the read fails.
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+/**
+ * #1875: the environment `gh` runs in -- the token file's contents as `GH_TOKEN` when the caller has not
+ * already set one. An explicit `GH_TOKEN` wins, and a host with neither (the agents host, logged in
+ * through `gh auth login`) is handed back its environment unchanged, so this changes nothing anywhere the
+ * file does not exist. PURE over its reader, so both branches are testable without a control plane.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {() => string} readToken
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function ghEnvironment(env, readToken) {
+  if (env.GH_TOKEN) return env;
+  const token = readToken().trim();
+  return token ? { ...env, GH_TOKEN: token } : env;
+}
+
+/**
+ * #1875: the refusal when the fleet-hold read fails. When no token was supplied AND gh says it has no
+ * login either (its own "gh auth login" hint -- gh's wording, matched because it names the mechanism), it
+ * names the token file and the row that decided what goes in it INSTEAD of that hint: an interactive login
+ * on a shared root box is the option the ruling rejected. Otherwise gh's own last line is the useful part
+ * (an expired token, GitHub unreachable), so it is kept -- and a host logged in the ordinary way, the
+ * agents host, never reads advice about a file it was never meant to have.
+ *
+ * @param {{ chosen: string, error: { message?: string, stderr?: string | Buffer }, tokenSet: boolean }} failure
+ * @returns {string}
+ */
+export function fleetHoldReadRefusal({ chosen, error, tokenSet }) {
+  const lead = `REFUSING ${chosen}: could not ask whether a fleet-hold sequence is active`;
+  const stderr = String(error.stderr ?? "");
+  if (!tokenSet && stderr.includes("gh auth login")) {
+    return `${lead}: this host has no GitHub credential -- GH_TOKEN is unset and ${GH_TOKEN_FILE} does `
+      + "not exist. Write the read-only token there (root:root 0600, never in git); it is read into "
+      + "GH_TOKEN for this check (#1875). Could not ask is not may proceed.";
+  }
+  const ghSaid = stderr.trim().split("\n").filter(Boolean).at(-1)
+    ?? String(error.message ?? "").split("\n")[0];
+  return `${lead} (${ghSaid}). Could not ask is not may proceed.`;
 }
 
 /**
@@ -1289,8 +1354,10 @@ async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, 
   try {
     issues = readIssues();
   } catch (error) {
-    process.stderr.write(`REFUSING ${chosen}: could not ask whether a fleet-hold sequence is active (`
-      + `${String(/** @type {Error} */ (error).message).split("\n")[0]}). Could not ask is not may proceed.\n`);
+    // EXISTENCE, not a second read: an unreadable file already failed the read above, and re-reading it
+    // here would throw past this refusal.
+    const tokenSet = Boolean(process.env.GH_TOKEN) || existsSync(GH_TOKEN_FILE);
+    process.stderr.write(`${fleetHoldReadRefusal({ chosen, error: /** @type {any} */ (error), tokenSet })}\n`);
     process.exit(2);
     return;
   }
