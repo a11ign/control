@@ -282,8 +282,17 @@ const box = (n: number, os = "10.0.22631") => ({ worker: `http://a11y-worker-${n
  * For the cases below that drive `consistencyVerdict` DIRECTLY rather than through `fleetConsistency`:
  * #1997 gave `fields` no default for the same reason #1029 gave `rows` none, so a case that omits it is
  * UNKNOWN about coverage and can no longer assert anything about readiness or agreement.
+ *
+ * #2019 made it take the GUEST COUNT, because the coverage now carries how many guests reported each
+ * field and a hand-written number would be a second place for that to be wrong. `guests` in and `guests`
+ * out per field is the statement "every compared guest reported every field", which is what this fixture
+ * has always meant and could not previously say.
  */
-const COMPARED_EVERYTHING = { compared: MUST_MATCH.map(({ path }) => path), unchecked: [] };
+const comparedEverything = (guests: number) => ({
+  compared: MUST_MATCH.map(({ path }) => path),
+  unchecked: [],
+  coverage: MUST_MATCH.map(({ path }) => ({ field: path, reported: guests, asked: guests })),
+});
 
 /**
  * The verdict `fleetStatus` would print over these guests, out of an inventory of `total`.
@@ -386,7 +395,13 @@ const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreacha
       progress: {},
     });
 
-const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[], environment = ENVIRONMENT) => {
+// #2019: `environment` also takes a FUNCTION OF THE GUEST INDEX, because the reading this row is about --
+// one guest of ten reporting a field and the rest not -- cannot be expressed by one environment shared by
+// every guest, which is the only shape #1997 needed.
+type GuestEnvironment = Record<string, unknown> | ((index: number) => Record<string, unknown>);
+const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[],
+  environment: GuestEnvironment = ENVIRONMENT) => {
+  const envFor = (index: number) => (typeof environment === "function" ? environment(index) : environment);
   const workers = states.map((_, i) => ({ name: `a11y-worker-${i + 2}`, url: `http://a11y-worker-${i + 2}:8765` }));
   return fleetStatus({
     workers: () => workers,
@@ -396,7 +411,9 @@ const driveFleet = (states: ("ready" | "busy" | "warming" | "unreachable")[], en
       // report a field. The defect was never inside `consistencyVerdict` -- coverage was computed in
       // `fleetStatus` and never crossed to the verdict, which is #1029's lesson verbatim, so a case that
       // drove only the pure function would hold the function and leave the CALL unheld.
-      return probe.health ? { ...probe, health: { ...probe.health, environment } } : probe;
+      return probe.health
+        ? { ...probe, health: { ...probe.health, environment: envFor(workers.indexOf(w)) } }
+        : probe;
     },
     // #1311 review: injected so a test that ever drives an "unreachable" box here fails loudly rather than
     // ssh-ing to the real control plane from a shell that knows where it is -- structural, not a URL's spelling.
@@ -441,7 +458,7 @@ test("#1029: the existing verdicts are unchanged -- this is an addition, not a r
   assert.equal(consistencyVerdict({ consistent: true, compared: 9, total: 10, rows }).state, "UNKNOWN");
   assert.equal(consistencyVerdict({
     consistent: true, compared: 4, total: 4, rows: [{ name: "a", state: "ready" }],
-    fields: COMPARED_EVERYTHING,
+    fields: comparedEverything(4),
   }).state, "CONSISTENT", "and an all-ready, all-agreeing fleet still reads CONSISTENT");
 });
 
@@ -457,7 +474,7 @@ test("#1029: a caller that supplies NO readiness gets UNKNOWN, never a permissiv
   assert.match(verdict.line, /environments agree across 4 of 4/,
     "while still reporting the fact it DID measure -- refusing to answer is not refusing to report");
   assert.equal(consistencyVerdict({ consistent: true, compared: 4, total: 4, rows: [],
-    fields: COMPARED_EVERYTHING }).state, "CONSISTENT",
+    fields: comparedEverything(4) }).state, "CONSISTENT",
   "and an EXPLICIT empty list is a different statement from no list at all: it says the caller asked "
   + "and found nobody blocked, which is exactly the distinction `undefined` versus `[]` exists to make");
 });
@@ -526,23 +543,131 @@ test("#1997: the UNKNOWN line names the deploy that closes it, and its denominat
   // the field -- or dropping the field -- and both are one command or one decision, not a runbook.
   const { state, line } = consistencyVerdict({
     consistent: true, compared: 10, total: 10, rows: [],
-    fields: { compared: MUST_MATCH.slice(1).map(({ path }) => path), unchecked: [MUST_MATCH[0].path] },
+    fields: {
+      compared: MUST_MATCH.slice(1).map(({ path }) => path),
+      unchecked: [MUST_MATCH[0].path],
+      // #2019: the coverage the two lists are derived from -- nine fields on every guest, the tenth on
+      // none. Spelled out rather than defaulted, because a `fields` that cannot say HOW MANY reported
+      // each field is now its own cannot-ask and would make this case UNKNOWN about the wrong question.
+      coverage: MUST_MATCH.map(({ path }, i) => ({ field: path, reported: i === 0 ? 0 : 10, asked: 10 })),
+    },
   });
   assert.equal(state, "UNKNOWN");
   assert.match(line, /9 of 10 fields/, "the FIELD denominator, beside the guest one -- #920's shape, one axis over");
   assert.match(line, /fleet:deploy/);
 });
 
-test("#1997: a field one guest of many reports is COMPARED, and the fleet still reads CONSISTENT", () => {
-  // The line this row deliberately does not cross. `fleetConsistency`'s absent-skip rule exists so a
-  // rolling deploy does not flag the guest it has not reached yet, and a field the deploy HAS reached on
-  // one guest has been compared -- on the guests that have it. Turning that into UNKNOWN would make every
-  // mid-deploy fleet unknown over a field the check can already see. #2019 asks whether partial coverage
-  // should weaken the headline; this asserts that today it does not, so the change is one axis wide.
-  const verdict = consistencyVerdict({
-    consistent: true, compared: 10, total: 10, rows: [], fields: COMPARED_EVERYTHING,
+// --- #2019: a MUST_MATCH field SOME compared guests do not report is the same cannot-ask, one threshold in ---
+
+/**
+ * Field coverage where `displayMode` was reported by `reporters` of `guests`, everything else by all.
+ *
+ * ONE VARIABLE between the readings below: the reporter count on one field. Anything else different and
+ * the pair stops being a control for the threshold and becomes a control for the axis.
+ */
+const displayReportedBy = (reporters: number, guests: number) => ({
+  ...comparedEverything(guests),
+  coverage: comparedEverything(guests).coverage.map((entry) => (
+    entry.field === "displayMode" ? { ...entry, reported: reporters } : entry)),
+});
+
+test("#2019: THE PAIR -- a field every guest reports and a field ONE guest of ten reports read differently", () => {
+  // THE DEFECT, VERBATIM. Measured 2026-09-22 at `2c34bd8db` with #1997 in the tree: ten guests, one
+  // reporting `displayMode` and nine reporting none of it, `fields.unchecked` empty, and the headline
+  // `fleet CONSISTENT across 10 of 10 -- these workers are interchangeable for capture`. One guest's
+  // display was read, nine were not, and the line said interchangeable.
+  //
+  // BOTH HALVES ARE `consistent: true` OVER THE SAME TEN GUESTS WITH THE SAME `compared` LIST -- which is
+  // exactly why the verdict could not tell them apart, and why an assertion on either one alone passes
+  // with the defect present.
+  const everybody = consistencyVerdict({
+    consistent: true, compared: 10, total: 10, rows: [], fields: displayReportedBy(10, 10),
   });
-  assert.equal(verdict.state, "CONSISTENT");
+  const oneOfTen = consistencyVerdict({
+    consistent: true, compared: 10, total: 10, rows: [], fields: displayReportedBy(1, 10),
+  });
+
+  assert.equal(everybody.state, "CONSISTENT", "the positive control: full coverage still reads CONSISTENT");
+  assert.match(everybody.line, /^fleet CONSISTENT across 10 of 10 — /);
+
+  assert.equal(oneOfTen.state, "UNKNOWN",
+    "`product-manager`'s ruling, 2026-09-22: the guest axis calls nine agreeing and one unasked UNKNOWN "
+    + "(#920), and a field 1 of 10 guests reports is that sentence one axis over");
+  assert.doesNotMatch(oneOfTen.line, /CONSISTENT/,
+    "not even as a substring -- #920 refused a caveat under the word for this same reason, and answer 2 "
+    + "was refused here on that precedent");
+  assert.match(oneOfTen.line, /displayMode \(1 of 10 reported it\)/,
+    "NAMED WITH ITS COUNT: '1 field was partly reported' sends a reader back to this command, and "
+    + "'displayMode, 1 of 10' tells them nine boxes owe an answer");
+  assert.match(oneOfTen.line, /fleet:deploy/, "and the converge that closes it");
+});
+
+test("#2019: `k of N` and `0 of N` are DIFFERENT LINES in the same state, because the remedies differ", () => {
+  // Done-when 5. `0 of N` is nobody could be asked -- it sends a reader to the FIELD (deploy it, or drop
+  // it from MUST_MATCH). `k of N` is some boxes did not report it -- it sends them to the BOXES. #920's
+  // own reason for splitting CONSISTENT from UNKNOWN is this reason, and collapsing the two lines would
+  // lose it while keeping the state.
+  const nobody = consistencyVerdict({
+    consistent: true, compared: 10, total: 10, rows: [], fields: displayReportedBy(0, 10),
+  });
+  const some = consistencyVerdict({
+    consistent: true, compared: 10, total: 10, rows: [], fields: displayReportedBy(3, 10),
+  });
+  assert.equal(nobody.state, "UNKNOWN");
+  assert.equal(some.state, "UNKNOWN", "the same state -- this is a line distinction, not a fifth state");
+  assert.match(nobody.line, /compared on NO guest/);
+  assert.doesNotMatch(nobody.line, /reported it/,
+    "a field nobody reported must not also be reported as a partial count: it is on ONE of the two lines");
+  assert.match(some.line, /reported by only SOME of the compared guests/);
+  assert.doesNotMatch(some.line, /compared on NO guest/);
+
+  // BOTH AT ONCE IS BOTH LINES, not the first one found. A converge that half-reached one field while
+  // never reaching another is two different repairs, and a reader who acts on one has not finished.
+  const both = consistencyVerdict({
+    consistent: true,
+    compared: 10,
+    total: 10,
+    rows: [],
+    fields: {
+      compared: MUST_MATCH.slice(1).map(({ path }) => path),
+      unchecked: [MUST_MATCH[0].path],
+      coverage: MUST_MATCH.map(({ path }, i) => (
+        { field: path, reported: i === 0 ? 0 : i === 1 ? 2 : 10, asked: 10 })),
+    },
+  });
+  assert.equal(both.state, "UNKNOWN");
+  assert.match(both.line, /compared on NO guest/);
+  assert.match(both.line, new RegExp(`${MUST_MATCH[1].path} \\(2 of 10 reported it\\)`));
+});
+
+test("#2019: a `fields` that cannot say HOW MANY reported each field is a cannot-ask, not a pass", () => {
+  // The same tiebreak #1029 settled for `rows` and #1997 for `fields`, a third time: a caller carrying
+  // the pre-#2019 shape has answered "did anybody report it" and not "how many", so it cannot rule out
+  // the 1-of-10 reading this row exists for. Answering the permissive way is how both earlier rows
+  // happened, and there is exactly one production caller -- it passes the whole object.
+  const verdict = consistencyVerdict({
+    consistent: true, compared: 4, total: 4, rows: [],
+    fields: { compared: MUST_MATCH.map(({ path }) => path), unchecked: [] },
+  });
+  assert.equal(verdict.state, "UNKNOWN");
+  assert.match(verdict.line, /by HOW MANY guests/,
+    "and it says WHICH question went unasked, so the caller knows what to pass rather than what to retry");
+});
+
+test("#2019: the reporter counts reach the JSON, so a caller acts on the count and not on a sentence", async () => {
+  // A conclusion that changes what happens next belongs in a field, not only in a sentence (the chairman's
+  // 2026-09-19 direction). The remedy here is a converge aimed at the boxes that did NOT report the field,
+  // and a reader parsing `--json` cannot grep a prose line for the count.
+  // ONE guest of the four keeps its display; the other three lost it -- the row's own reading, at four.
+  const partial = await driveFleet(["ready", "ready", "ready", "ready"],
+    (i) => (i === 0 ? ENVIRONMENT : reportingAllBut("displayMode")));
+  const display = partial.fields.coverage.find((f: { field: string }) => f.field === "displayMode");
+  assert.deepEqual(display, { field: "displayMode", reported: 1, asked: 4 });
+  assert.equal(partial.verdict.state, "UNKNOWN");
+  // The positive control for the line above, which a reading that reported 1-of-4 for EVERY field would
+  // otherwise satisfy.
+  const browser = partial.fields.coverage.find((f: { field: string }) => f.field === "browserVersion");
+  assert.deepEqual(browser, { field: "browserVersion", reported: 4, asked: 4 });
 });
 
 // --- #1298: a box that does not answer /health says FIRST, in words, whether it is on the network ---

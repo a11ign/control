@@ -375,6 +375,10 @@ function renderTable(rows) {
   return lines;
 }
 
+/** Shared by both gap clauses: the reason a coverage hole is invisible in the comparison itself. */
+const READS_AS_AGREEMENT = "A field no guest reports draws no values to disagree about, so it reads "
+  + "exactly like a field every guest agrees on";
+
 /**
  * THE FIELD AXIS OF THE SAME QUESTION — #1997. `null` when field coverage is no objection.
  *
@@ -383,32 +387,73 @@ function renderTable(rows) {
  * Both are reported as UNKNOWN and both name what to do about it, because "fix the fleet" and "pass the
  * coverage" are different instructions and a reader cannot guess which one they are looking at.
  *
- * A field reported by ONE guest of ten is deliberately NOT a gap here: it was compared, on the guests
- * that have it, which is the rolling-deploy case `fleetConsistency`'s absent-skip rule exists for. That
- * partial coverage still weakens the headline is true and is #2019, not this function's ruling to make.
+ * A field reported by ONE guest of ten IS a gap too — #2019, and this comment used to say the opposite.
+ * The two are different gaps and they get their own sentences, because the remedy differs: `0 of N` is
+ * nobody could be asked and sends a reader to the FIELD; `k of N` is some boxes did not report it and
+ * sends them to the BOXES. They are reported together when both hold, in one UNKNOWN.
  *
- * @param {{ compared: string[], unchecked: string[] } | undefined} fields
+ * NO COUNTS SUPPLIED IS THE SAME CANNOT-ASK AS NO COVERAGE AT ALL. A `fields` without `coverage` is a
+ * caller carrying a pre-#2019 shape: it has answered "did anybody report each field" and not "how many",
+ * so it cannot rule out the 1-of-10 case, and it takes the same line rather than a permissive pass.
+ *
+ * BOTH CLAUSES READ `coverage` AND NEITHER READS `compared`/`unchecked`. The two lists are the same
+ * measurement thresholded, and reading the zero case off one while reading the partial case off the other
+ * gives one fact two sources that can disagree -- a fixture with `unchecked: []` and a `reported: 0` count
+ * read CONSISTENT while this function was written that way, which is the defect of this whole family in
+ * miniature. The lists stay in the RETURN VALUE, where they are what a caller greps for the remedy.
+ *
+ * @param {{ compared: string[], unchecked: string[],
+ *           coverage?: { field: string, reported: number, asked: number }[] } | undefined} fields
  * @param {string} across the `across N of M` clause, so both lines still report what WAS measured
  * @returns {{ state: "UNKNOWN", line: string } | null}
  */
 function fieldCoverageGap(fields, across) {
-  const readsAsAgreement = "A field no guest reports draws no values to disagree about, so it reads "
-    + "exactly like a field every guest agrees on";
-  if (fields === undefined) {
+  const coverage = fields?.coverage;
+  if (coverage === undefined) {
     return { state: "UNKNOWN",
       line: `fleet UNKNOWN — the environments agree ${across}, and no field coverage was supplied, so `
-        + `WHICH fields were compared was never asked. ${readsAsAgreement} — pass `
-        + "`fleetConsistency`'s `fields`" };
+        + `WHICH fields were compared, and by HOW MANY guests, was never asked. ${READS_AS_AGREEMENT} — `
+        + "pass `fleetConsistency`'s `fields`" };
   }
-  if (fields.unchecked.length === 0) return null;
-  const total = fields.compared.length + fields.unchecked.length;
-  const missing = fields.unchecked.length;
+  const gaps = [uncheckedClause(coverage), partialClause(coverage)].filter((clause) => clause !== null);
+  if (gaps.length === 0) return null;
+  const whole = coverage.filter(({ reported, asked }) => reported === asked).length;
   return { state: "UNKNOWN",
-    line: `fleet UNKNOWN — the environments agree ${across} on ${fields.compared.length} of ${total} `
-      + `fields, and ${missing} ${missing === 1 ? "was" : "were"} compared on NO guest: `
-      + `${fields.unchecked.join(", ")}. `
-      + `${readsAsAgreement}, so this is not a consistent fleet until the guests report it. Deploy them `
-      + "(`npm run fleet:deploy`), or take the field out of `MUST_MATCH`" };
+    line: `fleet UNKNOWN — the environments agree ${across} on ${whole} of ${coverage.length} `
+      + `fields. ${gaps.join(" ")}` };
+}
+
+/**
+ * #1997's clause: the fields asked of everybody and answered by nobody. `null` when there are none.
+ * @param {{ field: string, reported: number, asked: number }[]} coverage
+ * @returns {string | null}
+ */
+function uncheckedClause(coverage) {
+  const unchecked = coverage.filter(({ reported }) => reported === 0).map(({ field }) => field);
+  if (unchecked.length === 0) return null;
+  return `${unchecked.length} ${unchecked.length === 1 ? "was" : "were"} compared on NO guest: `
+    + `${unchecked.join(", ")}. ${READS_AS_AGREEMENT}, so this is not a consistent fleet until the guests `
+    + "report it. Deploy them (`npm run fleet:deploy`), or take the field out of `MUST_MATCH`";
+}
+
+/**
+ * #2019's clause: the fields SOME compared guests reported and others did not, each with `k of N`.
+ *
+ * NAMED WITH ITS COUNT, never counted. "1 field was partly reported" sends a reader back to this command;
+ * "displayMode: 1 of 10 reported it" tells them nine boxes owe an answer, which is the finding.
+ *
+ * @param {{ field: string, reported: number, asked: number }[]} coverage
+ * @returns {string | null}
+ */
+function partialClause(coverage) {
+  const partial = coverage.filter(({ reported, asked }) => reported > 0 && reported < asked);
+  if (partial.length === 0) return null;
+  const named = partial.map(({ field, reported, asked }) => `${field} (${reported} of ${asked} reported it)`);
+  return `${partial.length} ${partial.length === 1 ? "was" : "were"} reported by only SOME of the compared `
+    + `guests: ${named.join(", ")}. A guest that did not report the field and has drifted reads exactly `
+    + "like one that agrees, which is the guest axis' own rule (#920) one axis over, so this is not a "
+    + "consistent fleet until every compared guest reports it. Finish the converge "
+    + "(`npm run fleet:deploy`), or take the field out of `MUST_MATCH`";
 }
 
 /**
@@ -485,10 +530,41 @@ function fieldCoverageGap(fields, across) {
  * A caveat line under a CONSISTENT headline was the alternative, and it loses on the one thing that
  * matters here: the word is what a reader takes away, which is why #920 refused it as a substring.
  *
+ * **AND THE SAME CLASS A FIFTH TIME, AT A THRESHOLD RATHER THAN A ZERO -- #2019.** #1997 above ruled
+ * 0-of-10 and deliberately stopped there, so a field ONE guest of ten reported was still `compared` and
+ * the headline still read `these workers are interchangeable for capture` on the strength of that one
+ * reading. Nine guests' value was unknown; the tenth agreed with itself.
+ *
+ * **Ruling (`product-manager`, 2026-09-22): a `MUST_MATCH` field that any COMPARED guest does not report
+ * is `UNKNOWN`, with the field named and its reporter count.** The guest axis is already ruled -- #920's
+ * `UNKNOWN` is *"the compared agree, and some could not be compared"* -- and a field reported by 1 of 10
+ * guests is that sentence verbatim, one axis over. Two axes of one sentence must not get opposite
+ * verdicts.
+ *
+ * **The measured reason, because the next reader will meet the same "but rolling deploys" objection.**
+ * The objection prices this as every rolling deploy reading UNKNOWN for its whole duration, held for days
+ * behind a priced field decision (#1926). **This fleet does not roll.** `--serial=0`, all boxes at once,
+ * is the documented normal converge, and the reason is this same consistency check: `provisionRevision`
+ * is both a cache key and a `MUST_MATCH` field, so one box ahead of its peers already reads INCONSISTENT
+ * today -- *"a canary box is not a safety measure, it IS the failure mode"*. Measured 10 m 07 s across
+ * five boxes against 26 minutes serial (`docs/operational-lessons.md#fleetprovision---serial0-and-the-sre-workbook`),
+ * and `fleet:deploy` is likewise one play across the inventory. So the partial window is ONE CONVERGE
+ * RUN, not days, and the days-long case -- 0 of 10 -- is #1997's, already UNKNOWN. This adds minutes at
+ * the tail of a converge, not a new long-lived UNKNOWN. A partial coverage that OUTLIVES a converge is
+ * the finding, not the noise: either the run did not reach those boxes, or their probe for the field
+ * failed, which is #1953's own point that a stamp cannot fail closed on a thing it does not read.
+ *
+ * Answer 2 (a coverage line under a CONSISTENT word) was refused for the reason #920 already gave on the
+ * sibling axis, and answer 3 (report coverage only when a deploy does not explain it) for coupling this
+ * verdict to deploy state to buy nothing once the window is a single run -- `fleet SPLIT` over
+ * `status.codes` already prints that explanation as its own adjacent line, which is where it belongs.
+ *
  * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[],
  *           rows?: { name?: string, state?: string }[],
- *           fields?: { compared: string[], unchecked: string[] } }} input `rows` carries each box's
- *   `stateOf`, `fields` `fleetConsistency`'s field coverage. Neither has a default, for the same reason.
+ *           fields?: { compared: string[], unchecked: string[],
+ *                      coverage?: { field: string, reported: number, asked: number }[] } }} input `rows`
+ *   carries each box's `stateOf`, `fields` `fleetConsistency`'s field coverage. Neither has a default,
+ *   for the same reason, and nor does `fields.coverage` (#2019).
  * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
  */
 export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows, fields }) {
