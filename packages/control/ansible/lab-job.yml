@@ -88,6 +88,16 @@
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
     lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply]
+    # THE SHAPE OF AN `-e only=` VALUE, stated once because two jobs now take one. Ids are `[a-z0-9.+-]`
+    # and commas, so a path, a flag or a shell metacharacter is INEXPRESSIBLE rather than rejected — the
+    # containment `isValidCaptureId` uses, and the reason every parameter here is a name and not a path.
+    # A trailing `+` is how this corpus spells a whole family (`route-title-stale+`).
+    #
+    # A variable rather than the literal repeated in each assert: `capture-only` and `evidence-check` are
+    # validating the SAME parameter to the SAME shape, and this repo's record on a fact stated twice is
+    # that the copies drift. Each job keeps its own `fail_msg`, because what to do about a refusal is not
+    # the same in both.
+    lab_case_id_shape: '^[a-z0-9][a-z0-9.+-]{0,80}[+]?(,[a-z0-9][a-z0-9.+-]{0,80}[+]?)*$'
     # A parameter that reaches its command through a DERIVED FACT rather than by its own name. The
     # derivation below reads the job's own command, and a command saying `{{ lab_named_worker }}` cannot
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
@@ -989,8 +999,25 @@
                   '--worker=http://' ~ hostvars[worker].ansible_host ~ ':8765'] }}"
         timeout: 1800
 
+      # `-e only=<family>` NARROWS THE CHECK TO ONE FAMILY, and without it a targeted question could not
+      # be dispatched at all. `evidence-check.mjs` has read `--only=` since it was written
+      # (`c.family ?? c.id).includes(only)`), the same shape as `--only=` on
+      # `capture-screenreader-dataset.mjs`, which `capture-only` exposes — the capability existed here too
+      # and no job could reach it. Measured 2026-09-22 on #1908: its acceptance is ten reads of
+      # `--only=media-autoplay-audio`, and the only dispatchable form sampled 24 cases at random across
+      # the whole corpus, so the family the row asks about might not be in the sample at all. The
+      # alternative was a ten-iteration loop typed over `ssh root@<lab>`, which is exactly the shape
+      # ADR 0013 exists to forbid.
+      #
+      # OPTIONAL, unlike `capture-only`'s, and the difference is what an empty value costs. An unnarrowed
+      # `capture-only` captures the WHOLE corpus — the four hours that job exists to avoid — while an
+      # unnarrowed `evidence-check` is the corpus-wide read this job has always been, and the one every
+      # existing caller wants. So the omitted case is the default here and a refusal there.
+      #
+      # Contained by the SAME shape as `capture-only`'s, `lab_case_id_shape`, for the same reason: it
+      # reaches an argv list and never a shell, but the value comes from the wire.
       evidence-check:
-        params: {sample: optional}
+        params: {sample: optional, only: optional}
         # ITS EXIT CODE IS THE ANSWER, not just a status: 0 safe to ship, 1 the evidence CHANGED so a
         # recapture is required, 2 it could not answer. All three are successful runs of the check; only a
         # crash is a failure. They stay non-zero-is-failure deliberately — 1 means "invalidate 2,122
@@ -1003,9 +1030,15 @@
           "2": >-
             INCONCLUSIVE — it could not compare enough captures to answer, which includes PARTIAL
             coverage and not only zero. Re-run it; do not read this as "unchanged".
+        # The `--only=` entry is APPENDED OR ABSENT, never rendered empty. `evidence-check.mjs` reads
+        # `flag("only", null)` and treats a falsy value as "no filter", so `--only=` would happen to work
+        # today — but that is a property of the script's current falsiness, not of this interface, and the
+        # list form says what is meant. `is defined` is also the spelling `lab-job.test.ts` derives
+        # OPTIONAL from, which is what keeps `params:` above and this argv from disagreeing.
         argv: "{{ [lab_tsx, 'packages/lab/scripts/evidence-check.mjs']
                   + (lab_fleet_workers | split(','))
-                  + ['--sample=' ~ (sample | default(24) | int)] }}"
+                  + ['--sample=' ~ (sample | default(24) | int)]
+                  + (['--only=' ~ only] if only is defined else []) }}"
         timeout: 7200
 
   tasks:
@@ -1139,7 +1172,7 @@
       ansible.builtin.assert:
         that:
           - only is defined
-          - only is match('^[a-z0-9][a-z0-9.+-]{0,80}[+]?(,[a-z0-9][a-z0-9.+-]{0,80}[+]?)*$')
+          - only is match(lab_case_id_shape)
         fail_msg: >-
           capture-only needs -e only=<case-id> or a comma-separated list, e.g.
           -e only=route-title-stale+ for a whole family, or -e only=<exact-id> for one case. Ids only. Paste what
@@ -1217,14 +1250,20 @@
           Refusing to run: A11Y_WORKER would be {{ lab_named_worker | truncate(80) }}, which is not a worker
           address. Something has overridden the inventory.
 
-    - name: An evidence check names one worker, and a sample size that is a number
+    # `only` is OPTIONAL here, so the shape is asserted only when one was supplied — `only is not defined`
+    # is the corpus-wide read every existing caller already gets, not a missing argument. The same shape as
+    # `capture-only`'s above, from the same variable.
+    - name: An evidence check names a sample size that is a number, and a family that is a name
       when: job == 'evidence-check'
       ansible.builtin.assert:
         that:
           - (sample | default(24)) | int > 0
           - (sample | default(24)) | int <= 200
+          - only is not defined or only is match(lab_case_id_shape)
         fail_msg: >-
-          evidence-check takes optionally -e sample=<1..200>. It no longer names a worker: it runs across the
+          evidence-check takes optionally -e sample=<1..200> and -e only=<family-or-case-id>, e.g.
+          -e only=media-autoplay-audio to read one family rather than a sample across the whole corpus.
+          Ids only, never a path. It no longer names a worker: it runs across the
           whole fleet from the inventory, which is asserted to be an address list before it is used.
 
     # BUILT HERE, from the inventory, and then asserted — not interpolated straight into the env.
