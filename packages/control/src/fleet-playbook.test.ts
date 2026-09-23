@@ -17,7 +17,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
+import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+  displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
@@ -1187,4 +1188,120 @@ test("#1875: a failure nobody classified (an unreadable token file, an injected 
     "an unreadable file exists, so the refusal keeps gh's reason rather than calling it missing");
   assert.equal(tokenSetOf(Object.assign(new Error("x"), { tokenSet: false })), false);
   assert.equal(tokenSetOf(null), true);
+});
+
+test("#1955: --display-mode is a flag the guard knows, or refuseUnknownFlags kills the run before ansible", () => {
+  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8");
+  assert.match(source, /"--display-mode="/,
+    "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
+});
+
+test("#1955: a display mode is <width>x<height> and digits only -- the shape that makes the -e safe to build", () => {
+  for (const bad of ["1024", "1024x", "x768", "1024*768", "1024 x 768", "10x10", "12345x768",
+    "1024x768;reboot", "$(id)x768", "1024x768'"]) {
+    assert.match(displayModeRefusal({ chosen: "provision-role.yml", limitFlag: "a11y-worker-2",
+      displayMode: bad }) ?? "", /^refusing --display-mode=/, bad);
+  }
+  for (const good of ["800x600", "1024x768", "640x480", "1920x1080", "100x100", "9999x9999"]) {
+    assert.match(good, DISPLAY_MODE_PATTERN, good);
+  }
+});
+
+test("#1955: only provision-role.yml pins the display, so --display-mode on any other playbook refuses", () => {
+  for (const chosen of PLAYBOOKS.filter((name) => name !== "provision-role.yml")) {
+    assert.match(displayModeRefusal({ chosen, limitFlag: "a11y-worker-2", displayMode: "800x600" }) ?? "",
+      /only provision-role\.yml pins the display/, chosen);
+  }
+});
+
+test("#1955: --display-mode refuses anything but ONE worker, because displayMode is a MUST_MATCH field", () => {
+  for (const limitFlag of [undefined, "a11y_workers", "a11y-worker-2,a11y-worker-3", "", "a11y-worker-"]) {
+    const refusal = displayModeRefusal({ chosen: "provision-role.yml", limitFlag, displayMode: "800x600" }) ?? "";
+    assert.match(refusal, /refusing --display-mode without --limit=<one worker>/, String(limitFlag));
+    assert.match(refusal, /MUST_MATCH/, String(limitFlag));
+  }
+});
+
+test("#1955 CONTROL: the one combination this flag exists to allow is allowed", () => {
+  // The positive control for the three refusals above. Without it they prove only that the guard says no,
+  // never that the operator has a way through -- which is the state this row is about: a mode task no
+  // shipped command could reach.
+  assert.equal(displayModeRefusal({ chosen: "provision-role.yml", limitFlag: "a11y-worker-2",
+    displayMode: "800x600" }), null);
+  assert.equal(displayModeRefusal({ chosen: "provision-role.yml", limitFlag: "a11y-worker-11",
+    displayMode: "640x480" }), null);
+  // And an operator who names no mode is not refused anything: every other fleet:provision run is unchanged.
+  assert.equal(displayModeRefusal({ chosen: "provision-role.yml", limitFlag: undefined,
+    displayMode: undefined }), null);
+  assert.equal(displayModeRefusal({ chosen: "deploy.yml", limitFlag: undefined, displayMode: undefined }), null);
+});
+
+test("#1955: the forwarded -e is the DICT display.yml reads, single-quoted against the remote shell", () => {
+  assert.equal(displayModeExtraVars("800x600"),
+    ` -e '{"worker_display_mode":{"width":800,"height":600}}'`);
+  assert.equal(displayModeExtraVars("1024x768"),
+    ` -e '{"worker_display_mode":{"width":1024,"height":768}}'`);
+  // No flag, nothing forwarded -- so the default in defaults/main.yml still decides, as it does today.
+  assert.equal(displayModeExtraVars(undefined), "");
+  // A value that never passed the refusal must not be able to emit anything at all, which is what keeps
+  // the quoting claim true even if a caller ever reaches this function without the guard.
+  assert.equal(displayModeExtraVars("1024x768'; rm -rf /"), "");
+  assert.equal(displayModeExtraVars("$(id)x768"), "");
+});
+
+test("#1955: display.yml reads the very keys that -e writes, so the dict cannot drift from its consumer", () => {
+  const play = readFileSync(
+    fileURLToPath(new URL("../ansible/roles/worker/tasks/display.yml", import.meta.url)), "utf8");
+  // The pin is cross-file on purpose: `displayModeExtraVars` names `worker_display_mode.width`/`.height`
+  // by writing a dict with those keys, and nothing else would notice if the role renamed either one --
+  // the flag would forward a var no task reads and every run would silently take the default again,
+  // which is the exact failure this row exists to end.
+  assert.match(play, /worker_display_mode\.width/);
+  assert.match(play, /worker_display_mode\.height/);
+  const emitted = displayModeExtraVars("800x600");
+  for (const key of ["width", "height"]) {
+    assert.ok(emitted.includes(`"${key}":`), `${key} must be in the forwarded dict: ${emitted}`);
+    assert.match(play, new RegExp(`worker_display_mode\\.${key}`));
+  }
+});
+
+/**
+ * The text of the ONE `ssh(...)` call that builds ansible's argv, so an assertion about forwarding cannot
+ * be satisfied by the same tokens appearing in a comment, an export or a test helper elsewhere in the file.
+ *
+ * A REGION AND NOT THE WHOLE FILE, and that is the entire reason this helper exists. `displayModeExtraVars`
+ * is a pure exported function with its own tests, so every one of them passes while the dispatch never
+ * calls it -- which is `--allow-edge-downgrade`'s original defect (#1955's own Region note: the obvious
+ * spelling "silently did nothing") reproduced one level up. Measured while writing this: deleting
+ * `+ displayModeExtraVars(displayMode)` from the argv builder left all seven other #1955 tests green.
+ */
+function argvBuilderSource() {
+  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
+  const start = source.indexOf("systemd-run --unit=");
+  const end = source.indexOf("{ timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen]", start);
+  assert.ok(start > 0 && end > start,
+    "could not find the argv builder -- this helper's anchors have drifted from the code, and every "
+    + "assertion using it would pass or fail for the wrong reason");
+  return source.slice(start, end);
+}
+
+test("#1955: the argv builder CALLS displayModeExtraVars -- a forwarded flag nobody forwards is the defect", () => {
+  const argv = argvBuilderSource();
+  assert.match(argv, /\+ displayModeExtraVars\(displayMode\)/,
+    "--display-mode is parsed, validated and refused correctly, and then not passed to ansible: the "
+    + "operator is told the flag was accepted and the role still reads its default");
+});
+
+test("#1955 CONTROL: the argv region really is the argv, not an empty slice", () => {
+  // Without this, `argvBuilderSource()` narrowing to nothing would make the assertion above unfalsifiable
+  // in the passing direction -- and a region that matched nothing would be the quietest way to lose it.
+  const argv = argvBuilderSource();
+  // Shorter than this and the slice is not an argv builder: the real one is several hundred characters of
+  // `-e` fragments, so a region that has collapsed to a line or two has lost its anchors.
+  const SHORTEST_CREDIBLE_ARGV = 200;
+  assert.ok(argv.length > SHORTEST_CREDIBLE_ARGV,
+    `the argv region is ${argv.length} chars, which is not an argv builder`);
+  // Two neighbours this row did not add, so the region is pinned by code that was already here.
+  assert.match(argv, /-e a11y_git_ref=\$\{ref\}/);
+  assert.match(argv, /\+ \(allowEdgeDowngrade \? " -e worker_edge_allow_downgrade=true" : ""\)/);
 });
