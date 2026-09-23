@@ -45,6 +45,19 @@
 # but the read never ruled it out either, and "probably doesn't apply" is not a justification for treating
 # 17/18 the same as 2/14 when the failure mode is a machine nobody can walk over to.
 #
+# ## #2065, 2026-09-23: THE EXIT CODE NAMES THE DANGEROUS OUTCOMES; THE ADAPTER READ GIVES THE VERDICT
+#
+# The paragraph above is unchanged and still load-bearing. What changed is everything it does NOT name.
+# `failed_when` read `rc not in [0, 2, 14]`, which spelt UNDOCUMENTED and FAILED the same word -- so a code
+# nobody has decoded ended the play on that host, and the two tasks below the install (the adapter proof,
+# and the mode pin) never ran on the one host whose outcome was actually in question. Live on the fleet
+# the installer returned `rc 1014` on all five of a11y-worker-7..11 and all five were recorded as failed;
+# `orchestrator`'s read on 2026-09-23T07:46Z found every one of them on `Intel Corporation 31.0.101.2141`
+# with `CM_PROB_NONE`, which is what the proof task would have said eleven hours earlier had it been
+# allowed to run. So the `failed_when` now names the codes that are DANGEROUS (17/18) rather than the ones
+# that are blessed, an undocumented code is reported by name and by number, and the MEASUREMENT below
+# decides. A declaration may open a question here; only a reading closes one.
+#
 # ## Why this runs through `run-interactive.yml`, not a direct `win_powershell` task
 #
 # It used to be a `win_powershell` task here, run straight over the SSH connection like the rest of this
@@ -182,8 +195,30 @@
   ansible.windows.win_command: >-
     {{ worker_display_driver_path }} -s --report C:\Windows\Temp\IntelGFX-install-{{ worker_display_driver_version }}.log
   register: display_driver_install
-  failed_when: display_driver_install.rc not in [0, 2, 14]
+  # UNDOCUMENTED IS UNKNOWN, AND UNKNOWN IS NOT FAILED (#2065). This read `rc not in [0, 2, 14]` until
+  # 2026-09-23, so any code the readme does not list removed the host from the play right here -- taking
+  # the adapter proof below with it, which is the ONE task that could say what the install achieved.
+  # Live on the fleet 2026-09-22/23 the installer returned `rc 1014` on all five of a11y-worker-7..11,
+  # a code section VIII does not document, and the five were called failed while being the only hosts
+  # whose outcome nobody had measured. They were on the Intel driver (orchestrator's read, #1567
+  # 2026-09-23T07:46Z: `Intel Corporation 31.0.101.2141`, `CM_PROB_NONE`, all five).
+  # So this names the codes that are known to be DANGEROUS and lets everything else reach the
+  # measurement. 17/18 keep failing here, before any reboot handling, for the reason the header gives.
+  failed_when: display_driver_install.rc in [17, 18]
   changed_when: true
+
+- name: An exit code nobody has decoded is UNKNOWN, and is said out loud rather than folded into success
+  # Deliberately NOT a failure and deliberately NOT silent. A code outside the readme's set is a fact
+  # about this run that the adapter read below is about to settle; it is named here so the play's own
+  # output carries the number even when the read that follows comes back clean. Folding it in with 0/2/14
+  # would be the defect this task exists against -- two outcomes printing the same word.
+  when: not display_driver_ok and display_driver_install.rc not in [0, 2, 14, 17, 18]
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: the display driver installer exited {{ display_driver_install.rc }},
+      which installation_readme.txt section VIII does not document — UNDOCUMENTED, so this run does not
+      know whether it succeeded. The adapter read below decides, and no reboot is performed for a code
+      whose meaning nobody has decoded.
 
 - name: Reboot if the install asked for a software-controlled restart
   when: not display_driver_ok and display_driver_install.rc in [2, 14]
@@ -192,6 +227,11 @@
     reboot_timeout: 600
 
 - name: Refuse to call this provisioned unless the adapter reads clean afterwards
+  # THIS IS THE VERDICT, AND ITS `when:` MUST NEVER NAME `display_driver_install` (#2065). It is gated on
+  # one thing only -- whether the driver half touched this host at all -- so every host that got an
+  # install gets measured, whatever number the installer exited with. Gating a measurement behind the
+  # claim it is meant to check leaves the claim unchecked, which is exactly what `rc 1014` bought on five
+  # workers: called failed by a declaration, never read.
   when: not display_driver_ok
   become: true
   ansible.windows.win_powershell:
