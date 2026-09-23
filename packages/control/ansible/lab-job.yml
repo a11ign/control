@@ -956,7 +956,16 @@
         exitMeanings:
           "1": >-
             the last backup is not readable at the destination, or no destination is configured. An
-            unverified backup is a belief; a backup that fails THIS is a copy you cannot restore.
+            unverified backup is a belief; a backup that fails THIS is a copy you cannot restore. Those
+            two are not the same finding and this message is the only thing that tells them apart: "not
+            readable" is a backup you cannot restore, "no destination" is a decision nobody made --
+            `A11Y_CORPUS_REMOTE` is unset on the lab and the org settled it the other way, so it means
+            THIS route has nowhere to look, not that the corpus is unprotected. `npm run corpus:release`
+            (GitHub Releases on the private `a11ign/corpus-backups`, verified by downloading what it
+            published) is the route that actually holds the corpus, and it verifies its own copy -- the
+            same reason `corpus-backup`'s gloss above names it (#1042). Two hand-dispatches of this job
+            against an unconfigured destination, 2026-09-10 and 2026-09-12, left a `failed` unit that
+            read as a broken backup for eleven days (#2061).
         argv: ["/usr/bin/npm", "run", "corpus:backup", "--", "--verify-only"]
         timeout: 1800
       capture-check:
