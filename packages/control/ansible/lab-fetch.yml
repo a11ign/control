@@ -136,6 +136,19 @@
       # cached captures may be kept: its answer costs ~4 h of fleet time either way, so "changed" without
       # "changed how" is the difference between a triage and a guess.
       evidence-check: "runs/screenreader-dataset/evidence-check/report.json"
+      # #2122: THE RUN THAT JUST FINISHED, under its own name, which `report.json` cannot tell you.
+      #
+      # `report.json` is a single fixed path, so run N+1 overwrote run N and a repeated-read protocol --
+      # the shape this repo uses to decide DRIFT versus SAME -- left an artefact for its LAST read only.
+      # #1908's acceptance was ten reads; nine of them existed solely in `a11y-lab`'s journal, which
+      # rotates, and the only durable copy was prose a session typed into a comment.
+      #
+      # The entry above STAYS AS IT IS and goes on naming the latest: it is the only fetch entry this tool
+      # has, and a rename is the failure #968 already recorded once for this same file. This is the
+      # additional one. Globbed, so `find` on the LAB resolves the newest rather than this file predicting
+      # a timestamp and a pid -- and the "from <path> on the lab" line the fetch prints is then the only
+      # place a reader outside the lab learns WHICH run they are holding.
+      evidence-check-run: "runs/screenreader-dataset/evidence-check/runs/*.json"
       # THE REAL-PAGE BASELINE, which `rules-real-pages-update` writes and which is TRACKED — so accepting
       # a finding on the lab dirties the checkout and blocks every later job until it is committed here.
       # It was not fetchable, so the only route back was to re-derive it locally from a `runs/` copy that
