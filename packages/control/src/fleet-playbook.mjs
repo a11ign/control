@@ -106,7 +106,7 @@ export { inventorySources, inventoryReadScript, parseInventoryReads };
  */
 refuseUnknownFlags(
   ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply",
-    "--allow-offline=", "--allow-hold="],
+    "--allow-offline=", "--allow-hold=", "--display-mode="],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
@@ -202,6 +202,77 @@ function osRollbackRefusal({ chosen, limitFlag, apply }) {
       + `and "${limitFlag ?? "(no --limit, i.e. the whole fleet)"}" is not one worker.`;
   }
   return null;
+}
+
+/**
+ * A display mode as `<width>x<height>`, digits only.
+ *
+ * 3-4 digits each, so 100x100 is the smallest expressible mode and 9999x9999 the largest. Not because
+ * anything here knows the adapter's capabilities -- `ChangeDisplaySettingsEx` decides that and returns
+ * `DISP_CHANGE_BADMODE` when it disagrees -- but because a value outside that range is a typo rather than
+ * a mode, and this one reaches a shell on the box holding the fleet SSH key. DIGITS ONLY is what makes
+ * `displayModeExtraVars` safe to build by interpolation: a value that matches this cannot carry a quote,
+ * a brace or a space.
+ */
+const DISPLAY_MODE_PATTERN = /^([0-9]{3,4})x([0-9]{3,4})$/;
+
+/**
+ * THE ONLY WAY TO DRIVE THE FLEET OFF ITS PINNED MODE, AND IT IS DELIBERATELY HARD TO POINT AT THE FLEET.
+ *
+ * #1955 done-when 3 cannot be read without this flag. `display.yml`'s mode task takes
+ * `worker_display_mode` from `defaults/main.yml` (1024x768), so every run so far has asked for the mode
+ * the box was already on and taken the `already 1024 x 768` early return -- `ChangeDisplaySettingsEx` has
+ * never executed on this fleet, and "the mode step passes" has been a reading of a no-op on 10 of 10
+ * (2026-09-23T08:15-08:21Z). Reading whether the task can RECOVER a mode means first putting a box on a
+ * different one.
+ *
+ * `-e worker_display_mode=...` typed on this command does nothing -- `refuseUnknownFlags` now says so
+ * rather than ignoring it, and this wrapper builds ansible's argv itself. So this is a NAMED flag
+ * forwarded as one `-e`, the shape `--allow-edge-downgrade` already established here.
+ *
+ * ONE WORKER, ALWAYS, and this is the load-bearing refusal rather than a courtesy. `displayMode` is a
+ * `MUST_MATCH` field (#1953): a fleet-wide off-pin mode makes every box INCONSISTENT with every capture
+ * taken before it, and the corpus cannot tell a deliberate probe from a drifted worker. `os-rollback.yml`
+ * and `recover.yml` earned the same `--limit=<one worker>` guard for destructive reasons; this one earns
+ * it for an evidential reason that is just as unrecoverable -- a wrong mode is not undone by setting the
+ * mode back, because the captures taken meanwhile carry it.
+ *
+ * @param {{ chosen: string, limitFlag: string | undefined, displayMode: string | undefined }} args
+ * @returns {string | null} the refusal to print, or null when there is nothing to refuse
+ */
+function displayModeRefusal({ chosen, limitFlag, displayMode }) {
+  if (displayMode === undefined) return null;
+  if (!DISPLAY_MODE_PATTERN.test(displayMode)) {
+    return `refusing --display-mode=${displayMode}: <width>x<height>, digits only, e.g. 800x600.`;
+  }
+  if (chosen !== "provision-role.yml") {
+    return `refusing --display-mode with --playbook=${chosen}: only provision-role.yml pins the display. `
+      + "Use `npm run fleet:provision -- --display-mode=800x600 --limit=a11y-worker-2`.";
+  }
+  if (!ONE_WORKER.test(limitFlag ?? "")) {
+    return "refusing --display-mode without --limit=<one worker>: displayMode is a MUST_MATCH field, so an "
+      + "off-pin mode across the fleet makes every worker inconsistent with every capture already taken, "
+      + `and "${limitFlag ?? "(no --limit, i.e. the whole fleet)"}" is not one worker.`;
+  }
+  return null;
+}
+
+/**
+ * The one `-e` that carries an operator's `--display-mode`, or the empty string when none was given.
+ *
+ * A JSON `-e`, not `key=value`, because `worker_display_mode` is a DICT -- `display.yml` reads
+ * `worker_display_mode.width` and `.height` -- and ansible has no command-line spelling for one key of a
+ * dict. Single-quoted because this string is assembled into a command that a REMOTE shell parses; the
+ * JSON's braces and double quotes are inert inside single quotes, and `DISPLAY_MODE_PATTERN` has already
+ * guaranteed the interpolated halves are digits, so no value reaching here can close that quote.
+ *
+ * @param {string | undefined} displayMode a value that has passed `displayModeRefusal`
+ * @returns {string} the argv fragment, leading space included, or ""
+ */
+function displayModeExtraVars(displayMode) {
+  const match = DISPLAY_MODE_PATTERN.exec(displayMode ?? "");
+  if (!match) return "";
+  return ` -e '{"worker_display_mode":{"width":${match[1]},"height":${match[2]}}}'`;
 }
 
 /**
@@ -498,7 +569,7 @@ const argOf = (/** @type {string} */ name) => flagValue(process.argv, name);
  * these refusals exists because the value reaches a shell on the box holding the fleet SSH key.
  *
  * @returns {{chosen: string, limitFlag: string|undefined, serialFlag: string|undefined, ref: string,
- *            allowEdgeDowngrade: boolean, apply: boolean}}
+ *            allowEdgeDowngrade: boolean, apply: boolean, displayMode: string|undefined}}
  */
 function parseArgs() {
   const refuse = (/** @type {string} */ message) => {
@@ -537,10 +608,15 @@ function parseArgs() {
   const apply = process.argv.includes("--apply");
   const osRefusal = osRollbackRefusal({ chosen, limitFlag, apply });
   if (osRefusal) refuse(osRefusal);
+  // Every refusal this flag needs lives in one place, so the shape check, the playbook check and the
+  // one-worker check cannot drift apart or be reached in a different order from the test's.
+  const displayMode = argOf("display-mode");
+  const displayModeIssue = displayModeRefusal({ chosen, limitFlag, displayMode });
+  if (displayModeIssue) refuse(displayModeIssue);
   const ref = argOf("ref") ?? localBranch();
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
 
-  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode };
 }
 
 /**
@@ -685,10 +761,12 @@ function runBootstrapFromHere(chosen) {
  * arguments rather than raise the ceiling. These seven are one thing: what to deploy and how.
  *
  * @param {{ chosen: string, ref: string, expected: string, limitFlag: string|undefined,
- *           serialFlag: string|undefined, allowEdgeDowngrade: boolean, apply: boolean }} spec
+ *           serialFlag: string|undefined, allowEdgeDowngrade: boolean, apply: boolean,
+ *           displayMode: string|undefined }} spec
  * @returns {string} the unit name
  */
-function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply }) {
+function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+  displayMode }) {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -746,6 +824,10 @@ try {
     // fleet was provisioned believing an authorisation had been given that never arrived. Both halves
     // are fixed; this is the half that gives the operator something real to type.
     + (allowEdgeDowngrade ? " -e worker_edge_allow_downgrade=true" : "")
+    // The same NAMED-flag shape as the line above, for the same reason: `-e worker_display_mode=...`
+    // typed here is not forwarded. This one is a dict rather than a scalar, so it goes as JSON --
+    // `displayModeExtraVars` holds the quoting and the why.
+    + displayModeExtraVars(displayMode)
     + (apply ? " -e a11y_os_rollback_apply=true" : ""),
   { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
 } catch (cause) {
@@ -1416,7 +1498,7 @@ async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
-  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply } = parseArgs();
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode } = parseArgs();
   await guardProtocolChange(chosen);
   await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen);
@@ -1465,7 +1547,8 @@ async function main() {
   // whole command line and whose stack is node's internals, which buries "which box failed" under twelve
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
-  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply });
+  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+    displayMode });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
     + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`
@@ -1608,5 +1691,6 @@ async function followUnit(unit, budgetMs) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
 
-export { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, PLAYBOOK_TIMEOUT_MS,
+export { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+  displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS,
   DEFAULT_PLAYBOOK_TIMEOUT_MS, onTheControlPlane, journalScope, osRollbackRefusal };
