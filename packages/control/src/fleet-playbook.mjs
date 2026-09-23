@@ -57,6 +57,10 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
+// #2027: THE `Fleet-hold-until:` READER IS A WAITING CONDITION, so it lives with the other three rather
+// than here -- see the re-export below for what that cost while it did not. Relative and leaf-shaped, so
+// ADR 0012's no-`npm install` property is unchanged.
+import { fleetHoldUntil } from "../../agent-org/src/waiting-condition.mjs";
 // RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -1129,39 +1133,22 @@ async function enforceLinkGate(chosen) {
  */
 
 /**
- * The `Fleet-hold-until:` line, or `null` -- same grammar as `notBeforeDate` (`waiting-condition.mjs`):
- * an optional `#{0,6}` heading prefix, because this row's own convention already writes `Not-before:` and
- * `Acceptance:` both bare and under a `## ` heading, and a bare-line-only regex would silently read a
- * headed one as absent (#1822's exact shape, one field over).
+ * THE READER MOVED TO `waiting-condition.mjs` (#2027), AND THE MOVE IS THE FIX RATHER THAN TIDYING.
  *
- * SECONDS REQUIRED, not optional. A `Not-before:` date is always ten characters, so lexical comparison
- * is chronological comparison for free -- a timestamp is not: `T10:30Z` sorts AFTER `T10:30:15Z`
- * lexically (`Z` > `:`), which would read a later-declared, earlier-expiring hold as still live. Fixing
- * that by comparing PARSED time (`activeFleetHolds` below) removes the trap either way; requiring
- * seconds here as well means a malformed field is refused as a whole rather than half-parsed.
+ * The comment above calls this "the fourth" waiting condition, and it was declared here -- so the module
+ * that promises to be the ONE reader of "is this row waiting on something" could not read it, and the
+ * work gate's fleet batch dispatched rows that were holding the fleet. That is #2005's defect exactly,
+ * one field over: a condition spelled in its consumer is invisible to every other consumer.
  *
- * A MALFORMED TIMESTAMP IS NOT A HOLD -- it fails OPEN, matching `notBeforeDate`'s own rule for a
- * malformed date: a typo must leave the row visible to a human, never hide a live sequence silently.
+ * RE-EXPORTED, NOT RELOCATED FROM THE CALLER'S POINT OF VIEW: `activeFleetHolds` below, this package's
+ * own tests and `fleet:deploy`/`fleet:provision` all keep importing `fleetHoldUntil` from here.
  *
- * DIGIT-SHAPED IS NOT CALENDAR-VALID, and `Date.parse` silently ROLLS OVER a date that does not exist
- * rather than refusing it -- `2026-02-31T04:00:00Z` parses to 2026-03-03, three days later than typed.
- * That is the wrong direction of error for a HOLD: a typo would silently EXTEND a live sequence's window
- * rather than failing open the way this function's own rule requires. So the matched text is round-
- * tripped through `Date` and compared back against itself; a date `Date` had to repair is refused, not
- * silently accepted with a different meaning than its author typed (reviewer, #1841).
- *
- * @param {string | null | undefined} body
- * @returns {string | null}
+ * A RELATIVE IMPORT, WHICH IS THE ONLY KIND THIS PACKAGE MAY HAVE -- ADR 0012's control plane runs from a
+ * raw git checkout with no `npm install`, and `control-has-no-dependencies.test.ts` walks this graph
+ * transitively to prove it. `waiting-condition.mjs` imports NOTHING AT ALL, so the walk gains one pure
+ * leaf and no surface beside the key.
  */
-export function fleetHoldUntil(body) {
-  const m = /^[ \t]*#{0,6}[ \t]*Fleet-hold-until:[ \t]*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)[ \t]*$/im
-    .exec(String(body ?? ""));
-  if (!m) return null;
-  const candidate = m[1];
-  const parsed = new Date(candidate);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return parsed.toISOString().slice(0, 19) === candidate.slice(0, 19) ? candidate : null;
-}
+export { fleetHoldUntil };
 
 /**
  * Every row still holding the fleet, RIGHT NOW -- pure, over issues the caller has already scoped to
