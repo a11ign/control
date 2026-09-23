@@ -8,9 +8,17 @@
  * ## Why this exists
  *
  * The request that started this was "switch to webhooks instead of polling for status". The efficiency
- * half of that premise does not survive measurement — a full 1,061-case corpus run makes ~3,192 worker
- * requests in four hours, two thirds of which are the captures themselves — but the half underneath it
- * is exactly right: **you cannot see what your boxes are doing.** `capture-status.mjs` prints one
+ * half of that premise does not survive measurement — a full corpus run makes about THREE worker requests
+ * per case, two of them the captures themselves — but the half underneath it is exactly right:
+ * **you cannot see what your boxes are doing.**
+ *
+ * The RATE is what this comment states, because the rate is the durable part. It used to quote the
+ * PRODUCT, "~3,192 worker requests in four hours", and that was the rate times a 1,061-case corpus
+ * (2026-07-26) on a three-worker fleet; both inputs moved and the product went stale without the sentence
+ * looking wrong (#2155). Three per case is recovered from that figure rather than newly measured —
+ * 3,192/1,061 is 3.01, and its own "two thirds are the captures" is 2,122/3,192. At the manifest's
+ * 1,715 cases, read 2026-09-23T14:26Z, three per case is ~5,100 requests; the wall-clock is not
+ * re-derived here at all, because the fleet's size is not something this file can read. `capture-status.mjs` prints one
  * `worker:` line and probes that one worker, even for a twelve-machine pool.
  *
  * So: this IS polling, and calling it anything else would be dishonest. What makes it cheap is that it
