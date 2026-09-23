@@ -553,7 +553,12 @@ test("#1997: the UNKNOWN line names the deploy that closes it, and its denominat
     },
   });
   assert.equal(state, "UNKNOWN");
-  assert.match(line, /9 of 10 fields/, "the FIELD denominator, beside the guest one -- #920's shape, one axis over");
+  // DERIVED, like the fixture three lines up -- #1561. The fixture is `MUST_MATCH.slice(1)` against
+  // `MUST_MATCH[0]`, so it already grows with the list; this denominator was typed out as `9 of 10` and so
+  // did not, and adding an eleventh field turned a passing assertion red for a reason unconnected to what
+  // it is about. Re-typing the new number would rebuild the same trap one field later.
+  assert.match(line, new RegExp(`${MUST_MATCH.length - 1} of ${MUST_MATCH.length} fields`),
+    "the FIELD denominator, beside the guest one -- #920's shape, one axis over");
   assert.match(line, /fleet:deploy/);
 });
 
