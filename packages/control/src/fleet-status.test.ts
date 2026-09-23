@@ -7,7 +7,8 @@ import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe } from "./fleet-status.mjs";
-import { fleetConsistency, MUST_MATCH } from "../../worker-fleet/src/fleet-consistency.mjs";
+import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
+  from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -382,7 +383,16 @@ test("the deprecated `consistent` field carries the CORRECTED answer, never the 
 // field this compares -- `windows`, `arch`, `nvda` and `edge` are not `MUST_MATCH` paths, so these guests
 // reported 1 of 10 fields and the verdict below still read CONSISTENT. #1997's fix turns that into
 // UNKNOWN, which is how a fixture that had been describing a fleet nobody could compare was found.
-const ENVIRONMENT = Object.fromEntries(MUST_MATCH.map(({ path }) => [path, `same-${path}`]));
+// EVERY COMPARED FIELD, FROM BOTH CHANNELS, DERIVED. A hand-written list is what silently decays --
+// `capture-fleet-guard.test.ts` records its own version of this, where the six fields that existed the
+// day it was typed turned every fixture in the file into a coverage gap nothing noticed. Deriving means
+// a field added tomorrow joins these fixtures on its own.
+//
+// `REPORTED_ONLY` is in here for a sharper reason than symmetry (#2063): a fixture that omitted those
+// fields would make EVERY case in this file read as a fleet with a reported-only gap, so every verdict
+// line would carry a drift clause and each case would quietly stop being about its own subject.
+const ENVIRONMENT = Object.fromEntries(
+  [...MUST_MATCH, ...REPORTED_ONLY].map(({ path }) => [path, `same-${path}`]));
 
 /** A probe as `probeWorker` returns one, with only the readiness dial to turn. */
 const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreachable") =>
@@ -930,4 +940,100 @@ test("#1356: A11Y_WORKER(S) still wins first, and never even calls the control p
   } finally {
     if (saved === undefined) delete process.env.A11Y_WORKERS; else process.env.A11Y_WORKERS = saved;
   }
+});
+
+// --- #2063: THE REPORTED-ONLY CHANNEL, ON THE LINE A READER SEES ---
+
+test("#2063: THE PAIR -- the headline over a nodeVersion split no longer claims interchangeability", async () => {
+  // Measured on the live fleet 2026-09-23T06:55Z: workers 2-6 on v24.19.0, workers 7-11 on v24.20.0, and
+  // every other reported field identical across all ten. `npm run fleet:status` printed `fleet CONSISTENT
+  // across 10 of 10 -- these workers are interchangeable for capture` over that split, because the field
+  // it differed on was in no list `fleet-consistency` had.
+  //
+  // DRIVEN THROUGH THE REAL `fleetStatus`, which is #1029's lesson and #1997's: the halves of this were
+  // computed in `fleetStatus` and had to CROSS to the verdict, so a case that drove only the pure
+  // function would hold the function and leave the crossing unheld.
+  const split = await driveFleet(["ready", "ready", "ready", "ready"],
+    (index) => ({ ...ENVIRONMENT, nodeVersion: index < 2 ? "v24.19.0" : "v24.20.0" }));
+  const agreed = await driveFleet(["ready", "ready", "ready", "ready"]);
+
+  assert.match(agreed.verdict.line, /^fleet CONSISTENT across 4 of 4 — these workers are interchangeable/,
+    "THE CONTROL: a fleet that agrees on every field still gets the plain sentence, so the rewrite below "
+    + "is a reading of the guests rather than a line that always hedges");
+  assert.doesNotMatch(split.verdict.line, /these workers are interchangeable for capture/,
+    "not even as a substring -- #920's rule, because the word is what a reader takes away, and a caveat "
+    + "appended after that clause leaves the claim in place");
+  assert.match(split.verdict.line, /nodeVersion: .*v24\.19\.0.*v24\.20\.0/,
+    "NAMED with each guest's value: the drift is on the line, not merely counted on it");
+  assert.match(split.verdict.line,
+    /nodeVersion: a11y-worker-2=v24\.19\.0 a11y-worker-3=v24\.19\.0 a11y-worker-4=v24\.20\.0 a11y-worker-5=v24\.20\.0/,
+    "and LOCATED, every box of the four -- which box is on which build IS the remedy, and a line naming "
+    + "only the two distinct VALUES would report drift without locating it");
+});
+
+test("#2063: THE RULING -- a reported-only split does NOT move the state", async () => {
+  // `ceo`, 2026-09-23: report it, pin provisioning, and only then may it gate (#2170). `fieldCoverageGap`
+  // turning the headline UNKNOWN is the sentence an operator reads as "do not start a run", so this
+  // channel must not reach it either -- a drift that cannot refuse a capture through `capture-fleet-guard`
+  // and does refuse it through the operator has only moved the gate to a human.
+  const split = await driveFleet(["ready", "ready", "ready", "ready"],
+    (index) => ({ ...ENVIRONMENT, nodeVersion: index < 2 ? "v24.19.0" : "v24.20.0" }));
+  assert.equal(split.verdict.state, "CONSISTENT", "the state is the gating channels' answer, and they agree");
+  assert.equal(split.comparedAgree, true);
+  assert.equal(split.consistent, true,
+    "and the deprecated compatibility field follows it, so no script reading `--json` refuses either");
+});
+
+test("#2063: a reported-only field NOBODY reports reads as unknown on the line, and refuses nothing", async () => {
+  // What `displayAdapter` will read until a worker carrying the field is deployed -- clause 3 of the row.
+  // It must be neither a refusal nor silence: silence is the #1997 defect (compared on nobody reads as
+  // agreed on by everybody) and a refusal would stop every capture in the project immediately.
+  const { [REPORTED_ONLY[1].path]: removed, ...withoutAdapter } = ENVIRONMENT;
+  assert.equal(typeof removed, "string", "the fixture must HOLD the adapter for deleting it to mean anything");
+  const blind = await driveFleet(["ready", "ready", "ready", "ready"], withoutAdapter);
+
+  assert.equal(blind.verdict.state, "CONSISTENT", "a field nobody reports in this channel gates nothing");
+  assert.match(blind.verdict.line, /displayAdapter: not reported by any of 4 guests/,
+    "and it is SAID, with its count -- the distinction #1997 drew for the gating channel");
+  assert.doesNotMatch(blind.verdict.line, /these workers are interchangeable for capture/);
+});
+
+test("#2063: the channel reaches the JSON, so a caller can act on WHICH field and which box", async () => {
+  // A conclusion that changes what happens next belongs in a field, not only in a sentence -- the same
+  // argument #1997 made for `fields`. The remedy here is a provisioning converge of a named field on named
+  // boxes, and a reader parsing `--json` cannot grep a prose line for it.
+  const split = await driveFleet(["ready", "ready"],
+    (index) => ({ ...ENVIRONMENT, nodeVersion: index === 0 ? "v24.19.0" : "v24.20.0" }));
+  assert.deepEqual(split.reportedOnly.map((d: { field: string, state: string }) => [d.field, d.state]),
+    [["nodeVersion", "drifted"]]);
+  assert.deepEqual(Object.values(split.reportedOnly[0].values), ["v24.19.0", "v24.20.0"]);
+
+  // THE CONTROL: an agreeing fleet carries an empty list, so the field is a reading and not a constant.
+  const agreed = await driveFleet(["ready", "ready"]);
+  assert.deepEqual(agreed.reportedOnly, []);
+});
+
+test("#2063: an INCONSISTENT verdict keeps its own sentence and gains the drift as a clause", async () => {
+  // The two findings must not be folded: INCONSISTENT says a run must not start, the drift clause says
+  // the fleet is not identical and a run may proceed anyway. Appended rather than substituted here
+  // because this line does not claim interchangeability in the first place -- there is nothing to retract.
+  const both = await driveFleet(["ready", "ready"], (index) => ({
+    ...ENVIRONMENT,
+    browserVersion: index === 0 ? "152.0.4191.66" : "151.0.4129.59",
+    nodeVersion: index === 0 ? "v24.19.0" : "v24.20.0",
+  }));
+  assert.equal(both.verdict.state, "INCONSISTENT");
+  assert.match(both.verdict.line, /^fleet INCONSISTENT across 2 of 2 — browserVersion/,
+    "the gating finding stays first and stays whole");
+  assert.match(both.verdict.line, /Reported, never gated \(#2063\): nodeVersion/);
+});
+
+test("#2063: an omitted reportedOnly changes no verdict, which is the one default this file allows", () => {
+  // `rows` and `fields` have no default because their absence is a GATING question left unasked, and
+  // answering it permissively is how #1029 and #1997 happened. This channel is DEFINED as never gating,
+  // so answering its absence pessimistically would hand a reported-only field the power over the verdict
+  // that the ruling exists to withhold. Pinned, so the next reader does not "fix" the asymmetry.
+  const input = { consistent: true, compared: 4, total: 4, rows: [], fields: comparedEverything(4) };
+  assert.deepEqual(consistencyVerdict(input), consistencyVerdict({ ...input, reportedOnly: [] }));
+  assert.equal(consistencyVerdict(input).state, "CONSISTENT");
 });

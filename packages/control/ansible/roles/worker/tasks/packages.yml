@@ -1,12 +1,32 @@
 ---
 # Node, Git and the repo — the prerequisites the rest of the role runs on.
 #
-# ## Why the version is resolved ONCE, on the control plane
+# ## Why the version is PINNED IN GIT rather than resolved at all
 #
-# The script asked nodejs.org for the current LTS on each box independently. Across twelve machines
-# provisioned over a week that straddles a Node release, and the fleet ends up on two versions — which
-# `/health.environment.nodeVersion` reports and `fleet-consistency.mjs` flags, but only after the fact.
-# Resolving it here, `run_once`, means every box in a run gets the same answer by construction.
+# WHAT THIS COMMENT USED TO CLAIM IS QUOTED BELOW AS A RETIRED CLAIM, NOT RESTATED — it named a backstop
+# that did not exist, and the quote is kept because that sentence is why nobody went looking for the
+# missing half. It said: the
+# script asked nodejs.org for the current LTS on each box independently, so a fleet provisioned over a
+# week that straddles a Node release ends up on two versions — "which `/health.environment.nodeVersion`
+# reports and `fleet-consistency.mjs` flags, but only after the fact". `run_once` fixed the WITHIN-a-run
+# half. Nothing ever wrote the flag: `nodeVersion` was in no list `fleet-consistency.mjs` had, so it
+# appeared in neither its mismatches nor its coverage, and `fleet:status` printed `fleet CONSISTENT
+# across 10 of 10 — these workers are interchangeable for capture` over the exact split this file
+# predicted (measured 2026-09-23T06:55Z: workers 2-6 on v24.19.0, workers 7-11 on v24.20.0).
+#
+# Both halves are closed here (#2063). `worker_node_version` in `defaults/main.yml` is the pin, so a box
+# provisioned today and one provisioned next month get the same build by construction rather than by
+# both being asked on the same day — a resolved value pins within a run and never across runs, which is
+# how these ten boxes diverged. And the backstop now exists: `nodeVersion` is in `fleet-consistency`'s
+# `REPORTED_ONLY`, so the drift is NAMED on `fleet:status`'s verdict line. It is deliberately not a
+# capture gate — the corpus is already mixed on it — see that list's own comment and `ceo`'s ruling.
+#
+# ## Why a box that HAS Node is still upgraded
+#
+# "Is Node installed" used to be a `win_stat` on `node.exe`, and the whole fetch/unpack block ran only
+# `when: not node_installed.stat.exists`. So a box kept whatever version it first received, for ever,
+# and a pin alone would have stopped the drift GROWING without ever converging the fleet — every one of
+# these ten boxes already has a node.exe. The gate is the VERSION, not the file.
 #
 # ## What disappeared with `win_unzip`
 #
@@ -20,21 +40,12 @@
 # Extracting straight into the destination inherits the destination's ACL, so the ACL repair is not
 # simplified here — its CAUSE is gone. That is the difference between porting a workaround and removing
 # the need for one.
-
-- name: Which Node LTS, decided once for the whole run
-  ansible.builtin.uri:
-    url: https://nodejs.org/dist/index.json
-    return_content: true
-    timeout: 30
-  delegate_to: localhost
-  run_once: true
-  register: node_index
-  changed_when: false
-
-- name: Pin it
-  ansible.builtin.set_fact:
-    node_lts: "{{ (node_index.json | selectattr('lts') | first).version }}"
-  run_once: true
+#
+# THE RENAME-ASIDE HALF IS BACK, and the two halves were never the same fix. The ACL repair went away
+# because extraction no longer moves a tree across accounts. The transaction went away because the block
+# only ever ran on a box with NO Node to lose — which was true exactly while "already installed" meant
+# "skip", and stopped being true the moment the gate became the version. An upgrade replaces a tree a
+# running worker is executing out of, so the rollback is load-bearing again.
 
 - name: What architecture is this box
   # `OSArchitecture`, not %PROCESSOR_ARCHITECTURE%: the env var reports the PROCESS architecture, so an
@@ -53,23 +64,38 @@
     that: (os_arch.output | first) in ['x64', 'arm64']
     fail_msg: "unsupported architecture '{{ os_arch.output | first }}' (expected x64 or arm64)"
 
-- name: Is Node already installed
-  # Checked by PATH-on-disk rather than `Get-Command`, because a session that started before the machine
-  # PATH was updated does not have it, and a perfectly good install then looks absent and gets replaced.
-  ansible.windows.win_stat:
-    path: 'C:\Program Files\nodejs\node.exe'
-  register: node_installed
+- name: Which Node this box is actually running
+  # Asked of the BINARY on disk, not of `Get-Command`: a session that started before the machine PATH
+  # was updated does not have it, and a perfectly good install then looks absent and gets replaced.
+  #
+  # And the answer is a VERSION, not a boolean. A `win_stat` can only say a box has SOME Node, which is
+  # what let ten boxes sit on two builds through however many provisioning runs — every one of them had
+  # a node.exe, so every one of them skipped the install that would have converged them.
+  ansible.windows.win_powershell:
+    parameters:
+      NodeExe: '{{ worker_node_home }}\node.exe'
+    script: |
+      param([string]$NodeExe)
+      $Ansible.Changed = $false
+      if (Test-Path $NodeExe) { (& $NodeExe --version).Trim() } else { '(absent)' }
+  register: node_have
+  changed_when: false
 
 - name: Fetch and unpack Node
-  when: not node_installed.stat.exists
+  when: (node_have.output | first) != worker_node_version
   become: true
   block:
     - name: Download it
-      # Archives, not MSIs: Node's current LTS line publishes win-arm64-zip but NO arm64 .msi, so the
-      # zip is the only version-agnostic choice — and this fleet has both architectures.
+      # Archives, not MSIs: Node's LTS line publishes win-arm64-zip but NO arm64 .msi, so the zip is the
+      # only architecture-agnostic choice — and this fleet has both architectures.
+      #
+      # VERIFIED BY CHECKSUM, per architecture, for `worker_edge_msi_sha256`'s reason: the point is a
+      # build we can name, and an unverified download makes the version claim rest on a hostname.
       ansible.windows.win_get_url:
-        url: "https://nodejs.org/dist/{{ node_lts }}/node-{{ node_lts }}-win-{{ os_arch.output | first }}.zip"
+        url: "https://nodejs.org/dist/{{ worker_node_version }}/node-{{ worker_node_version }}-win-{{ os_arch.output | first }}.zip"
         dest: 'C:\Windows\Temp\node.zip'
+        checksum: "{{ worker_node_sha256[os_arch.output | first] }}"
+        checksum_algorithm: sha256
 
     - name: Unpack it
       community.windows.win_unzip:
@@ -83,10 +109,11 @@
       # nothing.
       ansible.windows.win_powershell:
         parameters:
-          Version: "{{ node_lts }}"
+          Version: "{{ worker_node_version }}"
           Arch: "{{ os_arch.output | first }}"
+          Dest: '{{ worker_node_home }}'
         script: |
-          param([string]$Version, [string]$Arch)
+          param([string]$Version, [string]$Arch, [string]$Dest)
           # Under --check the download and unpack above did not happen, so there is nothing to move and
           # nothing to verify. Reporting "would install" is the honest answer; throwing on the absent
           # source would make a dry run look like a broken box.
@@ -95,9 +122,20 @@
           if (-not (Test-Path (Join-Path $src 'node.exe'))) {
             throw "no node.exe in $src -- the archive layout changed; do not install a broken tree"
           }
-          $dest = 'C:\Program Files\nodejs'
-          if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
-          Move-Item $src $dest
+          $dest = $Dest
+          # RENAME THE OLD TREE ASIDE RATHER THAN DELETING IT, and this path is now REACHED: before the
+          # pin, an existing install meant the whole block was skipped, so "replace" only ever ran on a
+          # box that had nothing. An UPGRADE runs it on a box that is serving, where a delete that fails
+          # part-way through leaves no Node at all -- the same failure `bootstrap-windows-worker.ps1`
+          # carries this shape for. Put it back on any failure.
+          if (Test-Path $dest) {
+            $old = "$dest.old-$PID"
+            Rename-Item $dest $old -Force
+            try { Move-Item $src $dest } catch { Rename-Item $old $dest -Force; throw }
+            Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue
+          } else {
+            Move-Item $src $dest
+          }
           # Move-Item preserves the SOURCE acl, so reset to inherit. Kept even though extraction now
           # happens under Program Files' parent, because this line IS the move.
           icacls.exe $dest /reset /T /C /Q | Out-Null
@@ -108,7 +146,7 @@
 - name: Node on the machine PATH
   become: true
   ansible.windows.win_path:
-    elements: 'C:\Program Files\nodejs'
+    elements: '{{ worker_node_home }}'
     scope: machine
     state: present
 

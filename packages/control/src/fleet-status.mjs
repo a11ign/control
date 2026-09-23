@@ -47,7 +47,8 @@ import { pathToFileURL } from "node:url";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { configuredWorkers } from "../../worker-fleet/src/fleet-env.mjs";
 import { assessWorker } from "../../worker-fleet/src/worker-health.mjs";
-import { fleetConsistency, describeMismatches } from "../../worker-fleet/src/fleet-consistency.mjs";
+import { fleetConsistency, describeMismatches, describeReportedOnly }
+  from "../../worker-fleet/src/fleet-consistency.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
@@ -562,12 +563,74 @@ function partialClause(coverage) {
  * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[],
  *           rows?: { name?: string, state?: string }[],
  *           fields?: { compared: string[], unchecked: string[],
- *                      coverage?: { field: string, reported: number, asked: number }[] } }} input `rows`
+ *                      coverage?: { field: string, reported: number, asked: number }[] },
+ *           reportedOnly?: { field: string, why: string, values: Record<string, unknown>,
+ *                            reported: number, asked: number,
+ *                            state: "drifted" | "unreported" }[] }} input `rows`
  *   carries each box's `stateOf`, `fields` `fleetConsistency`'s field coverage. Neither has a default,
- *   for the same reason, and nor does `fields.coverage` (#2019).
+ *   for the same reason, and nor does `fields.coverage` (#2019). `reportedOnly` is the one input here
+ *   that DOES default, and `withReportedDrift` below states why: it is the channel that gates nothing.
  * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
  */
-export function consistencyVerdict({ consistent, compared, total, mismatches = [], rows, fields }) {
+export function consistencyVerdict(input) {
+  return withReportedDrift(gatedVerdict(input), input.reportedOnly ?? [],
+    `across ${input.compared} of ${input.total}`);
+}
+
+/**
+ * THE REPORTED-ONLY CHANNEL, ON THE LINE A READER SEES — #2063.
+ *
+ * `fleetConsistency`'s third channel is compared and named and gates nothing, and this is where the
+ * "named" half is paid. `fleet:status` printed `fleet CONSISTENT across 10 of 10 — these workers are
+ * interchangeable for capture` over a fleet running v24.19.0 on workers 2-6 and v24.20.0 on 7-11
+ * (measured 2026-09-23T06:55Z, every other reported field identical), because the field it differed on
+ * was not one the check had. The headline was not wrong about what it compared; it claimed more than it
+ * compared, which is this file's own recurring defect with the axis changed again.
+ *
+ * SO THE INTERCHANGEABILITY SENTENCE IS REPLACED RATHER THAN APPENDED TO. A drift clause bolted onto
+ * `these workers are interchangeable for capture` leaves that claim in the reader's takeaway, which is
+ * exactly what #920 refused when it declined to fix a CONSISTENT headline with a footnote. On every other
+ * verdict the clause is appended, because none of those lines claims interchangeability in the first
+ * place — INCONSISTENT, UNKNOWN and BLOCKED are already saying the fleet is not usable as-is.
+ *
+ * AND THE STATE IS NEVER TOUCHED, which is the ruling. `capture-fleet-guard` reads `mismatches` and
+ * `fields.coverage` and this channel is in neither, so a drift here cannot refuse a run — and it must not
+ * acquire that power through the headline either, since `fieldCoverageGap` turning the headline UNKNOWN
+ * is the same sentence an operator reads as "do not start a run".
+ *
+ * NO DEFAULT REFUSAL, DELIBERATELY, AND IT IS NOT THE DEFAULT THIS FILE KEEPS REFUSING. `rows` and
+ * `fields` have no default because their absence is a GATING question left unasked, and answering it
+ * permissively is how #1029 and #1997 happened. This channel is defined as never gating, so answering its
+ * absence pessimistically would hand a reported-only field the power over the verdict that the ruling
+ * exists to withhold. What a caller must not lose is the field a NOBODY reports — and that is carried
+ * inside the channel, as `unreported`, rather than by an absent argument.
+ *
+ * @param {{state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string}} verdict
+ * @param {{field: string, why: string, values: Record<string, unknown>, reported: number,
+ *   asked: number, state: "drifted" | "unreported"}[]} reportedOnly
+ * @param {string} across the `across N of M` clause, so the rewritten line keeps its denominator
+ * @returns {{state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string}}
+ */
+function withReportedDrift(verdict, reportedOnly, across) {
+  if (reportedOnly.length === 0) return verdict;
+  const named = describeReportedOnly(reportedOnly).join("; ");
+  const noted = `Reported, never gated (#2063): ${named}. A run is not refused for this`;
+  if (verdict.state !== "CONSISTENT") return { ...verdict, line: `${verdict.line}. ${noted}` };
+  return { state: "CONSISTENT",
+    line: `fleet CONSISTENT ${across} on every field that gates a capture — and these workers are NOT `
+      + `identical: ${noted}` };
+}
+
+/**
+ * The verdict the gating channels produce, before the reported-only one qualifies it.
+ *
+ * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[],
+ *           rows?: { name?: string, state?: string }[],
+ *           fields?: { compared: string[], unchecked: string[],
+ *                      coverage?: { field: string, reported: number, asked: number }[] } }} input
+ * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
+ */
+function gatedVerdict({ consistent, compared, total, mismatches = [], rows, fields }) {
   const across = `across ${compared} of ${total}`;
   if (compared === 0) {
     return { state: "UNKNOWN",
@@ -925,7 +988,7 @@ export async function fleetStatus(deps) {
     // OPTIONAL field, meaning "this probe did not collect one", which is exactly true here since
     // `/health` carries no policy block. `null` would be a claim that it collected an empty policy.
     .map((p) => ({ worker: p.url, environment: p.health?.environment, policy: undefined }));
-  const { consistent, mismatches, compared, fields } = fleetConsistency(guests);
+  const { consistent, mismatches, compared, fields, reportedOnly } = fleetConsistency(guests);
   // WHICH CODE EACH BOX SERVES, COMPARED — the column has been printed since this file existed and
   // nothing ever read it. A fleet part-way through a deploy shows two hashes, and that is the ONLY
   // symptom it has: `consistent` above cannot see it, because `workerCode` is deliberately outside
@@ -943,10 +1006,13 @@ export async function fleetStatus(deps) {
   // is the whole fix: the two halves were both computed here and never crossed.
   // `fields` is the same crossing one axis over (#1997): the coverage was computed here and never
   // reached the verdict, so a field no guest reported was indistinguishable from one they all agree on.
+  // `reportedOnly` is the third crossing of the same seam (#2063): compared here, named on the verdict,
+  // and read by no gate. A fleet split on `nodeVersion` is a fact this command is FOR, and it was the one
+  // fact the headline could not see.
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
-    fields });
+    fields, reportedOnly });
   return { rows, linkLayer, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
-    reachable: guests.length, total: workers.length,
+    reportedOnly, reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
     // Removing it outright fails SILENTLY: `undefined` is falsy, so `if (status.consistent)` would read
