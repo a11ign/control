@@ -198,6 +198,10 @@
       register: corpus_backup_job_state
       changed_when: false
       failed_when: false
+      # READS IN `--check` TOO. An `ansible.builtin.command` is SKIPPED under `--check`, which would leave
+      # this register undefined and the gate below unevaluable -- so a preview of the removal could not
+      # even say whether the reset would run. It changes nothing, so running it is safe (#2059).
+      check_mode: false
 
     - name: Clear the last failed backup run, which no amount of timer removal clears by itself
       ansible.builtin.command:
@@ -210,6 +214,10 @@
         argv: [systemctl, list-timers, "a11y-corpus-*", "--no-legend"]
       changed_when: false
       register: corpus_timers_listed
+      # #2059: AND IN `--check`, for the same reason as the probe above -- measured on the lab
+      # 2026-09-23T05:21Z, where a `--check` run skipped this read and the assertion below then failed
+      # against an EMPTY string, reporting a healthy schedule as broken. The task only reads.
+      check_mode: false
 
     # BOTH DIRECTIONS, because this playbook now asserts a removal as well as an installation, and a
     # removal that is only checked by its own task is checked by the thing that performed it. The second
