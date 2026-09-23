@@ -1015,8 +1015,10 @@ export async function fleetStatus(deps) {
   // `fields` is the same crossing one axis over (#1997): the coverage was computed here and never
   // reached the verdict, so a field no guest reported was indistinguishable from one they all agree on.
   // `reportedOnly` is the third crossing of the same seam (#2063): compared here, named on the verdict,
-  // and read by no gate. A fleet split on `nodeVersion` is a fact this command is FOR, and it was the one
-  // fact the headline could not see.
+  // and read by no gate. A fleet split on `displayAdapter` is a fact this command is FOR, and it was the
+  // one fact the headline could not see. `nodeVersion` was the other member and the example this comment
+  // named; #2170 graduated it to `MUST_MATCH` once the fleet converged on the pin, so it now reaches the
+  // headline through `mismatches` instead.
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
     fields, reportedOnly });
   return { rows, linkLayer, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,

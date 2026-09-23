@@ -944,17 +944,42 @@ test("#1356: A11Y_WORKER(S) still wins first, and never even calls the control p
 
 // --- #2063: THE REPORTED-ONLY CHANNEL, ON THE LINE A READER SEES ---
 
-test("#2063: THE PAIR -- the headline over a nodeVersion split no longer claims interchangeability", async () => {
-  // Measured on the live fleet 2026-09-23T06:55Z: workers 2-6 on v24.19.0, workers 7-11 on v24.20.0, and
-  // every other reported field identical across all ten. `npm run fleet:status` printed `fleet CONSISTENT
-  // across 10 of 10 -- these workers are interchangeable for capture` over that split, because the field
-  // it differed on was in no list `fleet-consistency` had.
+/**
+ * THE REPORTED-ONLY FIELD THESE CASES ARE ABOUT, and it is `displayAdapter` because `nodeVersion` LEFT
+ * this channel at #2170 -- step 3 of `ceo`'s ruling on #2063, taken once the fleet converged on the pin.
+ * A case still driven by `nodeVersion` would assert that a runtime split leaves the state CONSISTENT,
+ * which is now the opposite of what `fleet-consistency` does with it, and the ruling's exemption would be
+ * guarded by nothing.
+ *
+ * ASSERTED to be in the list rather than read out of it by INDEX, which is what these cases used to do
+ * (`REPORTED_ONLY[1].path`). An index silently re-points at a different field the day the list changes
+ * length -- and #2170 is that day: it took the list from two members to one, so `[1]` became `undefined`
+ * and the fixture destructured nothing.
+ */
+const ADAPTER = "displayAdapter";
+const UHD = "Intel(R) UHD Graphics 630";
+const HD = "Intel(R) HD Graphics 630";
+
+test("#2063: the case subject is a REPORTED_ONLY field, not a name that used to be one", () => {
+  assert.ok(REPORTED_ONLY.some(({ path }) => path === ADAPTER),
+    `${ADAPTER} is not in REPORTED_ONLY, so every case below is testing the reported-only channel with a `
+    + "field that does not travel it");
+  // The positive control: the matcher has to be able to MISS, or the assertion above proves nothing.
+  assert.ok(!REPORTED_ONLY.some(({ path }) => path === "displayAdapterThatIsNotReportedOnly"));
+});
+
+test("#2063: THE PAIR -- the headline over a reported-only split no longer claims interchangeability", async () => {
+  // Measured on the live fleet 2026-09-23T06:55Z on `nodeVersion`, which was this case's original
+  // subject: workers 2-6 on v24.19.0, workers 7-11 on v24.20.0, every other reported field identical, and
+  // `npm run fleet:status` printed `fleet CONSISTENT across 10 of 10 -- these workers are interchangeable
+  // for capture` over that split because the field it differed on was in no list `fleet-consistency` had.
+  // The adapter split below is the live reading at 18:02Z the same day, on the field that stayed.
   //
   // DRIVEN THROUGH THE REAL `fleetStatus`, which is #1029's lesson and #1997's: the halves of this were
   // computed in `fleetStatus` and had to CROSS to the verdict, so a case that drove only the pure
   // function would hold the function and leave the crossing unheld.
   const split = await driveFleet(["ready", "ready", "ready", "ready"],
-    (index) => ({ ...ENVIRONMENT, nodeVersion: index < 2 ? "v24.19.0" : "v24.20.0" }));
+    (index) => ({ ...ENVIRONMENT, [ADAPTER]: index < 2 ? UHD : HD }));
   const agreed = await driveFleet(["ready", "ready", "ready", "ready"]);
 
   assert.match(agreed.verdict.line, /^fleet CONSISTENT across 4 of 4 — these workers are interchangeable/,
@@ -963,11 +988,11 @@ test("#2063: THE PAIR -- the headline over a nodeVersion split no longer claims 
   assert.doesNotMatch(split.verdict.line, /these workers are interchangeable for capture/,
     "not even as a substring -- #920's rule, because the word is what a reader takes away, and a caveat "
     + "appended after that clause leaves the claim in place");
-  assert.match(split.verdict.line, /nodeVersion: .*v24\.19\.0.*v24\.20\.0/,
+  assert.match(split.verdict.line, /displayAdapter: .*UHD Graphics 630.*HD Graphics 630/,
     "NAMED with each guest's value: the drift is on the line, not merely counted on it");
-  assert.match(split.verdict.line,
-    /nodeVersion: a11y-worker-2=v24\.19\.0 a11y-worker-3=v24\.19\.0 a11y-worker-4=v24\.20\.0 a11y-worker-5=v24\.20\.0/,
-    "and LOCATED, every box of the four -- which box is on which build IS the remedy, and a line naming "
+  assert.ok(split.verdict.line.includes(
+    `displayAdapter: a11y-worker-2=${UHD} a11y-worker-3=${UHD} a11y-worker-4=${HD} a11y-worker-5=${HD}`),
+    "and LOCATED, every box of the four -- which box is on which adapter IS the remedy, and a line naming "
     + "only the two distinct VALUES would report drift without locating it");
 });
 
@@ -977,7 +1002,7 @@ test("#2063: THE RULING -- a reported-only split does NOT move the state", async
   // channel must not reach it either -- a drift that cannot refuse a capture through `capture-fleet-guard`
   // and does refuse it through the operator has only moved the gate to a human.
   const split = await driveFleet(["ready", "ready", "ready", "ready"],
-    (index) => ({ ...ENVIRONMENT, nodeVersion: index < 2 ? "v24.19.0" : "v24.20.0" }));
+    (index) => ({ ...ENVIRONMENT, [ADAPTER]: index < 2 ? UHD : HD }));
   assert.equal(split.verdict.state, "CONSISTENT", "the state is the gating channels' answer, and they agree");
   assert.equal(split.comparedAgree, true);
   assert.equal(split.consistent, true,
@@ -985,10 +1010,11 @@ test("#2063: THE RULING -- a reported-only split does NOT move the state", async
 });
 
 test("#2063: a reported-only field NOBODY reports reads as unknown on the line, and refuses nothing", async () => {
-  // What `displayAdapter` will read until a worker carrying the field is deployed -- clause 3 of the row.
+  // What `displayAdapter` read on every guest until the worker carrying it was deployed on 2026-09-23,
+  // and what any field entering this channel reads on its first day -- clause 3 of #2063.
   // It must be neither a refusal nor silence: silence is the #1997 defect (compared on nobody reads as
   // agreed on by everybody) and a refusal would stop every capture in the project immediately.
-  const { [REPORTED_ONLY[1].path]: removed, ...withoutAdapter } = ENVIRONMENT;
+  const { [ADAPTER]: removed, ...withoutAdapter } = ENVIRONMENT;
   assert.equal(typeof removed, "string", "the fixture must HOLD the adapter for deleting it to mean anything");
   const blind = await driveFleet(["ready", "ready", "ready", "ready"], withoutAdapter);
 
@@ -1003,10 +1029,10 @@ test("#2063: the channel reaches the JSON, so a caller can act on WHICH field an
   // argument #1997 made for `fields`. The remedy here is a provisioning converge of a named field on named
   // boxes, and a reader parsing `--json` cannot grep a prose line for it.
   const split = await driveFleet(["ready", "ready"],
-    (index) => ({ ...ENVIRONMENT, nodeVersion: index === 0 ? "v24.19.0" : "v24.20.0" }));
+    (index) => ({ ...ENVIRONMENT, [ADAPTER]: index === 0 ? UHD : HD }));
   assert.deepEqual(split.reportedOnly.map((d: { field: string, state: string }) => [d.field, d.state]),
-    [["nodeVersion", "drifted"]]);
-  assert.deepEqual(Object.values(split.reportedOnly[0].values), ["v24.19.0", "v24.20.0"]);
+    [[ADAPTER, "drifted"]]);
+  assert.deepEqual(Object.values(split.reportedOnly[0].values), [UHD, HD]);
 
   // THE CONTROL: an agreeing fleet carries an empty list, so the field is a reading and not a constant.
   const agreed = await driveFleet(["ready", "ready"]);
@@ -1020,12 +1046,12 @@ test("#2063: an INCONSISTENT verdict keeps its own sentence and gains the drift 
   const both = await driveFleet(["ready", "ready"], (index) => ({
     ...ENVIRONMENT,
     browserVersion: index === 0 ? "152.0.4191.66" : "151.0.4129.59",
-    nodeVersion: index === 0 ? "v24.19.0" : "v24.20.0",
+    [ADAPTER]: index === 0 ? UHD : HD,
   }));
   assert.equal(both.verdict.state, "INCONSISTENT");
   assert.match(both.verdict.line, /^fleet INCONSISTENT across 2 of 2 — browserVersion/,
     "the gating finding stays first and stays whole");
-  assert.match(both.verdict.line, /Reported, never gated \(#2063\): nodeVersion/);
+  assert.match(both.verdict.line, /Reported, never gated \(#2063\): displayAdapter/);
 });
 
 test("#2063: an omitted reportedOnly changes no verdict, which is the one default this file allows", () => {
