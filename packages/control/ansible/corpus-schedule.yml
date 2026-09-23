@@ -1,6 +1,7 @@
 ---
-# Install the daily corpus-snapshot and corpus-backup timers on the lab, so protecting the corpus does
-# not depend on somebody remembering to dispatch them by hand.
+# Install the daily corpus-snapshot timer on the lab -- and REMOVE the corpus-backup timer this file used
+# to install beside it -- so protecting the corpus does not depend on somebody remembering to dispatch it
+# by hand, and so nothing on the lab is scheduled to fail every night on purpose.
 #
 #     ansible-playbook corpus-schedule.yml
 #
@@ -13,10 +14,42 @@
 # (`browserVersion` is a capture cache key), that `corpus-snapshot.mjs`'s own header calls "the most
 # expensive artifact in the repo and the only one with no copy".
 #
-# It does NOT decide where `corpus-backup` sends its copy -- that is #1042, a separate, undecided
-# question. The backup timer is installed and enabled regardless; its scheduled firing will exit
-# non-zero until #1042 lands, which `corpus-backup.mjs` documents as the correct behaviour rather than a
-# silent local-only success. `a11y-corpus-backup.service`'s own header says the same thing.
+# ## The corpus-backup timer is GONE, and #2059 is why -- read this before adding it back
+#
+# THIS PARAGRAPH REPLACES ONE THAT WAS TRUE WHEN WRITTEN AND STOPPED BEING TRUE WITHOUT SAYING SO. It read:
+# "It does NOT decide where `corpus-backup` sends its copy -- that is #1042, a separate, undecided
+# question. The backup timer is installed and enabled regardless; its scheduled firing WILL EXIT NON-ZERO
+# UNTIL #1042 LANDS". Every clause of that was correct: the nightly failure was a deliberate cost against a
+# named condition.
+#
+# #1042 closed 2026-09-23T04:26:00Z, and it closed THE OTHER WAY. The corpus's off-machine copy is
+# `corpus:release` -> GitHub Releases on the private `a11ign/corpus-backups`, driven from the CONTROL PLANE
+# (where the token lives) by `a11ign-corpus-release-nightly.timer` at 04:00Z -- an hour before this timer
+# fired, needing no `A11Y_CORPUS_REMOTE`, no mount and no ssh destination, and verifying itself by
+# downloading the release back. So the question this timer was waiting on is no longer undecided; it was
+# decided against this route, and the timer was never told. It failed at 05:00Z the same morning, as it had
+# every morning, and `lab:failed-units` reported it as it is meant to -- which is the cost: a unit that is
+# red no matter what anyone does teaches a reader to skim the list the next REAL failure appears in (#866).
+#
+# So this playbook now REMOVES `a11y-corpus-backup.timer` rather than installing it. Three things that are
+# easy to get wrong, and each is a task below rather than a note:
+#
+#   1. DISABLING IS AN ACT, NOT A DELETION. Dropping the units from `corpus_timer_units` would leave the
+#      timer enabled and firing on every lab that already has it -- ansible does not remove what it stops
+#      managing. And a unit cannot be disabled once its file is gone, so stop-and-disable runs BEFORE the
+#      files are removed, guarded so a lab that never had it is not an error.
+#   2. THE FAILED UNIT OUTLIVES THE TIMER. `a11y-job-corpus-backup` is transient and `--remain-after-exit`,
+#      so its `failed` state persists with no timer anywhere near it: stopping the timer alone leaves
+#      `npm run lab:failed-units` naming it forever. `systemctl reset-failed` is required, and is tolerated
+#      rather than asserted -- the deleted `a11y-corpus-backup.service` made the same call with systemd's
+#      own `ExecStartPre=-` prefix, for the same reason.
+#   3. THE TOOL IS NOT WHAT WAS DECIDED AGAINST. `corpus-backup.mjs` still refuses without a destination,
+#      still argues why a one-disk archive is not a backup, and `lab-job.yml`'s `corpus-backup` catalogue
+#      entry is still dispatchable by hand for anyone who sets `A11Y_CORPUS_REMOTE`. #2059 is about the
+#      CLOCK. Nothing here removes the capability.
+#
+# IF A DESTINATION IS EVER CONFIGURED, this timer is the right shape to bring back -- restore it from
+# #2059's own diff rather than rewriting it, and replace this paragraph with what made it true.
 #
 # ## Two trigger units per job, never the job's own transient name
 #
@@ -67,15 +100,25 @@
     - name: The control-plane key must be supplied
       ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
 
-- name: Install the corpus timers on the lab
+- name: Install the corpus snapshot timer on the lab, and retire the backup timer (#2059)
   hosts: a11y_lab
   gather_facts: false
   vars:
     corpus_timer_units:
       - a11y-corpus-snapshot.timer
       - a11y-corpus-snapshot.service
-      - a11y-corpus-backup.timer
-      - a11y-corpus-backup.service
+
+    # Installed by this playbook until #2059; removed by it now. Each name is written ONCE and every
+    # removal task below reaches it through these, so the stop, the delete and the assertion cannot drift
+    # apart -- the failure mode that would leave a timer running with a green playbook.
+    corpus_backup_timer: a11y-corpus-backup.timer
+    corpus_backup_service: a11y-corpus-backup.service
+    corpus_backup_units:
+      - "{{ corpus_backup_timer }}"
+      - "{{ corpus_backup_service }}"
+    # The TRANSIENT unit the trigger dispatched, which is a different name from either file above and is
+    # the one `npm run lab:failed-units` reports. See the reset task for why it needs its own handling.
+    corpus_backup_job_unit: a11y-job-corpus-backup
 
   tasks:
     - name: Install the unit files
@@ -106,8 +149,61 @@
         state: started
       loop:
         - a11y-corpus-snapshot.timer
-        - a11y-corpus-backup.timer
       register: corpus_timers_started
+
+    # ---- #2059: retire the corpus-backup timer ---------------------------------------------------------
+    # ORDER IS THE WHOLE POINT. `systemctl disable` needs the unit file to still be on disk, so the stop
+    # comes first and the delete second; reversing them leaves an enabled timer with no file, which
+    # `systemctl list-timers` still honours until the next daemon-reload and which nothing here would
+    # notice.
+    - name: Is the retired backup timer still installed on this lab?
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/{{ corpus_backup_timer }}"
+      register: corpus_backup_timer_file
+
+    # GUARDED, because `ansible.builtin.systemd` ERRORS on a unit it cannot find -- so a fresh lab, or a
+    # second run of this playbook, would fail on the absence that means the work is already done.
+    - name: Stop and disable the retired backup timer, while its unit file is still there to disable
+      ansible.builtin.systemd:
+        name: "{{ corpus_backup_timer }}"
+        state: stopped
+        enabled: false
+      when: corpus_backup_timer_file.stat.exists
+
+    - name: Remove the retired backup unit files
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}"
+        state: absent
+      loop: "{{ corpus_backup_units }}"
+      register: corpus_backup_units_removed
+
+    - name: Pick up the removal
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: corpus_backup_units_removed.results | selectattr('changed') | list | length > 0
+
+    # THE LAST FIRING OUTLIVES THE TIMER, and this is the task the acceptance turns on. The job unit is
+    # transient and `--remain-after-exit`: it is sitting in `failed` from the last 05:00Z run and stays
+    # there, reported by `npm run lab:failed-units`, however thoroughly the timer is removed.
+    #
+    # ASKED BEFORE IT IS CLEARED, rather than clearing unconditionally and tolerating the failure. A bare
+    # `reset-failed` would have to be `failed_when: false` (a lab that never loaded the unit is the SUCCESS
+    # case, not a fault, which is why the deleted service file wrote its own as `ExecStartPre=-`) -- and a
+    # task that can neither fail nor honestly report `changed` breaks this file's own idempotence claim
+    # above. `systemctl is-failed` answers exactly the question: `failed` on stdout when it is, a non-zero
+    # exit and some other word when it is not.
+    - name: Is the last backup run still sitting in failed?
+      ansible.builtin.command:
+        argv: [systemctl, is-failed, "{{ corpus_backup_job_unit }}"]
+      register: corpus_backup_job_state
+      changed_when: false
+      failed_when: false
+
+    - name: Clear the last failed backup run, which no amount of timer removal clears by itself
+      ansible.builtin.command:
+        argv: [systemctl, reset-failed, "{{ corpus_backup_job_unit }}"]
+      when: (corpus_backup_job_state.stdout | trim) == "failed"
+      changed_when: true
 
     - name: Read the schedule back over systemd's own view, not the files just written
       ansible.builtin.command:
@@ -115,12 +211,17 @@
       changed_when: false
       register: corpus_timers_listed
 
-    - name: Both timers must show a NEXT firing -- installed and enabled is not the same as scheduled
+    # BOTH DIRECTIONS, because this playbook now asserts a removal as well as an installation, and a
+    # removal that is only checked by its own task is checked by the thing that performed it. The second
+    # clause is what would have caught trap 1 above: units dropped from `corpus_timer_units` and nothing
+    # else changed still leaves the timer listed here.
+    - name: The snapshot timer must show a NEXT firing, and the retired backup timer must be gone
       ansible.builtin.assert:
         that:
           - "'a11y-corpus-snapshot.timer' in corpus_timers_listed.stdout"
-          - "'a11y-corpus-backup.timer' in corpus_timers_listed.stdout"
+          - "corpus_backup_timer not in corpus_timers_listed.stdout"
         fail_msg: >-
-          `systemctl list-timers 'a11y-corpus-*'` on {{ inventory_hostname }} does not list both timers:
+          `systemctl list-timers 'a11y-corpus-*'` on {{ inventory_hostname }} must list
+          a11y-corpus-snapshot.timer and must NOT list {{ corpus_backup_timer }} (#2059):
           {{ corpus_timers_listed.stdout }}
         success_msg: "{{ corpus_timers_listed.stdout }}"
