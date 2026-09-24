@@ -47,6 +47,12 @@ export function runLabStatus(run = defaultRun) {
       ...process.env,
       ANSIBLE_CONFIG: "packages/control/ansible/ansible.cfg",
       ANSIBLE_STDOUT_CALLBACK: "json",
+      // `ansible.cfg` enables `ansible.posix.profile_tasks`, whose per-task timing lines go to the SAME
+      // stdout as the json callback and make `JSON.parse` below throw -- so this script's first real run
+      // (#2230) was CANNOT_ASK, and would have been every hour. An EMPTY value is refused by ansible ("A
+      // non-empty plugin name is required"); `default` is a stdout callback, so listing it as a
+      // notification callback enables nothing that prints.
+      ANSIBLE_CALLBACKS_ENABLED: "ansible.builtin.default",
     },
   });
   return JSON.parse(out);
