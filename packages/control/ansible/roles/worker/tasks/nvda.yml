@@ -8,20 +8,36 @@
 # `witness`, so unbecomed tasks land in the right place.
 
 - name: Install dependencies
-  # `ansible.builtin.npm` is POSIX-oriented, so this stays a shell call. Unconditional and idempotent:
-  # skipping it when package-lock.json looks unchanged is the optimisation that leaves one box on last
-  # week's guidepup — and guidepup's version is EVIDENCE, in the capture cache key, because it parses
-  # NVDA's speech before this project ever sees it.
+  # pnpm through corepack, and BOTH worker install sites -- this one and `deploy.yml`'s -- carry the same
+  # script, which `worker-install-sites-match.test.ts` pins (#2299). Two paths running the same operation
+  # with different arguments is how one of them quietly stops working while the other keeps proving nothing
+  # is wrong. Unconditional and idempotent: skipping it when the lockfile looks unchanged is the
+  # optimisation that leaves one box on last week's guidepup -- and guidepup's version is EVIDENCE, in the
+  # capture cache key, because it parses NVDA's speech before this project ever sees it.
   #
-  # The FLAGS are the safe half of that optimisation, and the distinction matters: they cut waste rather
-  # than skipping work. Same resolution, same lockfile, same installed versions — npm just stops asking
-  # the registry for metadata it already has (`--prefer-offline`) and skips two network round trips that
-  # change nothing about what lands on disk (`--no-audit`, `--no-fund`). Nothing here can leave a box on
-  # a stale guidepup, which is the property the paragraph above is protecting.
+  # `--frozen-lockfile` is `npm ci`'s property and the one `npm install` never had: the lockfile is the
+  # SPECIFICATION, so a manifest that disagrees with it REFUSES the deploy rather than quietly resolving
+  # a tree no other machine has (measured 2026-09-24: `ERR_PNPM_OUTDATED_LOCKFILE`, rc 1).
   #
-  # Worth knowing what this does NOT fix: on an already-provisioned box this step is the bulk of the run,
-  # because npm still re-resolves the tree even when the answer is "nothing to do".
-  ansible.windows.win_shell: npm install --prefer-offline --no-audit --no-fund
+  # `corepack pnpm`, not a global pnpm: Node 24's zip ships corepack, `packageManager` in package.json pins
+  # the version, and nothing has to be installed on a box for this to run. `--prefer-offline` is the one
+  # flag of the old three that pnpm has; it cuts registry round trips, not resolution. The dependency
+  # scripts pnpm 10 does not run (esbuild, ffmpeg-static) are inert here: nothing on a worker records video.
+  #
+  # ONE-TIME MIGRATION: a tree npm made carries `node_modules\.package-lock.json`, and pnpm installed over
+  # it leaves every npm-hoisted package in place (measured on the lab: 173 top-level entries against 22 in
+  # a fresh pnpm tree) -- the very hoisting that lets an undeclared import resolve, which is what moving to
+  # pnpm is for. `rmdir` rather than `Remove-Item -Recurse`: npm's workspace links are junctions, and
+  # `rmdir` removes a junction without following it into `packages\`.
+  ansible.windows.win_shell: |
+    $env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
+    if (Test-Path 'node_modules\.package-lock.json') {
+      Write-Output 'node_modules was made by npm: removing it once, so nothing npm hoisted survives beside pnpm'
+      cmd.exe /d /c rmdir /s /q node_modules
+      if (Test-Path 'node_modules') { Write-Output 'could not remove node_modules'; exit 1 }
+    }
+    corepack pnpm install --frozen-lockfile --prefer-offline
+    exit $LASTEXITCODE
   args:
     chdir: "{{ worker_repo_path }}"
   changed_when: true

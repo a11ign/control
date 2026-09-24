@@ -255,6 +255,25 @@
          else 'This job therefore runs ' ~ lab_behind_count ~ ' COMMIT(S) BEHIND origin/main. Whatever it
                produces is stamped with that commit, not with the code you just pushed.' }}
 
+- name: "Is node_modules the tree npm made?"
+  # `npm ci` deleted `node_modules` and rebuilt it; pnpm does NOT. Installed over an npm tree it leaves every
+  # npm-hoisted package where it was (measured 2026-09-24, same commit, this host: 173 top-level entries
+  # against 22 in a fresh pnpm tree) -- and hoisting is what lets an undeclared import resolve, which is the
+  # defect a pnpm lab exists to expose instead of hiding. Only npm writes this hidden lockfile.
+  when: lab_pull is defined and lab_pull is changed
+  ansible.builtin.stat:
+    path: "{{ lab_repo_path }}/node_modules/.package-lock.json"
+  register: lab_npm_tree
+
+- name: "Drop the npm-made node_modules, once"
+  # ONE TIME per tree: after the pnpm install below there is no `.package-lock.json`, so this never fires
+  # again. `file: absent` removes a symlink without following it, so npm's workspace links into `packages/`
+  # cannot take source with them.
+  when: (lab_npm_tree.stat | default({})).exists | default(false)
+  ansible.builtin.file:
+    path: "{{ lab_repo_path }}/node_modules"
+    state: absent
+
 - name: "Install dependencies, BEFORE building anything with them"
   # THE SIBLING OF THE BUILD BELOW, and it cost two pipeline dispatches on 2026-09-02.
   #
@@ -269,10 +288,18 @@
   # BUILD is what fails and it names a module rather than a missing install -- so it reads as a broken
   # import in somebody's source.
   #
-  # `npm ci` rather than `npm install`, deliberately: it reads the lockfile as the SPECIFICATION and
-  # refuses a lockfile that disagrees with `package.json`, which is exactly the drift that produced this.
-  # `npm install` would quietly reconcile them and leave the lab's tree describing something no other
-  # machine has.
+  # `--frozen-lockfile` rather than a plain install, deliberately (#2299: pnpm, where this was `npm ci`):
+  # it reads the lockfile as the SPECIFICATION and refuses a lockfile that disagrees with `package.json`,
+  # which is exactly the drift that produced this. A plain install would quietly reconcile them and leave
+  # the lab's tree describing something no other machine has. Measured 2026-09-24 on this host: a manifest
+  # range moved off the lockfile exits 1 with `ERR_PNPM_OUTDATED_LOCKFILE`, as `npm ci` did (`EUSAGE`).
+  #
+  # `corepack pnpm`, not a pnpm on PATH: corepack ships with this Node, and `packageManager` in
+  # `package.json` pins the version (10.34.5), so the lab has nothing to install and cannot drift from CI's.
+  # The pnpm store defaults under the running user's home, on the SAME filesystem as `lab_repo_path` here,
+  # so packages are hard-linked rather than copied. The dependency scripts pnpm 10 does not run (esbuild,
+  # ffmpeg-static) are inert here: no lab job records video, and `tsx`, which runs on esbuild, starts without
+  # its postinstall (measured 2026-09-24).
   #
   # Unconditional on a changed pull rather than gated on the lockfile having moved: detecting that needs a
   # diff against the pre-pull ref, which is one more thing to get subtly wrong, and this runs in under a
@@ -280,8 +307,10 @@
   # usually right -- and "usually" here means the corpus is trained by code nobody has the dependencies for.
   when: lab_pull is defined and lab_pull is changed
   ansible.builtin.command:
-    argv: [/usr/bin/npm, ci]
+    argv: [/usr/bin/corepack, pnpm, install, --frozen-lockfile]
     chdir: "{{ lab_repo_path }}"
+  environment:
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
   changed_when: true
 
 - name: "Rebuild the compiled packages"

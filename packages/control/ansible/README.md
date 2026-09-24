@@ -7,7 +7,7 @@ pipx install ansible-core                       # 2.18+ — Debian's apt version
 ansible-galaxy collection install -r requirements.yml   # BOTH collections; see requirements.yml
 
 cd packages/control/ansible
-ansible-playbook deploy.yml                     # git pull + npm install + restart + PROVE it took
+ansible-playbook deploy.yml                     # git pull + pnpm install --frozen-lockfile + restart + PROVE it took
 ansible-playbook deploy.yml -l a11y-worker-3    # one box
 ansible-playbook restart.yml -l a11y-worker-3   # the remedy for a wedged worker -- one box; -l is required (#1829)
 ansible-playbook provision.yml                  # drives the PowerShell (today's path)
@@ -57,7 +57,7 @@ The UTM VMs keep their own lifecycle through `worker-ctl.sh` and are **not** man
 | `account.yml` | the worker account, and credential-free auto-logon — including the `LimitBlankPasswordUse` assertion |
 | `policy.yml` | Edge, Windows Update, notifications, OneDrive, screensaver |
 | `firewall.yml` | the worker port, and the allow-app alert that would block the whole desktop |
-| `nvda.yml` | npm, guidepup, NVDA, and the Speech Viewer |
+| `nvda.yml` | pnpm install, guidepup, NVDA, and the Speech Viewer |
 | `tasks.yml` | `a11ysrv`, `a11ycheck`, and removing `a11ybootstrap` |
 | `bespoke.yml` | sleep/NIC power, Defender and browser profiles — via the `a11y.worker` modules |
 | `verify.yml` | start it and prove it serves |
@@ -116,12 +116,31 @@ really changed `powercfg`.
 | 2 mutating `win_powershell` | **guarded** — `NotifyOnListen` and the node move check `$Ansible.CheckMode` |
 | `win_shell` | **skipped** (`supports_check_mode = $false`) |
 
-The `win_shell` skips are honest rather than a gap: `npm install`, `git clone` and `guidepup setup` are
+The `win_shell` skips are honest rather than a gap: `pnpm install`, `git clone` and `guidepup setup` are
 commands, not reconcilable state, so there is nothing for a dry run to predict.
 
 ```bash
 ansible-playbook provision-role.yml -l a11y-worker-1 --check --diff
 ```
+
+## The installs are pnpm, from the lockfile (#2299)
+
+The lab (`tasks/run-job.yml`) and both worker install sites (`deploy.yml` and the role's `nvda.yml`) run
+`corepack pnpm install --frozen-lockfile`, so the lockfile is still the SPECIFICATION (a manifest that
+disagrees refuses, exit 1, `ERR_PNPM_OUTDATED_LOCKFILE`) and every machine installs what CI tested.
+
+- **The Windows workers run pnpm** (measured 2026-09-24 on `a11y-worker-2`, Node 24.20.0, NTFS): corepack
+  ships in the Node zip, fetches the version `packageManager` pins, and needs nothing installed on the box;
+  a frozen install took ~20 s; packages are hard-linked from `%LOCALAPPDATA%\pnpm\store` (link count 2)
+  because the checkout and the store share the C: volume. "Keep npm from an exported lockfile" was the
+  fallback and was not needed. A Node major that stops bundling corepack (announced for Node 25) makes
+  `worker_node_version` a bump that must also provide pnpm.
+- **The first install on a machine removes the npm-made `node_modules`, once** (recognised by npm's hidden
+  `node_modules/.package-lock.json`). pnpm installed over it keeps every npm-hoisted package, and hoisting is
+  what lets an undeclared import resolve.
+- **pnpm 10 does not run dependency scripts** (esbuild, ffmpeg-static). Nothing here needs them; a change
+  that does must say so in `pnpm-workspace.yaml`.
+- The two worker sites carry the SAME script, and `worker-install-sites-match.test.ts` pins it.
 
 ## Powering the fleet, because it is not meant to run 24/7
 
