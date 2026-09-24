@@ -77,7 +77,19 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply]
+    lab_caller_params: [only, out, exclude, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply]
+    # WHICH HEADS `-e exclude=` MAY LEAVE OUT OF A TRAIN, by NAME. The value is a key of this map and never a
+    # subtype: the subtype strings live here, in a tracked file, so `-e exclude=4.1.3:status-progress` and
+    # `-e exclude=../x` are inexpressible rather than rejected -- the containment `out` and `worker` use.
+    #
+    # THIS IS AN EXPERIMENT LEVER, NOT A DECISION. It does not touch `rule-ownership.json`, so who decides a
+    # subtype is unchanged for every other run; the trainer stamps the model it produces `releaseEligible:
+    # false` and names what it lacks (`excludedSubtypes`), so it cannot pass for a full one. Add a name when
+    # an isolating retrain needs another head left out, and pin it in `lab-job.test.ts`.
+    lab_exclude_flag: '--exclude-subtype='
+    lab_train_exclusions:
+      # #2258's cheapest isolating candidate: 24 positives each, 0 of 24 at their own operating point.
+      status-heads: ['4.1.3:status-progress', '4.1.3:status-waiting']
     # THE SHAPE OF AN `-e only=` VALUE, stated once because two jobs now take one. Ids are `[a-z0-9.+-]`
     # and commas, so a path, a flag or a shell metacharacter is INEXPRESSIBLE rather than rejected — the
     # containment `isValidCaptureId` uses, and the reason every parameter here is a name and not a path.
@@ -119,7 +131,7 @@
     # working" into "failed".
     lab_jobs:
       train:
-        params: {out: optional}
+        params: {out: optional, exclude: optional}
         # Trains to a SCRATCH directory on purpose. The trainer now refuses to overwrite a release-eligible
         # model without `--allow-overwrite`, and promoting is a separate, deliberate step — one was already
         # lost to a `git checkout` on the assumption that a tracked file is always recoverable.
@@ -137,6 +149,17 @@
                "--data", "runs/screenreader-dataset/with-realism.jsonl",
                "--output", "runs/model-{{ out | default('candidate') }}"]
         timeout: 3600
+        # `-e exclude=<name>` leaves a NAMED GROUP of heads out of this run (`lab_train_exclusions`), for an
+        # isolating retrain. APPENDED to `argv` above by the include below, so a train naming no `exclude`
+        # runs exactly the argv it always did and `argv` stays a plain list every reader of this catalogue
+        # (`lab-fetch-paths.test.ts` reads its `--output`) can index. `is defined` is the spelling
+        # `lab-job.test.ts` derives OPTIONAL from, which keeps `params:` and this expression agreeing.
+        #
+        # No literal `--exclude-subtype=` in here, on purpose: the derivation reads names out of `{{ }}`,
+        # and `subtype` is a published parameter, so that flag spelled inline would make this job appear to
+        # take `-e subtype=`. The spelling lives in `lab_exclude_flag`, beside the groups it prefixes.
+        argvAppend: "{{ (lab_train_exclusions[exclude] | map('regex_replace', '^', lab_exclude_flag) | list)
+                        if exclude is defined else [] }}"
       build-realism:
         argv: ["/usr/bin/node", "packages/lab/scripts/build-realism-tier.mjs",
                "--out=runs/screenreader-dataset/with-realism.jsonl"]
@@ -1212,6 +1235,29 @@
           trainer writes weights into `runs/model-<name>`, so a path here would be an arbitrary write.
           Add a name to this list if you need another; do not pass a directory.
 
+    - name: A train that leaves a head out names the group from a fixed list
+      when: job == 'train' and exclude is defined
+      ansible.builtin.assert:
+        that: exclude in lab_train_exclusions
+        fail_msg: >-
+          -e exclude=<name> must be one of: {{ lab_train_exclusions.keys() | list | join(', ') }}. It is a NAME,
+          not a subtype: the subtypes each name stands for are in `lab_train_exclusions`, so a typo cannot
+          train a full model under an "excluded" label. Add a name to that map if you need another group.
+
+    # An experiment must never be read as the candidate. `candidate` is what `promote:gated --from=candidate`
+    # and the `acceptance`/`sweep` defaults read, so a headless model landing there is one `-e job=acceptance`
+    # away from being measured as if it were the model. Explicit, and not `candidate`, or refused.
+    - name: A train that leaves a head out names a scratch directory that is not the candidate
+      when: job == 'train' and exclude is defined
+      ansible.builtin.assert:
+        that:
+          - out is defined
+          - out != 'candidate'
+        fail_msg: >-
+          -e exclude= needs an explicit -e out=<name> other than 'candidate' (multidefect, varied or scratch).
+          A model trained without a head must never land in runs/model-candidate, where every default reader
+          would take it for the candidate.
+
     # Same containment, same reason: a NAME from a fixed list, never a path. This one becomes an env var
     # rather than an argv entry, and an env var reaching a child process is the `A11Y_PYTHON` hazard.
     - name: A sweep names the model it measures from a fixed list
@@ -1431,7 +1477,10 @@
       ansible.builtin.include_tasks: tasks/run-job.yml
       vars:
         job_name: "{{ job }}"
-        job_argv: "{{ lab_jobs[job].argv }}"
+        # `argvAppend` is optional and today only `train` has one: flags whose NUMBER depends on a parameter,
+        # which a plain list cannot express and a single templated `argv` string would hide from every reader
+        # that indexes `argv`. Concatenated HERE so `tasks/run-job.yml` keeps taking one list.
+        job_argv: "{{ lab_jobs[job].argv + (lab_jobs[job].argvAppend | default([])) }}"
         job_setenv: "{{ lab_jobs[job].setenv | default([]) }}"
         job_timeout: "{{ lab_jobs[job].timeout }}"
         # `run-job.yml` has read `job_success_codes` since it was written and NOTHING has ever passed it,

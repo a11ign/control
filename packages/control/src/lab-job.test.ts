@@ -13,7 +13,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor } from "./lab-job.mjs";
@@ -275,3 +278,159 @@ test("#1670: the ansible-playbook argv never hardcodes -i, so ansible.cfg's own 
   assert.deepEqual(args, ["packages/control/ansible/lab-job.yml", "-e", "job=train"],
     "the playbook path and every forwarded arg must still reach ansible-playbook, in order");
 });
+
+// ---------------------------------------------------------------------------------------------------------
+// #2304: `-e exclude=` leaves a NAMED GROUP of heads out of a train, and is the ONLY way to.
+//
+// The lever exists so #2258's isolating retrain can be dispatched without editing `rule-ownership.json`
+// (who decides a subtype, for every run) or running the trainer over ssh by hand (the hole ADR 0013 closed).
+// What these pin is what makes it SAFE to have: a fixed list, no expressible subtype or path, no landing
+// in the candidate directory, and a train that names no `exclude` running exactly the argv it always did.
+// Text pins run everywhere; the RENDERED ones need ansible-core and skip honestly without it.
+// ---------------------------------------------------------------------------------------------------------
+
+/** The text between two anchors of the catalogue, the anchors excluded. Throws rather than return "". */
+function between(text: string, from: string, to: string): string {
+  const start = text.indexOf(from);
+  const end = text.indexOf(to, start + from.length);
+  assert.ok(start >= 0 && end > start, `could not slice lab-job.yml between ${JSON.stringify(from)} and `
+    + `${JSON.stringify(to)}; the catalogue was reshaped and this reads nothing`);
+  return text.slice(start + from.length, end);
+}
+
+const TRAIN_ENTRY = between(CATALOGUE, "\n      train:\n", "\n      build-realism:\n");
+const TRAIN_ARGV = between(TRAIN_ENTRY, "        argv: ", "        timeout:");
+const TRAIN_APPEND = TRAIN_ENTRY.match(/argvAppend: "\{\{[\s\S]*?\}\}"/)?.[0] ?? "";
+const EXCLUSIONS_BLOCK = "    lab_exclude_flag:" + between(CATALOGUE, "\n    lab_exclude_flag:",
+  "\n    # THE SHAPE OF AN `-e only=` VALUE");
+const EXCLUDE_ASSERTS = "    - name: A train that leaves a head out names the group" + between(CATALOGUE,
+  "\n    - name: A train that leaves a head out names the group",
+  "\n    # Same containment, same reason: a NAME from a fixed list, never a path. This one becomes an env var");
+const JOB_ARGV_LINE = CATALOGUE.match(/^ {8}job_argv: (".*")$/m)?.[1] ?? "";
+
+/** `name: ['a', 'b']` lines of the exclusion map, as `{ name: [a, b] }`. */
+function exclusionGroups(): Record<string, string[]> {
+  const groups: Record<string, string[]> = {};
+  for (const [, name, list] of EXCLUSIONS_BLOCK.matchAll(/^ {6}([a-z][a-z0-9-]*): \[(.*)\]\s*$/gm)) {
+    groups[name] = [...list.matchAll(/'([^']+)'/g)].map(([, subtype]) => subtype);
+  }
+  return groups;
+}
+
+test("#2304: the exclusion groups are exactly these, and the flag is the trainer's own", () => {
+  // MEMBERSHIP, not a count: two lists can stay the same length while the wrong head moves in.
+  assert.deepEqual(exclusionGroups(), { "status-heads": ["4.1.3:status-progress", "4.1.3:status-waiting"] },
+    "the groups `-e exclude=` may name changed. Add a group with the reason (which retrain needs it), and "
+    + "update this list -- a group is a standing permission to train a model without a head.");
+  assert.match(EXCLUSIONS_BLOCK, /^ {4}lab_exclude_flag: '--exclude-subtype='$/m,
+    "the flag the job appends is not the one train-screenreader-model.py declares");
+});
+
+test("#2304: `exclude` reaches the command ONLY as a key into the fixed map — no subtype or path is expressible", () => {
+  // Every read of `exclude` in the train entry, minus the two sanctioned spellings, must leave none. A
+  // third spelling (`lab_exclude_flag ~ exclude`) would put the caller's string on the trainer's argv.
+  assert.ok(TRAIN_APPEND.includes("lab_train_exclusions[exclude]"),
+    "the train job no longer looks `exclude` up in the fixed map");
+  const rest = TRAIN_APPEND.replace("lab_train_exclusions[exclude]", "").replace("exclude is defined", "");
+  assert.ok(!/\bexclude\b/.test(rest),
+    `\`exclude\` is read some other way than as a key of \`lab_train_exclusions\`, so a caller's own string `
+    + `could reach the trainer: ${rest}`);
+  assert.ok(!/\bexclude\b/.test(TRAIN_ARGV), "`argv` reads `exclude` directly; it may only reach `argvAppend`");
+  assert.match(TRAIN_ENTRY, /params: \{out: optional, exclude: optional\}/);
+});
+
+test("#2304: the include appends `argvAppend` and nothing else, so run-job.yml still takes one list", () => {
+  assert.equal(JOB_ARGV_LINE, '"{{ lab_jobs[job].argv + (lab_jobs[job].argvAppend | default([])) }}"',
+    "the include no longer builds job_argv as argv + an OPTIONAL argvAppend");
+  assert.equal(CATALOGUE.match(/argvAppend:/g)?.length, 1, "only `train` may carry an argvAppend today");
+});
+
+test("#2304: the two refusals are guarded on train + exclude, and say what they check", () => {
+  assert.equal(EXCLUDE_ASSERTS.match(/when: job == 'train' and exclude is defined/g)?.length, 2,
+    "both refusals must fire for a train that names an exclude, and only for that");
+  assert.match(EXCLUDE_ASSERTS, /that: exclude in lab_train_exclusions/, "an unlisted name must be refused");
+  assert.match(EXCLUDE_ASSERTS, /- out is defined\s+- out != 'candidate'/,
+    "an exclusion must name a scratch directory, and never the candidate's");
+});
+
+// ---- the same claims, RENDERED by ansible itself --------------------------------------------------------
+
+const HAS_ANSIBLE = spawnSync("ansible-playbook", ["--version"]).status === 0;
+const NO_ANSIBLE = "ansible-playbook is not on PATH -- an honest skip, not a pass. The text pins above still ran.";
+
+/** Dedent `block` by `by` spaces so it can be re-nested at another depth. */
+const dedent = (block: string, by: number) => block.split("\n")
+  .map((line) => line.startsWith(" ".repeat(by)) ? line.slice(by) : line).join("\n");
+
+type TrainRun = { status: number | null; output: string; base: string[] | null; argv: string[] | null };
+
+/**
+ * Runs the REAL train entry, exclusion map, refusal tasks and `job_argv` expression -- all lifted from
+ * lab-job.yml byte for byte, so nothing here re-implements them -- under ansible-playbook with `-e job=train`
+ * and the given extras. `base` is `argv` alone; `argv` is what the include would hand to run-job.yml.
+ */
+function runTrain(extras: string[]): TrainRun {
+  const dir = mkdtempSync(join(tmpdir(), "lab-train-exclude-"));
+  try {
+    const out = (name: string) => join(dir, `${name}.json`);
+    writeFileSync(join(dir, "vars.yml"), [
+      "lab_python: /opt/py",
+      dedent(EXCLUSIONS_BLOCK, 4).trimEnd(),
+      "lab_jobs:", "  train:", dedent(TRAIN_ENTRY, 4).trimEnd(), "",
+    ].join("\n"));
+    writeFileSync(join(dir, "play.yml"), [
+      "- hosts: localhost", "  gather_facts: false", "  vars:", `    job_argv: ${JOB_ARGV_LINE}`, "  tasks:",
+      EXCLUDE_ASSERTS.trimEnd(),
+      ...["base", "argv"].flatMap((name) => [
+        `    - name: Render ${name}`, "      ansible.builtin.copy:",
+        `        content: "{{ ${name === "base" ? "lab_jobs[job].argv" : "job_argv"} | to_json }}"`,
+        `        dest: ${out(name)}`]), "",
+    ].join("\n"));
+    const run = spawnSync("ansible-playbook", ["play.yml", "-e", "@vars.yml", "-e", "job=train", ...extras],
+      { cwd: dir, encoding: "utf8", env: { ...process.env, ANSIBLE_LOCALHOST_WARNING: "False" } });
+    const read = (name: string): string[] | null => {
+      try { return JSON.parse(readFileSync(out(name), "utf8")); } catch { return null; }
+    };
+    return { status: run.status, output: `${run.stdout}${run.stderr}`, base: read("base"), argv: read("argv") };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("#2304 (rendered): a train with no `exclude` hands run-job.yml exactly `argv`, unchanged",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    for (const extras of [[], ["-e", "out=varied"]]) {
+      const run = runTrain(extras);
+      assert.equal(run.status, 0, run.output);
+      assert.ok(run.base && run.base.length >= 5, "the base argv did not render, so equality below is vacuous");
+      assert.deepEqual(run.argv, run.base, `${extras.join(" ") || "no extras"}: argvAppend changed a train that named no exclude`);
+      assert.ok(!run.argv?.some((arg) => arg.startsWith("--exclude")), "an exclusion flag appeared unasked");
+    }
+  });
+
+test("#2304 (rendered): `exclude=status-heads` appends one flag per subtype after argv, and nothing else",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runTrain(["-e", "exclude=status-heads", "-e", "out=scratch"]);
+    assert.equal(run.status, 0, run.output);
+    assert.ok(run.base && run.argv);
+    assert.deepEqual(run.argv, [...run.base,
+      "--exclude-subtype=4.1.3:status-progress", "--exclude-subtype=4.1.3:status-waiting"]);
+    assert.match(run.base[run.base.indexOf("--output") + 1], /model-scratch$/, "`out` no longer names the directory");
+  });
+
+test("#2304 (rendered): an unlisted name, a subtype, a path, no `out`, and `out=candidate` are each REFUSED",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const refused: Array<[string[], RegExp]> = [
+      [["-e", "exclude=nope", "-e", "out=scratch"], /must be one of: status-heads/],
+      [["-e", "exclude=4.1.3:status-progress", "-e", "out=scratch"], /must be one of: status-heads/],
+      [["-e", "exclude=../../etc", "-e", "out=scratch"], /must be one of: status-heads/],
+      [["-e", "exclude=status-heads"], /needs an explicit -e out=/],
+      [["-e", "exclude=status-heads", "-e", "out=candidate"], /needs an explicit -e out=/],
+    ];
+    for (const [extras, message] of refused) {
+      const run = runTrain(extras);
+      assert.notEqual(run.status, 0, `${extras.join(" ")} was accepted`);
+      assert.match(run.output, message, `${extras.join(" ")} was refused for the wrong reason`);
+      assert.equal(run.argv, null, `${extras.join(" ")} rendered an argv after being refused`);
+    }
+  });
