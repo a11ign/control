@@ -77,7 +77,7 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, exclude, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply]
+    lab_caller_params: [only, out, exclude, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply, case]
     # WHICH HEADS `-e exclude=` MAY LEAVE OUT OF A TRAIN, by NAME. The value is a key of this map and never a
     # subtype: the subtype strings live here, in a tracked file, so `-e exclude=4.1.3:status-progress` and
     # `-e exclude=../x` are inexpressible rather than rejected -- the containment `out` and `worker` use.
@@ -850,6 +850,22 @@
         argv: ["/usr/bin/npm", "run", "--silent", "scorer:explain-feature", "--",
                "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]
         timeout: 900
+      # WHAT DID THE MODEL SEE on a held-out acceptance case? Its label, each head's score against its cut, and
+      # the value of EVERY document feature by name -- so `orchestrator` can read whether the vetoed
+      # `form_change_nonempty` / `validation_error_missing` were 0 on the 16 misses and 6 false alarms #2258
+      # asks about (#2334). `explain-feature` cannot: it reads the TRAINING export, which does not hold these
+      # cases. `scorer:explain --criterion=X` prints the ids this takes, ready to paste.
+      #
+      # `-e case=` is a case id or a comma-separated list, contained by the SAME shape as `capture-only`'s
+      # (`lab_case_id_shape`), so a path or a flag cannot be expressed; a well-formed id the records do not
+      # hold is refused by name by the reader, not printed as an empty block. `-e out=` names the model from the
+      # fixed list, as `acceptance` does -- the reader takes its records from that model's own acceptance
+      # report, so it reads the repeats the model was actually scored on. Read-only: no weights, no corpus.
+      explain-case:
+        params: {case: required, out: optional}
+        argv: ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--",
+               "--model={{ out | default('candidate') }}", "--case={{ case }}"]
+        timeout: 900
       rules-coverage:
         argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
         timeout: 900
@@ -1226,8 +1242,19 @@
           -e only=route-title-stale+ for a whole family, or -e only=<exact-id> for one case. Ids only. Paste what
           check-signals or an audit printed.
 
+    - name: An explain-case job names case ids and nothing else
+      when: job == 'explain-case'
+      ansible.builtin.assert:
+        that:
+          - case is defined
+          - case is match(lab_case_id_shape)
+        fail_msg: >-
+          explain-case needs -e case=<case-id> or a comma-separated list, e.g. -e case=acceptance-b3-status-taxi.
+          Ids only, with no variant: `scorer:explain --criterion=<X>` prints the list of every miss and false
+          alarm on a criterion, ready to paste.
+
     - name: A train job names its scratch output from a fixed list
-      when: job in ['train', 'acceptance', 'shortcuts', 'false-positives']
+      when: job in ['train', 'acceptance', 'shortcuts', 'false-positives', 'explain-case']
       ansible.builtin.assert:
         that: out | default('candidate') in ['candidate', 'multidefect', 'varied', 'scratch']
         fail_msg: >-

@@ -18,6 +18,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor } from "./lab-job.mjs";
 
@@ -430,6 +431,113 @@ test("#2304 (rendered): an unlisted name, a subtype, a path, no `out`, and `out=
     for (const [extras, message] of refused) {
       const run = runTrain(extras);
       assert.notEqual(run.status, 0, `${extras.join(" ")} was accepted`);
+      assert.match(run.output, message, `${extras.join(" ")} was refused for the wrong reason`);
+      assert.equal(run.argv, null, `${extras.join(" ")} rendered an argv after being refused`);
+    }
+  });
+
+// ---------------------------------------------------------------------------------------------------------
+// #2334: `explain-case` -- what did the model see on ONE held-out acceptance case?
+//
+// It is read-only and takes two parameters from the wire, `case` and `out`, and the containment is the point:
+// `case` reaches the command only as `--case=<value>` and only after `lab_case_id_shape` has matched it, and
+// `out` is a NAME from the list `acceptance` already uses. So neither a path nor a flag is expressible.
+// Text pins run everywhere; the RENDERED ones need ansible-core and skip honestly without it.
+// ---------------------------------------------------------------------------------------------------------
+
+const EXPLAIN_CASE_ENTRY = between(CATALOGUE, "\n      explain-case:\n", "\n      rules-coverage:\n");
+const CASE_ASSERT = "    - name: An explain-case job names case ids and nothing else" + between(CATALOGUE,
+  "\n    - name: An explain-case job names case ids and nothing else",
+  "\n    - name: A train job names its scratch output from a fixed list");
+const OUT_ASSERT = "    - name: A train job names its scratch output from a fixed list" + between(CATALOGUE,
+  "\n    - name: A train job names its scratch output from a fixed list",
+  "\n    - name: A train that leaves a head out names the group from a fixed list");
+const CASE_SHAPE_LINE = CATALOGUE.match(/^ {4}lab_case_id_shape: (.*)$/m)?.[1] ?? "";
+
+const jobsOf = () => (parseYaml(CATALOGUE) as Array<{ vars?: { lab_jobs?: Record<string, { argv: string[]; params?: unknown }> } }>)
+  .flatMap((play) => (play.vars?.lab_jobs ? [play.vars.lab_jobs] : []))[0];
+
+test("#2334: `explain-case` takes `case` (required) and `out` (optional), and runs `scorer:explain --case=`", () => {
+  const job = jobsOf()["explain-case"];
+  assert.ok(job, "the catalogue has no `explain-case` job, so #2258 cannot read a held-out case's features");
+  assert.deepEqual(job.params, { case: "required", out: "optional" });
+  assert.deepEqual(job.argv, ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--",
+    "--model={{ out | default('candidate') }}", "--case={{ case }}"]);
+});
+
+test("#2334: `case` reaches the argv ONLY as the value of `--case=`, and is asserted against the shared shape", () => {
+  // A second spelling of `case` on the argv (`{{ case }}` bare, or joined into a path) would put the caller's
+  // string somewhere the shape was not written to contain.
+  assert.equal(EXPLAIN_CASE_ENTRY.match(/\{\{\s*case\b/g)?.length, 1, "`case` is interpolated more than once");
+  assert.match(EXPLAIN_CASE_ENTRY, /"--case=\{\{ case \}\}"/);
+  assert.match(CASE_ASSERT, /when: job == 'explain-case'/);
+  assert.match(CASE_ASSERT, /case is match\(lab_case_id_shape\)/,
+    "`case` is not contained by the shape `capture-only` uses");
+  assert.match(OUT_ASSERT, /job in \[[^\]]*'explain-case'[^\]]*\]/, "`out` for explain-case is not from the fixed list");
+});
+
+test("#2334: no existing job's argv changed -- the neighbours that share its asserts render what they always did", () => {
+  const jobs = jobsOf();
+  assert.deepEqual(jobs["explain-feature"].argv, ["/usr/bin/npm", "run", "--silent", "scorer:explain-feature", "--",
+    "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]);
+  // The three that read `out` beside it, through the assert whose `when` list gained a member.
+  assert.ok(jobs.acceptance.argv.at(-1)?.endsWith("model-{{ out | default('candidate') }}/acceptance-report.json"));
+  assert.equal(jobs.acceptance.argv[0], "{{ lab_python }}");
+  assert.deepEqual(jobs["capture-only"].params, { only: "required", workers: "optional", capture_root: "optional" });
+  // The one the row added is the only one that reaches the case reader; nothing else grew a `--case=`.
+  const withCase = Object.entries(jobs).filter(([, job]) => JSON.stringify(job.argv).includes("--case="));
+  assert.deepEqual(withCase.map(([name]) => name), ["explain-case"]);
+});
+
+/** Renders the REAL entry and the REAL two asserts under ansible-playbook, the shape `runTrain` uses. */
+function runExplainCase(extras: string[]): { status: number | null; output: string; argv: string[] | null } {
+  const dir = mkdtempSync(join(tmpdir(), "lab-explain-case-"));
+  try {
+    const dest = join(dir, "argv.json");
+    writeFileSync(join(dir, "vars.yml"), [
+      `lab_case_id_shape: ${CASE_SHAPE_LINE}`,
+      "lab_jobs:", "  explain-case:", dedent(EXPLAIN_CASE_ENTRY, 4).trimEnd(), "",
+    ].join("\n"));
+    writeFileSync(join(dir, "play.yml"), [
+      "- hosts: localhost", "  gather_facts: false", "  tasks:", CASE_ASSERT.trimEnd(), OUT_ASSERT.trimEnd(),
+      "    - name: Render argv", "      ansible.builtin.copy:",
+      "        content: \"{{ lab_jobs[job].argv | to_json }}\"", `        dest: ${dest}`, "",
+    ].join("\n"));
+    const run = spawnSync("ansible-playbook", ["play.yml", "-e", "@vars.yml", "-e", "job=explain-case", ...extras],
+      { cwd: dir, encoding: "utf8", env: { ...process.env, ANSIBLE_LOCALHOST_WARNING: "False" } });
+    let argv: string[] | null = null;
+    try { argv = JSON.parse(readFileSync(dest, "utf8")); } catch { argv = null; }
+    return { status: run.status, output: `${run.stdout}${run.stderr}`, argv };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("#2334 (rendered): a well-formed case id, or a comma-separated list, renders `--model=` and `--case=` and nothing else",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const one = runExplainCase(["-e", "case=acceptance-b3-status-taxi"]);
+    assert.equal(one.status, 0, one.output);
+    assert.deepEqual(one.argv?.slice(-2), ["--model=candidate", "--case=acceptance-b3-status-taxi"]);
+    const many = runExplainCase(["-e", "case=a-one,b.two,c+", "-e", "out=scratch"]);
+    assert.equal(many.status, 0, many.output);
+    assert.deepEqual(many.argv?.slice(-2), ["--model=scratch", "--case=a-one,b.two,c+"]);
+  });
+
+test("#2334 (rendered): a malformed case, a path, a flag, no case, and an unlisted `out` are each REFUSED",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    // JSON extra vars, not `case=<value>`: ansible splits a key=value string on whitespace, so `case=a b` would
+    // reach the shape as `a` with a stray word beside it and the space would never be tested at all.
+    const withCase = (value: string) => ["-e", JSON.stringify({ case: value })];
+    const shape = /explain-case needs -e case=/;
+    const refused: Array<[string[], RegExp]> = [
+      ...["../../etc/passwd", "/runs/model-candidate", "--model=x", "a b", "a;rm -rf /", "Upper", "a,,b",
+        "acceptance-b3-status-taxi/bad", "", "$(id)"].map((value): [string[], RegExp] => [withCase(value), shape]),
+      [[], shape],
+      [[...withCase("ok-case"), "-e", "out=../../etc"], /must be one of: candidate, multidefect, varied, scratch/],
+    ];
+    for (const [extras, message] of refused) {
+      const run = runExplainCase(extras);
+      assert.notEqual(run.status, 0, `${extras.join(" ") || "(no case)"} was accepted`);
       assert.match(run.output, message, `${extras.join(" ")} was refused for the wrong reason`);
       assert.equal(run.argv, null, `${extras.join(" ")} rendered an argv after being refused`);
     }
