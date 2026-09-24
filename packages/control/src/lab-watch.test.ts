@@ -34,6 +34,18 @@ test("runLabStatus forces the json callback for this one call, leaving ansible.c
   assert.equal(capturedEnv?.ANSIBLE_STDOUT_CALLBACK, "json");
 });
 
+test("runLabStatus replaces ansible.cfg's notification callbacks, or profile_tasks corrupts the JSON (#2230)", () => {
+  // MEASURED 2026-09-24 on the agent host: with `callbacks_enabled = ansible.posix.profile_tasks` inherited,
+  // stdout began "Thursday 24 September 2026 ..." and `JSON.parse` threw. The env var must be set, and
+  // must name a plugin: an empty value makes ansible abort before running a task.
+  let capturedEnv: NodeJS.ProcessEnv | undefined;
+  runLabStatus((_argv, opts) => {
+    capturedEnv = opts?.env;
+    return JSON.stringify(playbookRun(REPORT_TASK_NAME, "{}"));
+  });
+  assert.equal(capturedEnv?.ANSIBLE_CALLBACKS_ENABLED, "ansible.builtin.default");
+});
+
 test("extractReportJson finds the report task BY NAME, not by position", () => {
   const run = playbookRun(REPORT_TASK_NAME, '{"attention":true,"entries":[]}');
   assert.equal(extractReportJson(run), '{"attention":true,"entries":[]}');
