@@ -186,6 +186,7 @@ npm run lab:job -- -e job=train                 # named jobs only; see lab-job.y
 npm run lab:job -- -e job=capture-real-pages -e worker=a11y-worker-2 -e role=training -e shard=0/4
 npm run lab:status                              # every a11y-job-* unit and its state
 npm run lab:status -- -e job=train              # one job, systemd's view + its journal + its own progress file
+npm run lab:clear-failed -- -e job=everything  # clear ONE failed job unit (read its journal first); refuses a sweep, #2180
 ```
 
 > **Run these from YOUR machine, not from the control container.** `a11y_lab` authenticates with

@@ -1,0 +1,159 @@
+---
+# Clear ONE lab job unit that is sitting in `failed`, deliberately.
+#
+#     npm run lab:clear-failed -- -e job=everything
+#
+# ## Why this exists (#2180)
+#
+# A hand-dispatched job is a TRANSIENT unit held `--remain-after-exit`, so its last result stays on the
+# lab as `failed` until something removes it -- and `lab:status`'s "Failed units" report reads that line
+# for as long as it stands. Two of them (`everything`, `release-gate`) sat there for eleven and three days
+# with nothing left to clear them, because every route that clears a handle was the wrong one:
+#
+# - `run-job.yml` reaps a failed handle only on the NEXT START of that name, so clearing `everything` that
+#   way meant re-running a multi-hour pipeline, and clearing `release-gate` meant re-running a gate that
+#   would fail again for the same reason.
+# - `lab-stop.yml` is for a RUNNING unit and says so ("not a fault handler").
+# - #2061 cleared its unit inside `corpus-schedule.yml`, tied to that unit's timer removal, which these
+#   two do not have.
+#
+# This is the missing route: `reset-failed` on a named unit, in #2061's shape (`corpus-schedule.yml`, the
+# probe and the reset around `corpus_backup_job_unit`).
+#
+# ## READ THE JOURNAL FIRST -- systemd keeps only the LAST result, and this erases it
+#
+# The failed line is not the record: systemd holds one result per unit, so a unit dispatched twice shows
+# one failure and silently loses the earlier. Clearing removes even that. `npm run lab:status -- -e job=<name>`
+# prints the result and this invocation's journal; put what it says on the row BEFORE running this. What
+# this play prints while clearing is a courtesy, not the reading.
+#
+# ## ONE NAMED UNIT, AND NEVER A SWEEP
+#
+# `systemctl reset-failed` accepts patterns and, given none, resets EVERY failed unit. So the unit is built
+# here as `a11y-job-<job>` from a NAME restricted to lowercase words and hyphens -- never a caller-supplied
+# unit and never a glob. A "clear everything that failed" would erase the last-result line that other
+# owners are still reading (`a11y-job-acceptance` and `a11y-job-evidence-check` each have an owner and a
+# clock), which is exactly why the sweep is refused rather than merely absent from the docs.
+#
+# The name is checked against `lab-job.yml`'s catalogue too, so a typo is REFUSED instead of reading as a
+# unit that was "already clear" -- an absent unit is the success case below, and that would otherwise turn
+# `-e job=evrything` into a green run that cleared nothing.
+#
+# ## Clearing is not fixing
+#
+# `reset-failed` does not touch what made the unit fail. A gate that is red for a cause still standing
+# (`release-gate` behind an owed rehearsal) re-derives its red on demand and will fail again the next time
+# it is dispatched; the line is cleared so that `lab:status` stays a report worth reading, not because
+# anything was repaired.
+# THE LAB MUST BE IN THE INVENTORY, AND AN EMPTY INVENTORY MUST NOT READ AS SUCCESS.
+#
+# `ansible-playbook` prints `skipping: no hosts matched`, an EMPTY PLAY RECAP, and **exits 0**, so a clear
+# that reached no host would report success having cleared nothing. THIS PLAY RUNS ON `localhost`,
+# precisely so it can speak when the real play cannot -- see `tasks/require-inventory-group.yml`.
+- name: The lab must be in the inventory before anything claims to have run
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The lab must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_lab
+        inventory_group_noun: lab
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Clear one failed lab job unit
+  hosts: a11y_lab
+  gather_facts: false
+  vars_files:
+    - vars/lab-catalogue.yml
+
+  vars:
+    lab_clear_unit: "a11y-job-{{ job | default('') }}"
+
+  tasks:
+    # BOTH REFUSALS PRECEDE EVERY `systemctl`, so a refused name touches nothing on the lab. The first is
+    # the sweep refusal; its regex is what keeps a glob, a `.service` suffix or a second unit out of the
+    # argv below.
+    - name: A job must be named, as one plain name
+      ansible.builtin.assert:
+        that:
+          - job is defined
+          - job is match('^[a-z][a-z0-9-]{0,40}$')
+        fail_msg: >-
+          Pass -e job=<name>, ONE name from lab-job.yml's catalogue. Nothing was cleared. This playbook
+          takes a NAME, never a unit, a glob or a list, because `systemctl reset-failed` with a pattern --
+          or with none -- resets every failed unit at once, including those whose last result somebody
+          else is still reading. There is no "clear all failed" and there is not meant to be.
+
+    - name: That is a job this lab has
+      ansible.builtin.assert:
+        that: job in lab_catalogue
+        fail_msg: >-
+          '{{ job }}' is not a job this lab has, so the unit `{{ lab_clear_unit }}` is not one this lab
+          dispatches. Nothing was cleared. `npm run lab:job` lists every job; an absent unit reads as
+          already clear below, which is why a typo is refused here rather than tolerated.
+
+    # ASKED BEFORE IT IS CLEARED, rather than clearing unconditionally and tolerating the failure (#2061).
+    # A bare `reset-failed` would have to be `failed_when: false`, because a unit the lab no longer holds
+    # is the SUCCESS case -- and a task that can neither fail nor honestly report `changed` breaks the
+    # idempotence this play claims. `systemctl is-failed` answers exactly the question: `failed` on stdout
+    # when it is, a non-zero exit and some other word when it is not.
+    - name: Is this unit sitting in failed?
+      ansible.builtin.command:
+        argv: [systemctl, is-failed, "{{ lab_clear_unit }}"]
+      register: lab_clear_state
+      changed_when: false
+      failed_when: false
+      # READS IN `--check` TOO: an `ansible.builtin.command` is skipped under it, which would leave this
+      # register undefined and the gate below unevaluable (#2059). It changes nothing.
+      check_mode: false
+
+    - name: What the unit last did, before it is cleared
+      ansible.builtin.command:
+        argv: [systemctl, show, "-p", Result, "-p", ExecMainStatus, "-p", ActiveEnterTimestamp, "{{ lab_clear_unit }}"]
+      register: lab_clear_last
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: (lab_clear_state.stdout | trim) == "failed"
+
+    - name: Print it, since the reset erases it
+      ansible.builtin.debug:
+        msg: "{{ lab_clear_unit }}: {{ lab_clear_last.stdout_lines }}"
+      when: (lab_clear_state.stdout | trim) == "failed"
+
+    # GATED ON STDOUT, not on the exit code: `is-failed` exits non-zero for every state that is not
+    # `failed`, so the exit code cannot tell "clear already" from "still running", and a RUNNING unit must
+    # never be reset from under its job.
+    - name: Clear the failed unit
+      ansible.builtin.command:
+        argv: [systemctl, reset-failed, "{{ lab_clear_unit }}"]
+      when: (lab_clear_state.stdout | trim) == "failed"
+      changed_when: true
+
+    - name: Say plainly when there was nothing to clear
+      ansible.builtin.debug:
+        msg: >-
+          {{ lab_clear_unit }} is '{{ lab_clear_state.stdout | trim | default('absent', true) }}', not
+          failed, so nothing was cleared and nothing needed to be.
+      when: (lab_clear_state.stdout | trim) != "failed"
+
+    # Read back, because `reset-failed` returning cleanly means only that the request was accepted.
+    - name: Confirm it no longer reads failed
+      ansible.builtin.command:
+        argv: [systemctl, is-failed, "{{ lab_clear_unit }}"]
+      register: lab_clear_after
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: (lab_clear_state.stdout | trim) == "failed" and not ansible_check_mode
+
+    - name: It must no longer be failed
+      ansible.builtin.assert:
+        that: (lab_clear_after.stdout | trim) != "failed"
+        fail_msg: >-
+          {{ lab_clear_unit }} still reports `failed` after `systemctl reset-failed`. Do not assume it
+          cleared: read `npm run lab:status -- -e job={{ job }}` before trusting the report.
+        success_msg: "{{ lab_clear_unit }} cleared (now '{{ lab_clear_after.stdout | trim }}')"
+      when: (lab_clear_state.stdout | trim) == "failed" and not ansible_check_mode
