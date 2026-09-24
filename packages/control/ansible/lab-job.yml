@@ -1078,17 +1078,33 @@
       evidence-check:
         params: {sample: optional, only: optional, worker: optional}
         # ITS EXIT CODE IS THE ANSWER, not just a status: 0 safe to ship, 1 the evidence CHANGED so a
-        # recapture is required, 2 it could not answer. All three are successful runs of the check; only a
-        # crash is a failure. They stay non-zero-is-failure deliberately — 1 means "invalidate 2,122
-        # cached captures", which must never read as a green job — but the operator is now told which of
-        # the three they got instead of having to remember.
+        # recapture is required, 2 it could not answer, 3 it THREW and never got to answer (#2197). 1 and 2
+        # are successful runs of the check; 3 is a crash. They stay non-zero-is-failure deliberately — 1
+        # means "invalidate every cached capture", which must never read as a green job — but the operator
+        # is told which they got instead of having to remember.
+        #
+        # THE TEXT FOR 1 DOES NOT STATE A CAUSE AS FACT, and that is the whole of #2197. A throw used to
+        # exit 1 too, so a stale manifest read as "the evidence CHANGED" and named a 872-capture, ~71-minute
+        # fleet recapture as the remedy for what `-e job=generate` fixes in seconds. The script now exits 3
+        # for a throw, but a failure BEFORE its own handler runs (a module that will not load, an unknown
+        # flag) is still Node's `1`, so 1 is "the designed verdict, or a crash the script could not catch"
+        # and the output decides which.
         exitMeanings:
           "1": >-
-            the evidence CHANGED. The check ran correctly and this is its answer: bump
-            CAPTURE_PROTOCOL_VERSION and recapture. Not a fault.
+            EITHER the designed CHANGED verdict (the check ran and the evidence differs) OR a crash before
+            the script could report one (a module that would not load, an unknown flag) — read the output
+            above to tell them apart. A CHANGED run ends with an "N compared: … changed" line and a
+            "Report:" path; a crash prints an error or stack trace and no such line. ONLY the first means
+            bump CAPTURE_PROTOCOL_VERSION and recapture, which invalidates every stored capture; do not
+            recapture on this code alone.
           "2": >-
             INCONCLUSIVE — it could not compare enough captures to answer, which includes PARTIAL
             coverage and not only zero. Re-run it; do not read this as "unchanged".
+          "3": >-
+            the check THREW and did not answer, so this says nothing about the evidence — not CHANGED,
+            not unchanged. The error and stack are above. The usual cause is a stale manifest ("the
+            manifest describes case definitions that no longer match CASES"), which
+            `npm run lab:job -- -e job=generate` fixes; do NOT recapture the fleet for it.
         # The `--only=` entry is APPENDED OR ABSENT, never rendered empty. `evidence-check.mjs` reads
         # `flag("only", null)` and treats a falsy value as "no filter", so `--only=` would happen to work
         # today — but that is a property of the script's current falsiness, not of this interface, and the
