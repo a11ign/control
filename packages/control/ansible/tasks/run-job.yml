@@ -45,6 +45,14 @@
 #      code with it — the handle would vanish at the moment it matters. Verified both ways on this
 #      container: `/bin/true` leaves `Result=success ExecMainStatus=0`, and `exit 42` leaves
 #      `Result=exit-code ExecMainStatus=42 ActiveState=failed` rather than disappearing.
+#   4. **After "Release the unit", every property is systemd's DEFAULT, and two of the defaults read as
+#      success.** The release stops the transient unit, which unloads it, and an unloaded unit answers
+#      `systemctl show` byte for byte like a unit that never existed: `Result=success`, `ExecMainStatus=0`,
+#      `LoadState=not-found`, empty timestamps and `InvocationID`, and `Description=` the unit NAME. So the
+#      commit stamp `--description=` writes below is readable only WHILE the job runs; read `Result` and
+#      `ExecMainStatus` before the release, and the stamp afterwards from the journal (`lab-status.yml`,
+#      bounded by `_SYSTEMD_INVOCATION_ID`). Measured on the lab 2026-09-23: a `train` that exited 0 after
+#      4m12s and a unit name invented in the same command printed identical output (#2232).
 - name: "Settle the defaults for: {{ job_name }}"
   ansible.builtin.set_fact:
     job_unit: "a11y-job-{{ job_name }}"
@@ -412,6 +420,9 @@
 # The dirty marker is here rather than left implicit because the refusal above lets a dirty checkout run
 # when it is ALREADY at the requested commit -- so `DIRTY` is the only signal that the bytes executed were
 # not the bytes at that SHA. No shell is involved: this is one more element in the argv list.
+#
+# THE STAMP DOES NOT SURVIVE "Release the unit": afterwards `systemctl show -p Description` answers with the
+# unit NAME (header point 4), so read it back from the journal, never from the unit.
 - name: "Start it: {{ job_name }}"
   ansible.builtin.command:
     argv: >-
