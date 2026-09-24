@@ -422,6 +422,12 @@
       # whether NVDA's output is still stable. So this is a full capture of every acceptance page every
       # time — 42 pairs, and TWICE because the two repeats are what measure that stability.
       #
+      # NO SCOPED FORM (`only`), ON PURPOSE (#2168). `capture-only` takes one because the training corpus
+      # caches; this one cannot, and a corpus part-recaptured on a later day is two populations that
+      # nothing records. The evaluator's changed-definition refusal therefore names these jobs and says
+      # "every case, twice", and `acceptance-remedy-names-its-own-jobs.test.ts` reads that message back
+      # against this catalogue. Adding `only` here means reversing that ruling, on a row.
+      #
       # TWO ENTRIES RATHER THAN A `repeat` PARAMETER, and the ugliness is the point. `REPEAT` reaches the
       # child's ENVIRONMENT, and this catalogue's rule is that env additions come from here and never from
       # a caller's extra var — because `A11Y_PYTHON` is read at four sites and becomes the executed
