@@ -448,28 +448,36 @@ test("#2304 (rendered): an unlisted name, a subtype, a path, no `out`, and `out=
 const EXPLAIN_CASE_ENTRY = between(CATALOGUE, "\n      explain-case:\n", "\n      rules-coverage:\n");
 const CASE_ASSERT = "    - name: An explain-case job names case ids and nothing else" + between(CATALOGUE,
   "\n    - name: An explain-case job names case ids and nothing else",
+  "\n    - name: An explain-case criterion is a dotted WCAG number");
+const CRITERION_ASSERT = "    - name: An explain-case criterion is a dotted WCAG number" + between(CATALOGUE,
+  "\n    - name: An explain-case criterion is a dotted WCAG number",
   "\n    - name: A train job names its scratch output from a fixed list");
 const OUT_ASSERT = "    - name: A train job names its scratch output from a fixed list" + between(CATALOGUE,
   "\n    - name: A train job names its scratch output from a fixed list",
   "\n    - name: A train that leaves a head out names the group from a fixed list");
 const CASE_SHAPE_LINE = CATALOGUE.match(/^ {4}lab_case_id_shape: (.*)$/m)?.[1] ?? "";
+const CRITERION_SHAPE_LINE = CATALOGUE.match(/^ {4}lab_criterion_shape: (.*)$/m)?.[1] ?? "";
 
 const jobsOf = () => (parseYaml(CATALOGUE) as Array<{ vars?: { lab_jobs?: Record<string, { argv: string[]; params?: unknown }> } }>)
   .flatMap((play) => (play.vars?.lab_jobs ? [play.vars.lab_jobs] : []))[0];
 
-test("#2334: `explain-case` takes `case` (required) and `out` (optional), and runs `scorer:explain --case=`", () => {
+test("#2334/#2386: `explain-case` takes `case` (required), `out` and `criterion` (optional), and runs `scorer:explain --case=`", () => {
   const job = jobsOf()["explain-case"];
   assert.ok(job, "the catalogue has no `explain-case` job, so #2258 cannot read a held-out case's features");
-  assert.deepEqual(job.params, { case: "required", out: "optional" });
-  assert.deepEqual(job.argv, ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--",
-    "--model={{ out | default('candidate') }}", "--case={{ case }}"]);
+  assert.deepEqual(job.params, { case: "required", out: "optional", criterion: "optional" });
+  // A templated LIST, because the flag is appended or absent (`prune-orphan-captures`' form); what it renders is
+  // pinned below, against the list this entry was before `criterion` existed.
+  assert.equal(typeof job.argv, "string");
+  assert.match(job.argv as unknown as string, /\['\/usr\/bin\/npm', 'run', '--silent', 'scorer:explain', '--',\s+'--model=' ~ \(out \| default\('candidate'\)\), '--case=' ~ case\]/);
+  assert.match(job.argv as unknown as string, /\+ \(\['--criterion=' ~ criterion\] if criterion is defined else \[\]\)/);
 });
 
 test("#2334: `case` reaches the argv ONLY as the value of `--case=`, and is asserted against the shared shape", () => {
   // A second spelling of `case` on the argv (`{{ case }}` bare, or joined into a path) would put the caller's
   // string somewhere the shape was not written to contain.
-  assert.equal(EXPLAIN_CASE_ENTRY.match(/\{\{\s*case\b/g)?.length, 1, "`case` is interpolated more than once");
-  assert.match(EXPLAIN_CASE_ENTRY, /"--case=\{\{ case \}\}"/);
+  const argvTemplate = EXPLAIN_CASE_ENTRY.slice(EXPLAIN_CASE_ENTRY.indexOf("argv:"));
+  assert.equal(argvTemplate.match(/~ case\b/g)?.length, 1, "`case` is interpolated more than once");
+  assert.match(argvTemplate, /'--case=' ~ case\]/);
   assert.match(CASE_ASSERT, /when: job == 'explain-case'/);
   assert.match(CASE_ASSERT, /case is match\(lab_case_id_shape\)/,
     "`case` is not contained by the shape `capture-only` uses");
@@ -487,6 +495,16 @@ test("#2334: no existing job's argv changed -- the neighbours that share its ass
   // The one the row added is the only one that reaches the case reader; nothing else grew a `--case=`.
   const withCase = Object.entries(jobs).filter(([, job]) => JSON.stringify(job.argv).includes("--case="));
   assert.deepEqual(withCase.map(([name]) => name), ["explain-case"]);
+  // #2386: likewise the only job that reaches `--criterion=`, and only through the shape-asserted parameter.
+  const withCriterion = Object.entries(jobs).filter(([, job]) => JSON.stringify(job.argv).includes("--criterion="));
+  assert.deepEqual(withCriterion.map(([name]) => name), ["explain-case"]);
+});
+
+test("#2386: `criterion` is asserted against the dotted-WCAG shape, and only when it was supplied", () => {
+  assert.equal(CRITERION_SHAPE_LINE, "'^[1-4][.][0-9]{1,2}[.][0-9]{1,2}$'");
+  assert.match(CRITERION_ASSERT, /when: job == 'explain-case' and criterion is defined/);
+  assert.match(CRITERION_ASSERT, /criterion is match\(lab_criterion_shape\)/);
+  assert.match(CRITERION_ASSERT, /lab_criterion_shape/, "the refusal does not name the shape");
 });
 
 /** Renders the REAL entry and the REAL two asserts under ansible-playbook, the shape `runTrain` uses. */
@@ -495,11 +513,11 @@ function runExplainCase(extras: string[]): { status: number | null; output: stri
   try {
     const dest = join(dir, "argv.json");
     writeFileSync(join(dir, "vars.yml"), [
-      `lab_case_id_shape: ${CASE_SHAPE_LINE}`,
+      `lab_case_id_shape: ${CASE_SHAPE_LINE}`, `lab_criterion_shape: ${CRITERION_SHAPE_LINE}`,
       "lab_jobs:", "  explain-case:", dedent(EXPLAIN_CASE_ENTRY, 4).trimEnd(), "",
     ].join("\n"));
     writeFileSync(join(dir, "play.yml"), [
-      "- hosts: localhost", "  gather_facts: false", "  tasks:", CASE_ASSERT.trimEnd(), OUT_ASSERT.trimEnd(),
+      "- hosts: localhost", "  gather_facts: false", "  tasks:", CASE_ASSERT.trimEnd(), CRITERION_ASSERT.trimEnd(), OUT_ASSERT.trimEnd(),
       "    - name: Render argv", "      ansible.builtin.copy:",
       "        content: \"{{ lab_jobs[job].argv | to_json }}\"", `        dest: ${dest}`, "",
     ].join("\n"));
@@ -521,6 +539,38 @@ test("#2334 (rendered): a well-formed case id, or a comma-separated list, render
     const many = runExplainCase(["-e", "case=a-one,b.two,c+", "-e", "out=scratch"]);
     assert.equal(many.status, 0, many.output);
     assert.deepEqual(many.argv?.slice(-2), ["--model=scratch", "--case=a-one,b.two,c+"]);
+  });
+
+test("#2386 (rendered): with `criterion` unset the argv is byte-identical to what it was before the parameter existed",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const before = ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--", "--model=candidate",
+      "--case=acceptance-b3-sections-tree"];
+    const run = runExplainCase(["-e", "case=acceptance-b3-sections-tree"]);
+    assert.equal(run.status, 0, run.output);
+    assert.equal(JSON.stringify(run.argv), JSON.stringify(before));
+    const named = runExplainCase(["-e", "case=acceptance-b3-sections-tree", "-e", "out=scratch"]);
+    assert.equal(JSON.stringify(named.argv), JSON.stringify([...before.slice(0, 5), "--model=scratch", before[6]]));
+  });
+
+test("#2386 (rendered): `criterion` set appends `--criterion=<X>` after `--case=`, and nothing else moves",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runExplainCase(["-e", "case=acceptance-b3-sections-tree", "-e", "criterion=4.1.3"]);
+    assert.equal(run.status, 0, run.output);
+    assert.deepEqual(run.argv, ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--", "--model=candidate",
+      "--case=acceptance-b3-sections-tree", "--criterion=4.1.3"]);
+  });
+
+test("#2386 (rendered): a `criterion` that is not a dotted WCAG number is REFUSED, naming the shape",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    // JSON extra vars for the same reason as the case refusals: `criterion=a b` would be split on the space.
+    const refused = ["../../etc", "--model=x", "4.1", "4.1.3.1", "5.1.1", "0.1.1", "4.1.a", "4.1.3 ", " 4.1.3",
+      "4.1.3\n--x", "", "4.100.3", "$(id)", "4.1.3;id"];
+    for (const value of refused) {
+      const run = runExplainCase(["-e", "case=ok-case", "-e", JSON.stringify({ criterion: value })]);
+      assert.notEqual(run.status, 0, `criterion ${JSON.stringify(value)} was accepted`);
+      assert.match(run.output, /must be a dotted WCAG number/, `${JSON.stringify(value)} was refused for the wrong reason`);
+      assert.equal(run.argv, null, `${JSON.stringify(value)} rendered an argv after being refused`);
+    }
   });
 
 test("#2334 (rendered): a malformed case, a path, a flag, no case, and an unlisted `out` are each REFUSED",

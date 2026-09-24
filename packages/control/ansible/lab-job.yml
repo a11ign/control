@@ -100,6 +100,9 @@
     # that the copies drift. Each job keeps its own `fail_msg`, because what to do about a refusal is not
     # the same in both.
     lab_case_id_shape: '^[a-z0-9][a-z0-9.+-]{0,80}[+]?(,[a-z0-9][a-z0-9.+-]{0,80}[+]?)*$'
+    # The dotted WCAG number `scorer:explain --criterion=` reads (#2386): principle.guideline.criterion.
+    # A SHAPE, so a path or a flag is inexpressible.
+    lab_criterion_shape: '^[1-4][.][0-9]{1,2}[.][0-9]{1,2}$'
     # A parameter that reaches its command through a DERIVED FACT rather than by its own name. The
     # derivation below reads the job's own command, and a command saying `{{ lab_named_worker }}` cannot
     # say which parameter produced it — so the one indirection is declared, with its reason, rather than
@@ -861,10 +864,18 @@
       # hold is refused by name by the reader, not printed as an empty block. `-e out=` names the model from the
       # fixed list, as `acceptance` does -- the reader takes its records from that model's own acceptance
       # report, so it reads the repeats the model was actually scored on. Read-only: no weights, no corpus.
+      #
+      # `-e criterion=` (#2386) is OPTIONAL, and exists because the reader's default is the criteria a record is
+      # LABELLED with: a false positive on a criterion the case is not labelled with (#2258's
+      # `acceptance-b3-sections-tree/bad`, whose `4.1.3:status-progress` scored 1.000 on a case labelled 1.3.1)
+      # printed no head at all. The dotted WCAG number is contained by `lab_criterion_shape`, so a path or a flag
+      # is inexpressible. The flag is APPENDED or absent, as `prune-orphan-captures`'s is: unset, the argv is
+      # what it always was.
       explain-case:
-        params: {case: required, out: optional}
-        argv: ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--",
-               "--model={{ out | default('candidate') }}", "--case={{ case }}"]
+        params: {case: required, out: optional, criterion: optional}
+        argv: "{{ ['/usr/bin/npm', 'run', '--silent', 'scorer:explain', '--',
+                   '--model=' ~ (out | default('candidate')), '--case=' ~ case]
+                  + (['--criterion=' ~ criterion] if criterion is defined else []) }}"
         timeout: 900
       rules-coverage:
         argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
@@ -1268,6 +1279,15 @@
           explain-case needs -e case=<case-id> or a comma-separated list, e.g. -e case=acceptance-b3-status-taxi.
           Ids only, with no variant: `scorer:explain --criterion=<X>` prints the list of every miss and false
           alarm on a criterion, ready to paste.
+
+    - name: An explain-case criterion is a dotted WCAG number
+      when: job == 'explain-case' and criterion is defined
+      ansible.builtin.assert:
+        that: criterion is match(lab_criterion_shape)
+        fail_msg: >-
+          -e criterion=<X> must be a dotted WCAG number matching {{ lab_criterion_shape }}, e.g.
+          -e criterion=4.1.3. It selects which criterion's heads are printed and is optional: without it the
+          heads are the ones the case is LABELLED with.
 
     - name: A train job names its scratch output from a fixed list
       when: job in ['train', 'acceptance', 'shortcuts', 'false-positives', 'explain-case']
