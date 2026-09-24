@@ -37,7 +37,8 @@
 #
 # The name is checked against `lab-job.yml`'s catalogue too, so a typo is REFUSED instead of reading as a
 # unit that was "already clear" -- an absent unit is the success case below, and that would otherwise turn
-# `-e job=evrything` into a green run that cleared nothing.
+# a misspelt "everything" into a green run that cleared nothing. (Spelt as a bare word, not as the command:
+# `lab-job.test.ts` reads every `job=<name>` in the tree as a name an operator is told to run.)
 #
 # ## Clearing is not fixing
 #
