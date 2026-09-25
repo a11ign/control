@@ -213,16 +213,30 @@ Three things the playbook does that look like choices and are not:
   each restored the worker on the code it served before (`ca705aa378d70828`), with the task removed, the files deleted
   and no `node` process or persisted variable left behind.
 
-**No reading yet.** The first real run (2026-09-25, `a11y-worker-3`, box checkout `4c7010c20`, worker code
-`ca705aa378d70828`) took no reading: every one of its four captures failed inside the worker with `HTTP 500: fetch
-failed`, and so did the four of each of two diagnostic re-runs (12 of 12). The cause, read off the failing `fetch` in the
-last of them, is `connect ECONNREFUSED 127.0.0.1:9222`, from `pageSocketUrl` in `packages/nvda-worker/src/auth-flow.mjs`.
-An authenticated capture launches a FRESH Edge (a watcher on the box saw one start and exit around each capture) and asks
-its DevTools port for `/json/list` once, straight away; Edge starts listening about half a second after it is spawned (a
-bare `fetch` loop against a headless Edge on the same box: refused at +45 ms and +312 ms, `200` at +657 ms). So PR 4's
-authenticated path has not yet completed a capture on a real worker: the unit tests (`auth-flow-cdp.test.ts`) drive a
-fake browser that is already listening. The paragraph with the readings is added by the change that has them, after the
-worker waits for its port.
+**Measured by the leak check (#2399, 2026-09-25, `a11y-worker-3`, repo head `ed6e887df`, worker code `e19f726ecd7d245e`,
+node v24.20.0, `ok=26 failed=0`).** The four readings, from one run of `auth-leak-check.yml` (10:09:09Z to 10:13:08Z):
+
+| reading | fixture / stage | exit | examined | redactions |
+|---|---|---|---|---|
+| real | `login-quiet --stage written` | 0 (`CLEAN`) | 1 file, 64 announcements | 0 |
+| control 1 | `login-echo --stage raw` | 1 (`LEAK: FAKE_USER (contiguous, raw)`) | 1 file, 75 announcements | 0 |
+| control 2 | `login-echo --stage written` | 0 | 1 file, 75 announcements | 2 |
+| **central** | **`login-quiet --stage raw`** | **0 (`CLEAN`)** | 1 file, 64 announcements | 0 |
+
+**The central reading is exit `0`: on this run NVDA did not speak the text inserted through `Input.insertText`, so ADR
+0038's first defence held.** The two controls are what make that `0` mean something: control 1 exiting exactly `1` shows
+the detector can see a leak in the raw stage, and control 2's two redactions show the scrub removes it. `grep -c` for
+either value read `0` in the transcript and `0` in `server.log`, and the restore left the worker serving the code it
+served before, ready, with the fleet CONSISTENT. **What this is not:** one run, one box, one fixture, 64 announcements,
+NVDA at its typed-character default (ON, as read on that box). It is a measurement of that page on that box, not a proof
+over other pages or other boxes' NVDA settings.
+
+Why it is the SECOND run: the first (2026-09-25, box checkout `4c7010c20`, worker code `ca705aa378d70828`) took no
+reading, because every authenticated capture failed inside the worker with `HTTP 500: fetch failed` (12 of 12 over three
+runs), from `connect ECONNREFUSED 127.0.0.1:9222` in `pageSocketUrl` (`packages/nvda-worker/src/auth-flow.mjs`): Edge
+listens about half a second after it is spawned and the driver asked for `/json/list` once, straight away. The unit
+tests drove a fake browser that was already listening, so none could see it. #2475 made the driver wait for its port;
+this run is on the code that has that wait.
 
 ## Driving the LAB, not just the workers
 
