@@ -86,6 +86,11 @@ const DISPATCHED_ELSEWHERE: Record<string, string> = {
     + "hand on transfer day, never through the routine deploy wrapper. Wiring it into `fleet-playbook.mjs` "
     + "would make an org-move-only command reachable from the same surface as every ordinary deploy, "
     + "which is exactly the wrong affordance for something that must never run twice by accident.",
+  "auth-leak-check.yml":
+    "run BY HAND on the control plane against ONE named box (`-l` is asserted), never through the routine deploy "
+    + "wrapper: it stops the worker and starts a credential-bearing process, so it must not be one typo from "
+    + "`fleet:deploy`. A run that resolves no worker cannot exit 0 having done nothing: its first play includes "
+    + "`require-inventory-group.yml` on localhost, and the play after it asserts exactly one host (#2399).",
   "reset-checkout.yml":
     "one-time, run by hand at transfer step 8 (#1547, #63): it moves every worker and the control plane onto "
     + "a named commit of the REWRITTEN history, which `deploy.yml`'s `--ff-only` rightly refuses. Reachable "

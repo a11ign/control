@@ -1,0 +1,433 @@
+---
+# Run ADR 0038's leak check on ONE worker, with a fake credential in that worker's own environment, and put
+# the worker back whatever the outcome (#2399).
+#
+#     # ON THE CONTROL PLANE, the one machine that holds the fleet key, from this directory of its checkout:
+#     cd packages/control/ansible
+#     ansible-playbook auth-leak-check.yml -l a11y-worker-3
+#     ansible-playbook auth-leak-check.yml -l a11y-worker-3 -e leak_rehearse_exit=2   # walk the restore, capture nothing
+#
+# `fleet-playbook.mjs` does not list this playbook (its `PLAYBOOKS` is outside #2399's Region), so the wrapper's
+# supervised-unit path is not used: this is a few minutes' run, not a ten-machine reboot, and a caller that is
+# killed mid-run still gets its restore, because the restore is the play's own `always`, not the caller's.
+#
+# ## What it measures, and why it needs a machine and not a unit test
+#
+# ADR 0038, Constraint 4: does NVDA speak text inserted through the browser protocol's `Input.insertText`?
+# NVDA's typed-character default is ON (measured on `a11y-worker-3`), so if it does, the design's first
+# defence (the login is not in the transcript to start with) does not hold and the scrub is the ONLY defence.
+# That is a fact about a real screen reader on a real desktop, so it is read here and pasted, never argued.
+# It reads FOUR exits from `scripts/auth-leak-check.mjs`:
+#
+#     real     login-quiet  --stage written   MUST exit 0, examined > 0
+#     control1 login-echo   --stage raw       MUST exit EXACTLY 1   (the positive control: the detector can see a leak)
+#     control2 login-echo   --stage written   MUST exit 0, redactions >= 1
+#     central  login-quiet  --stage raw       exit 0 or 1 -- RECORDED, never asserted. 1 means NVDA speaks inserted text.
+#
+# ## Why it does not use tasks/run-interactive.yml
+#
+# That file registers its task `run_level: highest`, which is right for provisioning. `a11ysrv` is `limited`
+# because guidepup drives `nvda_noUIAccess.exe`, which "cannot read ELEVATED windows at all. An elevated worker
+# captures nothing, silently." A worker started from an elevated task would return an EMPTY transcript, and
+# `login-quiet` would read clean because nothing was said: the worst possible answer to this question. So the
+# one-shot task below is the same pattern (`interactive_token`, no trigger, removed on every exit) at the
+# worker's own run level.
+#
+# ## Where the fake values are, and are not
+#
+# They exist in ONE script file on the box for the run's duration, and in the environment of the process that
+# script starts (which is the leak worker). NOT on a command line: a PowerShell transcript's header records
+# the host application's full command line, so a value in the task's arguments would fail the `grep -c` below
+# by construction. The script is deleted in `always`, after the transcript and `server.log` are searched for
+# both values; a non-zero count fails the play AFTER the box is restored. They are the ADR's canaries, public
+# in the repo. A real credential, or anything from the inventory, never goes near this file.
+# The zero-host refusal comes first, on localhost, because a play whose target resolves to nothing prints "no hosts
+# matched" and can exit 0 having done nothing: for a leak check that reads as "clean". One spelling, shared (#1980).
+- name: The workers must be in the inventory
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The workers must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
+
+- name: Run the ADR 0038 leak check on one worker and restore it
+  hosts: a11y_workers
+  gather_facts: false
+  vars:
+    leak_dir: 'C:\ProgramData\a11y-witness'
+    leak_task: a11y-leak-check
+    leak_script: "{{ leak_dir }}\\a11y-leak-check.ps1"
+    leak_log: "{{ leak_dir }}\\{{ leak_task }}.log"
+    leak_fake_user: canaryuser6d3f2a
+    leak_fake_secret: canarysecretb81c94
+    # Minutes a run may take before the task is stopped. Four captures are about a minute each once NVDA is up.
+    leak_timeout_minutes: 20
+  tasks:
+    - name: Exactly ONE worker, or nothing
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          auth-leak-check.yml was given {{ ansible_play_hosts_all | length }} worker(s). It takes ONE worker out
+          of service and starts a credential-bearing process on it; name the box with -l <worker>.
+      run_once: true
+
+    - name: Ask the worker whether it is capturing
+      # Over HTTP from the control plane, the channel the dispatcher uses, so the two cannot disagree about busy.
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: leak_health_before
+
+    - name: Refuse to take a capturing worker
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is capturing (busy: true). Taking it out of service would kill a capture
+          another session started; wait for it, or name another box.
+      when: leak_health_before.json.busy | default(false)
+
+    - name: Read what the box holds, and refuse if the leak check cannot run there
+      # Clause 3 of #2399 as a check rather than a note: `tsx`, the CLI's TypeScript and the workspace package's
+      # BUILT files (the export map points at `dist/*.mjs`). Read-only.
+      ansible.windows.win_powershell:
+        script: |
+          $repo = '{{ a11y_repo_path }}'
+          $need = @('node_modules\tsx\dist\cli.mjs', 'packages\cli\src\auth\leak-check.ts', 'scripts\auth-leak-check.mjs',
+                    'scripts\auth-leak-fixtures.mjs', 'packages\worker-fleet\dist\cli-flags.mjs',
+                    'packages\worker-fleet\dist\worker-http.mjs', 'packages\nvda-worker\src\run-server.cmd')
+          $missing = @($need | Where-Object { -not (Test-Path (Join-Path $repo $_)) })
+          $Ansible.Changed = $false
+          if ($missing.Count -gt 0) {
+            $Ansible.Failed = $true
+            "missing on the box: " + ($missing -join ', ')
+          } else {
+            "head " + (git -C $repo rev-parse --short HEAD)
+          }
+          if (-not (Get-ScheduledTask -TaskName '{{ a11y_task_name }}' -ErrorAction SilentlyContinue)) {
+            $Ansible.Failed = $true
+            "the standing worker task {{ a11y_task_name }} is not registered: there is nothing to restore to"
+          }
+      register: leak_prereq
+
+    - name: The run, and its restore
+      block:
+        - name: Somewhere for the script and its transcript
+          become: true
+          ansible.windows.win_file:
+            path: "{{ leak_dir }}"
+            state: directory
+
+        - name: Write the script the one-shot task runs
+          # no_log: the fake values are in this content. They are public canaries, but the point of keeping them
+          # off every stream is that the `grep -c` afterwards means something.
+          become: true
+          no_log: true
+          ansible.windows.win_copy:
+            dest: "{{ leak_script }}"
+            content: |
+              param([int]$RehearseExit = -1)
+              # ASCII only: PowerShell 5.1 reads a file with no byte-order mark as the ANSI code page.
+              $ErrorActionPreference = 'Continue'
+              $repo = '{{ a11y_repo_path }}'
+              $worker = $null
+              $code = 3
+              Start-Transcript -Path '{{ leak_log }}' -Force | Out-Null
+              try {
+                Set-Location $repo
+                "box " + $env:COMPUTERNAME + ", head " + (git rev-parse --short HEAD) + ", node " + (& 'C:\Program Files\nodejs\node.exe' --version)
+                if ($RehearseExit -ge 0) {
+                  "REHEARSAL: exiting $RehearseExit before any worker or capture, to walk the restore path"
+                  $code = $RehearseExit
+                } else {
+                  # The node the standing worker task launches, so the leak worker is the same runtime.
+                  $node = 'C:\Program Files\nodejs\node.exe'
+                  $arg = (Get-ScheduledTask -TaskName '{{ a11y_task_name }}').Actions[0].Arguments
+                  if ($arg -and (Test-Path $arg.Trim('"'))) { $node = $arg.Trim('"') }
+                  # THE ONLY PLACE the fake credentials exist besides this file: this process's environment,
+                  # which the worker below inherits and the leak check reads by NAME.
+                  $env:FAKE_USER = '{{ leak_fake_user }}'
+                  $env:FAKE_SECRET = '{{ leak_fake_secret }}'
+                  $launcher = Join-Path $repo 'packages\nvda-worker\src\run-server.cmd'
+                  $worker = Start-Process -FilePath $launcher -ArgumentList ('"' + $node + '"') -WorkingDirectory $repo -PassThru
+                  $up = $false
+                  for ($i = 0; $i -lt 60 -and -not $up; $i++) {
+                    try { $h = Invoke-RestMethod -Uri 'http://127.0.0.1:{{ a11y_port }}/health' -TimeoutSec 5; $up = $true } catch { Start-Sleep -Seconds 2 }
+                  }
+                  if (-not $up) {
+                    "the leak worker did not answer /health within 120s"
+                  } else {
+                    "leak worker serving: code " + $h.code + ", ready " + $h.ready
+                    try {
+                      $d = Invoke-RestMethod -Uri 'http://127.0.0.1:{{ a11y_port }}/diagnostics' -TimeoutSec 15
+                      "screenReaderDefaults: " + ($d.screenReaderDefaults | ConvertTo-Json -Depth 6 -Compress)
+                    } catch { "could not read /diagnostics: " + $_.Exception.Message }
+                    $tsx = Join-Path $repo 'node_modules\tsx\dist\cli.mjs'
+                    $checks = @(
+                      @{ name = 'real';     fixture = 'login-quiet'; stage = 'written' },
+                      @{ name = 'control1'; fixture = 'login-echo';  stage = 'raw' },
+                      @{ name = 'control2'; fixture = 'login-echo';  stage = 'written' },
+                      @{ name = 'central';  fixture = 'login-quiet'; stage = 'raw' }
+                    )
+                    $readings = @()
+                    foreach ($c in $checks) {
+                      "=== " + $c.name + ": auth:leak-check --fixture " + $c.fixture + " --stage " + $c.stage
+                      $lines = @(& $node $tsx 'scripts\auth-leak-check.mjs' --fixture $c.fixture --stage $c.stage --user-env FAKE_USER --secret-env FAKE_SECRET --worker 'http://127.0.0.1:{{ a11y_port }}' 2>&1 | ForEach-Object { "$_" })
+                      $exit = $LASTEXITCODE
+                      $lines
+                      $text = $lines -join "`n"
+                      $ex = [regex]::Match($text, 'examined (\d+) files? and (\d+) announcements?')
+                      $rd = [regex]::Match($text, '(\d+) announcements? contained')
+                      $readings += @{ name = $c.name; fixture = $c.fixture; stage = $c.stage; exit = $exit
+                        files = $(if ($ex.Success) { [int]$ex.Groups[1].Value } else { -1 })
+                        announcements = $(if ($ex.Success) { [int]$ex.Groups[2].Value } else { -1 })
+                        redactions = $(if ($rd.Success) { [int]$rd.Groups[1].Value } else { 0 }) }
+                    }
+                    "READINGS-JSON " + (ConvertTo-Json -InputObject $readings -Compress)
+                    # 0: all four were READ (a leak is a reading, not a fault here). 2: one could not be examined.
+                    $code = $(if (@($readings | Where-Object { $_.exit -ge 2 -or $_.exit -lt 0 }).Count -eq 0) { 0 } else { 2 })
+                  }
+                }
+              } catch {
+                "the script itself failed: " + $_.Exception.Message
+                $code = 3
+              } finally {
+                # The leak worker and its whole tree, then the variables: part of the restore, not an afterthought.
+                if ($worker) { & taskkill.exe /PID $worker.Id /T /F 2>&1 | Out-Null }
+                Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Remove-Item Env:FAKE_USER, Env:FAKE_SECRET -ErrorAction SilentlyContinue
+                "finished with code $code"
+                Stop-Transcript | Out-Null
+              }
+              exit $code
+
+        - name: Stop the standing worker (the leak worker needs its port)
+          become: true
+          ansible.windows.win_shell: |
+            Stop-ScheduledTask -TaskName '{{ a11y_task_name }}' -ErrorAction SilentlyContinue
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Process node -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+            if (Get-Process node -ErrorAction SilentlyContinue) { 'node still running after 30s' } else { 'stopped' }
+          register: leak_stop
+          changed_when: true
+
+        - name: Refuse to start the leak worker on top of a standing one
+          ansible.builtin.fail:
+            msg: "{{ inventory_hostname }}: node did not stop within 30s, so the leak worker would race the standing one for the port."
+          when: "'still running' in leak_stop.stdout"
+
+        - name: "Register the one-shot task, at the worker's own run level"
+          become: true
+          community.windows.win_scheduled_task:
+            name: "{{ leak_task }}"
+            description: "a11ign: ADR 0038 leak check, one-shot, removed when it finishes"
+            username: "{{ ansible_user }}"
+            logon_type: interactive_token
+            run_level: limited
+            actions:
+              - path: powershell.exe
+                arguments: >-
+                  -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{{ leak_script }}"
+                  {{ ('-RehearseExit ' ~ leak_rehearse_exit) if leak_rehearse_exit is defined else '' }}
+            execution_time_limit: "PT{{ leak_timeout_minutes }}M"
+            state: present
+            enabled: true
+
+        - name: Start it
+          become: true
+          ansible.windows.win_shell: Start-ScheduledTask -TaskName '{{ leak_task }}'
+          changed_when: true
+
+        - name: Wait for it to finish
+          become: true
+          ansible.windows.win_shell: |
+            $t = Get-ScheduledTask -TaskName '{{ leak_task }}' -ErrorAction SilentlyContinue
+            if (-not $t) { 'MISSING'; exit 0 }
+            $t.State
+          register: leak_state
+          changed_when: false
+          retries: "{{ (((leak_timeout_minutes | int) + 5) * 6) | int }}"
+          delay: 10
+          until: leak_state.stdout is defined and 'Running' not in leak_state.stdout
+
+        - name: Collect its exit code and transcript
+          become: true
+          ansible.windows.win_shell: |
+            $info = Get-ScheduledTaskInfo -TaskName '{{ leak_task }}' -ErrorAction SilentlyContinue
+            "EXITCODE=$($info.LastTaskResult)"
+            if (Test-Path '{{ leak_log }}') { Get-Content -Path '{{ leak_log }}' }
+          register: leak_result
+          changed_when: false
+
+        - name: What it said
+          ansible.builtin.debug:
+            var: leak_result.stdout_lines
+
+      always:
+        # EVERYTHING below runs whether the run passed, failed, or was cut short, and none of it may stop the rest
+        # except the restore itself. Order matters: count while the files exist, delete, kill, then restart.
+        - name: Remove the one-shot task
+          become: true
+          ansible.windows.win_shell: |
+            Stop-ScheduledTask -TaskName '{{ leak_task }}' -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName '{{ leak_task }}' -Confirm:$false -ErrorAction SilentlyContinue
+            if (Get-ScheduledTask -TaskName '{{ leak_task }}' -ErrorAction SilentlyContinue) { 'STILL REGISTERED' } else { 'removed' }
+          register: leak_task_removed
+          changed_when: false
+          failed_when: false
+
+        - name: "grep -c: how many lines of the transcript and of server.log hold either value"
+          # `Select-String -SimpleMatch | Measure-Object` counts matching LINES, which is what `grep -c` counts.
+          # Counted BEFORE the transcript is deleted, and reported as numbers only.
+          become: true
+          ansible.windows.win_shell: |
+            $repo = '{{ a11y_repo_path }}'
+            $n = @{}
+            foreach ($f in @(@('transcript', '{{ leak_log }}'), @('serverlog', (Join-Path $repo 'server.log')))) {
+              foreach ($v in @(@('user', '{{ leak_fake_user }}'), @('secret', '{{ leak_fake_secret }}'))) {
+                $c = 0
+                if (Test-Path $f[1]) { $c = (Select-String -Path $f[1] -Pattern $v[1] -SimpleMatch | Measure-Object).Count }
+                "HITS " + $f[0] + " " + $v[0] + " " + $c
+              }
+            }
+          register: leak_hits
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Delete the script and the transcript
+          become: true
+          ansible.windows.win_shell: |
+            Remove-Item -Force -ErrorAction SilentlyContinue '{{ leak_script }}', '{{ leak_log }}'
+            $left = @('{{ leak_script }}', '{{ leak_log }}') | Where-Object { Test-Path $_ }
+            if ($left) { 'LEFT BEHIND: ' + ($left -join ', ') } else { 'both deleted' }
+          register: leak_deleted
+          changed_when: false
+          failed_when: false
+
+        - name: Stop any leak worker still running, and the variables with it
+          # The script's own `finally` does this; this is the path where the script never got to run it (the task
+          # was stopped at its time limit, or never started). The standing worker is stopped, so every `node` is ours.
+          become: true
+          ansible.windows.win_shell: |
+            Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            $deadline = (Get-Date).AddSeconds(15)
+            while ((Get-Process node -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+            $vars = 'FAKE_USER', 'FAKE_SECRET' | ForEach-Object { [Environment]::GetEnvironmentVariable($_, 'User'), [Environment]::GetEnvironmentVariable($_, 'Machine') } | Where-Object { $_ }
+            if (Get-Process node -ErrorAction SilentlyContinue) { 'node STILL RUNNING' } elseif ($vars) { 'PERSISTED VARIABLE FOUND' } else { 'no node, no persisted variable' }
+          register: leak_cleared
+          changed_when: false
+
+        - name: Restart the standing worker and wait for it to serve
+          ansible.builtin.import_tasks: tasks/restart-worker.yml
+
+        - name: Refuse to report the box restored if the old node may still be serving
+          ansible.builtin.fail:
+            msg: "{{ inventory_hostname }}: node did not stop within 30s before the standing worker was started; it may not be the process serving."
+          when: worker_stop.stdout is defined and 'still running' in worker_stop.stdout
+
+    - name: The standing worker is back, on the code it served before
+      ansible.builtin.assert:
+        that:
+          - worker_health.json.ok | default(false)
+          - worker_health.json.code == leak_health_before.json.code
+          - "'removed' in leak_task_removed.stdout"
+          - "'both deleted' in leak_deleted.stdout"
+          - "'no node' in leak_cleared.stdout"
+        success_msg: >-
+          {{ inventory_hostname }} restored: serving code {{ worker_health.json.code }} (before: {{ leak_health_before.json.code }}),
+          one-shot task removed, script and transcript deleted, no node process and no persisted variable left by the run
+        fail_msg: >-
+          {{ inventory_hostname }} is NOT restored: health ok={{ worker_health.json.ok | default('?') }},
+          code {{ worker_health.json.code | default('?') }} vs {{ leak_health_before.json.code }} before;
+          task: {{ leak_task_removed.stdout | default('?') }}; files: {{ leak_deleted.stdout | default('?') }};
+          processes: {{ leak_cleared.stdout | default('?') }}
+
+    - name: Wait for the standing worker to be READY, not merely answering
+      # `restart-worker.yml` proves `/health` answers, which a worker held behind a Windows toast also does
+      # ("warming: not ready: noForegroundBlocker", read on a11y-worker-3 after the exit-2 rehearsal, cleared by
+      # `fleet:recover`). "The fleet reads CONSISTENT" needs `ready`, so that is what is waited for; a box that
+      # does not become ready is named, with the one remedy, rather than reported restored.
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        method: GET
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: leak_ready
+      retries: 18
+      delay: 10
+      until: leak_ready.json is defined and (leak_ready.json.ready | default(false))
+      failed_when: false
+
+    - name: Say so if it did not
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is serving the code it served before but is NOT ready after 3 minutes:
+          {{ leak_ready.json.readiness.reason | default('no readiness reason read') }}. It is out of the fleet until it is
+          recovered: npm run fleet:recover -- --limit={{ inventory_hostname }}  (about a minute; a restart clears a toast
+          that holds the foreground).
+      when: not (leak_ready.json.ready | default(false))
+
+    - name: The task's own exit code
+      ansible.builtin.set_fact:
+        leak_task_exit: "{{ (leak_result.stdout | regex_search('EXITCODE=(-?[0-9]+)', '\\1') | first | default(-1)) | int }}"
+        leak_readings: >-
+          {{ (leak_result.stdout_lines | select('match', '^READINGS-JSON ') | list | first | default('READINGS-JSON []'))
+             | regex_replace('^READINGS-JSON ', '') | from_json }}
+
+    - name: The four readings, and the head
+      ansible.builtin.debug:
+        msg:
+          - "box: {{ inventory_hostname }}; repo head {{ leak_prereq.output | select('match', '^head ') | first | default('?') }}; worker code {{ leak_health_before.json.code }}"
+          - "task exit code: {{ leak_task_exit }}"
+          - "{{ leak_readings }}"
+          - "grep -c (transcript, server.log): {{ leak_hits.stdout_lines | default([]) }}"
+
+    - name: The run exited cleanly and read all four
+      ansible.builtin.assert:
+        that:
+          - leak_task_exit | int == 0
+          - leak_readings | length == 4
+        fail_msg: >-
+          the run did not read all four (task exit {{ leak_task_exit }}, {{ leak_readings | length }} reading(s)). The box is
+          restored; its transcript is above. Exit 2 from a check means COULD NOT EXAMINE, which is not a pass.
+
+    - name: The controls behave, and the real run is clean
+      vars:
+        by_name: "{{ dict(leak_readings | map(attribute='name') | zip(leak_readings)) }}"
+      ansible.builtin.assert:
+        that:
+          - by_name.real.exit == 0
+          - by_name.real.announcements > 0
+          - by_name.control1.exit == 1
+          - by_name.control2.exit == 0
+          - by_name.control2.redactions >= 1
+          - by_name.central.exit in [0, 1]
+        fail_msg: >-
+          a reading is outside what ADR 0038 requires: real exit {{ by_name.real.exit }} (examined {{ by_name.real.announcements }}),
+          control 1 exit {{ by_name.control1.exit }} (must be EXACTLY 1), control 2 exit {{ by_name.control2.exit }}
+          (redactions {{ by_name.control2.redactions }}, at least 1). The box is restored.
+
+    - name: The run's own log holds neither value
+      ansible.builtin.assert:
+        that:
+          - leak_hits.stdout_lines | select('search', ' [1-9][0-9]*$') | list | length == 0
+        fail_msg: >-
+          a fake value appears in the run's transcript or in server.log: {{ leak_hits.stdout_lines }}. That is a
+          finding about this run's own log, and it must be read before the readings are trusted.
+
+    - name: The central reading, said out loud
+      ansible.builtin.debug:
+        msg: >-
+          login-quiet --stage raw exited {{ by_name_central.exit }}.
+          {{ 'EXIT 1: NVDA SPEAKS INSERTED TEXT. The first defence does not hold; the scrub and the per-character branch are the ONLY defence. This goes to ceo at once (it changes what SECURITY.md may say).'
+             if by_name_central.exit == 1 else
+             'Exit 0: NVDA stayed quiet on inserted text on this run; the first defence held.' }}
+      vars:
+        by_name_central: "{{ (leak_readings | selectattr('name', 'equalto', 'central') | list | first) }}"
