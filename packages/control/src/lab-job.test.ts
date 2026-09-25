@@ -592,3 +592,39 @@ test("#2334 (rendered): a malformed case, a path, a flag, no case, and an unlist
       assert.equal(run.argv, null, `${extras.join(" ")} rendered an argv after being refused`);
     }
   });
+
+test("#2580: `promote-accepting-regression` is `promote`'s argv plus `--accept-regression`, with the same params and timeout", () => {
+  const jobs = jobsOf() as Record<string, { argv: string[]; params?: unknown; timeout?: number }>;
+  const promote = jobs.promote;
+  const accepting = jobs["promote-accepting-regression"];
+  assert.ok(accepting, "the catalogue has no `promote-accepting-regression` job, so the ruled v20 promotion (#2536) cannot run");
+  assert.deepEqual(accepting.argv, [...promote.argv, "--accept-regression"]);
+  assert.deepEqual(accepting.params, promote.params);
+  assert.equal(accepting.timeout, promote.timeout);
+});
+
+test("#2580 (positive control): the flag is reachable by exactly ONE named job, never as an option of another", () => {
+  // A run that only showed the new job present would be satisfied by a flag added to `promote` as well, which
+  // is the whole reason the job is separate: which regression you accept must be readable off the job list.
+  const jobs = jobsOf() as Record<string, { argv: string[]; params?: Record<string, string> }>;
+  assert.ok(!jobs.promote.argv.includes("--accept-regression"), "`promote` carries the flag itself");
+  const carriers = Object.entries(jobs)
+    .filter(([, job]) => JSON.stringify(job).includes("accept-regression")).map(([name]) => name);
+  assert.deepEqual(carriers, ["promote-accepting-regression"]);
+  // Nor may a caller parameter carry it: every job shares `lab_caller_params`, so a name there is a flag
+  // every job's guard would have to reason about. Read from the catalogue's own list, so a new name is seen.
+  const play = (parseYaml(CATALOGUE) as Array<{ vars?: { lab_caller_params?: string[] } }>)
+    .find((entry) => entry.vars?.lab_caller_params);
+  const callerParams = play?.vars?.lab_caller_params ?? [];
+  assert.ok(callerParams.length > 0, "found no `lab_caller_params`, so the check below examined nothing");
+  assert.deepEqual(callerParams.filter((name) => /accept|regress/i.test(name)), []);
+});
+
+test("#2580: the job's header comment says why it is separate and names the ruling it carries", () => {
+  // Joined across the comment's own line breaks, so a re-wrap of the prose does not read as a deletion.
+  const header = between(CATALOGUE, "\n      # THE SAME PROMOTION, ACCEPTING", "\n      promote-accepting-regression:\n")
+    .replace(/\n\s*#\s?/g, " ");
+  assert.match(header, /#2536/);
+  assert.match(header, /SEPARATE job/);
+  assert.match(header, /which regression you are asserting you have read and accepted/);
+});

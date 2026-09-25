@@ -482,6 +482,28 @@
         argv: ["/usr/bin/npm", "run", "--silent", "promote:gated", "--",
                "--from={{ out | default('candidate') }}"]
         timeout: 3600
+      # THE SAME PROMOTION, ACCEPTING A DELIBERATE HELD-OUT REGRESSION (#2536, #2580).
+      #
+      # `ceo` ruled (#2536, route 1) that the v20 candidate may be promoted with its two 4.1.3 held-out
+      # regression lines accepted. `promote-model.mjs` accepts a regression only through
+      # `--accept-regression`, and `promote` has a fixed argv, so no lab job could pass it: the ruling
+      # could not run through the interface ADR 0013 requires, and the only route left was a hand-run
+      # `promote:gated` over ssh -- the hand-crank this catalogue exists to remove.
+      #
+      # Kept as a SEPARATE job rather than a parameter on `promote`, because the difference is which
+      # regression you are asserting you have read and accepted, and that is exactly the thing a reader
+      # of the job list should not have to infer (`shortcuts-baseline-candidate` is the precedent). A
+      # boolean on `promote` would also travel through `lab_caller_params`, which every job shares, so it
+      # would be a flag every job's guard has to reason about.
+      #
+      # It excuses ONLY the ` (precision|recall) X -> ` lines and writes them into the changeset. A SILENT
+      # head not named in `accepted-silent-heads.json`, or any other blocker, still refuses. Identical to
+      # `promote` otherwise: same `out`, same timeout, and the same NO SHELL rule above.
+      promote-accepting-regression:
+        params: {out: optional}
+        argv: ["/usr/bin/npm", "run", "--silent", "promote:gated", "--",
+               "--from={{ out | default('candidate') }}", "--accept-regression"]
+        timeout: 3600
       # What the promotion actually changed, so it can be reviewed before anyone commits it.
       promote-diff:
         argv: ["/usr/bin/git", "status", "--short", "--", "packages/scorer/models", ".changeset"]
