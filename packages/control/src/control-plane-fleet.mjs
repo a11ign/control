@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
-import { WORKER_GROUP, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
+import { WORKER_GROUP, groupPerLine, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
   from "../../worker-fleet/src/fleet-env.mjs";
 
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
@@ -109,6 +109,47 @@ export function parseInventoryReads(stdout) {
 }
 
 /**
+ * Every worker's declared `mac`, keyed by `ansible_host` (#2655: the one thing a WAKE needs that a dispatch
+ * does not, so it rides on the read the fleet already makes rather than costing a second ssh).
+ *
+ * A NARROW READER THAT RESTATES `fleet-discover.mjs`'s `inventoryHosts`, and says why: that module imports
+ * `inventoryPathFor` FROM this one, so importing it back would be a cycle. `control-plane-fleet.test.ts`
+ * pins the two equal on one fixture, since a fact stated twice is one whose copies drift. An entry with no
+ * `mac:` is absent from the map: "the inventory declares none" is a state, not an error.
+ *
+ * @param {string} text
+ * @returns {Map<string, string>}
+ */
+export function macsByHost(text) {
+  /** @type {Map<string, string>} */
+  const macs = new Map();
+  const groups = groupPerLine(text);
+  /** @type {{ host?: string, mac?: string } | null} */
+  let current = null;
+  const flush = () => { if (current?.host && current.mac) macs.set(current.host, current.mac); };
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    if (line.trimStart().startsWith("#") || groups[index] !== WORKER_GROUP) continue;
+    if (/^\s{8}[A-Za-z0-9][\w-]*:\s*$/.test(line)) { flush(); current = {}; continue; }
+    const host = line.match(/^\s*ansible_host\s*:\s*(\S+)\s*$/);
+    if (host && current) current.host = host[1].replace(/^["']|["']$/g, "");
+    const mac = line.match(/^\s*mac\s*:\s*(\S*)\s*$/);
+    const hex = mac?.[1].replace(/^["']|["']$/g, "").replace(/[^0-9a-fA-F]/g, "").toLowerCase();
+    if (hex?.length === 12 && current) current.mac = (hex.match(/.{2}/g) ?? []).join(":");
+  }
+  flush();
+  return macs;
+}
+
+/**
+ * Sources are merged and the FIRST to declare a value wins: the durable copy is listed first.
+ * @param {Map<string, string>} into
+ * @param {Map<string, string>} from
+ */
+function mergeFirstWins(into, from) {
+  for (const [key, value] of from) if (!into.has(key)) into.set(key, value);
+}
+
+/**
  * THE FLEET THE CONTROL PLANE'S OWN INVENTORY DECLARES, pure given the reads -- THREE CAUSES, THREE
  * WORDINGS, all a refusal: no source existed, a source did not parse, or the parsed source names no
  * worker. None of the three may read as "the fleet is empty", which is why this never returns `{workers:
@@ -118,7 +159,7 @@ export function parseInventoryReads(stdout) {
  * on the operator host wraps it with its own, per #1356's done-when 2 ("each in its own words").
  *
  * @param {{ reads: { path: string, text: string }[], sources: string[], groupVarsText: string }} input
- * @returns {{ workers: { name: string, url: string }[], refusal: string | null }}
+ * @returns {{ workers: { name: string, url: string, mac?: string }[], refusal: string | null }}
  */
 export function controlPlaneFleet({ reads, sources, groupVarsText }) {
   const refuse = (/** @type {string} */ why) => ({ workers: [], refusal: why });
@@ -126,11 +167,14 @@ export function controlPlaneFleet({ reads, sources, groupVarsText }) {
   const port = portFromGroupVars(groupVarsText);
   /** @type {Map<string, string>} */
   const byUrl = new Map();
+  /** @type {Map<string, string>} */
+  const macs = new Map();
   for (const { path, text } of reads) {
     try {
       const urls = workersFromInventory(text, { port });
       const names = workerNamesFromInventory(text, { port });
       for (const url of urls) byUrl.set(url, names[url] ?? url.replace(/^https?:\/\//, ""));
+      mergeFirstWins(macs, macsByHost(text));
     } catch (error) {
       // THE PARSER'S OWN WORDS, never a label of mine: it throws for a malformed host line AND for an
       // empty worker group, and calling both "does not parse" was the wrong errand for the second.
@@ -140,7 +184,10 @@ export function controlPlaneFleet({ reads, sources, groupVarsText }) {
   if (!byUrl.size) {
     return refuse(`${reads.map(({ path }) => path).join(" and ")} ${reads.length === 1 ? "lists" : "list"} no ${WORKER_GROUP} hosts`);
   }
-  return { workers: [...byUrl].map(([url, name]) => ({ name, url })), refusal: null };
+  return { workers: [...byUrl].map(([url, name]) => {
+    const mac = macs.get(new URL(url).hostname);
+    return mac ? { name, url, mac } : { name, url };
+  }), refusal: null };
 }
 
 /**
@@ -154,7 +201,7 @@ export function controlPlaneFleet({ reads, sources, groupVarsText }) {
  *
  * @param {{ ansibleCfgText?: string, groupVarsText?: string,
  *           readInventories?: (sources: string[]) => { path: string, text: string }[] }} [deps]
- * @returns {{ workers: { name: string, url: string }[], refusal: string | null }}
+ * @returns {{ workers: { name: string, url: string, mac?: string }[], refusal: string | null }}
  */
 export function readControlPlaneFleet({
   ansibleCfgText = readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"),

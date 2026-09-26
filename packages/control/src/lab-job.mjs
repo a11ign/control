@@ -58,9 +58,7 @@ import { codeVersion, workerSourceDir } from "../../nvda-worker/src/code-version
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
-import { inventoryReadScript, inventorySources, parseInventoryReads, readControlPlaneFleet,
-  sshToControlPlane } from "./control-plane-fleet.mjs";
-import { inventoryHosts } from "./fleet-discover.mjs";
+import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -202,14 +200,16 @@ function dispatchToAnsible(forwarded) {
   process.exit(result.status ?? 1);
 }
 
+/** @typedef {{ name: string, url: string, mac?: string }} Worker */
+
 /**
  * The fleet a job may draw on, as `{ name, url }` -- the control plane's own resolved inventory, or an
  * explicit `workers` list (whose names are the addresses, since a caller that gave addresses gave no names).
  * A refusal is a value, so `run` can exit on it and a test never touches `process.exit`.
  *
  * @param {string} job
- * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} input
- * @returns {{ fleet: { name: string, url: string }[], refusal: null } | { fleet: null, refusal: string }}
+ * @param {{ workers?: string[], readFleet: () => { workers: Worker[], refusal: string | null } }} input
+ * @returns {{ fleet: Worker[], refusal: null } | { fleet: null, refusal: string }}
  */
 export function fleetFor(job, { workers, readFleet }) {
   if (workers) return { fleet: workers.map((url) => ({ name: url, url })), refusal: null };
@@ -225,7 +225,7 @@ export function fleetFor(job, { workers, readFleet }) {
  * #1356: THE POOL a capture-bearing job checks against, pure -- given an explicit `workers` list or the
  * control plane's own resolved fleet. `run` below is this plus the real exit.
  * @param {string} job
- * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} input
+ * @param {{ workers?: string[], readFleet: () => { workers: Worker[], refusal: string | null } }} input
  * @returns {{ pool: string[], refusal: null } | { pool: null, refusal: string }}
  */
 export function poolFor(job, input) {
@@ -268,8 +268,8 @@ export function workerDemand(catalogueText, job) {
  *
  * @param {{ fleet: boolean, selectable: boolean, named: boolean }} demand
  * @param {Record<string, string>} vars the `-e` extra vars
- * @param {{ name: string, url: string }[]} fleet
- * @returns {{ needed: { name: string, url: string }[], selected: boolean, refusal: null } | { refusal: string }}
+ * @param {Worker[]} fleet
+ * @returns {{ needed: Worker[], selected: boolean, refusal: null } | { refusal: string }}
  */
 export function neededWorkers(demand, vars, fleet) {
   const names = fleet.map((w) => w.name);
@@ -296,38 +296,16 @@ export function neededWorkers(demand, vars, fleet) {
 }
 
 /**
- * THE INVENTORY'S MACS, read from the control plane over the same ssh every other read here uses. The
- * resolved fleet (`readControlPlaneFleet`) carries names and addresses and no MAC, and the MAC is the one
- * thing a wake needs that the dispatch does not, so this is a second read of the same source and not a
- * second source. Keyed by address.
+ * Wake exactly `needed` and wait for `ready`. The MAC arrives WITH each worker, off the one inventory read
+ * `readControlPlaneFleet` already makes (#2655): a worker the inventory gives no `mac` is `no-mac` when it
+ * is silent, and needs none when it is up. `wakeFleet`'s own options (`send`, `request`, `sleep`, `now`)
+ * pass through `wakeOptions`.
  *
- * @returns {Map<string, { name: string, mac: string | null }>}
+ * @param {Worker[]} needed
+ * @param {{ wake?: typeof wakeFleet, wakeOptions?: import("./fleet-wake.mjs").WakeOptions }} [options]
  */
-function readWakeInventory() {
-  const cfg = readFileSync(fileURLToPath(new URL("../ansible/ansible.cfg", import.meta.url)), "utf8");
-  const reads = parseInventoryReads(sshToControlPlane(inventoryReadScript(inventorySources(cfg)), { capture: true }));
-  /** @type {Map<string, { name: string, mac: string | null }>} */
-  const byHost = new Map();
-  for (const { text } of reads) {
-    for (const h of inventoryHosts(text)) if (!byHost.get(h.host)?.mac) byHost.set(h.host, { name: h.name, mac: h.mac });
-  }
-  return byHost;
-}
-
-/**
- * Wake exactly `needed` and wait for `ready`. The socket, the health read and the inventory are
- * injectable through `options`; `wakeFleet`'s own options (`send`, `request`, `sleep`, `now`) pass through.
- *
- * @param {{ name: string, url: string }[]} needed
- * @param {{ macs?: Map<string, { name: string, mac: string | null }>, wake?: typeof wakeFleet,
- *           wakeOptions?: import("./fleet-wake.mjs").WakeOptions }} [options]
- */
-export async function wakeNeeded(needed, { macs, wake = wakeFleet, wakeOptions = {} } = {}) {
-  const inventory = macs ?? readWakeInventory();
-  const targets = needed.map(({ name, url }) => {
-    const host = new URL(url).hostname;
-    return { name, host, mac: inventory.get(host)?.mac ?? null };
-  });
+export async function wakeNeeded(needed, { wake = wakeFleet, wakeOptions = {} } = {}) {
+  const targets = needed.map(({ name, url, mac }) => ({ name, host: new URL(url).hostname, mac: mac ?? null }));
   return wake(targets, { log: (line) => process.stdout.write(`${line}\n`), ...wakeOptions });
 }
 
@@ -376,8 +354,8 @@ export function wakeRefusal(results, selected) {
  * @param {{ catalogueText?: string, workers?: string[], expected?: string,
  *           checkFleet?: (expected: string, workers: string[], options: object) => Promise<void>,
  *           dispatch?: (forwarded: string[]) => void,
- *           readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null },
- *           wake?: (needed: { name: string, url: string }[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]> }} [deps]
+ *           readFleet?: () => { workers: Worker[], refusal: string | null },
+ *           wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]> }} [deps]
  *   `wake` has NO default: only the command-line entry passes the real one (#2655).
  */
 export async function run(argv, {
@@ -428,8 +406,8 @@ export async function run(argv, {
  * @param {string} job
  * @param {{ fleet: boolean, selectable: boolean, named: boolean }} demand
  * @param {string[]} argv
- * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} sources
- * @returns {{ needed: { name: string, url: string }[], selected: boolean, refusal: null } | { refusal: string }}
+ * @param {{ workers?: string[], readFleet: () => { workers: Worker[], refusal: string | null } }} sources
+ * @returns {{ needed: Worker[], selected: boolean, refusal: null } | { refusal: string }}
  */
 function neededFor(job, demand, argv, sources) {
   const resolved = fleetFor(job, sources);
@@ -437,8 +415,8 @@ function neededFor(job, demand, argv, sources) {
 }
 
 /**
- * @param {{ needed: { name: string, url: string }[], selected: boolean }} needs
- * @param {(needed: { name: string, url: string }[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>} wake
+ * @param {{ needed: Worker[], selected: boolean }} needs
+ * @param {(needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>} wake
  */
 async function wakeOrRefuse({ needed, selected }, wake) {
   const results = await wake(needed);

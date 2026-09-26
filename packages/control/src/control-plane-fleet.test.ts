@@ -9,7 +9,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readControlPlaneFleet, inventoryPathFor } from "./control-plane-fleet.mjs";
+import { readControlPlaneFleet, inventoryPathFor, macsByHost } from "./control-plane-fleet.mjs";
+import { inventoryHosts } from "./fleet-discover.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
 const IN_TREE_FALLBACK = `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`;
@@ -108,4 +109,24 @@ test("#1683: the real defaults name the same durable path ansible.cfg's own firs
   + "and the real in-tree path this file always read", () => {
   const path = inventoryPathFor({ exists: () => false });
   assert.match(path, /packages\/control\/ansible\/inventory\.yml$/);
+});
+
+// #2655: the mac rides on the fleet read. `macsByHost` restates `inventoryHosts` (a cycle keeps it from
+// importing it), so the two are pinned equal on one fixture rather than trusted to stay so.
+const MACS_INVENTORY = ["all:", "  children:", "    a11y_workers:", "      hosts:",
+  "        a11y-worker-2:", "          ansible_host: 192.0.2.2", "          mac: AA-BB-CC-DD-EE-01",
+  "        a11y-worker-3:", "          ansible_host: 192.0.2.3",
+  "        a11y-worker-4:", "          ansible_host: 192.0.2.4", "          mac: \"aa:bb:cc:dd:ee:04\"",
+  "        a11y-worker-5:", "          ansible_host: 192.0.2.5", "          mac: not-a-mac",
+  "    other_group:", "      hosts:", "        lab:", "          ansible_host: 192.0.2.9", "          mac: 00:11:22:33:44:55"]
+  .join("\n") + "\n";
+
+test("#2655: macsByHost reads the declared macs, normalised, and leaves out hosts with none, a malformed one, or outside the worker group", () => {
+  assert.deepEqual([...macsByHost(MACS_INVENTORY)], [["192.0.2.2", "aa:bb:cc:dd:ee:01"], ["192.0.2.4", "aa:bb:cc:dd:ee:04"]]);
+});
+
+test("#2655: macsByHost agrees with fleet-discover's inventoryHosts on every host of the fixture (the copies are pinned equal)", () => {
+  const viaDiscover = inventoryHosts(MACS_INVENTORY).filter((h) => h.mac).map((h) => [h.host, h.mac]);
+  assert.deepEqual([...macsByHost(MACS_INVENTORY)], viaDiscover);
+  assert.ok(viaDiscover.length >= 2, "positive control: the fixture has hosts with a mac, so equality is not two empty lists");
 });

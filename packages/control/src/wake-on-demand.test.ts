@@ -19,6 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 import { captureBearingJobs, neededWorkers, run, wakeNeeded, wakeRefusal, workerDemand } from "./lab-job.mjs";
 
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
@@ -146,14 +147,30 @@ test("with no `wake` handed to run() nothing is woken -- only the command-line e
   assert.match(LAB_JOB_SOURCE, /await run\(process\.argv\.slice\(2\), \{ wake: wakeNeeded \}\)/);
 });
 
-test("wakeNeeded hands the wake the inventory's mac per host, and null for a host the inventory does not list", async () => {
+test("wakeNeeded hands the wake the mac each worker CARRIES, and null for one whose inventory entry declares none", async () => {
   let targets: unknown[] = [];
-  await wakeNeeded([FLEET[0], { name: "stranger", url: "http://198.51.100.9:8765" }], {
-    macs: new Map([["192.0.2.2", { name: "a11y-worker-2", mac: "aa:bb:cc:dd:ee:01" }]]),
+  await wakeNeeded([{ ...FLEET[0], mac: "aa:bb:cc:dd:ee:01" }, { name: "stranger", url: "http://198.51.100.9:8765" }], {
     wake: async (t) => { targets = t; return []; },
   });
   assert.deepEqual(targets, [
     { name: "a11y-worker-2", host: "192.0.2.2", mac: "aa:bb:cc:dd:ee:01" },
     { name: "stranger", host: "198.51.100.9", mac: null },
   ]);
+});
+
+test("the mac reaches the wake through the ONE inventory read: readControlPlaneFleet carries it, and a run never reads a second inventory", () => {
+  const inventory = ["all:", "  children:", "    a11y_workers:", "      hosts:",
+    "        a11y-worker-2:", "          ansible_host: 192.0.2.2", "          mac: AA-BB-CC-DD-EE-01",
+    "        a11y-worker-3:", "          ansible_host: 192.0.2.3"].join("\n") + "\n";
+  let reads = 0;
+  const { workers } = readControlPlaneFleet({
+    ansibleCfgText: "[defaults]\ninventory = /etc/a11ign/inventory.yml\n", groupVarsText: "a11y_port: 8765\n",
+    readInventories: (sources) => { reads += 1; return [{ path: sources[0], text: inventory }]; },
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(workers, [
+    { name: "a11y-worker-2", url: "http://192.0.2.2:8765", mac: "aa:bb:cc:dd:ee:01" },
+    { name: "a11y-worker-3", url: "http://192.0.2.3:8765" },
+  ]);
+  assert.doesNotMatch(LAB_JOB_SOURCE, /sshToControlPlane|inventoryReadScript/, "no second read of the inventory in lab-job.mjs");
 });
