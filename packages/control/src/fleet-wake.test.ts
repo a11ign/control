@@ -82,12 +82,12 @@ function fakeWorld() {
 const SLOW_HEALTHY_MS = 3_100;
 const OLD_PROBE_MS = 2_000;
 const READY = { ok: true, ready: true, busy: false };
-const workers = (...names: string[]) => names.map((name, i) => ({ name, host: `10.0.0.${i + 1}`, mac: `aa:bb:cc:dd:ee:0${i + 1}` }));
+const workers = (...names: string[]) => names.map((name, i) => ({ name, host: `192.0.2.${i + 1}`, mac: `aa:bb:cc:dd:ee:0${i + 1}` }));
 
 test("#2655 5.5: a healthy box answering in 3.1 s -- slower than the old 2 s probe, faster than T -- is UP and is sent NO packet", async () => {
   // 3.09 s is the slowest healthy first-after-idle reading on the real fleet (#2671); 3.1 s is that plus a hair.
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ delayMs: SLOW_HEALTHY_MS, json: READY }] });
+  const health = fakeHealth({ "192.0.2.1": [{ delayMs: SLOW_HEALTHY_MS, json: READY }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request });
   assert.equal(r.state, "already-up");
   assert.equal(world.sent.length, 0, "a slow answer is not a down box, so it is not woken");
@@ -97,7 +97,7 @@ test("#2655 5.5: a healthy box answering in 3.1 s -- slower than the old 2 s pro
 
 test("#2655 5.1: T clears a LOADED box (about 10 s: two synchronous PowerShell calls, each bounded at 5 s) too", async () => {
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ delayMs: 10_000, json: READY }] });
+  const health = fakeHealth({ "192.0.2.1": [{ delayMs: 10_000, json: READY }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request });
   assert.equal(r.state, "already-up");
   assert.equal(world.sent.length, 0);
@@ -107,7 +107,7 @@ test("#2655 5.1: T clears a LOADED box (about 10 s: two synchronous PowerShell c
 test("#2655 5.5: a box that answers only on a LATER poll gets exactly ONE packet in total", async () => {
   const world = fakeWorld();
   // silent, silent, silent, then up: the packet goes after the first silence and no poll sends another.
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ delayMs: Infinity }, { delayMs: Infinity }, { delayMs: Infinity }, { json: READY }] });
+  const health = fakeHealth({ "192.0.2.1": [{ delayMs: Infinity }, { delayMs: Infinity }, { delayMs: Infinity }, { json: READY }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request });
   assert.equal(r.state, "woken");
   assert.equal(world.sent.length, 1, "at most one packet per box per wake, however many polls timed out");
@@ -116,7 +116,7 @@ test("#2655 5.5: a box that answers only on a LATER poll gets exactly ONE packet
 
 test("#2655 5.5: a box that never answers ends in the UNKNOWN-outcome error -- packet sent, nothing answered -- and never says 'down'", async () => {
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ delayMs: Infinity }] });
+  const health = fakeHealth({ "192.0.2.1": [{ delayMs: Infinity }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request, deadlineMs: 60_000 });
   assert.equal(r.state, "no-answer");
   assert.equal(world.sent.length, 1, "silence for the whole deadline still sent one packet, not one per poll");
@@ -129,14 +129,14 @@ test("#2655 5.5: a box that never answers ends in the UNKNOWN-outcome error -- p
 });
 
 test("#2655 5.2: a REFUSED connection is its own outcome, KNOWN (the box is up), and it is sent no packet", async () => {
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ code: "ECONNREFUSED", message: "connect ECONNREFUSED" }] });
-  const probe = await probeWorker("http://REDACTED-INTERNAL-ADDRESS:8765", { request: health.request });
+  const health = fakeHealth({ "192.0.2.1": [{ code: "ECONNREFUSED", message: "connect ECONNREFUSED" }] });
+  const probe = await probeWorker("http://192.0.2.1:8765", { request: health.request });
   assert.equal(probe.outcome, "refused");
-  const silent = await probeWorker("http://REDACTED-INTERNAL-ADDRESS:8765", { request: fakeHealth({}).request });
+  const silent = await probeWorker("http://192.0.2.1:8765", { request: fakeHealth({}).request });
   assert.equal(silent.outcome, "no-answer", "a timeout and a refusal must not share an outcome");
 
   const world = fakeWorld();
-  const later = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ code: "ECONNREFUSED" }, { code: "ECONNREFUSED" }, { json: READY }] });
+  const later = fakeHealth({ "192.0.2.1": [{ code: "ECONNREFUSED" }, { code: "ECONNREFUSED" }, { json: READY }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: later.request });
   assert.equal(r.state, "came-up");
   assert.equal(world.sent.length, 0, "a refusal means the box is up: a magic packet has nothing to do");
@@ -144,7 +144,7 @@ test("#2655 5.2: a REFUSED connection is its own outcome, KNOWN (the box is up),
 
 test("#2655 5.2: a box refusing for the whole wait is 'not-listening' (it is up), which is not the unknown 'no-answer'", async () => {
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ code: "ECONNREFUSED" }] });
+  const health = fakeHealth({ "192.0.2.1": [{ code: "ECONNREFUSED" }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request, deadlineMs: 30_000 });
   assert.equal(r.state, "not-listening");
   assert.equal(world.sent.length, 0);
@@ -152,7 +152,7 @@ test("#2655 5.2: a box refusing for the whole wait is 'not-listening' (it is up)
 
 test("#2655 3: answered but never ready is its own named error, carrying /health's own reason", async () => {
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ json: { ok: true, ready: false, busy: false, reason: "not ready: browserConfigured" } }] });
+  const health = fakeHealth({ "192.0.2.1": [{ json: { ok: true, ready: false, busy: false, reason: "not ready: browserConfigured" } }] });
   const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request, deadlineMs: 30_000 });
   assert.equal(r.state, "never-ready");
   assert.match(String(r.detail), /not ready: browserConfigured/);
@@ -163,7 +163,7 @@ test("#2655 3: answered but never ready is its own named error, carrying /health
 test("#2655 2: a worker that is UP AND BUSY is neither woken nor waited on", async () => {
   const world = fakeWorld();
   let slept = 0;
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ json: { ok: true, ready: false, busy: true, reason: "busy with a capture" } }] });
+  const health = fakeHealth({ "192.0.2.1": [{ json: { ok: true, ready: false, busy: true, reason: "busy with a capture" } }] });
   const [r] = await wakeFleet(workers("w1"), {
     ...world.options, request: health.request,
     // still moves the clock: a sleep that did not would turn a mutant of this test into a hang, not a failure
@@ -176,9 +176,9 @@ test("#2655 2: a worker that is UP AND BUSY is neither woken nor waited on", asy
 
 test("#2655 3: silent and no mac in the inventory is 'no-mac', and nothing is sent; an UP box with no mac is fine", async () => {
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ delayMs: Infinity }], "REDACTED-INTERNAL-ADDRESS": [{ json: READY }] });
+  const health = fakeHealth({ "192.0.2.1": [{ delayMs: Infinity }], "192.0.2.2": [{ json: READY }] });
   const results = await wakeFleet(
-    [{ name: "w1", host: "REDACTED-INTERNAL-ADDRESS", mac: null }, { name: "w2", host: "REDACTED-INTERNAL-ADDRESS", mac: null }],
+    [{ name: "w1", host: "192.0.2.1", mac: null }, { name: "w2", host: "192.0.2.2", mac: null }],
     { ...world.options, request: health.request });
   assert.deepEqual(results.map((r) => r.state), ["no-mac", "already-up"]);
   assert.equal(world.sent.length, 0);
@@ -187,19 +187,19 @@ test("#2655 3: silent and no mac in the inventory is 'no-mac', and nothing is se
 test("#2655 2: it wakes exactly the workers it is given -- three asked, one silent: one packet, and no other host is probed", async () => {
   const world = fakeWorld();
   const health = fakeHealth({
-    "REDACTED-INTERNAL-ADDRESS": [{ json: READY }],
-    "REDACTED-INTERNAL-ADDRESS": [{ delayMs: Infinity }, { json: READY }],
-    "REDACTED-INTERNAL-ADDRESS": [{ json: READY }],
+    "192.0.2.1": [{ json: READY }],
+    "192.0.2.2": [{ delayMs: Infinity }, { json: READY }],
+    "192.0.2.3": [{ json: READY }],
   });
   const results = await wakeFleet(workers("w1", "w2", "w3"), { ...world.options, request: health.request });
   assert.deepEqual(results.map((r) => r.state), ["already-up", "woken", "already-up"]);
   assert.deepEqual(world.sent, ["aa:bb:cc:dd:ee:02"], "only the silent box is sent a packet");
-  assert.deepEqual([...new Set(health.calls)].sort(), ["REDACTED-INTERNAL-ADDRESS", "REDACTED-INTERNAL-ADDRESS", "REDACTED-INTERNAL-ADDRESS"]);
+  assert.deepEqual([...new Set(health.calls)].sort(), ["192.0.2.1", "192.0.2.2", "192.0.2.3"]);
 });
 
 test("#2655 5.1: every probe is made with T, never with a shorter number, and T is not the discover probe's 2 s", async () => {
   const world = fakeWorld();
-  const health = fakeHealth({ "REDACTED-INTERNAL-ADDRESS": [{ delayMs: Infinity }, { json: READY }] });
+  const health = fakeHealth({ "192.0.2.1": [{ delayMs: Infinity }, { json: READY }] });
   await wakeFleet(workers("w1"), { ...world.options, request: health.request });
   assert.deepEqual([...new Set(health.timeouts)], [HEALTH_TIMEOUT_MS]);
   assert.notEqual(HEALTH_TIMEOUT_MS, 2_000);
