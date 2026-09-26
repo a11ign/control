@@ -6,9 +6,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import {
   reconcile, inventoryHosts, normaliseMac, enrol, writeEnrolments, enrolmentBlock, lookupMac, macOf, macNote,
+  scan, PROBE_TIMEOUT_MS,
 } from "./fleet-discover.mjs";
 import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
@@ -352,4 +355,68 @@ test("#2667: enrol() carries the lookup through to the written comment", () => {
   const macLookup = lookupMac(IP.b200, hostWith({}));
   const { text: written } = enrol(text, [{ ip: IP.b200, mac: null, macLookup, health }], "2026-09-26");
   assert.match(written, /# NO mac -- neither `ip` nor `arp` could be run on this host/);
+});
+
+// #2666: `/health` took 2.85-2.93 s on three healthy workers (a11y-worker-13/-14/-16, read by `orchestrator` on
+// #2664) and the 2 s probe timeout reported them `ASLEEP?`. These drive the REAL `scan` over loopback rather
+// than a reimplementation of the probe, because the defect lives in the probe's deadline, not in `reconcile`.
+const SLOW_HEALTHY_ANSWER_MS = 3_000;
+const LOOPBACK_SUBNET = "127.0.0";
+
+/** A server answering `/health` `ready:true` after `delayMs`, or never when `delayMs` is null. */
+async function healthStub(delayMs: number | null): Promise<{ server: Server; port: number }> {
+  const server = createServer((_req, res) => {
+    if (delayMs === null) return;
+    setTimeout(() => res.end(JSON.stringify({ ready: true })), delayMs);
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  return { server, port: (server.address() as AddressInfo).port };
+}
+
+const stopStub = (server: Server) => new Promise<void>((done) => {
+  server.closeAllConnections();
+  server.close(() => done());
+});
+
+test("a box whose /health answers in 3 s is found, not reported absent", async () => {
+  const { server, port } = await healthStub(SLOW_HEALTHY_ANSWER_MS);
+  try {
+    const found = await scan(LOOPBACK_SUBNET, port);
+    assert.equal(found.length, 1, "a healthy box that answers slowly must be discovered");
+    assert.equal(found[0].ip, "127.0.0.1");
+  } finally {
+    await stopStub(server);
+  }
+});
+
+test("the slow-answer stub is slower than the OLD 2 s timeout and inside the current one", () => {
+  // The positive control for the test above: if the constant were lowered back under the stub's delay, that
+  // test would fail for the right reason, and if the stub were sped up under 2 s it would pass on main.
+  const OLD_PROBE_TIMEOUT_MS = 2_000;
+  assert.ok(SLOW_HEALTHY_ANSWER_MS > OLD_PROBE_TIMEOUT_MS);
+  assert.ok(SLOW_HEALTHY_ANSWER_MS < PROBE_TIMEOUT_MS);
+});
+
+test("a fast answer is still found (the probe itself works, so an empty result below is the timeout)", async () => {
+  const { server, port } = await healthStub(0);
+  try {
+    assert.equal((await scan(LOOPBACK_SUBNET, port)).length, 1);
+  } finally {
+    await stopStub(server);
+  }
+});
+
+test("a box that never answers is given up on at the timeout, so a scan's cost is bounded by it", async () => {
+  const { server, port } = await healthStub(null);
+  const timeoutMs = 400;
+  try {
+    const started = Date.now();
+    const found = await scan(LOOPBACK_SUBNET, port, { timeoutMs });
+    const elapsed = Date.now() - started;
+    assert.equal(found.length, 0);
+    assert.ok(elapsed >= timeoutMs - 50, `gave up after ${elapsed} ms, before the ${timeoutMs} ms deadline`);
+    assert.ok(elapsed < timeoutMs * 5, `a scan took ${elapsed} ms against a ${timeoutMs} ms timeout`);
+  } finally {
+    await stopStub(server);
+  }
 });

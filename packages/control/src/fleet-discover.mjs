@@ -63,7 +63,17 @@ import { inventoryPathFor } from "./control-plane-fleet.mjs";
 refuseUnknownFlags(["--cidr=", "--port=", "--enroll", "--json"], { entry: import.meta.url, command: "npm run fleet:discover" });
 
 const DEFAULT_PORT = 8765;
-const PROBE_TIMEOUT_MS = 2_000;
+/**
+ * How long one `/health` probe waits. It is the wall-clock of a whole `scan`, because `scan` probes all 254
+ * addresses at once and any address that neither answers nor refuses (a powered-off or absent host drops the
+ * SYN) holds its probe to this deadline.
+ *
+ * 6 s, from a reading rather than a guess: `/health` took 2.85-2.93 s on three healthy workers and 0.6-0.75 s
+ * on twelve (`orchestrator`, #2664, 2026-09-26). The old 2 s called those three `ASLEEP?`, and that verdict
+ * (and "not enrolled" under `--enroll`) is one people act on, so a slow answer must not read as an absence.
+ * 6 s is about twice the slowest measured box; the price is a scan that can take 6 s instead of 2.
+ */
+export const PROBE_TIMEOUT_MS = 6_000;
 const LAST_HOST_IN_SUBNET = 254;
 
 /**
@@ -216,9 +226,9 @@ export function localSubnet() {
   return null;
 }
 
-async function probe(/** @type {any} */ ip, /** @type {any} */ port) {
+async function probe(/** @type {any} */ ip, /** @type {any} */ port, /** @type {number} */ timeoutMs) {
   try {
-    const response = await requestJson(`http://${ip}:${port}/health`, { timeoutMs: PROBE_TIMEOUT_MS });
+    const response = await requestJson(`http://${ip}:${port}/health`, { timeoutMs });
     if (!response.ok || !response.json) return null;
     const lookup = lookupMac(ip);
     return { ip, health: response.json, mac: lookup.mac, macLookup: lookup };
@@ -227,10 +237,10 @@ async function probe(/** @type {any} */ ip, /** @type {any} */ port) {
   }
 }
 
-/** Everything answering /health on the subnet. */
-export async function scan(/** @type {any} */ subnet, port = DEFAULT_PORT) {
+/** Everything answering /health on the subnet. `timeoutMs` is injectable so a test can bound a scan cheaply. */
+export async function scan(/** @type {any} */ subnet, port = DEFAULT_PORT, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   const addresses = Array.from({ length: LAST_HOST_IN_SUBNET }, (_, i) => `${subnet}.${i + 1}`);
-  const found = await Promise.all(addresses.map((ip) => probe(ip, port)));
+  const found = await Promise.all(addresses.map((ip) => probe(ip, port, timeoutMs)));
   // A cast rather than a predicate: `probe` answers null for an address that does not respond, and
   // the filter is what makes the declared return true. Stated once, where it is established.
   return /** @type {any[]} */ (found.filter((entry) => entry !== null));
