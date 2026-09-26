@@ -1033,6 +1033,40 @@ export async function fleetStatus(deps) {
     consistent: verdict.state === "CONSISTENT" };
 }
 
+/**
+ * The closing advice under an INCONSISTENT verdict, chosen by WHICH field disagreed (#2661).
+ *
+ * NAME THE REMEDY, not just the state. A reader who has not read the runbook cannot get from
+ * "browserVersion differs" to "re-provision the WHOLE fleet, never one box", and the difference
+ * matters: `provisionRevision` is a capture CACHE KEY and a MUST_MATCH field, so a single box
+ * provisioned alone gets a stamp its peers lack and splits the fleet further. That is why
+ * `--serial=0` is right here and wrong almost everywhere else.
+ *
+ * `browserProfile` is the exception: provisioning cannot converge it. `readOrStampProfileIdentity`
+ * stamps a profile provisioning created with a fresh UUID, and `bespoke.yml` forbids relabelling it
+ * `adopted`, so re-provisioning five cold boxes beside ten adopted ones reproduces the mismatch. The
+ * advice then names the ruling (#2654) instead of sending the reader round a loop that cannot end.
+ * Any OTHER field disagreeing alongside it keeps today's advice, because that part IS convergeable.
+ *
+ * @param {{ field: string }[]} mismatches
+ * @returns {string}
+ */
+export function inconsistentAdvice(mismatches) {
+  const notInterchangeable = "  These guests are NOT interchangeable for capture, so a corpus run must not start: two\n"
+    + "  workers on different values would share a cache key while producing different evidence.\n";
+  const onlyProfile = mismatches.length > 0 && mismatches.every(({ field }) => field === "browserProfile");
+  if (onlyProfile) {
+    return notInterchangeable
+      + "  Only `browserProfile` differs, and the profiles differ by ORIGIN: provisioning cannot equalise\n"
+      + "  them (a profile it creates gets its own UUID, never `adopted`), so re-provisioning will not fix\n"
+      + "  this. Per the ruling on #2654, a cold profile is a separate class until it is measured equal\n"
+      + "  to the adopted ones; keep those boxes out of the capture set rather than re-provisioning.\n";
+  }
+  return notInterchangeable
+    + "  Re-provision the WHOLE fleet together — `npm run fleet:provision -- --serial=0`. Never one\n"
+    + "  box alone: a lone re-provision splits the fleet rather than converging it.\n";
+}
+
 async function main() {
   const status = await fleetStatus();
   if (process.argv.includes("--json")) {
@@ -1054,15 +1088,7 @@ async function main() {
     // and 1, which the old `reachable >= 2` gate silenced. A verdict the reader never sees is not safer.
     process.stdout.write(`  ${status.verdict.line}\n`);
     if (status.verdict.state === "INCONSISTENT") {
-      // NAME THE REMEDY, not just the state. A reader who has not read the runbook cannot get from
-          // "browserVersion differs" to "re-provision the WHOLE fleet, never one box", and the difference
-          // matters: `provisionRevision` is a capture CACHE KEY and a MUST_MATCH field, so a single box
-          // provisioned alone gets a stamp its peers lack and splits the fleet further. That is why
-      // `--serial=0` is right here and wrong almost everywhere else.
-      process.stdout.write("  These guests are NOT interchangeable for capture, so a corpus run must not start: two\n"
-          + "  workers on different values would share a cache key while producing different evidence.\n"
-          + "  Re-provision the WHOLE fleet together — `npm run fleet:provision -- --serial=0`. Never one\n"
-          + "  box alone: a lone re-provision splits the fleet rather than converging it.\n");
+      process.stdout.write(inconsistentAdvice(status.mismatches));
     }
     // SPLIT CODE IS A SEPARATE VERDICT FROM INCONSISTENT, and collapsing them would be wrong in both
     // directions. INCONSISTENT means the guests are not interchangeable for capture — a cache-key field

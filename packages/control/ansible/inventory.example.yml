@@ -72,6 +72,12 @@ all:
         a11y-worker-11:
           ansible_host: 192.0.2.21
           mac: "00:00:00:00:00:21"
+          # OPTIONAL, and absent on every host above: `a11y_capture: false` keeps a host ENROLLED (deployed
+          # to, served, named by `fleet:env --list`, `doctor`, `fleet:status`) but leaves it out of
+          # `A11Y_WORKERS`, so it is handed no corpus cases. `fleet:env` names each host it leaves out on
+          # stderr. Only the literals `true` and `false` are read. Commented here, not set, so this
+          # file's key SET stays equal to the real one's (`inventory-example-parity.test.ts`).
+          # a11y_capture: false
 
     a11y_control:
       hosts:

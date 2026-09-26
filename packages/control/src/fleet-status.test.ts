@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
-  linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe } from "./fleet-status.mjs";
+  linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice } from "./fleet-status.mjs";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
   from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
@@ -1062,4 +1062,40 @@ test("#2063: an omitted reportedOnly changes no verdict, which is the one defaul
   const input = { consistent: true, compared: 4, total: 4, rows: [], fields: comparedEverything(4) };
   assert.deepEqual(consistencyVerdict(input), consistencyVerdict({ ...input, reportedOnly: [] }));
   assert.equal(consistencyVerdict(input).state, "CONSISTENT");
+});
+
+// #2661 — the closing advice under INCONSISTENT depends on WHICH field disagreed. Driven through the REAL
+// `fleetConsistency` and the real `inconsistentAdvice` `main` prints, not a copy of either string.
+const mismatchesWhere = (field: string) => {
+  const drifted = (n: number) => ({ ...box(n), environment: { ...box(n).environment, [field]: `differs-${n}` } });
+  return fleetConsistency([box(2), drifted(3)]).mismatches;
+};
+
+test("only browserProfile differing: the advice does not say to re-provision, and names #2654", () => {
+  const mismatches = mismatchesWhere("browserProfile");
+  assert.deepEqual(mismatches.map((m) => m.field), ["browserProfile"], "the fixture must disagree on ONLY this");
+  const advice = inconsistentAdvice(mismatches);
+  assert.doesNotMatch(advice, /Re-provision/);
+  assert.doesNotMatch(advice, /fleet:provision/);
+  assert.match(advice, /differ by ORIGIN/);
+  assert.match(advice, /cannot equalise/);
+  assert.match(advice, /#2654/);
+});
+
+test("a field provisioning CAN converge differing: the advice is exactly what it always was", () => {
+  const today = "  These guests are NOT interchangeable for capture, so a corpus run must not start: two\n"
+    + "  workers on different values would share a cache key while producing different evidence.\n"
+    + "  Re-provision the WHOLE fleet together — `npm run fleet:provision -- --serial=0`. Never one\n"
+    + "  box alone: a lone re-provision splits the fleet rather than converging it.\n";
+  for (const field of ["provisionRevision", "browserVersion"]) {
+    const mismatches = mismatchesWhere(field);
+    assert.deepEqual(mismatches.map((m) => m.field), [field], "the fixture must disagree on ONLY this");
+    assert.equal(inconsistentAdvice(mismatches), today, field);
+  }
+});
+
+test("browserProfile alongside a convergeable field keeps the re-provision advice", () => {
+  // The convergeable part IS fixable by provisioning, so the profile must not silence the advice for it.
+  const mismatches = [...mismatchesWhere("browserProfile"), ...mismatchesWhere("browserVersion")];
+  assert.match(inconsistentAdvice(mismatches), /Re-provision the WHOLE fleet/);
 });
