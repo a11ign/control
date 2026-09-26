@@ -57,6 +57,7 @@ The UTM VMs keep their own lifecycle through `worker-ctl.sh` and are **not** man
 |---|---|
 | `packages.yml` | Node (LTS resolved ONCE on the control plane, so a fleet cannot straddle a release), MinGit, the repo |
 | `account.yml` | the worker account, and credential-free auto-logon — including the `LimitBlankPasswordUse` assertion |
+| `powershell-native-image.yml` | the NGEN native image of PowerShell's engine, built only where `ngen display` says there is none (#2672) |
 | `policy.yml` | Edge, Windows Update, notifications, OneDrive, screensaver |
 | `firewall.yml` | the worker port, and the allow-app alert that would block the whole desktop |
 | `nvda.yml` | pnpm install, guidepup, NVDA, and the Speech Viewer |

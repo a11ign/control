@@ -5,6 +5,8 @@
 #
 #   packages  node, git and the repo — literally everything else needs them
 #   account   the worker identity must exist before a task can name it as a principal
+#   powershell  the native image of PowerShell's engine (#2672); needs nothing, and every later task and
+#             the worker's own /health path launches powershell.exe, so it is cheapest before them
 #   policy    machine and user policy; independent of the rest, cheap, and the thing that drifts
 #   display   the pinned display mode (#1567); independent of policy and edge, grouped with them as
 #             another machine-environment setting the capture cache key depends on
@@ -37,6 +39,10 @@
 - name: Account and credential-free auto-logon
   ansible.builtin.import_tasks: account.yml
   tags: [account]
+
+- name: PowerShell's native image, so every powershell.exe launch is not JIT-compiled
+  ansible.builtin.import_tasks: powershell-native-image.yml
+  tags: [powershell]
 
 - name: Machine and user policy
   ansible.builtin.import_tasks: policy.yml

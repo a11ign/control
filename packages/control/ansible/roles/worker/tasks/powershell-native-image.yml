@@ -1,0 +1,78 @@
+---
+# #2672: PowerShell's own engine needs an NGEN native image, or every `powershell.exe` launch JIT-compiles it.
+#
+# Read on #2671 (2026-09-26): a11y-worker-13, -14 and -16 answered `ngen display` for
+# `System.Management.Automation` with `Error: The specified assembly is not installed.`, and the twelve
+# other workers listed a native image. A bare `powershell.exe -NoProfile -Command 1` took 0.75-0.86 s on
+# the three and 0.13-0.17 s on the twelve, and that start-up is what made their first `/health` after the
+# 5 s environment cache went stale take 2.9 s (two synchronous `powershell.exe` calls on the request path,
+# `packages/nvda-worker/src/server.mjs`). The three had just been re-imaged or patched, which fits servicing
+# having invalidated the images -- a LEAD, not a reading: the cause is a correlation until a box moves when
+# the image is built, and this task prints the launch time on either side of the install so that reading
+# exists (the row's done-when 3).
+#
+# READS BEFORE IT WRITES, AND ACTS ONLY ON `not installed`. A converged box reports `ok`, never `changed`,
+# the same contract `firewall.yml`'s NotifyOnListen task keeps -- and it does not write under `--check`
+# (`win_powershell` hands the script `$Ansible.CheckMode`; acting on it is the script's job).
+#
+# `ngen install`, NOT `ngen update`. `update` recompiles images that are already registered and stale; it
+# has nothing to say about an assembly with no image at all, which is the state the three boxes are in.
+# Install is synchronous here (no `/queue`) so the read-back below can prove the image landed instead of
+# trusting that the servicing queue will get to it.
+#
+# THE ASSEMBLY IS NAMED HERE AND NOT IN `defaults/main.yml`, on purpose: `defaults/main.yml` is a
+# `provisionRevision` input, and a native image changes how fast PowerShell STARTS, never what a capture
+# HEARS -- putting it there would bump the stamp fleet-wide and invalidate every cached capture for a change
+# that cannot reach one (`provision-stamp-inputs.test.ts`'s EXEMPT entry for this file says the same).
+
+- name: PowerShell has a native image, and is built only where it has none
+  become: true
+  vars:
+    worker_powershell_assembly: "System.Management.Automation, Version=3.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35"
+  ansible.windows.win_powershell:
+    parameters:
+      Assembly: "{{ worker_powershell_assembly }}"
+    script: |
+      param([string]$Assembly)
+
+      # Framework64: the 64-bit powershell.exe this fleet runs loads the 64-bit image, and a 32-bit NGEN
+      # of the same assembly would leave every launch exactly as slow as it is now.
+      $ngen = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\ngen.exe'
+      if (-not (Test-Path -LiteralPath $ngen)) { throw "ngen.exe not found at $ngen" }
+
+      function Read-Image {
+        $text = (& $ngen display $Assembly 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $missing = $text -match 'not installed'
+        # Measured 2026-09-26: exit -1 + "The specified assembly is not installed." on a box with no image,
+        # exit 0 + an "NGEN Roots:" listing on one with it. Any OTHER failure is neither, and reading it as
+        # "installed" would report a converged box that was never checked.
+        if ($LASTEXITCODE -ne 0 -and -not $missing) { throw "ngen display exit ${LASTEXITCODE}: $($text.Trim())" }
+        [pscustomobject]@{ Installed = -not $missing; Text = $text.Trim() }
+      }
+
+      # A bare launch, three times, and the fastest: the first can pay disk cache, and the fastest is the
+      # figure the row's threshold (under 0.3 s) is written against.
+      function Measure-Launch {
+        $best = $null
+        1..3 | ForEach-Object {
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          & (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -Command 1 | Out-Null
+          $t.Stop()
+          if ($null -eq $best -or $t.Elapsed.TotalSeconds -lt $best) { $best = $t.Elapsed.TotalSeconds }
+        }
+        '{0:N2}s' -f $best
+      }
+
+      $before = Read-Image
+      $Ansible.Changed = -not $before.Installed
+      if (-not $Ansible.Changed) { "native image present: nothing to do"; return }
+      if ($Ansible.CheckMode) { "native image MISSING: would run ngen install"; return }
+
+      "native image MISSING; bare powershell.exe launch before: $(Measure-Launch)"
+      $install = (& $ngen install $Assembly 2>&1 | ForEach-Object { "$_" }) -join "`n"
+      $exit = $LASTEXITCODE
+      $after = Read-Image
+      if ($exit -ne 0 -or -not $after.Installed) {
+        throw "ngen install exit $exit, and the read-back says installed=$($after.Installed). Output: $($install.Trim())"
+      }
+      "ngen install exit 0, native image now present; bare powershell.exe launch after: $(Measure-Launch)"
