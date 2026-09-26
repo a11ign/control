@@ -68,7 +68,17 @@ test("workerDemand is DERIVED from the catalogue, and finds every job that names
   }
   // Every job the staleness check protects is one a wake protects, or a stale-checked job could find a dark pool.
   for (const job of captureBearingJobs(CATALOGUE)) assert.notEqual(workerDemand(CATALOGUE, job), null, job);
-  assert.deepEqual(workerDemand(CATALOGUE, "capture-only"), { fleet: true, selectable: true, named: false });
+  // The whole real table, pinned: a comment naming `lab_fleet_workers` is not demand (the review of #2681).
+  const table = Object.fromEntries(["capture-real-pages", "capture-only", "capture", "retrain", "capture-acceptance",
+    "capture-acceptance-2", "stability", "everything", "gate-stability", "capture-check", "evidence-check"]
+    .map((job) => [job, workerDemand(CATALOGUE, job)]));
+  const F = { fleet: true, selectable: false, named: false };
+  assert.deepEqual(table, {
+    "capture-real-pages": F, "capture-only": { fleet: false, selectable: true, named: false }, capture: F, retrain: F,
+    "capture-acceptance": F, "capture-acceptance-2": F, everything: F,
+    stability: { fleet: false, selectable: false, named: true }, "gate-stability": { fleet: false, selectable: false, named: true },
+    "capture-check": { fleet: false, selectable: false, named: true }, "evidence-check": { fleet: true, selectable: false, named: true },
+  });
 });
 
 test("neededWorkers: a count wakes the FIRST N in inventory order, names wake those names, nothing wakes the fleet", () => {
@@ -104,6 +114,13 @@ test("a diagnostic still wakes its worker, but is not STALENESS-checked (a stale
   const seen = await drive(["-e", "job=capture-check", "-e", "worker=a11y-worker-4"], allUp);
   assert.deepEqual(seen.events, ["wake", "dispatch"]);
   assert.deepEqual(seen.woken, ["a11y-worker-4"]);
+});
+
+test("a REQUIRED `worker=` that is missing wakes NOTHING: the playbook refuses it, and its header comment naming the fleet is not demand", async () => {
+  for (const job of ["capture-check", "stability", "gate-stability"]) {
+    const seen = await drive(["-e", `job=${job}`], allUp);
+    assert.deepEqual(seen.woken, [], `${job} with no worker= must not wake the fleet`);
+  }
 });
 
 test("a job that touches no worker wakes none and reads no fleet; describe-only wakes none", async () => {

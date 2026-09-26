@@ -247,7 +247,11 @@ export function poolFor(job, input) {
  * @returns {{ fleet: boolean, selectable: boolean, named: boolean } | null}
  */
 export function workerDemand(catalogueText, job) {
-  const block = catalogueJobs(catalogueText).find((entry) => entry.name === job)?.block ?? "";
+  // COMMENTS ARE NOT DEMAND. `capture-check`'s own header says it takes one worker "rather than reading
+  // `lab_fleet_workers`", and scanning that sentence made a run with no `worker=` (which the playbook
+  // refuses) wake the whole fleet. Only the YAML the playbook actually renders is read.
+  const block = (catalogueJobs(catalogueText).find((entry) => entry.name === job)?.block ?? "")
+    .split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
   const demand = {
     fleet: /\blab_fleet_workers\b/.test(block),
     selectable: /\blab_selected_workers\b/.test(block),
