@@ -9,7 +9,10 @@ import { fileURLToPath } from "node:url";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { reconcile, inventoryHosts, normaliseMac, enrol, writeEnrolments, scan, PROBE_TIMEOUT_MS } from "./fleet-discover.mjs";
+import {
+  reconcile, inventoryHosts, normaliseMac, enrol, writeEnrolments, enrolmentBlock, lookupMac, macOf, macNote,
+  scan, PROBE_TIMEOUT_MS,
+} from "./fleet-discover.mjs";
 import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
 /**
@@ -267,6 +270,91 @@ test("#1684: --enroll refuses cleanly when the in-tree write target does not exi
   const missing = fileURLToPath(new URL("../ansible/no-such-inventory.yml", import.meta.url));
   const result = writeEnrolments(missing, [{ ip: IP.b200, mac: "aa:bb:cc:dd:ee:ff", health }]);
   assert.deepEqual(result, { added: [], skipped: [] });
+});
+
+// #2667: `arp` is absent on the control plane and on the dev host, so `macOf` returned null for every address
+// and a wrong declared MAC still read OK, and --enroll wrote "ARP had none" for a MAC the table held.
+// `run` stands in for execFileSync: a tool that is not installed throws ENOENT (no numeric `status`), a tool
+// that ran and found nothing exits non-zero (numeric `status`).
+const NEIGH_MAC = "aa:bb:cc:dd:ee:0a";
+const notInstalled = (tool: string) => Object.assign(new Error(`spawnSync ${tool} ENOENT`), { code: "ENOENT" });
+const exitedNonZero = () => Object.assign(new Error("exit 1"), { status: 1 });
+const hostWith = (tools: Record<string, string | (() => never)>) => (tool: string) => {
+  const answer = tools[tool];
+  if (answer === undefined) throw notInstalled(tool);
+  return typeof answer === "function" ? answer() : answer;
+};
+
+test("#2667: with `arp` absent and `ip` present, the MAC is read from the neighbour table", () => {
+  const calls: string[][] = [];
+  const run = (tool: string, args: string[]) => {
+    calls.push([tool, ...args]);
+    return hostWith({ ip: `${IP.a10} dev eth0 lladdr ${NEIGH_MAC.toUpperCase()} REACHABLE\n` })(tool);
+  };
+  assert.equal(macOf(IP.a10, run), NEIGH_MAC);
+  assert.deepEqual(calls, [["ip", "neigh", "show", IP.a10]]);
+  assert.deepEqual(lookupMac(IP.a10, run), { mac: NEIGH_MAC, ran: true, missing: [] });
+});
+
+test("#2667: `ip` present but the neighbour entry FAILED is 'no entry', not 'could not ask'", () => {
+  const lookup = lookupMac(IP.a10, hostWith({ ip: `${IP.a10} dev eth0  FAILED\n` }));
+  assert.deepEqual(lookup, { mac: null, ran: true, missing: [] });
+  assert.match(macNote(lookup) ?? "", /no entry/);
+});
+
+test("#2667: with `ip` absent, `arp -n` is still read, single-digit octets padded (macOS)", () => {
+  const run = hostWith({ arp: `? (${IP.a10}) at 0:1a:2b:3:4:5 on en0 ifscope [ethernet]\n` });
+  assert.deepEqual(lookupMac(IP.a10, run), { mac: "00:1a:2b:03:04:05", ran: true, missing: ["ip"] });
+});
+
+test("#2667: an `arp` that ran and exited non-zero is 'no entry', not a missing tool", () => {
+  const lookup = lookupMac(IP.a10, hostWith({ arp: () => { throw exitedNonZero(); } }));
+  assert.deepEqual(lookup, { mac: null, ran: true, missing: ["ip"] });
+});
+
+test("#2667: with NEITHER tool runnable, the lookup says so and names both", () => {
+  const lookup = lookupMac(IP.a10, hostWith({}));
+  assert.deepEqual(lookup, { mac: null, ran: false, missing: ["ip", "arp"] });
+  assert.equal(macNote(lookup), "neither `ip` nor `arp` could be run on this host");
+});
+
+test("#2667: a wrong declared MAC no longer reads as a bare OK when the host could not read MACs", () => {
+  const blind = lookupMac(IP.a10, hostWith({}));
+  const [finding] = reconcile(
+    [{ name: "w1", host: IP.a10, mac: "aa:bb:cc:dd:ee:01" }],
+    [{ ip: IP.a10, mac: blind.mac, macLookup: blind, health }]);
+  assert.equal(finding.state, "ok");
+  assert.equal(finding.macCompared, false);
+  assert.match(finding.macNote ?? "", /neither `ip` nor `arp` could be run/);
+});
+
+test("#2667: a compared MAC carries no warning, and neither does an entry with no declared MAC", () => {
+  const read = { mac: NEIGH_MAC, ran: true, missing: [] };
+  const [compared] = reconcile([{ name: "w1", host: IP.a10, mac: NEIGH_MAC }],
+    [{ ip: IP.a10, mac: NEIGH_MAC, macLookup: read, health }]);
+  assert.equal(compared.macCompared, true);
+  assert.equal(compared.macNote, null);
+  const blind = lookupMac(IP.a10, hostWith({}));
+  const [unenrolled] = reconcile([{ name: "w1", host: IP.a10, mac: null }],
+    [{ ip: IP.a10, mac: null, macLookup: blind, health }]);
+  assert.equal(unenrolled.macNote, null);
+});
+
+test("#2667: --enroll names the missing tool, and 'the table has no entry' is a DIFFERENT sentence", () => {
+  const base = { name: "a11y-worker-9", ip: IP.a9, mac: null, health, today: "2026-09-26" };
+  const noTool = enrolmentBlock({ ...base, macLookup: lookupMac(IP.a9, hostWith({})) });
+  const noEntry = enrolmentBlock({ ...base, macLookup: lookupMac(IP.a9, hostWith({ ip: "" })) });
+  assert.match(noTool, /# NO mac -- neither `ip` nor `arp` could be run on this host/);
+  assert.match(noEntry, /# NO mac -- the neighbour table has no entry for this address/);
+  assert.doesNotMatch(noTool, /ARP had none/);
+  assert.doesNotMatch(noEntry, /ARP had none/);
+});
+
+test("#2667: enrol() carries the lookup through to the written comment", () => {
+  const text = readFileSync(fileURLToPath(new URL("../ansible/inventory.example.yml", import.meta.url)), "utf8");
+  const macLookup = lookupMac(IP.b200, hostWith({}));
+  const { text: written } = enrol(text, [{ ip: IP.b200, mac: null, macLookup, health }], "2026-09-26");
+  assert.match(written, /# NO mac -- neither `ip` nor `arp` could be run on this host/);
 });
 
 // #2666: `/health` took 2.85-2.93 s on three healthy workers (a11y-worker-13/-14/-16, read by `orchestrator` on
