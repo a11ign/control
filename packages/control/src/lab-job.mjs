@@ -58,7 +58,10 @@ import { codeVersion, workerSourceDir } from "../../nvda-worker/src/code-version
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
-import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
+import { inventoryReadScript, inventorySources, parseInventoryReads, readControlPlaneFleet,
+  sshToControlPlane } from "./control-plane-fleet.mjs";
+import { inventoryHosts } from "./fleet-discover.mjs";
+import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
@@ -84,19 +87,14 @@ export function extraVars(argv) {
 }
 
 /**
- * Every job name whose command reads `A11Y_WORKERS` from the whole fleet — DERIVED from the catalogue's
- * own text, never hand-written, for the reason `worker-files.mjs` and the signal-type scrape both taught
- * this repo: a hand-written list is a fact stated twice and this repo's record on those is that they drift.
- *
- * `lab-job.test.ts` parses this same file with a real YAML library, which `packages/control` may not
- * depend on (ADR 0012). So this slices the catalogue into per-job blocks by the indentation `lab-job.yml`
- * already commits to (job names at 6 spaces under `lab_jobs:`) rather than parsing YAML properly — a
- * narrower tool than a parser, and mutation-checked rather than trusted on the strength of reading it.
+ * The catalogue sliced into `{ name, block }` per job. Shared by `captureBearingJobs` and `workerDemand`:
+ * both answer a question about what a job's block says, and one slicer means the two cannot disagree about
+ * where a job ends. Refuses loudly when the catalogue's shape changed, because a blind scan reads as clean.
  *
  * @param {string} catalogueText the raw text of `lab-job.yml`
- * @returns {string[]}
+ * @returns {{ name: string, block: string }[]}
  */
-export function captureBearingJobs(catalogueText) {
+function catalogueJobs(catalogueText) {
   const from = catalogueText.indexOf("\n    lab_jobs:");
   const to = catalogueText.indexOf("\n  tasks:", from);
   if (from < 0 || to < 0) {
@@ -114,6 +112,24 @@ export function captureBearingJobs(catalogueText) {
     throw new Error(`only found ${jobs.length} job(s) in lab-job.yml's catalogue; the indentation this scan `
       + "depends on changed, and this derivation is blind rather than the catalogue being small");
   }
+  return jobs;
+}
+
+/**
+ * Every job name whose command reads `A11Y_WORKERS` from the whole fleet — DERIVED from the catalogue's
+ * own text, never hand-written, for the reason `worker-files.mjs` and the signal-type scrape both taught
+ * this repo: a hand-written list is a fact stated twice and this repo's record on those is that they drift.
+ *
+ * `lab-job.test.ts` parses this same file with a real YAML library, which `packages/control` may not
+ * depend on (ADR 0012). So this slices the catalogue into per-job blocks by the indentation `lab-job.yml`
+ * already commits to (job names at 6 spaces under `lab_jobs:`) rather than parsing YAML properly — a
+ * narrower tool than a parser, and mutation-checked rather than trusted on the strength of reading it.
+ *
+ * @param {string} catalogueText the raw text of `lab-job.yml`
+ * @returns {string[]}
+ */
+export function captureBearingJobs(catalogueText) {
+  const jobs = catalogueJobs(catalogueText);
   return jobs
     // DERIVES ITS POOL FROM THE FLEET is the property; a VERBATIM passthrough was the string. This used to
     // require `A11Y_WORKERS={{ lab_fleet_workers }}` exactly, so the moment a job computed its pool from
@@ -187,20 +203,159 @@ function dispatchToAnsible(forwarded) {
 }
 
 /**
+ * The fleet a job may draw on, as `{ name, url }` -- the control plane's own resolved inventory, or an
+ * explicit `workers` list (whose names are the addresses, since a caller that gave addresses gave no names).
+ * A refusal is a value, so `run` can exit on it and a test never touches `process.exit`.
+ *
+ * @param {string} job
+ * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} input
+ * @returns {{ fleet: { name: string, url: string }[], refusal: null } | { fleet: null, refusal: string }}
+ */
+export function fleetFor(job, { workers, readFleet }) {
+  if (workers) return { fleet: workers.map((url) => ({ name: url, url })), refusal: null };
+  const fleet = readFleet();
+  if (fleet.refusal) {
+    return { fleet: null, refusal: `REFUSING ${job}: could not learn which boxes it will dispatch to -- `
+      + `${fleet.refusal}. Could not ask is not may proceed.` };
+  }
+  return { fleet: fleet.workers, refusal: null };
+}
+
+/**
  * #1356: THE POOL a capture-bearing job checks against, pure -- given an explicit `workers` list or the
  * control plane's own resolved fleet. `run` below is this plus the real exit.
  * @param {string} job
  * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} input
  * @returns {{ pool: string[], refusal: null } | { pool: null, refusal: string }}
  */
-export function poolFor(job, { workers, readFleet }) {
-  if (workers) return { pool: workers, refusal: null };
-  const fleet = readFleet();
-  if (fleet.refusal) {
-    return { pool: null, refusal: `REFUSING ${job}: could not learn which boxes it will dispatch to -- `
-      + `${fleet.refusal}. Could not ask is not may proceed.` };
+export function poolFor(job, input) {
+  const resolved = fleetFor(job, input);
+  return resolved.fleet
+    ? { pool: resolved.fleet.map((w) => w.url), refusal: null }
+    : { pool: null, refusal: resolved.refusal };
+}
+
+/**
+ * HOW A JOB NAMES ITS WORKERS, read from its catalogue block (#2655): `null` when it puts no capture on a
+ * worker, else which of the three ways it can. Derived from the block's own text like `captureBearingJobs`,
+ * and wider on purpose: the diagnostics that `captureBearingJobs` excludes from the STALENESS check
+ * (`stability`, `gate-stability`, `capture-check`, `evidence-check`) still put captures on workers, so they
+ * need those workers awake even though a stale one must not stop them.
+ *
+ * @param {string} catalogueText
+ * @param {string} job
+ * @returns {{ fleet: boolean, selectable: boolean, named: boolean } | null}
+ */
+export function workerDemand(catalogueText, job) {
+  const block = catalogueJobs(catalogueText).find((entry) => entry.name === job)?.block ?? "";
+  const demand = {
+    fleet: /\blab_fleet_workers\b/.test(block),
+    selectable: /\blab_selected_workers\b/.test(block),
+    named: /params:\s*\{[^}]*\bworker:/.test(block),
+  };
+  return demand.fleet || demand.selectable || demand.named ? demand : null;
+}
+
+/**
+ * WHICH WORKERS THIS RUN NEEDS -- exactly those, so a job that names three wakes three and not the fleet.
+ * Mirrors the playbook's own selection (`lab-job.yml`: `-e worker=<name>`, and `-e workers=<count|names>`
+ * over the inventory's order) and refuses what the playbook would, BEFORE a packet is sent for a run that
+ * is about to be refused anyway.
+ *
+ * `selected` is true when the caller NAMED the pool (`worker=` or `workers=`): a run whose population is
+ * part of what it states (`#21`) may not proceed with a smaller one, which `run` reads as "all of them or
+ * refuse".
+ *
+ * @param {{ fleet: boolean, selectable: boolean, named: boolean }} demand
+ * @param {Record<string, string>} vars the `-e` extra vars
+ * @param {{ name: string, url: string }[]} fleet
+ * @returns {{ needed: { name: string, url: string }[], selected: boolean, refusal: null } | { refusal: string }}
+ */
+export function neededWorkers(demand, vars, fleet) {
+  const names = fleet.map((w) => w.name);
+  const pick = (/** @type {string[]} */ wanted) => {
+    const missing = wanted.filter((name) => !names.includes(name));
+    if (missing.length || !wanted.length) {
+      return { refusal: `REFUSING: ${wanted.length ? `${missing.join(", ")} not in the inventory (${names.join(", ")})` : "that names no worker"}` };
+    }
+    return { needed: fleet.filter((w) => wanted.includes(w.name)), selected: true, refusal: null };
+  };
+  if (demand.named && vars.worker !== undefined) return pick([vars.worker]);
+  if (demand.selectable && vars.workers !== undefined) {
+    if (/^[0-9]+$/.test(vars.workers)) {
+      const count = Number(vars.workers);
+      return count >= 1 && count <= fleet.length
+        ? { needed: fleet.slice(0, count), selected: true, refusal: null }
+        : { refusal: `REFUSING: -e workers=${vars.workers} against a fleet of ${fleet.length}` };
+    }
+    return pick(vars.workers.split(",").map((name) => name.trim()).filter(Boolean));
   }
-  return { pool: fleet.workers.map((w) => w.url), refusal: null };
+  if (demand.fleet || demand.selectable) return { needed: fleet, selected: false, refusal: null };
+  // Named-only and `worker=` not given: the playbook refuses the missing required var itself.
+  return { needed: [], selected: false, refusal: null };
+}
+
+/**
+ * THE INVENTORY'S MACS, read from the control plane over the same ssh every other read here uses. The
+ * resolved fleet (`readControlPlaneFleet`) carries names and addresses and no MAC, and the MAC is the one
+ * thing a wake needs that the dispatch does not, so this is a second read of the same source and not a
+ * second source. Keyed by address.
+ *
+ * @returns {Map<string, { name: string, mac: string | null }>}
+ */
+function readWakeInventory() {
+  const cfg = readFileSync(fileURLToPath(new URL("../ansible/ansible.cfg", import.meta.url)), "utf8");
+  const reads = parseInventoryReads(sshToControlPlane(inventoryReadScript(inventorySources(cfg)), { capture: true }));
+  /** @type {Map<string, { name: string, mac: string | null }>} */
+  const byHost = new Map();
+  for (const { text } of reads) {
+    for (const h of inventoryHosts(text)) if (!byHost.get(h.host)?.mac) byHost.set(h.host, { name: h.name, mac: h.mac });
+  }
+  return byHost;
+}
+
+/**
+ * Wake exactly `needed` and wait for `ready`. The socket, the health read and the inventory are
+ * injectable through `options`; `wakeFleet`'s own options (`send`, `request`, `sleep`, `now`) pass through.
+ *
+ * @param {{ name: string, url: string }[]} needed
+ * @param {{ macs?: Map<string, { name: string, mac: string | null }>, wake?: typeof wakeFleet,
+ *           wakeOptions?: import("./fleet-wake.mjs").WakeOptions }} [options]
+ */
+export async function wakeNeeded(needed, { macs, wake = wakeFleet, wakeOptions = {} } = {}) {
+  const inventory = macs ?? readWakeInventory();
+  const targets = needed.map(({ name, url }) => {
+    const host = new URL(url).hostname;
+    return { name, host, mac: inventory.get(host)?.mac ?? null };
+  });
+  return wake(targets, { log: (line) => process.stdout.write(`${line}\n`), ...wakeOptions });
+}
+
+/**
+ * WHAT A JOB DOES WHEN ONLY SOME OF THE WORKERS IT ASKED FOR WOKE (#2655 done-when 3), decided here:
+ *
+ *   - it NAMED its pool (`worker=`, `workers=`): ALL of them or REFUSE, naming each that did not come.
+ *     "Which five boxes ran is part of what a scaling measurement states" (#21), and a run on four is not
+ *     the run that was asked for;
+ *   - it takes the WHOLE fleet: PROCEED with those that are usable, and print the rest. The dispatcher
+ *     already evicts a worker that fails, and before this row a job ran with whatever answered, so one
+ *     broken box (no `mac`, Wake-on-LAN off) must not stop the other fourteen. It REFUSES only when
+ *     NOTHING is usable, which is `assertWorkersServe`'s own line ("none answered is not a clean fleet").
+ *
+ * PURE: the refusal is returned, and `run` exits on it.
+ *
+ * @param {{ name: string, host: string, state: string, detail?: string }[]} results
+ * @param {boolean} selected
+ * @returns {string | null}
+ */
+export function wakeRefusal(results, selected) {
+  const failed = results.filter(wakeFailed);
+  if (!failed.length) return null;
+  if (!selected && failed.length < results.length) return null;
+  return [`REFUSING: ${failed.length} of the ${results.length} worker(s) this job needs did not come up:`,
+    ...failed.map((r) => wakeReportLine(r)),
+    selected ? "It named its workers, so a smaller pool is not the run that was asked for."
+      : "None is usable, and a job on no worker is not a clean run."].join("\n");
 }
 
 /**
@@ -221,13 +376,16 @@ export function poolFor(job, { workers, readFleet }) {
  * @param {{ catalogueText?: string, workers?: string[], expected?: string,
  *           checkFleet?: (expected: string, workers: string[], options: object) => Promise<void>,
  *           dispatch?: (forwarded: string[]) => void,
- *           readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null } }} [deps]
+ *           readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null },
+ *           wake?: (needed: { name: string, url: string }[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]> }} [deps]
+ *   `wake` has NO default: only the command-line entry passes the real one (#2655).
  */
 export async function run(argv, {
   catalogueText, workers, expected,
   checkFleet = assertWorkersServe,
   dispatch = dispatchToAnsible,
   readFleet = readControlPlaneFleet,
+  wake,
 } = {}) {
   // Stripped before forwarding: `ansible-playbook` does not recognise this flag and would refuse the
   // whole command line with it still attached, and it is this file's own concern, not the playbook's.
@@ -237,26 +395,61 @@ export async function run(argv, {
   const job = jobNamed(argv);
   if (job && !isDescribeOnly(argv)) {
     const catalogue = catalogueText ?? readFileSync(CATALOGUE, "utf8");
-    if (captureBearingJobs(catalogue).includes(job)) {
+    const demand = workerDemand(catalogue, job);
+    if (demand) {
       // #1356: the CONTROL PLANE's own inventory when `workers` was not given directly -- never a
       // checkout's `inventory.yml`, gitignored and absent here just as it was on the control plane's own
-      // persistent checkout (#1670). `poolFor` refuses in ITS OWN words before `checkFleet` ever runs,
-      // rather than handing it an empty pool that reads as "no workers were given" -- a real but less
-      // specific claim.
-      const resolved = poolFor(job, { workers, readFleet });
-      if (resolved.pool === null) {
-        process.stderr.write(`${resolved.refusal}\n`);
+      // persistent checkout (#1670). Refused in ITS OWN words before anything is asked of a worker,
+      // rather than handing an empty pool to a check that reads it as "no workers were given".
+      const needs = neededFor(job, demand, argv, { workers, readFleet });
+      if (needs.refusal !== null) {
+        process.stderr.write(`${needs.refusal}\n`);
         return process.exit(3);
       }
-      const pool = resolved.pool;
-      const hash = expected ?? codeVersion(workerSourceDir());
-      await checkFleet(hash, pool, { when: "before dispatching to the lab", allow: allowStale,
-        bareMetalUrls: pool });
-      // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
+      // WAKE FIRST (#2655): the staleness check below reads `/health`, and a worker that is powered off
+      // between jobs answers nothing, which `describeCodeDrift` refuses as "none answered".
+      if (wake && needs.needed.length) await wakeOrRefuse(needs, wake);
+      if (captureBearingJobs(catalogue).includes(job)) {
+        const pool = needs.needed.map((w) => w.url);
+        const hash = expected ?? codeVersion(workerSourceDir());
+        await checkFleet(hash, pool, { when: "before dispatching to the lab", allow: allowStale,
+          bareMetalUrls: pool });
+        // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
+      }
     }
   }
 
   dispatch(forwarded);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await run(process.argv.slice(2));
+/**
+ * The fleet, then the part of it this run needs -- each refusal in its own words.
+ *
+ * @param {string} job
+ * @param {{ fleet: boolean, selectable: boolean, named: boolean }} demand
+ * @param {string[]} argv
+ * @param {{ workers?: string[], readFleet: () => { workers: { name: string, url: string }[], refusal: string | null } }} sources
+ * @returns {{ needed: { name: string, url: string }[], selected: boolean, refusal: null } | { refusal: string }}
+ */
+function neededFor(job, demand, argv, sources) {
+  const resolved = fleetFor(job, sources);
+  return resolved.fleet ? neededWorkers(demand, extraVars(argv), resolved.fleet) : { refusal: resolved.refusal };
+}
+
+/**
+ * @param {{ needed: { name: string, url: string }[], selected: boolean }} needs
+ * @param {(needed: { name: string, url: string }[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>} wake
+ */
+async function wakeOrRefuse({ needed, selected }, wake) {
+  const results = await wake(needed);
+  process.stdout.write(`${results.map((r) => wakeReportLine(r)).join("\n")}\n`);
+  const refusal = wakeRefusal(results, selected);
+  if (refusal) {
+    process.stderr.write(`${refusal}\n`);
+    process.exit(3);
+  }
+}
+
+// `wake` is passed HERE and defaults to nothing in `run`, so a test that drives `run` with fakes cannot
+// reach a real socket by leaving a dependency out. `lab-job.test.ts`-style tests read this line (#2655).
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await run(process.argv.slice(2), { wake: wakeNeeded });
