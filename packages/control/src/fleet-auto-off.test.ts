@@ -1,0 +1,396 @@
+// no-token: readFleetGatedIssues -- this file never calls it: every `readHoldState`/`tick` call below
+// passes an injected `readIssues`/`holdState`, and `readFleetGatedIssues` itself is reached only through
+// `fleet-auto-off.mjs`'s re-export chain, never invoked here
+/**
+ * #2656: a worker idle five minutes powers itself off, never mid-capture and never while held.
+ *
+ * This is the DECISION and the STATE, proven offline -- every network read, every clock read and the
+ * `sleep.yml` dispatch itself are injected, exactly as `fleet-wake.test.ts` and `fleet-watch.mjs`'s own
+ * suite already prove their neighbours without a real fleet (the resource ban bars a live run: #2656
+ * ships this timer DISABLED for that reason too).
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
+  hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
+  readState, writeState, readHoldState, dispatchShutdown, reportLine, tick,
+} from "./fleet-auto-off.mjs";
+
+// ---------------------------------------------------------------------------------------------------------
+// hasWakeableMac -- "has a MAC" means magicPacket() accepts it, not merely a non-empty field.
+// ---------------------------------------------------------------------------------------------------------
+
+test("hasWakeableMac: 12 hex digits, any separator, is wakeable", () => {
+  assert.equal(hasWakeableMac("aa:bb:cc:dd:ee:ff"), true);
+  assert.equal(hasWakeableMac("AA-BB-CC-DD-EE-FF"), true);
+  assert.equal(hasWakeableMac("aabbccddeeff"), true);
+});
+
+test("hasWakeableMac: absent, empty or short is not wakeable", () => {
+  assert.equal(hasWakeableMac(null), false);
+  assert.equal(hasWakeableMac(undefined), false);
+  assert.equal(hasWakeableMac(""), false);
+  assert.equal(hasWakeableMac("aa:bb:cc"), false, "too short to be a MAC magicPacket() accepts");
+  assert.equal(hasWakeableMac("not-a-mac-at-all"), false);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// probeIdle -- the three outcomes, and only three (done-when 7.1). #2656's own reading, agreeing with
+// fleet-wake.mjs's HEALTH_TIMEOUT_MS on the READING (5 s rebuild, 12 s loaded ceiling) not the number by
+// copying it -- both derive 12_000 independently.
+// ---------------------------------------------------------------------------------------------------------
+
+test("probeIdle: busy:true is `busy`", async () => {
+  const request = async () => ({ status: 200, ok: true, text: "", json: { busy: true } });
+  assert.deepEqual(await probeIdle("http://x", { request }), { outcome: "busy" });
+});
+
+test("probeIdle: busy:false is `idle` -- the positive control for the whole poll", async () => {
+  const request = async () => ({ status: 200, ok: true, text: "", json: { busy: false } });
+  assert.deepEqual(await probeIdle("http://x", { request }), { outcome: "idle" });
+});
+
+test("probeIdle: a silent probe (timeout/refused/unreachable) is `no-answer`, never `busy` or `idle`", async () => {
+  const request = async () => { const e = new Error("Request to http://x/health timed out after 12000 ms");
+    (e as NodeJS.ErrnoException).code = "ETIMEDOUT"; throw e; };
+  const probe = await probeIdle("http://x", { request });
+  assert.equal(probe.outcome, "no-answer");
+  assert.match((probe as { detail: string }).detail, /ETIMEDOUT/);
+});
+
+test("probeIdle: an answer that cannot be read -- non-OK status -- is `no-answer`, not a crash", async () => {
+  const request = async () => ({ status: 500, ok: false, text: "", json: null });
+  const probe = await probeIdle("http://x", { request });
+  assert.equal(probe.outcome, "no-answer");
+  assert.match((probe as { detail: string }).detail, /HTTP 500/);
+});
+
+test("probeIdle: an answer with no boolean `busy` field is `no-answer`, not read as idle", async () => {
+  const request = async () => ({ status: 200, ok: true, text: "", json: {} });
+  const probe = await probeIdle("http://x", { request });
+  assert.equal(probe.outcome, "no-answer");
+});
+
+test("probeIdle: the timeout it asks for is PROBE_TIMEOUT_MS, not fleet:discover's old 2 s -- not vacuous", async () => {
+  let seen: number | undefined;
+  const request = async (_url: string, options: { timeoutMs?: number }) => {
+    seen = options.timeoutMs;
+    return { status: 200, ok: true, text: "", json: { busy: false } };
+  };
+  const probe = await probeIdle("http://x", { request: request as never });
+  assert.equal(seen, PROBE_TIMEOUT_MS);
+  assert.ok(PROBE_TIMEOUT_MS > 2_000, "must exceed fleet:discover's PROBE_TIMEOUT_MS, which read healthy boxes as asleep");
+  assert.deepEqual(probe, { outcome: "idle" });
+});
+
+test("probeIdle: a slow-but-real answer, under PROBE_TIMEOUT_MS, still reads idle -- the timeout is not vacuous (done-when 7.5)", async () => {
+  // "Slow" is simulated by an actual delay shorter than PROBE_TIMEOUT_MS and longer than the old 2 s --
+  // proving a real answer landing inside the budget is read, not dropped by some shorter timeout still
+  // lurking in the call chain.
+  const request = async () => new Promise<{ status: number; ok: boolean; text: string; json: unknown }>((resolve) => {
+    setTimeout(() => resolve({ status: 200, ok: true, text: "", json: { busy: false } }), 5);
+  });
+  const probe = await probeIdle("http://x", { request });
+  assert.deepEqual(probe, { outcome: "idle" });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// advance -- the idle-since ledger. A busy or no-answer sample RESETS the streak (done-when 7.3).
+// ---------------------------------------------------------------------------------------------------------
+
+test("advance: a first idle sample stamps `now`", () => {
+  const next = advance([{ name: "a11y-worker-2", outcome: "idle" }], {}, 1000);
+  assert.deepEqual(next, { "a11y-worker-2": 1000 });
+});
+
+test("advance: a worker already idle-since keeps its ORIGINAL timestamp, not `now`", () => {
+  const next = advance([{ name: "a11y-worker-2", outcome: "idle" }], { "a11y-worker-2": 500 }, 1000);
+  assert.deepEqual(next, { "a11y-worker-2": 500 });
+});
+
+test("advance: a busy sample drops the worker from the ledger -- the streak ends", () => {
+  const next = advance([{ name: "a11y-worker-2", outcome: "busy" }], { "a11y-worker-2": 500 }, 1000);
+  assert.deepEqual(next, {});
+});
+
+test("advance: a no-answer sample ALSO drops the worker -- RESET, not held (done-when 7.3, argued in the "
+  + "function's own comment: a mid-capture box is plausibly the slow one, so an unconfirmed gap must never "
+  + "count as idle time)", () => {
+  const next = advance([{ name: "a11y-worker-2", outcome: "no-answer" }], { "a11y-worker-2": 500 }, 1000);
+  assert.deepEqual(next, {}, "the prior idle-since must not survive a no-answer, or a capture hidden in "
+    + "the gap would count toward the five minutes once the worker answers idle again");
+});
+
+test("advance: a worker recovering to idle after a no-answer restarts the clock at `now`, not the old stamp", () => {
+  const afterBlip = advance([{ name: "a11y-worker-2", outcome: "no-answer" }], { "a11y-worker-2": 500 }, 900);
+  const afterRecovery = advance([{ name: "a11y-worker-2", outcome: "idle" }], afterBlip, 1000);
+  assert.deepEqual(afterRecovery, { "a11y-worker-2": 1000 });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// advanceShutdownRequested -- kept while silent, cleared the moment the worker answers again.
+// ---------------------------------------------------------------------------------------------------------
+
+test("advanceShutdownRequested: kept across a no-answer -- the expected shape of a box going down", () => {
+  const next = advanceShutdownRequested([{ name: "a11y-worker-2", outcome: "no-answer" }], { "a11y-worker-2": 500 });
+  assert.deepEqual(next, { "a11y-worker-2": 500 });
+});
+
+test("advanceShutdownRequested: cleared when the worker answers idle again -- the shutdown never landed", () => {
+  const next = advanceShutdownRequested([{ name: "a11y-worker-2", outcome: "idle" }], { "a11y-worker-2": 500 });
+  assert.deepEqual(next, {});
+});
+
+test("advanceShutdownRequested: cleared when the worker answers busy -- sleep.yml's own refusal won the race", () => {
+  const next = advanceShutdownRequested([{ name: "a11y-worker-2", outcome: "busy" }], { "a11y-worker-2": 500 });
+  assert.deepEqual(next, {});
+});
+
+test("advanceShutdownRequested: a worker with no prior request stays absent", () => {
+  const next = advanceShutdownRequested([{ name: "a11y-worker-2", outcome: "no-answer" }], {});
+  assert.deepEqual(next, {});
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// autoOffDecision -- THE PURE FUNCTION (done-when 1). Every keep reason, each with a test that fails
+// without it, and the no-mac positive control.
+// ---------------------------------------------------------------------------------------------------------
+
+const BASE = {
+  name: "a11y-worker-2", hasMac: true, probe: "idle" as const,
+  idleSince: 0, shutdownRequestedAt: null, held: false, holdUnreadable: false,
+  batchQueued: false, leasePending: false,
+};
+const NOW = IDLE_THRESHOLD_MS; // idleSince 0 -> exactly at the threshold
+
+test("autoOffDecision: POSITIVE CONTROL -- idle past the threshold, MAC present, nothing else pending, reads off", () => {
+  assert.deepEqual(autoOffDecision(BASE, NOW), { action: "off", reason: "idle-five-minutes" });
+});
+
+test("autoOffDecision: no-mac keeps, even when otherwise idle past the threshold", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, hasMac: false }, NOW), { action: "keep", reason: "no-mac" });
+});
+
+test("autoOffDecision: already-off keeps once a shutdown was requested, regardless of the current probe", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, shutdownRequestedAt: 0 }, NOW), { action: "keep", reason: "already-off" });
+});
+
+test("autoOffDecision: no-answer keeps -- unknown never powers anything off", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, probe: "no-answer", idleSince: null }, NOW),
+    { action: "keep", reason: "no-answer" });
+});
+
+test("autoOffDecision: busy keeps", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, probe: "busy", idleSince: null }, NOW), { action: "keep", reason: "busy" });
+});
+
+test("autoOffDecision: hold-unreadable keeps -- could not ask is not may proceed", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, holdUnreadable: true }, NOW), { action: "keep", reason: "hold-unreadable" });
+});
+
+test("autoOffDecision: held keeps -- a Fleet-hold-until row owns the fleet", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, held: true }, NOW), { action: "keep", reason: "held" });
+});
+
+test("autoOffDecision: batch-queued keeps", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, batchQueued: true }, NOW), { action: "keep", reason: "batch-queued" });
+});
+
+test("autoOffDecision: lease-pending keeps", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, leasePending: true }, NOW), { action: "keep", reason: "lease-pending" });
+});
+
+test("autoOffDecision: idle-since-unknown keeps -- never treat 'never observed idle' as idle", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, idleSince: null }, NOW), { action: "keep", reason: "idle-since-unknown" });
+});
+
+test("autoOffDecision: not-yet-five-minutes keeps, one millisecond short of the threshold", () => {
+  assert.deepEqual(autoOffDecision(BASE, NOW - 1), { action: "keep", reason: "not-yet-five-minutes" });
+});
+
+test("autoOffDecision: exactly at the threshold is off, one past it is off -- the boundary is inclusive and stays off", () => {
+  assert.equal(autoOffDecision(BASE, NOW).action, "off");
+  assert.equal(autoOffDecision(BASE, NOW + 1).action, "off");
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// readState / writeState -- absent or corrupt reads as empty, never a crash.
+// ---------------------------------------------------------------------------------------------------------
+
+test("readState: a missing file reads as both ledgers empty", () => {
+  const read = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
+  assert.deepEqual(readState("nowhere.json", read), { idleSince: {}, shutdownRequestedAt: {} });
+});
+
+test("readState: corrupt JSON reads as empty, not a thrown error", () => {
+  assert.deepEqual(readState("x.json", () => "{not json"), { idleSince: {}, shutdownRequestedAt: {} });
+});
+
+test("readState/writeState: round-trips both ledgers", () => {
+  let written = "";
+  const state = { idleSince: { "a11y-worker-2": 5 }, shutdownRequestedAt: { "a11y-worker-3": 9 } };
+  writeState("x.json", state, (_p, data) => { written = data; });
+  assert.deepEqual(readState("x.json", () => written), state);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// readHoldState -- REUSES fleet-playbook.mjs's own hold reader, and fails CLOSED.
+// ---------------------------------------------------------------------------------------------------------
+
+test("readHoldState: no active hold reads held:false", () => {
+  const state = readHoldState({ readIssues: () => [], nowMs: 1000 });
+  assert.deepEqual(state, { held: false, holdUnreadable: false });
+});
+
+test("readHoldState: an active Fleet-hold-until row reads held:true", () => {
+  const nowMs = Date.parse("2026-09-27T00:00:00Z");
+  const issues = [{ number: 42, body: "Fleet-hold-until: 2026-09-27T01:00:00Z" }];
+  const state = readHoldState({ readIssues: () => issues, nowMs });
+  assert.equal(state.held, true);
+  assert.equal(state.holdUnreadable, false);
+});
+
+test("readHoldState: a gh failure reads holdUnreadable:true and carries a refusal, never throws past the caller", () => {
+  const readIssues = () => { throw Object.assign(new Error("gh: command not found"), { tokenSet: true }); };
+  const state = readHoldState({ readIssues, nowMs: 1000 });
+  assert.equal(state.held, false);
+  assert.equal(state.holdUnreadable, true);
+  assert.ok(state.refusal && state.refusal.length > 0);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// dispatchShutdown -- calls sleep.yml, by name, with ANSIBLE_CONFIG set. Reused, not reimplemented.
+// ---------------------------------------------------------------------------------------------------------
+
+test("dispatchShutdown: runs ansible-playbook against sleep.yml, limited to the one worker", () => {
+  let seenCommand = "";
+  let seenArgs: string[] = [];
+  let seenEnv: NodeJS.ProcessEnv | undefined;
+  const run = ((command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+    seenCommand = command; seenArgs = [...args]; seenEnv = options.env;
+    return { status: 0, stdout: "ok", stderr: "" };
+  }) as unknown as typeof import("node:child_process").spawnSync;
+  const result = dispatchShutdown("a11y-worker-2", { run });
+  assert.equal(seenCommand, "ansible-playbook");
+  assert.match(seenArgs[0], /sleep\.yml$/, "must name sleep.yml -- reused, never reimplemented (done-when 2)");
+  assert.deepEqual(seenArgs.slice(1), ["-l", "a11y-worker-2"], "must limit to exactly the one worker, never the fleet");
+  assert.match(String(seenEnv?.ANSIBLE_CONFIG), /ansible\.cfg$/);
+  assert.equal(result.status, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// reportLine -- names a no-answer worker's own wait (done-when 7.4).
+// ---------------------------------------------------------------------------------------------------------
+
+test("reportLine: a no-answer worker's line names the seconds waited", () => {
+  const line = reportLine({ name: "a11y-worker-2", host: "192.0.2.12" }, { action: "keep", reason: "no-answer" }, 12_000);
+  assert.match(line, /waited 12\.0s/);
+});
+
+test("reportLine: any other reason carries no wait clause", () => {
+  const line = reportLine({ name: "a11y-worker-2", host: "192.0.2.12" }, { action: "keep", reason: "busy" }, 12_000);
+  assert.ok(!line.includes("waited"));
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// tick -- the whole thing, offline. #2656 done-when 6: report-only by default, dispatches ONLY under
+// {apply:true}, and never touches the network, the clock or sleep.yml except through the injected deps.
+// ---------------------------------------------------------------------------------------------------------
+
+const WORKERS = [{ name: "a11y-worker-2", host: "192.0.2.12", mac: "aa:bb:cc:dd:ee:ff" }];
+
+/** A worker already idle-since time 0 -- so `now = IDLE_THRESHOLD_MS` lands exactly at the boundary. */
+const alreadyIdleSince0 = (() =>
+  JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} })) as never;
+
+test("tick: report only (apply omitted) never dispatches, even for a worker decided off", async () => {
+  let dispatched = 0;
+  const result = await tick({
+    workers: WORKERS,
+    probe: async () => ({ outcome: "idle" }),
+    now: () => IDLE_THRESHOLD_MS,
+    statePath: "x.json",
+    read: alreadyIdleSince0,
+    write: () => {},
+    holdState: () => ({ held: false, holdUnreadable: false }),
+    dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
+  });
+  assert.equal(dispatched, 0, "report-only must power nothing off");
+  assert.deepEqual(result.decisions[0].decision, { action: "off", reason: "idle-five-minutes" },
+    "and it must still SAY what it would have done");
+});
+
+test("tick: --apply dispatches exactly the workers decided off, and stamps shutdownRequestedAt", async () => {
+  const dispatchedNames: string[] = [];
+  let savedState: unknown = null;
+  await tick({
+    workers: WORKERS,
+    probe: async () => ({ outcome: "idle" }),
+    now: () => IDLE_THRESHOLD_MS,
+    statePath: "x.json",
+    read: alreadyIdleSince0,
+    write: (_p, data) => { savedState = JSON.parse(String(data)); },
+    holdState: () => ({ held: false, holdUnreadable: false }),
+    apply: true,
+    dispatch: (name: string) => { dispatchedNames.push(name); return { status: 0, log: "" }; },
+  });
+  assert.deepEqual(dispatchedNames, ["a11y-worker-2"]);
+  assert.deepEqual((savedState as { shutdownRequestedAt: Record<string, number> }).shutdownRequestedAt,
+    { "a11y-worker-2": IDLE_THRESHOLD_MS });
+});
+
+test("tick: a worker still idle but under the threshold is kept, and never dispatched even under --apply", async () => {
+  let dispatched = 0;
+  const result = await tick({
+    workers: WORKERS,
+    probe: async () => ({ outcome: "idle" }),
+    now: () => IDLE_THRESHOLD_MS - 1,
+    statePath: "x.json",
+    read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+    write: () => {},
+    holdState: () => ({ held: false, holdUnreadable: false }),
+    apply: true,
+    dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
+  });
+  assert.equal(dispatched, 0);
+  assert.equal(result.decisions[0].decision.reason, "not-yet-five-minutes");
+});
+
+test("tick: an unreadable hold keeps EVERY worker, even one otherwise idle past the threshold", async () => {
+  const result = await tick({
+    workers: WORKERS,
+    probe: async () => ({ outcome: "idle" }),
+    now: () => IDLE_THRESHOLD_MS,
+    statePath: "x.json",
+    read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+    write: () => {},
+    holdState: () => ({ held: false, holdUnreadable: true, refusal: "REFUSING auto-off: could not ask" }),
+  });
+  assert.equal(result.decisions[0].decision.reason, "hold-unreadable");
+  assert.ok(result.holdRefusal);
+});
+
+test("tick: a worker with no MAC is never decided off, even idle past the threshold, and the report names it", async () => {
+  const result = await tick({
+    workers: [{ name: "a11y-worker-12", host: "192.0.2.20", mac: null }],
+    probe: async () => ({ outcome: "idle" }),
+    now: () => IDLE_THRESHOLD_MS,
+    statePath: "x.json",
+    read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+    write: () => {},
+    holdState: () => ({ held: false, holdUnreadable: false }),
+  });
+  assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "no-mac" });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// POLL_INTERVAL_MS -- pinned strictly under the shortest capture (12 s), or a capture entirely inside one
+// gap would never be sampled busy at all (done-when 3).
+// ---------------------------------------------------------------------------------------------------------
+
+test("POLL_INTERVAL_MS is strictly shorter than the shortest measured capture (12 s)", () => {
+  assert.ok(POLL_INTERVAL_MS < 12_000,
+    `POLL_INTERVAL_MS (${POLL_INTERVAL_MS}) must be under 12 s or a capture could start and finish `
+    + "entirely inside one gap and never be sampled busy");
+});
