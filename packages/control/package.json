@@ -7,7 +7,8 @@
   "type": "module",
   "exports": {
     "./fleet-playbook": "./src/fleet-playbook.mjs",
-    "./lab-pipeline": "./src/lab-pipeline.mjs"
+    "./lab-pipeline": "./src/lab-pipeline.mjs",
+    "./fleet-wake": "./src/fleet-wake.mjs"
   },
   "//": "NO `dependencies` KEY, AND THAT IS THE POINT. ADR 0012 keeps the credential that can reconfigure twelve auto-logging-in Windows boxes away from npm's transitive surface, and this package is the code that runs on the machine holding it. `control-has-no-dependencies.test.ts` asserts the emptiness rather than trusting this comment: the ADR made the same claim in prose and was violated on BOTH machines it described, for as long as nobody looked.",
   "dependencies": {},

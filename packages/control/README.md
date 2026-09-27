@@ -23,7 +23,9 @@ ansible/               the playbooks themselves, and packages/control/ansible/RE
                         why SSH and not WinRM, why the fleet is defined once in inventory.yml
 ```
 
-Exports two entry points other packages import: `./fleet-playbook` and `./lab-pipeline`.
+Exports three entry points other packages import: `./fleet-playbook`, `./lab-pipeline` and `./fleet-wake`
+(#2682: `packages/lab`'s by-hand entries wake exactly the workers they name, the same credential-free call
+`fleet-wake.mjs`'s own CLI makes).
 
 ## Reaching the control plane itself
 
