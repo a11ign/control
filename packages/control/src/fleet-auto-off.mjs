@@ -1,6 +1,7 @@
 // @ts-check
 /**
- * A worker idle five minutes powers itself off -- never mid-capture, never while held. #2656.
+ * A worker idle five minutes powers itself off -- never mid-capture. #2656. (It does not check
+ * `Fleet-hold-until:` -- #2737, see below.)
  *
  *     npm run fleet:auto-off                # report only: prints off/keep + reason, powers nothing off
  *     npm run fleet:auto-off -- --apply      # for every worker decided `off`, dispatch sleep.yml at it
@@ -30,13 +31,17 @@
  * probe RESETS the streak here (see `advance`'s own comment), where `fleet-watch.mjs` never has to make
  * that call because its own probe (`fleetStatus`) never returns "unknown".
  *
- * ## What decides "held", honestly
+ * ## `Fleet-hold-until:` does NOT gate this file (ceo's ruling on #2726/#2728, #2737)
  *
- * `Fleet-hold-until:` holds the WHOLE FLEET, not one worker -- #1839's own field, read here through the
- * exact functions `fleet-playbook.mjs` already exports for it (`readFleetGatedIssues`, `activeFleetHolds`,
- * `tokenSetOf`, `GH_TOKEN_FILE`), never a second reader. An unreadable read is `keep` for EVERY worker
- * (done-when 4: "an unreadable hold powers NOTHING off"), which is why `readHoldState` fails closed rather
- * than throwing past the callers that need an answer either way.
+ * This file used to read `Fleet-hold-until:` before deciding, on the theory that a power cycle mid-hold
+ * could strand a multi-round same-build capture sequence the way #1767/#1768 lost their baselines. Re-read
+ * against what #1839's hold actually protects: only `fleet:deploy`/`fleet:provision` can change a worker's
+ * `codeVersion`/`provisionRevision` stamp, and both already refuse while a hold is active (`fleet-playbook.mjs`'s
+ * own `enforceSequenceHold`). A power-off/wake cycle changes neither, so the hold read here protected
+ * nothing. It also would have needed a durable GitHub credential on the control plane (#2726) purely to
+ * answer a question whose answer never mattered -- removed instead of provisioned. The "never mid-capture"
+ * guard below is unrelated and unaffected: it is `probeIdle`'s own per-worker `busy` read, re-confirmed by
+ * `sleep.yml` itself immediately before any shutdown.
  *
  * ## `batchQueued` and `leasePending` are an honest gap
  *
@@ -53,8 +58,6 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { inventoryHosts } from "./fleet-discover.mjs";
 import { inventoryPathFor } from "./control-plane-fleet.mjs";
 import { magicPacket } from "./fleet-wake.mjs";
-import { readFleetGatedIssues, activeFleetHolds, tokenSetOf, fleetHoldReadRefusal }
-  from "./fleet-playbook.mjs";
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
 
@@ -226,7 +229,7 @@ export function advanceShutdownRequested(probes, previous) {
  * @typedef {{
  *   name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer",
  *   idleSince: number | null, shutdownRequestedAt: number | null,
- *   held: boolean, holdUnreadable: boolean, batchQueued: boolean, leasePending: boolean,
+ *   batchQueued: boolean, leasePending: boolean,
  * }} DecisionInput
  * @typedef {{ action: "off" | "keep", reason: string }} Decision
  */
@@ -246,33 +249,11 @@ export function autoOffDecision(input, now, idleThresholdMs = IDLE_THRESHOLD_MS)
   if (input.shutdownRequestedAt !== null) return { action: "keep", reason: "already-off" };
   if (input.probe === "no-answer") return { action: "keep", reason: "no-answer" };
   if (input.probe === "busy") return { action: "keep", reason: "busy" };
-  if (input.holdUnreadable) return { action: "keep", reason: "hold-unreadable" };
-  if (input.held) return { action: "keep", reason: "held" };
   if (input.batchQueued) return { action: "keep", reason: "batch-queued" };
   if (input.leasePending) return { action: "keep", reason: "lease-pending" };
   if (input.idleSince === null) return { action: "keep", reason: "idle-since-unknown" };
   if (now - input.idleSince < idleThresholdMs) return { action: "keep", reason: "not-yet-five-minutes" };
   return { action: "off", reason: "idle-five-minutes" };
-}
-
-/**
- * Is any row currently holding the whole fleet, read the way `fleet-playbook.mjs`'s own sequence-hold
- * gate already does (`readFleetGatedIssues`, `activeFleetHolds`) -- never a second reader, so the two
- * cannot disagree about what a hold is. FAILS CLOSED: a `gh` failure reads as `holdUnreadable: true`,
- * which `autoOffDecision` turns into `keep` for every worker (done-when 4).
- *
- * @param {{ readIssues?: typeof readFleetGatedIssues, nowMs?: number }} [deps]
- * @returns {{ held: boolean, holdUnreadable: boolean, refusal?: string }}
- */
-export function readHoldState({ readIssues = readFleetGatedIssues, nowMs = Date.now() } = {}) {
-  let issues;
-  try {
-    issues = readIssues();
-  } catch (error) {
-    return { held: false, holdUnreadable: true,
-      refusal: fleetHoldReadRefusal({ chosen: "auto-off", error: /** @type {any} */ (error), tokenSet: tokenSetOf(error) }) };
-  }
-  return { held: activeFleetHolds(issues, nowMs).length > 0, holdUnreadable: false };
 }
 
 /**
@@ -319,7 +300,6 @@ export function reportLine(worker, decision, probeTimeoutMs = PROBE_TIMEOUT_MS) 
  *   workers?: { name: string, host: string, mac: string | null }[],
  *   probe?: typeof probeIdle, now?: () => number, statePath?: string,
  *   read?: typeof readFileSync, write?: typeof writeFileSync,
- *   holdState?: () => { held: boolean, holdUnreadable: boolean, refusal?: string },
  *   batchQueued?: () => boolean, leasePending?: () => boolean,
  *   apply?: boolean, dispatch?: typeof dispatchShutdown,
  * }} [deps]
@@ -337,7 +317,6 @@ export async function tick(deps = {}) {
   const dispatch = deps.dispatch ?? dispatchShutdown;
 
   const previous = readState(statePath, deps.read);
-  const hold = (deps.holdState ?? readHoldState)();
 
   const probes = await Promise.all(workers.map(async (w) => ({
     name: w.name, host: w.host, ...(await probe(`http://${w.host}:${PORT}`)),
@@ -355,8 +334,6 @@ export async function tick(deps = {}) {
       probe: /** @type {"idle" | "busy" | "no-answer"} */ (p?.outcome ?? "no-answer"),
       idleSince: idleSince[w.name] ?? null,
       shutdownRequestedAt: shutdownRequestedAt[w.name] ?? null,
-      held: hold.held,
-      holdUnreadable: hold.holdUnreadable,
       batchQueued: batchQueued(),
       leasePending: leasePending(),
     };
@@ -372,7 +349,7 @@ export async function tick(deps = {}) {
   }
 
   writeState(statePath, { idleSince, shutdownRequestedAt }, deps.write);
-  return { decisions, holdRefusal: hold.refusal };
+  return { decisions };
 }
 
 async function main() {
@@ -394,8 +371,7 @@ async function main() {
     return;
   }
 
-  const { decisions, holdRefusal } = await tick({ workers: declared, apply });
-  if (holdRefusal) process.stdout.write(`${holdRefusal}\n\n`);
+  const { decisions } = await tick({ workers: declared, apply });
   for (const { worker, decision } of decisions) process.stdout.write(`${reportLine(worker, decision)}\n`);
   process.stdout.write(apply
     ? "\n  --apply: every `off` above was just dispatched to sleep.yml.\n"

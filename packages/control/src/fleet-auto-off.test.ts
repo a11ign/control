@@ -1,8 +1,7 @@
-// no-token: readFleetGatedIssues -- this file never calls it: every `readHoldState`/`tick` call below
-// passes an injected `readIssues`/`holdState`, and `readFleetGatedIssues` itself is reached only through
-// `fleet-auto-off.mjs`'s re-export chain, never invoked here
 /**
- * #2656: a worker idle five minutes powers itself off, never mid-capture and never while held.
+ * #2656: a worker idle five minutes powers itself off, never mid-capture. (It no longer checks
+ * `Fleet-hold-until:` -- #2737, ceo's ruling on #2726/#2728: a power cycle cannot drift the stamp that
+ * hold protects, so the read bought nothing and needed a credential this box was never meant to hold.)
  *
  * This is the DECISION and the STATE, proven offline -- every network read, every clock read and the
  * `sleep.yml` dispatch itself are injected, exactly as `fleet-wake.test.ts` and `fleet-watch.mjs`'s own
@@ -14,7 +13,7 @@ import assert from "node:assert/strict";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
-  readState, writeState, readHoldState, dispatchShutdown, reportLine, tick,
+  readState, writeState, dispatchShutdown, reportLine, tick,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -159,7 +158,7 @@ test("advanceShutdownRequested: a worker with no prior request stays absent", ()
 
 const BASE = {
   name: "a11y-worker-2", hasMac: true, probe: "idle" as const,
-  idleSince: 0, shutdownRequestedAt: null, held: false, holdUnreadable: false,
+  idleSince: 0, shutdownRequestedAt: null,
   batchQueued: false, leasePending: false,
 };
 const NOW = IDLE_THRESHOLD_MS; // idleSince 0 -> exactly at the threshold
@@ -183,14 +182,6 @@ test("autoOffDecision: no-answer keeps -- unknown never powers anything off", ()
 
 test("autoOffDecision: busy keeps", () => {
   assert.deepEqual(autoOffDecision({ ...BASE, probe: "busy", idleSince: null }, NOW), { action: "keep", reason: "busy" });
-});
-
-test("autoOffDecision: hold-unreadable keeps -- could not ask is not may proceed", () => {
-  assert.deepEqual(autoOffDecision({ ...BASE, holdUnreadable: true }, NOW), { action: "keep", reason: "hold-unreadable" });
-});
-
-test("autoOffDecision: held keeps -- a Fleet-hold-until row owns the fleet", () => {
-  assert.deepEqual(autoOffDecision({ ...BASE, held: true }, NOW), { action: "keep", reason: "held" });
 });
 
 test("autoOffDecision: batch-queued keeps", () => {
@@ -232,31 +223,6 @@ test("readState/writeState: round-trips both ledgers", () => {
   const state = { idleSince: { "a11y-worker-2": 5 }, shutdownRequestedAt: { "a11y-worker-3": 9 } };
   writeState("x.json", state, (_p, data) => { written = data; });
   assert.deepEqual(readState("x.json", () => written), state);
-});
-
-// ---------------------------------------------------------------------------------------------------------
-// readHoldState -- REUSES fleet-playbook.mjs's own hold reader, and fails CLOSED.
-// ---------------------------------------------------------------------------------------------------------
-
-test("readHoldState: no active hold reads held:false", () => {
-  const state = readHoldState({ readIssues: () => [], nowMs: 1000 });
-  assert.deepEqual(state, { held: false, holdUnreadable: false });
-});
-
-test("readHoldState: an active Fleet-hold-until row reads held:true", () => {
-  const nowMs = Date.parse("2026-09-27T00:00:00Z");
-  const issues = [{ number: 42, body: "Fleet-hold-until: 2026-09-27T01:00:00Z" }];
-  const state = readHoldState({ readIssues: () => issues, nowMs });
-  assert.equal(state.held, true);
-  assert.equal(state.holdUnreadable, false);
-});
-
-test("readHoldState: a gh failure reads holdUnreadable:true and carries a refusal, never throws past the caller", () => {
-  const readIssues = () => { throw Object.assign(new Error("gh: command not found"), { tokenSet: true }); };
-  const state = readHoldState({ readIssues, nowMs: 1000 });
-  assert.equal(state.held, false);
-  assert.equal(state.holdUnreadable, true);
-  assert.ok(state.refusal && state.refusal.length > 0);
 });
 
 // ---------------------------------------------------------------------------------------------------------
@@ -313,7 +279,6 @@ test("tick: report only (apply omitted) never dispatches, even for a worker deci
     statePath: "x.json",
     read: alreadyIdleSince0,
     write: () => {},
-    holdState: () => ({ held: false, holdUnreadable: false }),
     dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
   });
   assert.equal(dispatched, 0, "report-only must power nothing off");
@@ -331,7 +296,6 @@ test("tick: --apply dispatches exactly the workers decided off, and stamps shutd
     statePath: "x.json",
     read: alreadyIdleSince0,
     write: (_p, data) => { savedState = JSON.parse(String(data)); },
-    holdState: () => ({ held: false, holdUnreadable: false }),
     apply: true,
     dispatch: (name: string) => { dispatchedNames.push(name); return { status: 0, log: "" }; },
   });
@@ -349,26 +313,11 @@ test("tick: a worker still idle but under the threshold is kept, and never dispa
     statePath: "x.json",
     read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
     write: () => {},
-    holdState: () => ({ held: false, holdUnreadable: false }),
     apply: true,
     dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
   });
   assert.equal(dispatched, 0);
   assert.equal(result.decisions[0].decision.reason, "not-yet-five-minutes");
-});
-
-test("tick: an unreadable hold keeps EVERY worker, even one otherwise idle past the threshold", async () => {
-  const result = await tick({
-    workers: WORKERS,
-    probe: async () => ({ outcome: "idle" }),
-    now: () => IDLE_THRESHOLD_MS,
-    statePath: "x.json",
-    read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
-    write: () => {},
-    holdState: () => ({ held: false, holdUnreadable: true, refusal: "REFUSING auto-off: could not ask" }),
-  });
-  assert.equal(result.decisions[0].decision.reason, "hold-unreadable");
-  assert.ok(result.holdRefusal);
 });
 
 test("tick: a worker with no MAC is never decided off, even idle past the threshold, and the report names it", async () => {
@@ -379,7 +328,6 @@ test("tick: a worker with no MAC is never decided off, even idle past the thresh
     statePath: "x.json",
     read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
     write: () => {},
-    holdState: () => ({ held: false, holdUnreadable: false }),
   });
   assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "no-mac" });
 });
