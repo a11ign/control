@@ -1,3 +1,6 @@
+// no-token: readFleetGatedIssues -- this file never calls it: every `readHoldState`/`tick` call below
+// passes an injected `readIssues`/`holdState`, and `readFleetGatedIssues` itself is reached only through
+// `fleet-auto-off.mjs`'s re-export chain, never invoked here
 /**
  * #2656: a worker idle five minutes powers itself off, never mid-capture and never while held.
  *
