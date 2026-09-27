@@ -1,0 +1,19 @@
+[Unit]
+# #2656: A WORKER IDLE FIVE MINUTES POWERS ITSELF OFF -- SHIPPED DISABLED. Installed by
+# `auto-off-schedule.yml`, which explicitly ensures this timer is `state: stopped, enabled: false` every
+# time it runs. Enabling it is the THIRD row's step, after wake-on-demand has been read live on the real
+# fleet.
+Description=a11y: poll the fleet for idle workers every 10s (disabled until wake-on-demand is proven live)
+
+[Timer]
+# 10 s, strictly under the shortest measured capture (12 s, `sleep.yml`'s own header) -- `POLL_INTERVAL_MS`
+# in `fleet-auto-off.mjs`, pinned by its own test. A gap at or above 12 s could let a whole capture start
+# and finish between two polls and never be sampled `busy` at all; this cadence guarantees at least one
+# poll lands inside any real capture.
+OnBootSec=10s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=a11y-fleet-auto-off.service
+
+[Install]
+WantedBy=timers.target

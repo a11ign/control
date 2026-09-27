@@ -1,0 +1,99 @@
+---
+# Install the auto-off timer on the control plane -- SHIPPED DISABLED. #2656.
+#
+#     ansible-playbook auto-off-schedule.yml
+#
+# ## What this ships, and what it deliberately does not do
+#
+# `fleet-auto-off.mjs` decides, per worker, `off` or `keep` and why; `sleep.yml` (reused, not
+# reimplemented) does the actual shutdown, busy re-checked immediately before it. This playbook installs
+# the systemd unit pair that would fire that decision on a schedule -- and then does NOT enable or start
+# the timer. `npm run fleet:auto-off` (no `--apply`) is report-only regardless; the timer is a second,
+# independent gate on top of that, so a stray `systemctl start` on the wrong box still finds the report-only
+# default rather than a live shutdown.
+#
+# Enabling the timer is the THIRD row's step (#2656's own text), after wake-on-demand has been read live on
+# the real fleet. Until then this playbook's whole job is: the files exist, are correct, and are inert.
+#
+# ## The corpus-schedule.yml shape, one target group over
+#
+# `corpus-schedule.yml` (#1795) already solved "a job dispatchable only by hand is a job nobody remembers
+# to run" for the LAB. This is the identical shape for the CONTROL PLANE: the require-inventory-group
+# precondition on localhost, the same "install, then reload only if changed" pattern, and a systemd
+# TRIGGER unit (`a11y-fleet-auto-off.service`) whose only job is to invoke the real command -- so a manual
+# `npm run fleet:auto-off` and the scheduled firing share one history in `journalctl`.
+#
+# THE LAB MUST BE IN THE INVENTORY, AND AN EMPTY INVENTORY MUST NOT READ AS SUCCESS -- `ansible-playbook`
+# prints `skipping: no hosts matched` and exits 0 on zero hosts, so this runs a `localhost` precondition
+# first, exactly as `corpus-schedule.yml` and every other playbook here already do (#1980).
+- name: The control plane must be in the inventory before anything claims to have run
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control plane
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Install the fleet auto-off timer on the control plane, DISABLED (#2656)
+  hosts: a11y_control
+  gather_facts: false
+  vars:
+    auto_off_timer_units:
+      - a11y-fleet-auto-off.timer
+      - a11y-fleet-auto-off.service
+
+  tasks:
+    - name: Install the unit files
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ auto_off_timer_units }}"
+      register: auto_off_units_installed
+
+    - name: Pick up any unit that changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: auto_off_units_installed.results | selectattr('changed') | list | length > 0
+
+    # NEITHER ENABLED NOR STARTED -- the whole point of "shipped disabled" (done-when 6). Unlike
+    # `corpus-schedule.yml`, which enables its timer because that row already decided the job safe to run
+    # unattended, this row's own text reserves that decision for the row that reads wake-on-demand live.
+    #
+    # `state: stopped, enabled: false` rather than omitting the task entirely: idempotent either way, and
+    # explicit about the state this playbook GUARANTEES rather than merely not disturbing -- a timer
+    # somebody enabled by hand between two runs of this playbook is put back to disabled, because "shipped
+    # disabled" is a property of the fleet, not a one-time default nobody re-asserts.
+    - name: Ensure the timer is installed but NOT running -- ships disabled on purpose
+      ansible.builtin.systemd:
+        name: a11y-fleet-auto-off.timer
+        state: stopped
+        enabled: false
+
+    # Read back over systemd's own view, not the files just written -- `corpus-schedule.yml`'s own
+    # assertion shape, one condition flipped: here the record of correctness is "installed, not active",
+    # never "listed with a next firing".
+    - name: Read the unit's own state back
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, a11y-fleet-auto-off.timer]
+      register: auto_off_timer_enabled
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The timer must be installed and DISABLED -- never active from this playbook alone
+      ansible.builtin.assert:
+        that:
+          - "'disabled' in auto_off_timer_enabled.stdout"
+        fail_msg: >-
+          `systemctl is-enabled a11y-fleet-auto-off.timer` on {{ inventory_hostname }} must say `disabled`
+          (#2656: shipped disabled on purpose, enabled only by the row that reads wake-on-demand live).
+          Got: {{ auto_off_timer_enabled.stdout }}
+        success_msg: "a11y-fleet-auto-off.timer is installed and disabled, as #2656 requires"
