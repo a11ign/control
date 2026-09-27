@@ -58,8 +58,10 @@ import { readFleetGatedIssues, activeFleetHolds, tokenSetOf, fleetHoldReadRefusa
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
 
+const MS_PER_MINUTE = 60_000;
+
 /** Chairman's constraint via `ceo`, 2026-09-26: idle five minutes, not sooner. */
-export const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+export const IDLE_THRESHOLD_MS = 5 * MS_PER_MINUTE;
 
 const PORT = 8765;
 

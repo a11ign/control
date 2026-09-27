@@ -75,7 +75,7 @@ test("probeIdle: the timeout it asks for is PROBE_TIMEOUT_MS, not fleet:discover
     seen = options.timeoutMs;
     return { status: 200, ok: true, text: "", json: { busy: false } };
   };
-  const probe = await probeIdle("http://x", { request });
+  const probe = await probeIdle("http://x", { request: request as never });
   assert.equal(seen, PROBE_TIMEOUT_MS);
   assert.ok(PROBE_TIMEOUT_MS > 2_000, "must exceed fleet:discover's PROBE_TIMEOUT_MS, which read healthy boxes as asleep");
   assert.deepEqual(probe, { outcome: "idle" });
@@ -298,7 +298,8 @@ test("reportLine: any other reason carries no wait clause", () => {
 const WORKERS = [{ name: "a11y-worker-2", host: "192.0.2.12", mac: "aa:bb:cc:dd:ee:ff" }];
 
 /** A worker already idle-since time 0 -- so `now = IDLE_THRESHOLD_MS` lands exactly at the boundary. */
-const alreadyIdleSince0 = () => JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} });
+const alreadyIdleSince0 = (() =>
+  JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} })) as never;
 
 test("tick: report only (apply omitted) never dispatches, even for a worker decided off", async () => {
   let dispatched = 0;
@@ -318,7 +319,7 @@ test("tick: report only (apply omitted) never dispatches, even for a worker deci
 });
 
 test("tick: --apply dispatches exactly the workers decided off, and stamps shutdownRequestedAt", async () => {
-  let dispatchedNames: string[] = [];
+  const dispatchedNames: string[] = [];
   let savedState: unknown = null;
   await tick({
     workers: WORKERS,
