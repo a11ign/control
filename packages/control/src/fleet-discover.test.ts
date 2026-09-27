@@ -139,6 +139,29 @@ test("MAC formats are normalised, so 00-1A-2B and 00:1a:2b are one machine", () 
   assert.equal(normaliseMac("nonsense"), null);
 });
 
+// #2700: found on #2657. The five workers #2654 enrolled were written with a same-line comment on their
+// `mac:` line -- `/^\s*mac\s*:\s*(\S*)\s*$/`, anchored to end-of-line, failed the whole line and
+// `inventoryHosts` returned `mac: null` for a worker that has one, so `fleet:wake` refused to wake it and
+// `fleet-auto-off.mjs`'s `hasWakeableMac` took the `no-mac` branch forever. This is the row's own example
+// line, unchanged.
+test("#2700: a mac: line with a trailing # comment still parses, in the shape #2654 wrote", () => {
+  const text = [
+    "all:",
+    "  children:",
+    "    a11y_workers:",
+    "      hosts:",
+    "        a11y-worker-12:",
+    '          ansible_host: 192.0.2.30',
+    '          mac: "c4:65:16:b8:67:66"  # read off the box 2026-09-26 (#2654), Get-NetAdapter -Physical',
+    "",
+  ].join("\n");
+
+  const hosts = inventoryHosts(text);
+
+  assert.equal(hosts.length, 1);
+  assert.equal(hosts[0].mac, "c4:65:16:b8:67:66");
+});
+
 // Reads the EXAMPLE, deliberately, not the real inventory -- the real one is gitignored (real addresses,
 // restored from the secrets store at bring-up) and does not exist in CI or a fresh clone. This test only
 // checks the SHAPE (a host exists, its address is address-shaped), which the example preserves by design

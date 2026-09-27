@@ -110,7 +110,11 @@ export function inventoryHosts(text) {
     }
     const host = line.match(/^\s*ansible_host\s*:\s*(\S+)\s*$/);
     if (host && current) current.host = host[1].replace(/^["']|["']$/g, "");
-    const mac = line.match(/^\s*mac\s*:\s*(\S*)\s*$/);
+    // #2700: unlike `host` above, a `mac:` line may carry a same-line `# ...` comment (five workers
+    // enrolled by #2654 are written that way) -- `(?:#.*)?` after the value tolerates it without
+    // swallowing it into the captured MAC, so long as it is set off by whitespace as every comment in
+    // this file is.
+    const mac = line.match(/^\s*mac\s*:\s*(\S*)\s*(?:#.*)?$/);
     if (mac && current) current.mac = normaliseMac(mac[1].replace(/^["']|["']$/g, ""));
   }
   // The filter guarantees `host`, and a filter cannot narrow -- so the cast states what the line above
