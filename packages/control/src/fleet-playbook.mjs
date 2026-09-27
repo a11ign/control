@@ -60,7 +60,7 @@ import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // #2027: THE `Fleet-hold-until:` READER IS A WAITING CONDITION, so it lives with the other three rather
 // than here -- see the re-export below for what that cost while it did not. Relative and leaf-shaped, so
 // ADR 0012's no-`npm install` property is unchanged.
-import { fleetHoldUntil } from "../../agent-org/src/waiting-condition.mjs";
+import { fleetHoldUntil, fleetHoldWorkers } from "../../agent-org/src/waiting-condition.mjs";
 // RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -1229,8 +1229,12 @@ async function enforceLinkGate(chosen) {
  * raw git checkout with no `npm install`, and `control-has-no-dependencies.test.ts` walks this graph
  * transitively to prove it. `waiting-condition.mjs` imports NOTHING AT ALL, so the walk gains one pure
  * leaf and no surface beside the key.
+ *
+ * `fleetHoldWorkers` TRAVELS WITH IT, for the identical reason (ceo's #928 ruling, point 2): the worker
+ * list is parsed off the same line by the same module, and a second reader of it here would be exactly
+ * the #2027 defect this comment already describes, one field further narrowed.
  */
-export { fleetHoldUntil };
+export { fleetHoldUntil, fleetHoldWorkers };
 
 /**
  * Every row still holding the fleet, RIGHT NOW -- pure, over issues the caller has already scoped to
@@ -1242,16 +1246,21 @@ export { fleetHoldUntil };
  * COMPARED AS PARSED TIME, never lexically -- see `fleetHoldUntil`'s own comment on why a timestamp
  * (unlike a ten-character date) cannot be compared as text.
  *
+ * `workers` IS `fleetHoldWorkers`'s OWN READING, CARRIED THROUGH RATHER THAN RE-DERIVED (ceo's #928
+ * ruling, point 2): `[]` means the row names none and so holds the whole fleet, unchanged from before this
+ * field existed. `sequenceHoldGate` is what narrows a hold's reach to an operation's own `--limit`; this
+ * function stays a plain read of "what is live right now", the same shape it always was.
+ *
  * @param {{number?: number, body?: string}[]} issues
  * @param {number} nowMs
- * @returns {{number: number, until: string}[]}
+ * @returns {{number: number, until: string, workers: string[]}[]}
  */
 export function activeFleetHolds(issues, nowMs) {
   const holds = [];
   for (const issue of issues ?? []) {
     const until = fleetHoldUntil(issue?.body);
     if (until === null) continue;
-    if (Date.parse(until) > nowMs) holds.push({ number: Number(issue.number), until });
+    if (Date.parse(until) > nowMs) holds.push({ number: Number(issue.number), until, workers: fleetHoldWorkers(issue?.body) });
   }
   return holds;
 }
@@ -1269,21 +1278,49 @@ export function allowHoldNumbers(argv) {
 }
 
 /**
- * The refusal text for one or more active holds, naming each row and the timestamp it clears at --
- * `holdRefusal`'s own shape, one field over.
+ * The refusal text for one or more active holds, naming each row, the timestamp it clears at, and (ceo's
+ * #928 ruling, point 2) the workers it names, when it names any -- `[]` says nothing extra, matching every
+ * hold declared before that field existed.
  *
- * @param {{ chosen: string, unnamed: {number: number, until: string}[] }} held
+ * @param {{ chosen: string, unnamed: {number: number, until: string, workers?: string[]}[] }} held
  * @returns {string}
  */
 function sequenceHoldRefusal({ chosen, unnamed }) {
   return [
     `REFUSING ${chosen}: a fleet-hold sequence is active (#1839).`,
-    ...unnamed.map(({ number, until }) => `  held by #${number} until ${until}`),
+    ...unnamed.map(({ number, until, workers }) => `  held by #${number} until ${until}`
+      + ((workers ?? []).length ? ` (${(workers ?? []).join(", ")})` : "")),
     "  This protects a multi-round same-build capture sequence -- deploying or provisioning now would",
     "  strand it the way #1767 and #1768 did, purely from ordinary merge cadence. Read the row before",
     "  proceeding: it names what it is protecting and when the hold clears itself.",
     "  To proceed past it deliberately, name each one: --allow-hold=<row> (repeatable).",
   ].join("\n");
+}
+
+/**
+ * Whether a hold whose own worker scope is `holdWorkers` reaches an operation whose target is `limitFlag`
+ * -- `ceo`'s #928 ruling (point 2): #1839's own reasoning protects a capture sequence's OWN workers
+ * between rounds, and nothing in it needs the rest of the fleet (typically ~12 idle boxes) held too.
+ *
+ * UNSCOPED (`holdWorkers.length === 0`) REACHES EVERY TARGET -- #928's OWN REQUIRED BACK-COMPAT: every row
+ * that already carries an unscoped `Fleet-hold-until:` keeps holding the whole fleet, unchanged, which is
+ * why this is the first branch and short-circuits before `limitFlag` is even read.
+ *
+ * A SCOPED HOLD REACHES ONLY AN OPERATION THAT TOUCHES ONE OF ITS NAMED WORKERS. `limitFlag` absent, or
+ * the whole-fleet group name `parseArgs` already accepts for it (`a11y_workers`), means the operation's
+ * own target IS the fleet -- the same default `--limit` already has -- so it reaches every scoped hold
+ * too, for the identical reason an unscoped hold reaches every target: neither one is naming anything
+ * narrower to be safe from.
+ *
+ * @param {string[]} holdWorkers
+ * @param {string | undefined} limitFlag
+ * @returns {boolean}
+ */
+export function fleetHoldReachesTarget(holdWorkers, limitFlag) {
+  if (holdWorkers.length === 0) return true;
+  if (!limitFlag || limitFlag === WORKER_GROUP) return true;
+  const targets = limitFlag.split(",");
+  return holdWorkers.some((worker) => targets.includes(worker));
 }
 
 /**
@@ -1294,26 +1331,34 @@ function sequenceHoldRefusal({ chosen, unnamed }) {
  * holding anything is refused rather than silently accepted, and proceeding past a real hold says so
  * rather than staying quiet about it.
  *
- * @param {{ chosen: string, holds: {number: number, until: string}[], allowHold: number[] }} input
+ * NARROWED BY `limitFlag` BEFORE ANYTHING ELSE RUNS (ceo's #928 ruling, point 2): `fleetHoldReachesTarget`
+ * drops a hold whose named workers do not overlap this operation's own `--limit`, so a stray/unnamed/held
+ * verdict below is already computed over "holds this operation could actually collide with" -- the same
+ * reduction whether `holds` came from a fleet-wide default or a fully-scoped fixture, and callers that
+ * never pass `limitFlag` see every hold reach them, unchanged from before this parameter existed.
+ *
+ * @param {{ chosen: string, holds: {number: number, until: string, workers?: string[]}[],
+ *   allowHold: number[], limitFlag?: string }} input
  * @returns {{ refusal: string | null, notice: string | null }}
  */
-export function sequenceHoldGate({ chosen, holds, allowHold }) {
+export function sequenceHoldGate({ chosen, holds, allowHold, limitFlag }) {
   if (!LINK_GATED.includes(chosen)) {
     return { refusal: allowHold.length
       ? `refusing --allow-hold with --playbook=${chosen}: only ${LINK_GATED.join(" and ")} read the fleet-hold gate.`
       : null, notice: null };
   }
-  const heldNumbers = holds.map((h) => h.number);
+  const reaching = holds.filter((h) => fleetHoldReachesTarget(h.workers ?? [], limitFlag));
+  const heldNumbers = reaching.map((h) => h.number);
   const stray = allowHold.filter((n) => !heldNumbers.includes(n));
   if (stray.length) {
     const why = heldNumbers.length ? `not held (the hold is #${heldNumbers.join(", #")})` : "no row holds the fleet";
     return { refusal: `refusing --allow-hold=${stray.join(", --allow-hold=")}: ${why}. `
       + "A number for a row that is not holding the fleet would be accepted and ignored.", notice: null };
   }
-  const unnamed = holds.filter((h) => !allowHold.includes(h.number));
+  const unnamed = reaching.filter((h) => !allowHold.includes(h.number));
   if (unnamed.length) return { refusal: sequenceHoldRefusal({ chosen, unnamed }), notice: null };
-  if (holds.length === 0) return { refusal: null, notice: null };
-  return { refusal: null, notice: `  proceeding past a fleet-hold sequence: ${holds.map((h) => `#${h.number}`).join(", ")}, `
+  if (reaching.length === 0) return { refusal: null, notice: null };
+  return { refusal: null, notice: `  proceeding past a fleet-hold sequence: ${reaching.map((h) => `#${h.number}`).join(", ")}, `
     + "each named with --allow-hold." };
 }
 
@@ -1434,13 +1479,18 @@ export function fleetHoldReadRefusal({ chosen, error, tokenSet }) {
  * silently reads as absent because GitHub was unreachable is the exact defect this row exists to remove,
  * one layer down.
  *
+ * `limitFlag` PASSED THROUGH FROM `parseArgs` (ceo's #928 ruling, point 2): it is this operation's own
+ * `--limit`, and `sequenceHoldGate` is what narrows a hold's reach by it. Undefined here means the same
+ * thing it means to `parseArgs` -- no `--limit`, i.e. the whole fleet -- so an operation that never named
+ * one still collides with every scoped hold, exactly as it always collided with every unscoped one.
+ *
  * @param {string} chosen
- * @param {{ readIssues?: () => {number: number, body: string}[], nowMs?: number }} [deps]
+ * @param {{ readIssues?: () => {number: number, body: string}[], nowMs?: number, limitFlag?: string }} [deps]
  */
-async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, nowMs = Date.now() } = {}) {
+async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, nowMs = Date.now(), limitFlag } = {}) {
   const allowHold = allowHoldNumbers(process.argv.slice(2));
   if (!LINK_GATED.includes(chosen)) {
-    const { refusal } = sequenceHoldGate({ chosen, holds: [], allowHold });
+    const { refusal } = sequenceHoldGate({ chosen, holds: [], allowHold, limitFlag });
     if (refusal) { process.stderr.write(`${refusal}\n`); process.exit(2); }
     return;
   }
@@ -1455,7 +1505,7 @@ async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, 
     process.exit(2);
     return;
   }
-  const { refusal, notice } = sequenceHoldGate({ chosen, holds: activeFleetHolds(issues, nowMs), allowHold });
+  const { refusal, notice } = sequenceHoldGate({ chosen, holds: activeFleetHolds(issues, nowMs), allowHold, limitFlag });
   if (notice) process.stdout.write(`${notice}\n\n`);
   if (refusal) {
     process.stderr.write(`${refusal}\n`);
@@ -1501,7 +1551,7 @@ async function main() {
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode } = parseArgs();
   await guardProtocolChange(chosen);
   await enforceLinkGate(chosen);
-  await enforceSequenceHold(chosen);
+  await enforceSequenceHold(chosen, { limitFlag });
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
   // to a commit is the only comparison that settles "is it running my code?" — the first version compared

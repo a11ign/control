@@ -22,7 +22,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
-  fleetHoldUntil, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
+  fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf }
   from "./fleet-playbook.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
@@ -973,6 +973,8 @@ test("#1839: Fleet-hold-until: parses bare and under a heading, and requires sec
   assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-09-22T04:00Z"), null,
     "no seconds -- a malformed field is not a hold, it fails OPEN rather than half-parsing");
   assert.equal(fleetHoldUntil("Fleet-hold-until: tomorrow"), null);
+  assert.equal(fleetHoldUntil("Fleet-hold-until: 2026-09-22T04:00:00Z a11y-worker-2,a11y-worker-3"),
+    "2026-09-22T04:00:00Z", "#928: a trailing worker list still leaves the timestamp readable");
 });
 
 test("#1839: a digit-shaped but non-existent calendar date fails open, rather than being silently repaired to a LATER one", () => {
@@ -1007,7 +1009,63 @@ test("#1839: activeFleetHolds returns only unexpired rows, and ignores a body wi
     { number: 1700, body: "Fleet-hold-until: 2026-09-21T06:00:00Z" }, // already in the past
     { number: 1701, body: "no hold field on this row" },
   ];
-  assert.deepEqual(activeFleetHolds(issues, now), [{ number: 1768, until: "2026-09-21T22:00:00Z" }]);
+  assert.deepEqual(activeFleetHolds(issues, now),
+    [{ number: 1768, until: "2026-09-21T22:00:00Z", workers: [] }],
+    "workers: [] -- #928's own back-compat default, this row names none so it still holds the whole fleet");
+});
+
+// --- #928 (ceo's ruling, point 2): a Fleet-hold-until row may name its OWN workers rather than the fleet ---
+
+test("#928: fleetHoldWorkers reads the trailing comma-separated list, and [] when the line names none", () => {
+  assert.deepEqual(fleetHoldWorkers("Fleet-hold-until: 2026-09-27T04:00:00Z"), []);
+  assert.deepEqual(fleetHoldWorkers("Fleet-hold-until: 2026-09-27T04:00:00Z a11y-worker-2"), ["a11y-worker-2"]);
+  assert.deepEqual(
+    fleetHoldWorkers("Fleet-hold-until: 2026-09-27T04:00:00Z a11y-worker-2,a11y-worker-3"),
+    ["a11y-worker-2", "a11y-worker-3"]);
+  assert.deepEqual(fleetHoldWorkers("## Fleet-hold-until: 2026-09-27T04:00:00Z a11y-worker-12"), ["a11y-worker-12"],
+    "a headed field parses the same as a bare one, matching fleetHoldUntil's own rule");
+  assert.deepEqual(fleetHoldWorkers(null), []);
+  assert.deepEqual(fleetHoldWorkers("no field here at all"), []);
+});
+
+test("#928: a malformed worker list fails the WHOLE line open, same direction as a malformed timestamp", () => {
+  const garbled = "Fleet-hold-until: 2026-09-27T04:00:00Z not-a-worker-name";
+  assert.equal(fleetHoldUntil(garbled), null, "the timestamp does not half-parse past a garbled tail");
+  assert.deepEqual(fleetHoldWorkers(garbled), [], "and the worker reader agrees: this line is not a hold at all");
+});
+
+test("#928: fleetHoldReachesTarget -- unscoped reaches every target, scoped reaches only its own workers", () => {
+  assert.equal(fleetHoldReachesTarget([], "a11y-worker-9"), true, "unscoped: back-compat, holds the whole fleet");
+  assert.equal(fleetHoldReachesTarget([], undefined), true, "unscoped, no --limit either");
+  assert.equal(fleetHoldReachesTarget(["a11y-worker-2"], undefined), true,
+    "no --limit means the operation's own target IS the fleet, which overlaps any scoped hold");
+  assert.equal(fleetHoldReachesTarget(["a11y-worker-2"], "a11y_workers"), true,
+    "the whole-fleet group name is the same target as no --limit at all");
+  assert.equal(fleetHoldReachesTarget(["a11y-worker-2"], "a11y-worker-2"), true, "exact overlap");
+  assert.equal(fleetHoldReachesTarget(["a11y-worker-2"], "a11y-worker-3,a11y-worker-2"), true,
+    "overlap with one of several named targets");
+  assert.equal(fleetHoldReachesTarget(["a11y-worker-2"], "a11y-worker-9"), false, "disjoint: does not reach");
+});
+
+test("#928: sequenceHoldGate drops a hold whose named workers do not overlap this operation's --limit", () => {
+  const scoped = [{ number: 2114, until: "2026-09-27T22:00:00Z", workers: ["a11y-worker-2", "a11y-worker-3"] }];
+  const disjoint = sequenceHoldGate({ chosen: "deploy.yml", holds: scoped, allowHold: [], limitFlag: "a11y-worker-9" });
+  assert.equal(disjoint.refusal, null, "a deploy limited to a worker the hold does not name must proceed");
+
+  const overlap = sequenceHoldGate({ chosen: "deploy.yml", holds: scoped, allowHold: [], limitFlag: "a11y-worker-2" });
+  assert.match(String(overlap.refusal), /held by #2114 until 2026-09-27T22:00:00Z \(a11y-worker-2, a11y-worker-3\)/,
+    "a deploy that reaches a named worker still refuses, and names the workers it is protecting");
+
+  const wholeFleet = sequenceHoldGate({ chosen: "deploy.yml", holds: scoped, allowHold: [] });
+  assert.ok(wholeFleet.refusal, "no --limit means the whole fleet, which overlaps any scoped hold");
+});
+
+test("#928: an unscoped hold still refuses every target, exactly as before this field existed", () => {
+  const unscoped = [{ number: 1768, until: "2026-09-21T22:00:00Z", workers: [] }];
+  for (const limitFlag of [undefined, "a11y-worker-9", "a11y-worker-2,a11y-worker-3"]) {
+    const { refusal } = sequenceHoldGate({ chosen: "deploy.yml", holds: unscoped, allowHold: [], limitFlag });
+    assert.ok(refusal, `limitFlag=${limitFlag} must still be refused by an unscoped hold`);
+  }
 });
 
 test("#1839: --allow-hold is repeatable, which flagValue is not", () => {
@@ -1077,7 +1135,8 @@ test("#1839: main() CALLS the fleet-hold gate, before the control plane is asked
   const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
-  assert.match(mainBody, /await enforceSequenceHold\(chosen\)/, "a perfect gate that no run reaches refuses nothing");
+  assert.match(mainBody, /await enforceSequenceHold\(chosen, \{ limitFlag \}\)/,
+    "a perfect gate that no run reaches refuses nothing, and #928's own narrowing needs this operation's --limit");
   assert.ok(mainBody.indexOf("await enforceSequenceHold(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
     "the gate must run before the control plane's checkout moves");
   assert.match(source, /"--allow-hold="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
