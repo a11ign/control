@@ -60,6 +60,9 @@ import { fleetConsistency, describeMismatches, describeReportedOnly }
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
+// #2752: the MAC fallback below reuses fleet-discover.mjs's own `normaliseMac` rather than restating it --
+// two MAC parsers is how a colon-vs-dash disagreement becomes a resolution that silently never matches.
+import { normaliseMac } from "./fleet-discover.mjs";
 
 /**
  * as `doctor`.
@@ -85,7 +88,8 @@ const SECONDS_PER_MINUTE = 60;
  * actually drives the fleet. A READ-ONLY reporter, so a refusal here is a thrown error naming WHICH of
  * the three causes it was (no source, unparseable, or unreachable), never a silently empty table.
  *
- * @param {{ readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null } }} [deps]
+ * @param {{ readFleet?: () => { workers: { name: string, url: string, mac?: string }[], refusal: string | null } }} [deps]
+ * @returns {{ name: string, url: string, mac?: string }[]}
  */
 export function fleetToProbe({ readFleet = readControlPlaneFleet } = {}) {
   const named = configuredWorkers();
@@ -101,11 +105,15 @@ export function fleetToProbe({ readFleet = readControlPlaneFleet } = {}) {
   // had drifted, and .224 is a11y-worker-FIVE — so `fleet:sleep --limit=a11y-worker-4` put a healthy
   // machine to sleep and left the drifted one serving. A report and a command that cannot be matched up
   // is a report you have to translate, and translation is where the mistake goes.
-  return fleet.workers.map(({ name, url }) => {
+  return fleet.workers.map(({ name, url, mac }) => {
     const address = url.replace(/^https?:\/\//, "");
     // `controlPlaneFleet` already falls back to the bare address AS the name when the inventory names
     // none -- do not then print it twice.
-    return { name: name === address ? address : `${name}  ${address}`, url };
+    const row = { name: name === address ? address : `${name}  ${address}`, url };
+    // #2752: carried through so `linkLayerFor` can fall back to a MAC-based re-resolution when this row
+    // is unreachable at `url` -- omitted entirely rather than `mac: undefined` when the inventory declares
+    // none, matching `controlPlaneFleet`'s own shape and keeping every caller's `deepEqual` honest.
+    return mac ? { ...row, mac } : row;
   });
 }
 
@@ -921,44 +929,178 @@ const OFF_ADVICE = [
   "  OFF it is a walk to the machine. Report it to the chairman by inventory name before anything else is tried.",
 ];
 
+// --- #2752: a box unreachable at its PINNED address may only have drifted under DHCP -----------------
+
+/** How many addresses a ping sweep covers -- matches `fleet-discover.mjs`'s own `scan()`, a whole /24. */
+const LAST_HOST_IN_SUBNET = 254;
+/** One second per ping, in parallel across the subnet -- `ip neigh show` runs only after every ping returns. */
+const MAC_RESOLVE_PING_TIMEOUT_S = 1;
+/** Generous: 254 pings run in parallel, not serially, unlike `neighbourScript`'s per-address polling loop. */
+const MAC_RESOLVE_READ_TIMEOUT_MS = 20_000;
+
 /**
- * The link-layer lines, printed FIRST, and the gate a fleet write reads -- #1298 as amended.
+ * The /24 an address is on ("203.0.113" from "203.0.113.90"), or null when it is not a plain IPv4 literal
+ * (a hostname, or an address already carrying a port `neighbourScript`'s own `addressOf` strips first).
+ * @param {string} address
+ * @returns {string | null}
+ */
+export function subnetOf(address) {
+  if (!IPV4.test(address)) return null;
+  return address.split(".").slice(0, 3).join(".");
+}
+
+/**
+ * Ping every address on the subnet once, in parallel, then dump the WHOLE neighbour table -- not one
+ * address's entry the way `neighbourScript` above reads it, because a box that drifted is at an address
+ * this file never pinned and so never otherwise asks about.
+ * @param {string} subnet
+ * @returns {string}
+ */
+export function macResolveScript(subnet) {
+  if (!/^\d{1,3}(\.\d{1,3}){2}$/.test(subnet)) {
+    throw new Error(`macResolveScript: not a /24 prefix, refusing to send it to a shell: ${subnet}`);
+  }
+  return `for i in $(seq 1 ${LAST_HOST_IN_SUBNET}); do ping -c 1 -W ${MAC_RESOLVE_PING_TIMEOUT_S} `
+    + `"${subnet}.$i" >/dev/null 2>&1 & done; wait; ip neigh show`;
+}
+
+/**
+ * Every entry a bare `ip neigh show` dump carries. FAILED and INCOMPLETE lines have no `lladdr` and are
+ * skipped rather than reported with a null MAC -- nothing here needs to say a table ENTRY was absent, only
+ * where a MAC currently answers.
+ * @param {string} stdout
+ * @returns {{ ip: string, mac: string, state: string }[]}
+ */
+export function parseNeighbourTable(stdout) {
+  /** @type {{ ip: string, mac: string, state: string }[]} */
+  const entries = [];
+  for (const line of stdout.split("\n")) {
+    const match = line.match(/^(\d{1,3}(?:\.\d{1,3}){3})\s+dev\s+\S+\s+lladdr\s+([0-9a-fA-F:]{11,17})\s+(\S+)\s*$/);
+    const mac = match && normaliseMac(match[2]);
+    if (match && mac) entries.push({ ip: match[1], mac, state: match[3] });
+  }
+  return entries;
+}
+
+/**
+ * Where a MAC that did not answer at its PINNED address is now -- REACHABLE entries only, reusing
+ * `linkVerdictOf`'s own rule (#1298) that a cached STALE/DELAY line is not a live answer, and never the
+ * pinned address itself, which is exactly the one already failing there.
+ * @param {{ name: string, host: string, mac: string }[]} candidates
+ * @param {{ ip: string, mac: string, state: string }[]} table
+ * @returns {Map<string, string>} inventory name -> the address it now answers at
+ */
+export function resolveMovedByMac(candidates, table) {
+  /** @type {Map<string, string>} */
+  const resolved = new Map();
+  for (const { name, host, mac } of candidates) {
+    const found = table.find((entry) => entry.mac === mac && entry.state === "REACHABLE" && entry.ip !== host);
+    if (found) resolved.set(name, found.ip);
+  }
+  return resolved;
+}
+
+/**
+ * THE LIVE FALLBACK #2752 ASKS FOR, run over the same ssh channel `askControlPlane` already opens for the
+ * per-address read above. DESIGN NOTE, since this row's own Acceptance asked for one: this pings the whole
+ * /24 over ssh rather than calling `fleet-discover.mjs`'s `scan()` in-process, because `scan()` probes
+ * `/health` from wherever ITS OWN process runs, and the entire reason this file shells out for layer 2 at
+ * all (`askControlPlane`, above) is that `fleet:status`'s caller is often not on the workers' segment --
+ * running `scan()` here would scan the CALLER's subnet, not the fleet's. `normaliseMac` is reused directly
+ * from `fleet-discover.mjs` (#2667) rather than restated, and the ping-sweep-then-`ip neigh show` shape is
+ * the same one that file's `scan()`/ARP read already established, moved onto the control plane's ssh
+ * channel here rather than run locally.
+ *
+ * PAID ONLY WHEN NEEDED: called with an empty list whenever every silent box either reads ON or declares
+ * no MAC, so a healthy fleet -- or one with no MACs enrolled -- asks for nothing beyond what #1298 already
+ * asks, matching this file's "a healthy fleet pays nothing" rule one level up.
+ *
+ * @param {{ name: string, host: string, mac: string }[]} candidates
+ * @param {{ run?: typeof spawnSync, controlPlane?: () => { host: string, key: string } }} [deps]
+ * @returns {Map<string, string>}
+ */
+export function resolveMovedByMacLive(candidates, { run = spawnSync, controlPlane = controlPlaneFromEnvironment } = {}) {
+  const askable = candidates.filter((c) => subnetOf(c.host));
+  if (!askable.length) return new Map();
+  const subnet = /** @type {string} */ (subnetOf(askable[0].host));
+  /** @type {{ host: string, key: string }} */
+  let target;
+  try {
+    target = controlPlane();
+  } catch {
+    return new Map();
+  }
+  const result = run("ssh", ["-i", target.key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+    "-o", "ConnectTimeout=10", `root@${target.host}`, macResolveScript(subnet)],
+  { encoding: "utf8", timeout: MAC_RESOLVE_READ_TIMEOUT_MS });
+  if (result.error || result.status !== 0) return new Map();
+  return resolveMovedByMac(askable, parseNeighbourTable(String(result.stdout ?? "")));
+}
+
+/**
+ * The link-layer lines, printed FIRST, and the gate a fleet write reads -- #1298 as amended, #2752 as
+ * narrowed.
  *
  * UNKNOWN GATES EXACTLY AS OFF DOES (`ceo`, 2026-09-13): a write proceeds only when every box that did not
  * answer reads a positive ON, and a HOLD names the OFF boxes and the UNKNOWN boxes in separate lists,
  * because one is a walk to a machine and the other is a better read.
  *
- * @param {{ name: string, link: LinkAnswer }[]} asked the boxes that did not answer, with their answers
- * @returns {{ lines: string[], gate: { hold: boolean, off: string[], unknown: string[] } | null }}
+ * A box the #2752 MAC fallback resolved is neither OFF nor UNKNOWN -- it is not gone, its pinned address
+ * is just stale -- so it is reported on its own MOVED line and excluded from both HOLD lists. `gate.moved`
+ * is only PRESENT when non-empty, so every existing caller's `deepEqual` on `{hold, off, unknown}` still
+ * holds for the ordinary case where nothing moved.
+ *
+ * @param {{ name: string, link: LinkAnswer, movedTo?: string | null }[]} asked the boxes that did not
+ *        answer, with their answers
+ * @returns {{ lines: string[], gate: { hold: boolean, off: string[], unknown: string[],
+ *             moved?: { name: string, movedTo: string }[] } | null }}
  */
 export function linkLayerReport(asked) {
   if (!asked.length) return { lines: [], gate: null };
-  const named = asked.map(({ name, link }) => ({ name: inventoryName(name), link }));
-  const off = named.filter(({ link }) => link.verdict === LINK.OFF).map(({ name }) => name);
-  const unknown = named.filter(({ link }) => link.verdict !== LINK.OFF && link.verdict !== LINK.ON)
+  const named = asked.map(({ name, link, movedTo }) => ({ name: inventoryName(name), link, movedTo: movedTo ?? null }));
+  const moved = named.filter((entry) => entry.movedTo);
+  const off = named.filter(({ link, movedTo }) => !movedTo && link.verdict === LINK.OFF).map(({ name }) => name);
+  const unknown = named.filter(({ link, movedTo }) => !movedTo && link.verdict !== LINK.OFF && link.verdict !== LINK.ON)
     .map(({ name }) => name);
   const hold = off.length > 0 || unknown.length > 0;
+  const movedNote = moved.length ? `; moved by MAC: ${moved.map((m) => `${m.name} -> ${m.movedTo}`).join(", ")}` : "";
   const gateLine = hold
-    ? `fleet write: HOLD — off the network: ${off.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}`
-    : "fleet write: may proceed — every box that did not answer is ON THE NETWORK, so it is the worker, not the wire";
+    ? `fleet write: HOLD — off the network: ${off.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}${movedNote}`
+    : `fleet write: may proceed — every box that did not answer is ON THE NETWORK, so it is the worker, not the wire${movedNote}`;
+  const movedLines = moved.map(({ name, movedTo }) =>
+    `MOVED (${name} answers by MAC at ${movedTo}, not its pinned address -- fix inventory.yml and ask for a DHCP reservation)`);
   return {
-    lines: [...named.map(({ name, link }) => linkLine(name, link)), ...(off.length ? OFF_ADVICE : []), gateLine],
-    gate: { hold, off, unknown },
+    lines: [...named.filter((entry) => !entry.movedTo).map(({ name, link }) => linkLine(name, link)),
+      ...movedLines, ...(off.length ? OFF_ADVICE : []), gateLine],
+    gate: { hold, off, unknown, ...(moved.length ? { moved: moved.map(({ name, movedTo }) => ({ name, movedTo: /** @type {string} */ (movedTo) })) } : {}) },
   };
 }
 
 /**
  * @param {WorkerRow[]} rows
  * @param {(rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers>} linkRead
+ * @param {Map<string, string>} [macByName] declared MAC per inventory name, for the #2752 fallback below
+ * @param {(candidates: { name: string, host: string, mac: string }[]) =>
+ *           Map<string, string> | Promise<Map<string, string>>} [macRead]
  */
-async function linkLayerFor(rows, linkRead) {
+async function linkLayerFor(rows, linkRead, macByName = new Map(), macRead = resolveMovedByMacLive) {
   const silent = rows.filter((row) => row.state === "unreachable");
   if (!silent.length) return linkLayerReport([]);
   const answers = await linkRead(silent);
-  return linkLayerReport(silent.map((row) => ({
+  const asked = silent.map((row) => ({
     name: row.name,
+    host: addressOf(row.url),
+    mac: macByName.get(inventoryName(row.name)) ?? null,
     link: answers.get(row.name) ?? { verdict: LINK.NO_VERDICT, detail: "the read returned nothing for this box" },
-  })));
+  }));
+  // #2752: OFF/UNKNOWN at a pinned address is not necessarily a dead box. Paid only for a box that both
+  // failed to read ON and declares a MAC, so this is exactly the population #1298's own gate already holds
+  // on -- nothing here widens what a healthy fleet, or an un-enrolled one, pays.
+  const candidates = asked
+    .filter((entry) => entry.link.verdict !== LINK.ON && entry.mac)
+    .map((entry) => ({ name: entry.name, host: entry.host, mac: /** @type {string} */ (entry.mac) }));
+  const movedTo = candidates.length ? await macRead(candidates) : new Map();
+  return linkLayerReport(asked.map((entry) => ({ ...entry, movedTo: movedTo.get(entry.name) ?? null })));
 }
 
 /**
@@ -975,9 +1117,11 @@ export function renderHead(status) {
 }
 
 /**
- * @param {{ workers?: () => { name: string, url: string }[],
+ * @param {{ workers?: () => { name: string, url: string, mac?: string }[],
  *           probe?: (worker: { name: string, url: string }) => Promise<any>,
- *           linkRead?: (rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers> }} [deps]
+ *           linkRead?: (rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers>,
+ *           macRead?: (candidates: { name: string, host: string, mac: string }[]) =>
+ *             Map<string, string> | Promise<Map<string, string>> }} [deps]
  *   injectable ONLY so a
  *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
  *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
@@ -988,8 +1132,11 @@ export async function fleetStatus(deps) {
   const workers = (deps?.workers ?? fleetToProbe)();
   const probes = await Promise.all(workers.map(deps?.probe ?? probeWorker));
   const rows = summarise(probes);
+  // #2752: the inventory NAME (not the `name  address` row shape) is the key both sides agree on --
+  // `linkLayerFor` strips the same way via `inventoryName` before it looks a box up here.
+  const macByName = new Map(workers.filter((w) => w.mac).map((w) => [inventoryName(w.name), /** @type {string} */ (w.mac)]));
   // #1298: only the boxes that did not answer are asked about at LAYER 2, so a healthy fleet pays nothing.
-  const linkLayer = await linkLayerFor(rows, deps?.linkRead ?? readLinkLayer);
+  const linkLayer = await linkLayerFor(rows, deps?.linkRead ?? readLinkLayer, macByName, deps?.macRead ?? resolveMovedByMacLive);
   const guests = probes
     .filter((p) => p.reachable)
     // `policy: undefined`, not null. `fleetConsistency` takes `policy?: Record<string, unknown>` -- an

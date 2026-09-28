@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
-  linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice } from "./fleet-status.mjs";
+  linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
+  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive } from "./fleet-status.mjs";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
   from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
@@ -1098,4 +1099,183 @@ test("browserProfile alongside a convergeable field keeps the re-provision advic
   // The convergeable part IS fixable by provisioning, so the profile must not silence the advice for it.
   const mismatches = [...mismatchesWhere("browserProfile"), ...mismatchesWhere("browserVersion")];
   assert.match(inconsistentAdvice(mismatches), /Re-provision the WHOLE fleet/);
+});
+
+// --- #2752: a box unreachable at its PINNED address may only have drifted under DHCP -------------------
+// Reproduced from a FIXTURE, not the live incident: worker-6's own MAC from the row body, moved from its
+// pinned address the same way the row's own account describes, and never from a real `fleet:status` run
+// (the resource ban on this row forbids one, and the row's own done-when 4 asks for a fixture anyway).
+
+/** worker-6's real MAC, from row #2752's own body -- so this suite reproduces its exact incident. */
+const WORKER_6_MAC = "e8:6a:64:fe:0f:02";
+
+test("#2752: subnetOf reads the /24 an address is on, and refuses anything that is not a plain IPv4 literal", () => {
+  assert.equal(subnetOf("192.0.2.90"), "192.0.2");
+  assert.equal(subnetOf("a11y-worker-9"), null, "a hostname has no subnet to sweep");
+  assert.equal(subnetOf("192.0.2.90 (TypeError: Invalid URL)"), null, "addressOf's own error-string shape is not an address either");
+});
+
+test("#2752: macResolveScript pings the whole /24 once, then dumps the WHOLE neighbour table -- not one address", () => {
+  const script = macResolveScript("192.0.2");
+  assert.match(script, /seq 1 254/);
+  assert.match(script, /ping -c 1 -W 1 "192\.0\.2\.\$i"/);
+  assert.match(script, /wait; ip neigh show$/, "no address filter -- a box that drifted is not at any address this file pinned");
+  assert.throws(() => macResolveScript("192.0.2;reboot"), /not a \/24 prefix, refusing/);
+});
+
+test("#2752: parseNeighbourTable reads a bare `ip neigh show` dump, skipping FAILED/INCOMPLETE (no lladdr)", () => {
+  const dump = [
+    "192.0.2.90 dev eth0  FAILED",
+    `192.0.2.109 dev eth0 lladdr ${WORKER_6_MAC} REACHABLE`,
+    "192.0.2.217 dev eth0 lladdr c4:65:16:b8:69:30 STALE",
+    "192.0.2.1 dev eth0  INCOMPLETE",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseNeighbourTable(dump), [
+    { ip: "192.0.2.109", mac: WORKER_6_MAC, state: "REACHABLE" },
+    { ip: "192.0.2.217", mac: "c4:65:16:b8:69:30", state: "STALE" },
+  ]);
+});
+
+test("#2752: resolveMovedByMac only trusts a REACHABLE entry, and never the candidate's own pinned address", () => {
+  const table = [
+    { ip: "192.0.2.109", mac: WORKER_6_MAC, state: "REACHABLE" },
+    { ip: "192.0.2.90", mac: WORKER_6_MAC, state: "FAILED" },
+    // worker-9's only sighting is at a DIFFERENT address than its own pinned one (.220, not .217) and
+    // STALE -- a mutation that drops the REACHABLE check would resolve this one, since it is not the
+    // candidate's own address either; only the state check catches it.
+    { ip: "192.0.2.220", mac: "c4:65:16:b8:69:30", state: "STALE" },
+  ];
+  const resolved = resolveMovedByMac(
+    [{ name: "a11y-worker-6", host: "192.0.2.90", mac: WORKER_6_MAC },
+      { name: "a11y-worker-9", host: "192.0.2.217", mac: "c4:65:16:b8:69:30" },
+      { name: "a11y-worker-4", host: "192.0.2.175", mac: "e8:6a:64:e3:a9:e6" }],
+    table);
+  assert.deepEqual([...resolved], [["a11y-worker-6", "192.0.2.109"]],
+    "worker-6 resolves by MAC; worker-9's only sighting elsewhere is STALE, not REACHABLE; worker-4's MAC is nowhere in the table");
+
+  const selfOnly = resolveMovedByMac(
+    [{ name: "a11y-worker-6", host: "192.0.2.109", mac: WORKER_6_MAC }],
+    [{ ip: "192.0.2.109", mac: WORKER_6_MAC, state: "REACHABLE" }]);
+  assert.equal(selfOnly.size, 0, "a REACHABLE entry AT the pinned address is not a move, it is the ordinary OK case");
+});
+
+test("#2752: resolveMovedByMacLive runs one ssh -- the whole-subnet sweep, not the per-address poll -- and only when a candidate is a plain IPv4", () => {
+  const calls: string[][] = [];
+  const dump = `192.0.2.90 dev eth0  FAILED\n192.0.2.109 dev eth0 lladdr ${WORKER_6_MAC} REACHABLE\n`;
+  const run = ((command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    return { status: 0, stdout: dump };
+  }) as unknown as typeof spawnSync;
+  const controlPlane = () => ({ host: "control.invalid", key: "/nonexistent/key" });
+
+  const resolved = resolveMovedByMacLive(
+    [{ name: "a11y-worker-6", host: "192.0.2.90", mac: WORKER_6_MAC }], { run, controlPlane });
+  assert.deepEqual([...resolved], [["a11y-worker-6", "192.0.2.109"]]);
+  assert.equal(calls.length, 1, "one ssh for the whole sweep, not one per candidate");
+  const [command, ...args] = calls[0];
+  assert.equal(command, "ssh");
+  assert.ok(args.includes("root@control.invalid"));
+  assert.match(args[args.length - 1], /seq 1 254.*192\.0\.2\.\$i.*ip neigh show$/s);
+
+  let ran = 0;
+  const byHostname = resolveMovedByMacLive(
+    [{ name: "a11y-worker-9", host: "a11y-worker-9", mac: "c4:65:16:b8:69:30" }],
+    { run: (() => { ran += 1; return { status: 0, stdout: "" }; }) as unknown as typeof spawnSync, controlPlane });
+  assert.equal(byHostname.size, 0);
+  assert.equal(ran, 0, "a hostname has no subnet to sweep, so there is no ssh at all");
+});
+
+test("#2752: resolveMovedByMacLive resolves nothing, and never throws, when the control plane cannot be reached or the read fails there", () => {
+  const candidates = [{ name: "a11y-worker-6", host: "192.0.2.90", mac: WORKER_6_MAC }];
+  const failedSsh = resolveMovedByMacLive(candidates, {
+    run: (() => ({ status: 255, stdout: "" })) as unknown as typeof spawnSync,
+    controlPlane: () => ({ host: "control.invalid", key: "/nonexistent/key" }),
+  });
+  assert.equal(failedSsh.size, 0);
+  const untold = resolveMovedByMacLive(candidates, {
+    controlPlane: () => { throw new Error("A11Y_CONTROL_HOST is required and has no default"); },
+  });
+  assert.equal(untold.size, 0);
+});
+
+test("#2752: fleetStatus's own gate narrows -- a box that only DRIFTED is MOVED and no longer held, a box that is truly gone still holds", async () => {
+  const workers = [
+    { name: "a11y-worker-6", url: "http://192.0.2.90:8765", mac: WORKER_6_MAC },
+    { name: "a11y-worker-9", url: "http://192.0.2.217:8765", mac: "c4:65:16:b8:69:30" },
+  ];
+  const status = await fleetStatus({
+    workers: () => workers,
+    probe: async (w) => ({ name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }),
+    linkRead: () => new Map([
+      ["a11y-worker-6", { verdict: LINK.OFF, detail: "FAILED" }],
+      ["a11y-worker-9", { verdict: LINK.OFF, detail: "FAILED" }],
+    ]),
+    // worker-6's MAC answers elsewhere; worker-9's MAC answers nowhere -- genuinely off, per the row's own account
+    macRead: (candidates) => resolveMovedByMac(candidates, [{ ip: "192.0.2.109", mac: WORKER_6_MAC, state: "REACHABLE" }]),
+  });
+
+  assert.deepEqual(status.linkLayer.gate, {
+    hold: true, off: ["a11y-worker-9"], unknown: [],
+    moved: [{ name: "a11y-worker-6", movedTo: "192.0.2.109" }],
+  });
+  const shown = status.linkLayer.lines.join("\n");
+  assert.ok(shown.includes("MOVED (a11y-worker-6 answers by MAC at 192.0.2.109, not its pinned address"), shown);
+  assert.ok(!shown.includes("OFF THE NETWORK (no layer-2 answer from a11y-worker-6"),
+    "a resolved box is not ALSO reported OFF -- that is the whole point of the fallback");
+  assert.ok(shown.includes("OFF THE NETWORK (no layer-2 answer from a11y-worker-9"),
+    "a box the fallback could not resolve is exactly as held as it was before #2752");
+});
+
+test("#2752: when every held box resolves by MAC, the gate narrows all the way to may-proceed", async () => {
+  const workers = [{ name: "a11y-worker-6", url: "http://192.0.2.90:8765", mac: WORKER_6_MAC }];
+  const status = await fleetStatus({
+    workers: () => workers,
+    probe: async (w) => ({ name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }),
+    linkRead: () => new Map([["a11y-worker-6", { verdict: LINK.OFF, detail: "FAILED" }]]),
+    macRead: () => new Map([["a11y-worker-6", "192.0.2.109"]]),
+  });
+  assert.equal(status.linkLayer.gate?.hold, false);
+  const last = status.linkLayer.lines[status.linkLayer.lines.length - 1];
+  assert.match(last, /^fleet write: may proceed/);
+  assert.match(last, /moved by MAC: a11y-worker-6 -> 192\.0\.2\.109/);
+});
+
+test("#2752 MUTATION, both directions: the MAC fallback is asked ONLY for a box that is unreachable, not ON at layer 2, "
+  + "AND declares a MAC -- never for a healthy fleet, an un-enrolled one, or one the link layer already answered ON", async () => {
+  let macAsked = 0;
+  const countingMacRead = () => { macAsked += 1; return new Map<string, string>(); };
+
+  await fleetStatus({
+    workers: () => [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765", mac: "aa:bb:cc:dd:ee:01" }],
+    probe: async (w) => fakeProbe(w.name, "ready"),
+    linkRead: () => new Map(), macRead: countingMacRead,
+  });
+  assert.equal(macAsked, 0, "nothing was unreachable, so the fallback must not even be considered");
+
+  await fleetStatus({
+    workers: () => [{ name: "a11y-worker-3", url: "http://192.0.2.3:8765" }],
+    probe: async (w) => ({ name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }),
+    linkRead: () => new Map([["a11y-worker-3", { verdict: LINK.OFF, detail: "FAILED" }]]),
+    macRead: countingMacRead,
+  });
+  assert.equal(macAsked, 0, "unreachable but no MAC declared -- nothing to resolve by, so it must not be asked either");
+
+  await fleetStatus({
+    workers: () => [{ name: "a11y-worker-4", url: "http://192.0.2.4:8765", mac: "aa:bb:cc:dd:ee:04" }],
+    probe: async (w) => ({ name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }),
+    linkRead: () => new Map([["a11y-worker-4", { verdict: LINK.ON, detail: "REACHABLE" }]]),
+    macRead: countingMacRead,
+  });
+  assert.equal(macAsked, 0, "ON already answers the question -- the worker, not the wire -- so a MAC search is not asked");
+
+  // MUTATION TARGET: the positive control. Everything above must read 0; this one alone must read 1, or
+  // the three zeros above are vacuous -- none of them would notice a check that never fires at all.
+  await fleetStatus({
+    workers: () => [{ name: "a11y-worker-6", url: "http://192.0.2.90:8765", mac: WORKER_6_MAC }],
+    probe: async (w) => ({ name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }),
+    linkRead: () => new Map([["a11y-worker-6", { verdict: LINK.OFF, detail: "FAILED" }]]),
+    macRead: countingMacRead,
+  });
+  assert.equal(macAsked, 1, "OFF plus a declared MAC is exactly the population #2752 exists for");
 });
