@@ -10,6 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
@@ -245,6 +246,20 @@ test("dispatchShutdown: runs ansible-playbook against sleep.yml, limited to the 
   assert.equal(result.status, 0);
 });
 
+// #2725 done-when 4: a REAL spawnSync (not a stub unconditionally returning {status: 0}), run against a
+// PATH that omits `ansible-playbook` -- exactly the live defect (systemd's default PATH lacked
+// `/root/.local/bin`, where `ansible-playbook` actually lives). Proves `dispatchShutdown` itself surfaces
+// the failure rather than discarding `spawnSync`'s own `error`, which is what let #2725 read as an
+// infinite silent retry instead of a visible one.
+test("dispatchShutdown: a REAL spawnSync against a PATH lacking ansible-playbook surfaces the failure", () => {
+  const run = ((command: string, args: readonly string[], options: { encoding?: string }) =>
+    spawnSync(command, args, { ...options, env: { PATH: "" }, encoding: "utf8" })
+  ) as unknown as typeof import("node:child_process").spawnSync;
+  const result = dispatchShutdown("a11y-worker-2", { run });
+  assert.notEqual(result.status, 0, "a missing ansible-playbook must never read as a successful dispatch");
+  assert.match(result.log, /ENOENT/, "the reason must be visible in the log, not swallowed");
+});
+
 // ---------------------------------------------------------------------------------------------------------
 // reportLine -- names a no-answer worker's own wait (done-when 7.4).
 // ---------------------------------------------------------------------------------------------------------
@@ -302,6 +317,31 @@ test("tick: --apply dispatches exactly the workers decided off, and stamps shutd
   assert.deepEqual(dispatchedNames, ["a11y-worker-2"]);
   assert.deepEqual((savedState as { shutdownRequestedAt: Record<string, number> }).shutdownRequestedAt,
     { "a11y-worker-2": IDLE_THRESHOLD_MS });
+});
+
+test("tick: a failed dispatch is logged to stderr and does not stamp shutdownRequestedAt (done-when 2)", async () => {
+  let savedState: unknown = null;
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let stderrOutput = "";
+  process.stderr.write = ((chunk: string) => { stderrOutput += chunk; return true; }) as typeof process.stderr.write;
+  try {
+    await tick({
+      workers: WORKERS,
+      probe: async () => ({ outcome: "idle" }),
+      now: () => IDLE_THRESHOLD_MS,
+      statePath: "x.json",
+      read: alreadyIdleSince0,
+      write: (_p, data) => { savedState = JSON.parse(String(data)); },
+      apply: true,
+      dispatch: () => ({ status: null, log: "spawnSync ansible-playbook ENOENT" }),
+    });
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  assert.deepEqual((savedState as { shutdownRequestedAt: Record<string, number> }).shutdownRequestedAt, {},
+    "a dispatch that never reached sleep.yml must not be recorded as a requested shutdown");
+  assert.match(stderrOutput, /a11y-worker-2/, "the failure must name the worker");
+  assert.match(stderrOutput, /ENOENT/, "the failure reason must reach the log, not be discarded (#2725)");
 });
 
 test("tick: a worker still idle but under the threshold is kept, and never dispatched even under --apply", async () => {

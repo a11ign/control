@@ -273,7 +273,11 @@ export function dispatchShutdown(name, { run = spawnSync } = {}) {
     env: { ...process.env, ANSIBLE_CONFIG: `${ANSIBLE_DIR}ansible.cfg` },
     encoding: "utf8",
   });
-  return { status: result.status, log: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+  // `result.error` is `spawnSync`'s OWN signal that the process never ran at all (ENOENT when
+  // `ansible-playbook` is not on PATH, the #2725 defect) -- folded into `log` here because it is the
+  // only field the caller reads, and a dropped `error` is exactly how that defect went silent before.
+  const errorDetail = result.error ? `${result.error.message}\n` : "";
+  return { status: result.status, log: `${errorDetail}${result.stdout ?? ""}${result.stderr ?? ""}` };
 }
 
 /**
@@ -343,7 +347,17 @@ export async function tick(deps = {}) {
   if (apply) {
     for (const { worker, decision } of decisions) {
       if (decision.action !== "off") continue;
-      dispatch(worker.name);
+      const dispatched = dispatch(worker.name);
+      // SURFACE A FAILED DISPATCH (done-when 2) -- before this, a `spawnSync` failure (ENOENT when
+      // `ansible-playbook` was not on PATH, #2725) was silently discarded here, so a broken dispatch
+      // environment read as an infinite, successful-looking retry instead of a visible error. A failed
+      // dispatch never actually reached `sleep.yml`, so it does not stamp `shutdownRequestedAt` either --
+      // that field means a shutdown was requested, and none was.
+      if (dispatched.status !== 0) {
+        process.stderr.write(`fleet-auto-off: dispatchShutdown failed for ${worker.name} `
+          + `(status=${dispatched.status}): ${dispatched.log}\n`);
+        continue;
+      }
       shutdownRequestedAt[worker.name] = now;
     }
   }

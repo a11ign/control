@@ -7,6 +7,13 @@ Description=a11y: poll the fleet for idle workers and (once enabled) power them 
 
 [Service]
 Type=oneshot
+# WITHOUT THIS, `ansible-playbook` IS UNREACHABLE -- systemd's default PATH
+# (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin) does not include
+# `/root/.local/bin`, where `ansible-playbook` actually lives on `a11y-control` today. Confirmed live
+# on #2725: with this line absent, `dispatchShutdown`'s `spawnSync("ansible-playbook", ...)` failed
+# with ENOENT on every tick, silently, and `tick()`'s caller dropped the failure on the floor -- the
+# fleet read every idle worker as dispatched, forever, and nothing ever actually shut down.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
 # NO `--apply` HERE ON PURPOSE. `fleet-auto-off.mjs` defaults to report-only regardless of this unit's own
 # enabled/disabled state -- so even a `systemctl start` on this unit by hand, before the timer is ever
 # enabled, only prints a report and powers nothing off. Adding `--apply` is the THIRD row's step, after
