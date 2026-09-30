@@ -8,8 +8,8 @@
  *
  * ## Where this runs, and why it needs no SSH
  *
- * ON THE CONTROL PLANE ITSELF, as the systemd timer `auto-off-schedule.yml` installs (disabled: #2656's
- * own done-when 6). `fleet-playbook.mjs` cannot be reused for the dispatch half -- its whole job is to SSH
+ * ON THE CONTROL PLANE ITSELF, as the systemd timer `auto-off-schedule.yml` installs (live since #2734,
+ * with `--apply` in its unit since #2784). `fleet-playbook.mjs` cannot be reused for the dispatch half -- its whole job is to SSH
  * INTO the control plane from an operator machine that holds `A11Y_PVE_KEY`, and a timer already standing
  * on the control plane is not that machine. This file talks to workers the way `sleep.yml` itself does:
  * plain HTTP to `/health`, and `ansible-playbook` invoked LOCALLY, no ssh hop needed because it is already
