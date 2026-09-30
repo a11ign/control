@@ -164,10 +164,12 @@ const END_MARK = "--end-of-units--";
 
 /**
  * One command, one line per unit -- `<name> <base64 of the file>` -- so a unit's own text can never be
- * mistaken for a delimiter, ended by `END_MARK`.
+ * mistaken for a delimiter, ended by `END_MARK`. Absolute globs rather than a `cd`: this reads a directory
+ * and never works from one, and `control-plane-checkout-is-one-fact.test.ts` rightly treats every `cd` as
+ * a claim about the control plane's checkout.
  */
-const LIST_COMMAND = `cd ${INSTALLED_DIR} && for f in a11y-*.service a11y-*.timer; do `
-  + `[ -f "$f" ] && printf '%s %s\\n' "$f" "$(base64 -w0 "$f")"; done; echo ${END_MARK}`;
+const LIST_COMMAND = `for f in ${INSTALLED_DIR}/a11y-*.service ${INSTALLED_DIR}/a11y-*.timer; do `
+  + `[ -f "$f" ] && printf '%s %s\\n' "\${f##*/}" "$(base64 -w0 "$f")"; done; echo ${END_MARK}`;
 
 /**
  * @param {string} output what `LIST_COMMAND` printed
