@@ -628,3 +628,102 @@ test("#2580: the job's header comment says why it is separate and names the ruli
   assert.match(header, /SEPARATE job/);
   assert.match(header, /which regression you are asserting you have read and accepted/);
 });
+
+// ---------------------------------------------------------------------------------------------------------
+// #2764: `a11y_capture: false` keeps a host out of `A11Y_WORKERS` on the ANSIBLE path too.
+//
+// #2660 taught `fleet-env.mjs` the declaration and left this path building `lab_fleet_workers` from
+// `groups['a11y_workers']` unfiltered, so every `capture-real-pages` run was handed the host the declaration
+// exists to keep out. The two readers of one inventory must agree; the meaning of the key is written once, in
+// `inventory.example.yml`, and not repeated here.
+//
+// The tasks are LIFTED from lab-job.yml byte for byte and run under ansible-playbook against a real inventory.
+// ---------------------------------------------------------------------------------------------------------
+
+const CAPTURE_MARK = "    - name: Only a literal true or false may be declared as a11y_capture";
+const CAPTURE_TASKS = `${CAPTURE_MARK}\n` + between(CATALOGUE, `\n${CAPTURE_MARK}\n`, "\n    # `-e workers=N` MUST NAME A POOL");
+const SELECTION_MARK = "    - name: Which workers this run may use";
+const SELECTION_TASKS = `${SELECTION_MARK}\n`
+  + between(CATALOGUE, `\n${SELECTION_MARK}\n`, "\n    - name: Address the selected workers\n");
+
+type PoolRun = { status: number | null; output: string; fleet: string | null; selected: string[] | null };
+
+/** `hosts` maps a worker name to the lines of vars under it, e.g. `["a11y_capture: false"]`. */
+function runPool(hosts: Record<string, string[]>, extras: string[] = []): PoolRun {
+  const dir = mkdtempSync(join(tmpdir(), "lab-capture-pool-"));
+  try {
+    const FIRST_HOST_OCTET = 10;
+    const addressOf = (i: number) => `192.0.2.${FIRST_HOST_OCTET + i}`;
+    writeFileSync(join(dir, "inventory.yml"), [
+      "all:", "  children:", "    a11y_workers:", "      hosts:",
+      ...Object.entries(hosts).flatMap(([name, vars], i) => [
+        `        ${name}:`, `          ansible_host: ${addressOf(i)}`, ...vars.map((line) => `          ${line}`)]),
+      "",
+    ].join("\n"));
+    writeFileSync(join(dir, "play.yml"), [
+      "- hosts: localhost", "  gather_facts: false", "  tasks:",
+      CAPTURE_TASKS.trimEnd(), SELECTION_TASKS.trimEnd(),
+      "    - name: Render", "      ansible.builtin.copy:",
+      "        content: \"{{ {'fleet': lab_fleet_workers, 'selected': lab_selected_hosts} | to_json }}\"",
+      `        dest: ${join(dir, "out.json")}`, "",
+    ].join("\n"));
+    const run = spawnSync("ansible-playbook", ["-i", "inventory.yml", "play.yml", ...extras],
+      { cwd: dir, encoding: "utf8", env: { ...process.env, ANSIBLE_LOCALHOST_WARNING: "False" } });
+    let rendered: { fleet: string; selected: string[] } | null = null;
+    try { rendered = JSON.parse(readFileSync(join(dir, "out.json"), "utf8")); } catch { rendered = null; }
+    return { status: run.status, output: `${run.stdout}${run.stderr}`,
+      fleet: rendered?.fleet ?? null, selected: rendered?.selected ?? null };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("#2764 (rendered): a host declaring `a11y_capture: false` is absent from the fleet list; undeclared and `true` are present",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runPool({
+      "a11y-worker-a": [],
+      "a11y-worker-b": ["a11y_capture: false"],
+      "a11y-worker-c": ["a11y_capture: true"],
+    });
+    assert.equal(run.status, 0, run.output);
+    assert.equal(run.fleet, "http://192.0.2.10:8765,http://192.0.2.12:8765",
+      "the excluded host must be absent, the undeclared and the `true` host present, in inventory order");
+    assert.deepEqual(run.selected, ["a11y-worker-a", "a11y-worker-c"]);
+  });
+
+test("#2764 (rendered): a fleet declaring nothing is unchanged, so this is not a filter that always drops something",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runPool({ "a11y-worker-a": [], "a11y-worker-b": [] });
+    assert.equal(run.status, 0, run.output);
+    assert.equal(run.fleet, "http://192.0.2.10:8765,http://192.0.2.11:8765");
+  });
+
+test("#2764 (rendered): `-e workers=<n>` counts from the capturing hosts, never from an excluded one",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const hosts = { "a11y-worker-a": ["a11y_capture: false"], "a11y-worker-b": [], "a11y-worker-c": [] };
+    const one = runPool(hosts, ["-e", "workers=1"]);
+    assert.equal(one.status, 0, one.output);
+    assert.deepEqual(one.selected, ["a11y-worker-b"], "the first host in the inventory is excluded, so it cannot be 'the first one'");
+    const tooMany = runPool(hosts, ["-e", "workers=3"]);
+    assert.notEqual(tooMany.status, 0, "3 boxes were granted from a fleet that has 2 to capture on");
+    assert.match(tooMany.output, /more boxes than the fleet has to capture on/);
+  });
+
+test("#2764 (rendered): a pool with no capturing host, and a non-boolean declaration, are each REFUSED",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const none = runPool({ "a11y-worker-a": ["a11y_capture: false"] });
+    assert.notEqual(none.status, 0, "an empty capture pool was accepted");
+    assert.match(none.output, /no capture pool/);
+    assert.equal(none.fleet, null);
+    const spelled = runPool({ "a11y-worker-a": ['a11y_capture: "false"'], "a11y-worker-b": [] });
+    assert.notEqual(spelled.status, 0, "a quoted \"false\" was read as not declared");
+    assert.match(spelled.output, /other than `true` or `false`/);
+  });
+
+test("#2764: every job that pools the fleet reads `lab_fleet_workers`, which is built from the capture hosts",
+  () => {
+    assert.match(CAPTURE_TASKS, /lab_fleet_workers: >-\s+\{\{ lab_capture_hosts\b/,
+      "lab_fleet_workers is no longer derived from lab_capture_hosts");
+    assert.ok(!/lab_fleet_workers: >-\s+\{\{ groups\[/.test(CATALOGUE),
+      "lab_fleet_workers is built from the unfiltered group again");
+  });
