@@ -6,6 +6,14 @@
 #     ansible-playbook lab-job.yml -e job=capture-real-pages -e role=training -e shard=0/4
 #     ansible-playbook lab-job.yml -e job=evidence-check -e only=media-autoplay-audio -e worker=a11y-worker-2
 #
+# ## Being told it ended (#2729): `-e row=<n>`
+#
+#     npm run lab:job -- -e job=evidence-check -e row=2718
+#
+# Name the row that is waiting on the job and the gate's `lab-job-finished` cause wakes that row's holder on
+# its next tick, carrying the outcome and exit code (`tasks/run-job.yml` writes the record). This is what
+# replaces polling `lab:status`. Without `row=` nothing is recorded and nobody is woken.
+#
 # The `capture-real-pages` line carried `-e worker=a11y-worker-2` until #1956, and that job has REFUSED
 # `-e worker=` since it moved to the whole fleet — the file's first example was a command the file itself
 # rejects. `evidence-check` is where a named worker belongs now (#1948): optional there, and it aims a
