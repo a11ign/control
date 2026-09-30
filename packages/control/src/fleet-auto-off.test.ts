@@ -13,6 +13,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
@@ -409,4 +411,31 @@ test("POLL_INTERVAL_MS is strictly shorter than the shortest measured capture (1
   assert.ok(POLL_INTERVAL_MS < 12_000,
     `POLL_INTERVAL_MS (${POLL_INTERVAL_MS}) must be under 12 s or a capture could start and finish `
     + "entirely inside one gap and never be sampled busy");
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// The SHIPPED unit pair -- #2784. Everything above proves the decision; none of it reads the file systemd runs.
+// ---------------------------------------------------------------------------------------------------------
+
+const shippedUnit = (name: string) =>
+  readFileSync(fileURLToPath(new URL(`../ansible/files/${name}`, import.meta.url)), "utf8");
+const activeLines = (unit: string) => unit.split("\n").filter((line) => !line.trimStart().startsWith("#"));
+
+test("#2784: the service passes --apply, or the timer is a report on a clock", () => {
+  // THE FAILURE IS INVISIBLE ELSEWHERE: a unit running the bare script is installed, enabled, active,
+  // exits 0, and prints fifteen lines every ten seconds while nothing powers off. #2734 flipped the timer
+  // live with exactly this unit and both rows closed on a fleet idle for 25h+.
+  const execStart = activeLines(shippedUnit("a11y-fleet-auto-off.service")).filter((l) => l.startsWith("ExecStart="));
+  assert.deepEqual(execStart,
+    ["ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs --apply"]);
+});
+
+test("#2784: the timer polls under the shortest capture and fires the service the playbook installs", () => {
+  const timer = activeLines(shippedUnit("a11y-fleet-auto-off.timer")).join("\n");
+  assert.match(timer, /^OnUnitActiveSec=10s$/m, `${POLL_INTERVAL_MS} ms, so a poll lands inside any capture`);
+  assert.match(timer, /^Unit=a11y-fleet-auto-off\.service$/m);
+  assert.match(timer, /^WantedBy=timers\.target$/m, "an [Install] section, or `enable` has nothing to enable");
+  const playbook = readFileSync(fileURLToPath(new URL("../ansible/auto-off-schedule.yml", import.meta.url)), "utf8");
+  assert.match(playbook, /- a11y-fleet-auto-off\.timer\n\s+- a11y-fleet-auto-off\.service/,
+    "the playbook installs both files of the pair");
 });
