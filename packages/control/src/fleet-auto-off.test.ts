@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
-  readState, writeState, dispatchShutdown, reportLine, tick,
+  readState, writeState, dispatchShutdown, reportLine, tick, DEFAULT_STATE_PATH,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -428,6 +428,15 @@ test("#2784: the service passes --apply, or the timer is a report on a clock", (
   const execStart = activeLines(shippedUnit("a11y-fleet-auto-off.service")).filter((l) => l.startsWith("ExecStart="));
   assert.deepEqual(execStart,
     ["ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs --apply"]);
+});
+
+test("#2784: the service runs from the checkout, or its relative state path is ENOENT on every tick", () => {
+  // Read live on a11y-control at 09:40Z: with no WorkingDirectory the unit starts in `/`, and
+  // `writeState("runs/fleet-auto-off-state.json")` throws ENOENT, so the timer fails every ten seconds
+  // and never dispatches. The state path must stay relative to the directory the unit names.
+  const active = activeLines(shippedUnit("a11y-fleet-auto-off.service"));
+  assert.deepEqual(active.filter((l) => l.startsWith("WorkingDirectory=")), ["WorkingDirectory=/root/a11y-witness"]);
+  assert.ok(!DEFAULT_STATE_PATH.startsWith("/"), "if the state path becomes absolute, this pin and the unit line can go");
 });
 
 test("#2784: the timer polls under the shortest capture and fires the service the playbook installs", () => {
