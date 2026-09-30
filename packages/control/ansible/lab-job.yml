@@ -1473,10 +1473,14 @@
     # `-e '{"resolved_addresses": {"<inventory name>": "<ipv4>"}}'`. DHCP moves boxes (workers 3 and 6
     # each moved within hours on 2026-09-28) and the pin is only a guess at where one is.
     #
-    # HOW IT REACHES THE ADDRESS LISTS WITHOUT TOUCHING THEM: `add_host` on a host the inventory already
-    # has UPDATES its variables in memory for this run, so `hostvars[h].ansible_host` -- which every
-    # address below and `lab_named_worker` read -- is the resolved one, and the inventory file is never
-    # written. Each list is still built by the same expression and still passes the same address assert.
+    # HOW IT REACHES THE ADDRESS LISTS WITHOUT TOUCHING THEM: `set_fact` delegated to the worker, with
+    # `delegate_facts`, sets `ansible_host` on THAT host's variables for this run (a fact outranks the
+    # inventory's own value), so `hostvars[h].ansible_host` -- which every address below and
+    # `lab_named_worker` read -- is the resolved one, and the inventory file is never written. Each list
+    # is still built by the same expression and still passes the same address assert. (`add_host` also
+    # updates a host in memory, but takes `ansible_host` as an undocumented option that
+    # `check-modules.py` rightly refuses.) `set_fact` runs on the controller: no connection is made to a
+    # worker that may not be reachable.
     #
     # NOT A NEW DOOR FOR AN ADDRESS. Extra vars outrank everything, so this is checked as the other
     # inputs are: keys must be inventory workers and values bare IPv4 addresses, or the run is refused.
@@ -1492,12 +1496,15 @@
           Refusing to run: resolved_addresses must map inventory worker names ({{ groups['a11y_workers'] | join(', ') }})
           to plain IPv4 addresses. It is set by lab:job from what it resolved, never by hand.
 
+    # NO `when:` HERE, ON PURPOSE: ansible-core 2.20 templates `delegate_to` BEFORE it evaluates `when`, so
+    # with nothing resolved (every healthy fleet) `item` is undefined and the run FAILS. An empty loop
+    # runs the task zero times and templates nothing.
     - name: Aim each worker that moved at the address it answers on now
-      when: resolved_addresses is defined
-      ansible.builtin.add_host:
-        name: "{{ item.key }}"
+      ansible.builtin.set_fact:
         ansible_host: "{{ item.value }}"
-      loop: "{{ resolved_addresses | dict2items }}"
+      delegate_to: "{{ item.key }}"
+      delegate_facts: true
+      loop: "{{ (resolved_addresses | default({})) | dict2items }}"
       loop_control:
         label: "{{ item.key }} -> {{ item.value }}"
 
