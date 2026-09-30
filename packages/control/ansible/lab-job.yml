@@ -1467,6 +1467,52 @@
           Refusing to run: a worker declares a11y_capture as something other than `true` or `false`.
           A value read as "not declared" would leave a host in the capture pool that meant to be out of it.
 
+    # USE-TIME ADDRESSES (#2803). `lab-job.mjs` resolves each worker it needs where it is used: one that
+    # answers `/health` at its inventory pin is used as pinned, one that does not is looked up by its
+    # declared MAC (two reads that must agree, then `/health`, #2790) and handed here as
+    # `-e '{"resolved_addresses": {"<inventory name>": "<ipv4>"}}'`. DHCP moves boxes (workers 3 and 6
+    # each moved within hours on 2026-09-28) and the pin is only a guess at where one is.
+    #
+    # HOW IT REACHES THE ADDRESS LISTS WITHOUT TOUCHING THEM: `add_host` on a host the inventory already
+    # has UPDATES its variables in memory for this run, so `hostvars[h].ansible_host` -- which every
+    # address below and `lab_named_worker` read -- is the resolved one, and the inventory file is never
+    # written. Each list is still built by the same expression and still passes the same address assert.
+    #
+    # NOT A NEW DOOR FOR AN ADDRESS. Extra vars outrank everything, so this is checked as the other
+    # inputs are: keys must be inventory workers and values bare IPv4 addresses, or the run is refused.
+    # `lab-job.mjs` refuses a command line that sets it, so the only writer is what it resolved itself.
+    - name: A use-time address names an inventory worker and a bare IPv4 address, and nothing else
+      when: resolved_addresses is defined
+      ansible.builtin.assert:
+        that:
+          - resolved_addresses is mapping
+          - resolved_addresses | list | difference(groups['a11y_workers']) | length == 0
+          - resolved_addresses | dict2items | map(attribute='value') | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+        fail_msg: >-
+          Refusing to run: resolved_addresses must map inventory worker names ({{ groups['a11y_workers'] | join(', ') }})
+          to plain IPv4 addresses. It is set by lab:job from what it resolved, never by hand.
+
+    - name: Aim each worker that moved at the address it answers on now
+      when: resolved_addresses is defined
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        ansible_host: "{{ item.value }}"
+      loop: "{{ resolved_addresses | dict2items }}"
+      loop_control:
+        label: "{{ item.key }} -> {{ item.value }}"
+
+    # A worker `lab-job.mjs` found neither at its pin nor by MAC, and could not wake, for a job that took
+    # the WHOLE fleet: left out of the pool by name (it printed why). A job that NAMED its pool is refused
+    # there instead, so nothing named is ever left out here.
+    - name: A left-out worker is an inventory worker
+      when: left_out_workers is defined
+      ansible.builtin.assert:
+        that:
+          - left_out_workers is sequence and left_out_workers is not string
+          - left_out_workers | difference(groups['a11y_workers']) | length == 0
+        fail_msg: >-
+          Refusing to run: left_out_workers must list inventory worker names ({{ groups['a11y_workers'] | join(', ') }}).
+
     - name: Which enrolled workers take captured cases
       ansible.builtin.set_fact:
         lab_capture_hosts: >-
@@ -1474,6 +1520,7 @@
              | reject('in', groups['a11y_workers'] | map('extract', hostvars)
                             | selectattr('a11y_capture', 'defined') | selectattr('a11y_capture', 'sameas', false)
                             | map(attribute='inventory_hostname') | list)
+             | reject('in', left_out_workers | default([]))
              | list }}
 
     - name: At least one enrolled worker must take captured cases

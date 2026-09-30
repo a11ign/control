@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor } from "./lab-job.mjs";
+import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs } from "./lab-job.mjs";
+import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
 
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
 
@@ -726,4 +727,191 @@ test("#2764: every job that pools the fleet reads `lab_fleet_workers`, which is 
       "lab_fleet_workers is no longer derived from lab_capture_hosts");
     assert.ok(!/lab_fleet_workers: >-\s+\{\{ groups\[/.test(CATALOGUE),
       "lab_fleet_workers is built from the unfiltered group again");
+  });
+
+
+// ---------------------------------------------------------------------------------------------------------
+// #2803: `lab:job` builds its pool from addresses resolved AT USE TIME, not the inventory pin.
+//
+// THE FIXTURE: three workers. `a` answers at its pin. `b` is silent at its pin and its MAC reads at another
+// address, twice, where `/health` answers (a MOVED worker). `c` is silent everywhere and reads nowhere (MISSING).
+// The resolution is `resolvePoolAtUseTime` ITSELF, given a fake probe and a fake neighbour read, so the
+// two-read-plus-`/health` rule is the shipped one and not a restatement of it.
+// ---------------------------------------------------------------------------------------------------------
+
+const PIN = (i: number) => `http://192.0.2.${i}:8765`;
+const MOVED_TO = "192.0.2.99";
+const FLEET_2803 = [
+  { name: "a11y-worker-a", url: PIN(10), mac: "aa:bb:cc:dd:ee:01" },
+  { name: "a11y-worker-b", url: PIN(11), mac: "aa:bb:cc:dd:ee:02" },
+  { name: "a11y-worker-c", url: PIN(12), mac: "aa:bb:cc:dd:ee:03" },
+];
+const UP_AT = new Set([PIN(10), `http://${MOVED_TO}:8765`]);
+const fixtureResolver = (workers: typeof FLEET_2803, macReads: Array<Map<string, string>> = []) => {
+  const reads = [...macReads];
+  return () => resolvePoolAtUseTime(workers, {
+    probe: async (url) => UP_AT.has(url),
+    macRead: () => reads.shift() ?? new Map(),
+  });
+};
+const sameMove = () => [new Map([["a11y-worker-b", MOVED_TO]]), new Map([["a11y-worker-b", MOVED_TO]])];
+
+type Drive2803 = { events: string[]; woken: { name: string; url: string }[]; checkedPool: string[];
+  dispatched: string[] | null; exited: number | undefined; stderr: string };
+
+async function drive2803(argv: string[], { workers = FLEET_2803, macReads = sameMove() } = {}): Promise<Drive2803> {
+  const seen: Drive2803 = { events: [], woken: [], checkedPool: [], dispatched: null, exited: undefined, stderr: "" };
+  const realExit = process.exit;
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string) => { seen.stderr += chunk; return true; }) as typeof process.stderr.write;
+  process.exit = ((code: number) => { seen.exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
+  try {
+    await run(argv, {
+      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef",
+      readFleet: () => ({ refusal: null, workers }),
+      resolvePool: (needed) => fixtureResolver(needed as typeof FLEET_2803, macReads)(),
+      // A worker is up exactly where the fixture says something answers; `c` never is, so waking it fails.
+      wake: async (needed) => {
+        seen.events.push("wake");
+        seen.woken = needed.map(({ name, url }) => ({ name, url }));
+        return needed.map((w) => ({ name: w.name, host: w.name, state: UP_AT.has(w.url) ? "already-up" : "no-answer" }));
+      },
+      checkFleet: async (_expected, pool) => { seen.events.push("check"); seen.checkedPool = pool as string[]; },
+      dispatch: (forwarded) => { seen.events.push("dispatch"); seen.dispatched = forwarded; },
+    });
+  } catch (error) {
+    if (!/^exit \d$/.test((error as Error).message)) throw error;
+  } finally {
+    process.exit = realExit;
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+  return seen;
+}
+
+const passed = (dispatched: string[] | null) =>
+  JSON.parse(String(dispatched?.at(-1) ?? "{}")) as Record<string, unknown>;
+
+test("#2803: a whole-fleet job wakes, checks and is dispatched at the MOVED worker's resolved address, not its pin", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  assert.equal(seen.exited, undefined);
+  assert.deepEqual(seen.woken.find((w) => w.name === "a11y-worker-b")?.url, `http://${MOVED_TO}:8765`,
+    "the wake must aim at where the box is, or it waits five minutes on an address nothing answers at");
+  assert.ok(!seen.checkedPool.includes(PIN(11)), "the staleness check must not be aimed at the moved worker's pin");
+  assert.deepEqual(seen.checkedPool, [PIN(10), `http://${MOVED_TO}:8765`]);
+  assert.deepEqual(passed(seen.dispatched), {
+    resolved_addresses: { "a11y-worker-b": MOVED_TO }, left_out_workers: ["a11y-worker-c"] });
+  assert.deepEqual(seen.dispatched?.slice(0, 4), ["-e", "job=capture", "-e", "only=x"], "the caller's own arguments are untouched");
+});
+
+test("#2803: each moved worker is named with its old AND new address, and each missing worker with why", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  assert.match(seen.stderr, new RegExp(`MOVED a11y-worker-b: pinned ${PIN(11)}, answers by MAC at http://${MOVED_TO}:8765`));
+  assert.match(seen.stderr, new RegExp(`MISSING a11y-worker-c \\(${PIN(12)}\\): no answer at its pin, and its mac is not on the network segment -- left out`));
+  assert.doesNotMatch(seen.stderr, /MOVED a11y-worker-[ac]\b/, "a worker that answers at its pin is not reported as moved");
+});
+
+test("#2803: a worker that is missing does not block a job whose pool the caller did not name", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  assert.deepEqual(seen.events, ["wake", "check", "dispatch"]);
+  assert.equal(seen.exited, undefined);
+});
+
+test("#2803: a NAMED pool keeps its all-or-nothing rule -- naming the missing worker is a refusal, never a smaller pool", async () => {
+  const seen = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-c", "-e", "only=x"]);
+  assert.equal(seen.exited, 3);
+  assert.deepEqual(seen.events, ["wake"], "neither the check nor the dispatch may run after the refusal");
+  assert.equal(seen.dispatched, null);
+});
+
+test("#2803: a NAMED pool whose members are all found -- one of them moved -- runs, and its moved address goes to the playbook", async () => {
+  const seen = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"]);
+  assert.equal(seen.exited, undefined);
+  assert.deepEqual(passed(seen.dispatched), { resolved_addresses: { "a11y-worker-b": MOVED_TO } },
+    "nothing is left out of a pool that named its members");
+});
+
+test("#2803: a healthy fleet pays one probe each, and its dispatch line is byte-identical to before this row", async () => {
+  const healthy = FLEET_2803.slice(0, 1);
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { workers: healthy, macReads: [] });
+  assert.deepEqual(seen.dispatched, ["-e", "job=capture", "-e", "only=x"]);
+  assert.equal(seen.stderr, "", "nothing moved and nothing missing, so nothing is said");
+});
+
+test("#2803: two neighbour reads that DISAGREE trust no address -- the worker is missing, not moved to whichever read came first", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"],
+    { macReads: [new Map([["a11y-worker-b", MOVED_TO]]), new Map([["a11y-worker-b", "192.0.2.77"]])] });
+  assert.doesNotMatch(String(seen.dispatched?.join(" ")), /resolved_addresses/);
+  assert.match(seen.stderr, /MISSING a11y-worker-b[^\n]*read as 192\.0\.2\.99 once and not again/);
+});
+
+test("#2803: a caller may not supply the use-time variables -- they are what lab:job resolved, and nothing else", async () => {
+  for (const attempt of ["resolved_addresses={\"a11y-worker-a\":\"192.0.2.1\"}", "left_out_workers=[]"]) {
+    const seen = await drive2803(["-e", "job=capture", "-e", attempt]);
+    assert.equal(seen.exited, 3, attempt);
+    assert.equal(seen.dispatched, null, attempt);
+  }
+});
+
+test("#2803: useTimeArgs renders nothing for an undisturbed fleet, and JSON for the two things that changed", () => {
+  assert.deepEqual(useTimeArgs({ moved: {}, leftOut: [] }), []);
+  assert.deepEqual(JSON.parse(useTimeArgs({ moved: { w: "192.0.2.5" }, leftOut: [] })[1]), { resolved_addresses: { w: "192.0.2.5" } });
+  assert.deepEqual(JSON.parse(useTimeArgs({ moved: {}, leftOut: ["w"] })[1]), { left_out_workers: ["w"] });
+});
+
+test("#2803: the real entry hands run() the real resolver, and run() has no default for it (a test cannot reach a socket)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+  assert.match(source, /resolvePool: resolvePoolAtUseTime \}\)/);
+  assert.doesNotMatch(source, /resolvePool = /, "a default would let a test that leaves it out reach the real neighbour table");
+});
+
+// The playbook half, rendered under ansible-playbook: the SAME tasks lifted byte for byte.
+type Rendered = PoolRun & { named: string | null };
+
+function runUseTime(extras: string[], hosts = { "a11y-worker-a": [], "a11y-worker-b": [], "a11y-worker-c": [] } as Record<string, string[]>): Rendered {
+  const run = runPool(hosts, extras);
+  return { ...run, named: null };
+}
+
+test("#2803 (rendered): a moved worker's resolved address is in `lab_fleet_workers`, not its pin",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const moved = runUseTime(["-e", JSON.stringify({ resolved_addresses: { "a11y-worker-b": MOVED_TO } })]);
+    assert.equal(moved.status, 0, moved.output);
+    assert.equal(moved.fleet, `http://192.0.2.10:8765,http://${MOVED_TO}:8765,http://192.0.2.12:8765`);
+    assert.doesNotMatch(String(moved.fleet), /192\.0\.2\.11/, "the pin must be gone, or the run is aimed at the old address");
+    const pinned = runUseTime([]);
+    assert.equal(pinned.fleet, "http://192.0.2.10:8765,http://192.0.2.11:8765,http://192.0.2.12:8765",
+      "positive control: with nothing resolved the list is the inventory's, so the line above is the override's doing");
+  });
+
+test("#2803 (rendered): a left-out worker is absent from the pool, and the others are not",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runUseTime(["-e", JSON.stringify({ left_out_workers: ["a11y-worker-c"] })]);
+    assert.equal(run.status, 0, run.output);
+    assert.equal(run.fleet, "http://192.0.2.10:8765,http://192.0.2.11:8765");
+    assert.deepEqual(run.selected, ["a11y-worker-a", "a11y-worker-b"]);
+  });
+
+test("#2803 (rendered): an address that is not a bare IPv4, and a name that is not a worker, are each REFUSED",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const refused = [
+      { resolved_addresses: { "a11y-worker-b": "192.0.2.99:9999" } },
+      { resolved_addresses: { "a11y-worker-b": "evil.example" } },
+      { resolved_addresses: { "a11y-worker-b": "" } },
+      // Passes the fleet list's own `[0-9.]+` pattern, so ONLY this row's assert stands between it and the environment.
+      { resolved_addresses: { "a11y-worker-b": "1.2.3.4.5" } },
+      { resolved_addresses: { "a11y-worker-b": "..." } },
+      { resolved_addresses: { "not-a-worker": MOVED_TO } },
+      { resolved_addresses: ["a11y-worker-b"] },
+      { left_out_workers: ["not-a-worker"] },
+      { left_out_workers: "a11y-worker-c" },
+    ];
+    for (const vars of refused) {
+      const run = runUseTime(["-e", JSON.stringify(vars)]);
+      assert.notEqual(run.status, 0, `${JSON.stringify(vars)} must be refused: ${run.output}`);
+      assert.equal(run.fleet, null, `${JSON.stringify(vars)} must not have built a pool`);
+      assert.match(run.output, /resolved_addresses must map|left_out_workers must list/, `refused by its own assert, not by a later one: ${run.output}`);
+    }
   });

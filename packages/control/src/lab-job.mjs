@@ -60,6 +60,9 @@ import { codeVersion, workerSourceDir } from "../../nvda-worker/src/code-version
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
+// #2803: the SAME two-read-plus-`/health` rule `doctor` and `worker:code` use (#2790), imported rather than
+// restated -- a second copy of "when is a neighbour-table address to be trusted" is the one that drifts.
+import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
@@ -341,6 +344,59 @@ export function wakeRefusal(results, selected) {
 }
 
 /**
+ * The extra vars `lab-job.yml` reads to build its address lists from USE-TIME addresses (#2803). Named
+ * without a `lab_` prefix on purpose: they are inputs from outside the playbook, not facts it sets.
+ * A caller never supplies them -- `run` refuses a command line that does -- because they are the one place
+ * an address reaches the playbook other than the inventory; the playbook still proves each is a bare IPv4
+ * address of an inventory worker before using it.
+ */
+const USE_TIME_VARS = ["resolved_addresses", "left_out_workers"];
+
+/**
+ * @param {{ moved: Record<string, string>, leftOut: string[] }} placement
+ * @returns {string[]} `-e` arguments, none when nothing moved and nothing was left out
+ */
+export function useTimeArgs({ moved, leftOut }) {
+  /** @type {Record<string, unknown>} */
+  const vars = {};
+  if (Object.keys(moved).length) vars.resolved_addresses = moved;
+  if (leftOut.length) vars.left_out_workers = leftOut;
+  return Object.keys(vars).length ? ["-e", JSON.stringify(vars)] : [];
+}
+
+/**
+ * WHERE EACH NEEDED WORKER IS NOW (#2803), before it is woken or handed to the playbook. A worker that
+ * answers at its pin is used as pinned; one that does not is looked up by MAC (`resolvePoolAtUseTime`) and,
+ * when found, carried on at its new address -- so the wake, the staleness check and the playbook all aim at
+ * the box that is there. Reported on stderr, one line each, never written back to the inventory.
+ *
+ * A worker not found is NOT dropped here: it may simply be powered off, which is what the wake step is
+ * for, and a box that comes up comes up at its pin. What is left out is decided AFTER the wake.
+ *
+ * @param {Worker[]} needed
+ * @param {typeof resolvePoolAtUseTime} resolvePool
+ * @returns {Promise<{ needed: Worker[], moved: Record<string, string>, why: Map<string, string> }>}
+ */
+async function placeAtUseTime(needed, resolvePool) {
+  const resolved = await resolvePool(needed);
+  /** @type {Record<string, string>} */
+  const moved = {};
+  for (const { name, from, to } of resolved.moved) {
+    moved[name] = new URL(to).hostname;
+    process.stderr.write(`lab-job: MOVED ${name}: pinned ${from}, answers by MAC at ${to} -- using that address for `
+      + "this run; inventory.yml is not rewritten (fix it, and ask for a DHCP reservation, #2752)\n");
+  }
+  return {
+    needed: needed.map((w) => (moved[w.name] ? { ...w, url: withAddress(w.url, moved[w.name]) } : w)),
+    moved,
+    why: new Map(resolved.missing.map(({ name, why }) => [name, why])),
+  };
+}
+
+/** @param {string} url @param {string} address the same URL, aimed at another host */
+const withAddress = (url, address) => url.replace(new URL(url).hostname, address);
+
+/**
  * Check the fleet, then dispatch — every dependency injectable, so a test can drive the DECISION without
  * a real fleet, a real ansible-playbook, or a real `process.exit`.
  *
@@ -359,8 +415,9 @@ export function wakeRefusal(results, selected) {
  *           checkFleet?: (expected: string, workers: string[], options: object) => Promise<void>,
  *           dispatch?: (forwarded: string[]) => void,
  *           readFleet?: () => { workers: Worker[], refusal: string | null },
- *           wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]> }} [deps]
- *   `wake` has NO default: only the command-line entry passes the real one (#2655).
+ *           wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
+ *           resolvePool?: typeof resolvePoolAtUseTime }} [deps]
+ *   `wake` and `resolvePool` have NO default: only the command-line entry passes the real ones (#2655, #2803).
  */
 export async function run(argv, {
   catalogueText, workers, expected,
@@ -368,11 +425,17 @@ export async function run(argv, {
   dispatch = dispatchToAnsible,
   readFleet = readControlPlaneFleet,
   wake,
+  resolvePool,
 } = {}) {
   // Stripped before forwarding: `ansible-playbook` does not recognise this flag and would refuse the
   // whole command line with it still attached, and it is this file's own concern, not the playbook's.
   const allowStale = argv.includes("--allow-stale-workers");
   const forwarded = argv.filter((a) => a !== "--allow-stale-workers");
+  const supplied = USE_TIME_VARS.find((name) => argv.some((a) => a.includes(name)));
+  if (supplied) {
+    process.stderr.write(`REFUSING: ${supplied} is set by lab:job from what it resolved this run, never by a caller.\n`);
+    return process.exit(3);
+  }
 
   const job = jobNamed(argv);
   if (job && !isDescribeOnly(argv)) {
@@ -388,20 +451,40 @@ export async function run(argv, {
         process.stderr.write(`${needs.refusal}\n`);
         return process.exit(3);
       }
-      // WAKE FIRST (#2655): the staleness check below reads `/health`, and a worker that is powered off
-      // between jobs answers nothing, which `describeCodeDrift` refuses as "none answered".
-      if (wake && needs.needed.length) await wakeOrRefuse(needs, wake);
-      if (captureBearingJobs(catalogue).includes(job)) {
-        const pool = needs.needed.map((w) => w.url);
-        const hash = expected ?? codeVersion(workerSourceDir());
-        await checkFleet(hash, pool, { when: "before dispatching to the lab", allow: allowStale,
-          bareMetalUrls: pool });
-        // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
-      }
+      const usable = await placeWakeAndCheck({ needs, catalogue, job }, { expected, checkFleet, allowStale, wake, resolvePool });
+      dispatch([...forwarded, ...useTimeArgs(usable)]);
+      return;
     }
   }
 
   dispatch(forwarded);
+}
+
+/**
+ * Resolve, wake, then check staleness -- in that order, each for a reason the comments below give.
+ *
+ * @param {{ needs: { needed: Worker[], selected: boolean }, catalogue: string, job: string }} run
+ * @param {{ expected?: string, checkFleet: (expected: string, workers: string[], options: object) => Promise<void>,
+ *           allowStale: boolean, wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
+ *           resolvePool?: typeof resolvePoolAtUseTime }} deps
+ * @returns {Promise<{ moved: Record<string, string>, leftOut: string[] }>}
+ */
+async function placeWakeAndCheck({ needs, catalogue, job }, { expected, checkFleet, allowStale, wake, resolvePool }) {
+  // RESOLVE FIRST (#2803): the wake and the staleness check below both aim at an address, and a worker that
+  // moved answers nothing at its pin -- which the wake would wait five minutes on and then call missing.
+  const placed = resolvePool && needs.needed.length
+    ? await placeAtUseTime(needs.needed, resolvePool)
+    : { needed: needs.needed, moved: {}, why: new Map() };
+  // WAKE NEXT (#2655): the staleness check below reads `/health`, and a worker that is powered off
+  // between jobs answers nothing, which `describeCodeDrift` refuses as "none answered".
+  const leftOut = wake && placed.needed.length ? await wakeOrRefuse({ ...needs, needed: placed.needed }, wake, placed.why) : [];
+  const pool = placed.needed.filter((w) => !leftOut.includes(w.name)).map((w) => w.url);
+  if (captureBearingJobs(catalogue).includes(job)) {
+    const hash = expected ?? codeVersion(workerSourceDir());
+    await checkFleet(hash, pool, { when: "before dispatching to the lab", allow: allowStale, bareMetalUrls: pool });
+    // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
+  }
+  return { moved: placed.moved, leftOut };
 }
 
 /**
@@ -419,10 +502,16 @@ function neededFor(job, demand, argv, sources) {
 }
 
 /**
+ * Wake `needed`, and return the NAMES of the workers a job that took the whole fleet goes on without
+ * (#2803): each is printed as MISSING with the reason the resolution gave, and the playbook leaves it out
+ * of the pool it builds. A job that named its pool refuses instead (`wakeRefusal`), unchanged.
+ *
  * @param {{ needed: Worker[], selected: boolean }} needs
  * @param {(needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>} wake
+ * @param {Map<string, string>} why the resolution's reason per worker it could not find
+ * @returns {Promise<string[]>}
  */
-async function wakeOrRefuse({ needed, selected }, wake) {
+async function wakeOrRefuse({ needed, selected }, wake, why) {
   const results = await wake(needed);
   process.stdout.write(`${results.map((r) => wakeReportLine(r)).join("\n")}\n`);
   const refusal = wakeRefusal(results, selected);
@@ -430,8 +519,14 @@ async function wakeOrRefuse({ needed, selected }, wake) {
     process.stderr.write(`${refusal}\n`);
     process.exit(3);
   }
+  const gone = results.filter(wakeFailed);
+  for (const { name } of gone) {
+    const url = needed.find((w) => w.name === name)?.url;
+    process.stderr.write(`lab-job: MISSING ${name} (${url}): ${why.get(name) ?? "did not come up"} -- left out of this run\n`);
+  }
+  return gone.map((r) => r.name);
 }
 
 // `wake` is passed HERE and defaults to nothing in `run`, so a test that drives `run` with fakes cannot
 // reach a real socket by leaving a dependency out. `lab-job.test.ts`-style tests read this line (#2655).
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await run(process.argv.slice(2), { wake: wakeNeeded });
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime });
