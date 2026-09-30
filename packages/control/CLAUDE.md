@@ -52,8 +52,8 @@ npm run fleet:status                                                # what every
 `npm run fleet:auto-off` reports, per worker, `off` or `keep` and why -- report-only until `--apply` is
 passed, and even then only for a worker its own pure decision names. It is the timer half of #2656: an
 idle-five-minutes worker powers itself off through `sleep.yml`, reused rather than reimplemented, and the
-`auto-off-schedule.yml` playbook that installs it ships the systemd timer DISABLED until wake-on-demand has
-been read live on the real fleet.
+`auto-off-schedule.yml` playbook installs its timer LIVE, and the unit passes `--apply` (a unit without it is a
+report on a clock; the installed copy is the program, so read `systemctl list-timers` on the control host, #2784).
 
 A multi-round SAME-BUILD sequence (every round must land on one worker build, e.g. #781) needs its own hold BETWEEN captures, when no worker is actually `busy` and the check above says nothing. Write **`Fleet-hold-until: <ISO-8601 UTC timestamp, with seconds>`** in the row's body (an OPEN row carrying `fleet-gated`) and `fleet:deploy`/`fleet:provision` refuse until that time passes or the row closes — self-clearing either way, unlike the row-comment sentence that lost #1767's and #1768's baselines to ordinary merge cadence. **Name your own workers to hold only them** — append a comma-separated list, e.g. `Fleet-hold-until: 2026-09-27T22:00:00Z a11y-worker-2,a11y-worker-3` — and a deploy/provision whose own `--limit` never touches a named worker proceeds; naming none holds the whole fleet, unchanged (ceo, #928 point 2, #2736). `--allow-hold=<row>` overrides, one row at a time, repeatable, and refuses a number that names a row not currently holding anything. [#1839 →](https://github.com/a11ign/a11ign/issues/1839)
 
@@ -82,6 +82,8 @@ holds against the ssh path too, which an in-process flag could not.
 why not an `/admin/update` route (the worker has no auth and binds all interfaces), and the two Windows
 gotchas that otherwise cost an afternoon — `administrators_authorized_keys` and OpenSSH's `DefaultShell`.
 The fleet is defined **once**, in `inventory.yml`.
+
+Fetching a file FROM a Windows OpenSSH guest (copy-provisioning) takes `scp -O`: the default SFTP `scp` silently truncates it to 204800 bytes and exits 0. Push is unaffected. [Why →](docs/operational-lessons.md#a-default-scp-fetch-from-a-windows-openssh-guest-is-cut-to-204800-bytes-without-a-word-2770-found-on-2763)
 
 A new bare-metal box needs no console visit — PXE + `autounattend.xml` plants the account and key. Deploy pushes every hashed file (defined once in `packages/nvda-worker/src/worker-files.mjs`) and reboots each guest, since `utmctl exec` cannot be trusted to restart the worker. Roll back by checking out the ref and redeploying — git is the source of truth. `worker:deploy` refuses a `CAPTURE_PROTOCOL_VERSION` change without `--allow-protocol-change` (it invalidates the whole cache). [Full detail →](docs/operational-lessons.md#a-new-box-needs-no-console-visit-and-the-protocol-version-trap)
 

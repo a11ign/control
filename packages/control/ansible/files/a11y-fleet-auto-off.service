@@ -3,7 +3,7 @@
 # `a11y-corpus-snapshot.service`, there is no separately-named transient unit to avoid colliding with,
 # because nothing dispatches this job by hand through `systemd-run` -- a manual run is a plain foreground
 # `node fleet-auto-off.mjs`, so this unit and a manual run share no unit name to collide over.
-Description=a11y: poll the fleet for idle workers and (once enabled) power them off
+Description=a11y: poll the fleet for idle workers and power them off
 
 [Service]
 Type=oneshot
@@ -14,14 +14,18 @@ Type=oneshot
 # with ENOENT on every tick, silently, and `tick()`'s caller dropped the failure on the floor -- the
 # fleet read every idle worker as dispatched, forever, and nothing ever actually shut down.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
-# NO `--apply` HERE ON PURPOSE. `fleet-auto-off.mjs` defaults to report-only regardless of this unit's own
-# enabled/disabled state -- so even a `systemctl start` on this unit by hand, before the timer is ever
-# enabled, only prints a report and powers nothing off. Adding `--apply` is the THIRD row's step, after
-# wake-on-demand has been read live (#2656's own text): a decision this file does not make for it.
+# `--apply` IS HERE (#2784), OR THE TIMER IS A REPORT ON A CLOCK. `fleet-auto-off.mjs` defaults to report-only
+# on purpose -- a stray manual `npm run fleet:auto-off` on the wrong box must not power anything off -- so the
+# unit has to carry the flag, and a unit without it is installed, enabled, active, exits 0, prints 15
+# `keep`/`off` lines every 10 s and shuts nothing down. #2656 shipped this unit without it, "the THIRD row's
+# step"; #2734 was that third row, flipped the timer live, and left this line out -- so a fleet sat powered at
+# 0 captures for 25h+ with both rows closed. `fleet-auto-off.test.ts` now pins the flag. The never-mid-capture
+# guarantee does not depend on it: the `busy`/`no-answer` branches of `autoOffDecision` and `sleep.yml`'s own
+# re-check immediately before the shutdown are what refuse a capturing worker.
 #
 # THE LITERAL PATH IS THE ONLY WAY A STATIC UNIT FILE CAN SAY THIS AT ALL -- it cannot import
 # `control-plane-checkout.mjs`'s export the way a `.mjs` consumer does, the same reason
 # `a11y-corpus-snapshot.service` names `/opt/a11y` literally for the lab's own checkout
 # (`control-plane-checkout-is-one-fact.test.ts`). `a11y-witness` here is that same guard's own
 # `CHECKOUT_NAME`, read out of `control-plane-checkout.mjs`, not a second literal invented for this file.
-ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs
+ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs --apply
