@@ -83,6 +83,8 @@ why not an `/admin/update` route (the worker has no auth and binds all interface
 gotchas that otherwise cost an afternoon — `administrators_authorized_keys` and OpenSSH's `DefaultShell`.
 The fleet is defined **once**, in `inventory.yml`.
 
+Fetching a file FROM a Windows OpenSSH guest (copy-provisioning) takes `scp -O`: the default SFTP `scp` silently truncates it to 204800 bytes and exits 0. Push is unaffected. [Why →](docs/operational-lessons.md#a-default-scp-fetch-from-a-windows-openssh-guest-is-cut-to-204800-bytes-without-a-word-2770-found-on-2763)
+
 A new bare-metal box needs no console visit — PXE + `autounattend.xml` plants the account and key. Deploy pushes every hashed file (defined once in `packages/nvda-worker/src/worker-files.mjs`) and reboots each guest, since `utmctl exec` cannot be trusted to restart the worker. Roll back by checking out the ref and redeploying — git is the source of truth. `worker:deploy` refuses a `CAPTURE_PROTOCOL_VERSION` change without `--allow-protocol-change` (it invalidates the whole cache). [Full detail →](docs/operational-lessons.md#a-new-box-needs-no-console-visit-and-the-protocol-version-trap)
 
 Five more `utmctl`/local-VM quirks that have each cost real time — do not restart with `utmctl exec` and believe it, verify through `/health` not `exec`, this shell is zsh (no scalar word-splitting), `utmctl` needs the UTM app running, and `utmctl exec`/SSH land in session 0 and cannot run a capture. [Full detail →](docs/local-worker-vm.md#five-utmctl-quirks-moved-from-claudemd-458).

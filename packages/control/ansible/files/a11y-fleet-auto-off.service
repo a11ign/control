@@ -28,4 +28,12 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/r
 # `a11y-corpus-snapshot.service` names `/opt/a11y` literally for the lab's own checkout
 # (`control-plane-checkout-is-one-fact.test.ts`). `a11y-witness` here is that same guard's own
 # `CHECKOUT_NAME`, read out of `control-plane-checkout.mjs`, not a second literal invented for this file.
+# `WorkingDirectory` IS HERE BECAUSE THE STATE PATH IS RELATIVE (#2784). `fleet-auto-off.mjs` keeps its idle
+# clock at `runs/fleet-auto-off-state.json`, resolved against the process's cwd, and a systemd service starts
+# in `/`: read live 2026-09-30 09:40Z, the first tick of the freshly installed timer died with
+# `ENOENT: open 'runs/fleet-auto-off-state.json'` and so did every one after it, every ten seconds. The
+# by-hand run that proved the shutdown had set `-p WorkingDirectory=/root/a11y-witness`, which is why the
+# report looked fine. The failure is in the SAFE direction (nothing is powered off), which is also why a
+# green unit suite could not see it. Same literal checkout as ExecStart, for the same reason.
+WorkingDirectory=/root/a11y-witness
 ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs --apply

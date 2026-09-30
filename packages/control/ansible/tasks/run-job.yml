@@ -59,6 +59,14 @@
     # Exit codes other than 0 that mean success, matching `run-interactive.yml`'s `interactive_ok`.
     job_ok: "{{ [0] + (job_success_codes | default([])) }}"
 
+# `-e row=<n>` NAMES THE ROW WAITING ON THIS JOB (#2729), and it is refused BEFORE anything starts: a typo
+# found after an hour-long job has ended is a wake that never arrives, which is the poll this exists to end.
+- name: "The row waiting on this job must be a row number: {{ job_name }}"
+  when: row is defined
+  ansible.builtin.assert:
+    that: (row | string) is match('^[1-9][0-9]*$')
+    fail_msg: "-e row={{ row }} is not a row number; it names the GitHub row the gate wakes when {{ job_name }} ends."
+
 - name: "What is this unit doing right now: {{ job_name }}"
   ansible.builtin.command:
     argv: [systemctl, show, "-p", SubState, "--value", "{{ job_unit }}"]
@@ -506,6 +514,55 @@
     argv: [systemctl, stop, "{{ job_unit }}"]
   changed_when: false
   failed_when: false
+
+# THE PUSH HALF OF #2729: NO GATE CAUSE FIRED WHEN A LAB JOB ENDED, so sessions polled `lab:status` and each
+# poll re-read a large context to learn nothing. This is the one moment the outcome is known exactly, by the
+# process that has been waiting for it, so it is written down HERE for `work-gate.mjs`'s `lab-job-finished`
+# cause (`.agent-org/plugins/causes.mjs`, `packages/agent-org/src/work-gate/lab-job-orders.mjs`) to find on
+# its next tick and hand to the row's holder.
+#
+# AFTER THE RELEASE, so a woken holder that dispatches the next job does not meet "a second one is running".
+# BEFORE THE ASSERT, so a job that FAILED is recorded too -- the failure is the result most worth waking for.
+# One file per InvocationID: a re-run of the same job is a new record and the same run is never recorded twice.
+# The reader is a different package that cannot import this one; `lab-job.test.ts` pins the field names.
+#
+# NOT DELEGATED TO THE LAB: the gate reads the control host's disk and the lab is a different machine.
+# A failed write is IGNORED-BUT-PRINTED rather than fatal, because failing here would replace the job's own
+# verdict (the assert below) with a bookkeeping error.
+#
+# A DISPATCH KILLED BEFORE THIS TASK WRITES NOTHING. That is the known hole: the unit is left `exited` on the
+# lab and only `lab:status` sees it.
+- name: "Make the directory the gate reads: {{ job_name }}"
+  when: row is defined
+  delegate_to: localhost
+  become: false
+  run_once: true
+  ansible.builtin.file:
+    path: "{{ lookup('env', 'HOME') }}/.cache/a11ign/lab-jobs"
+    state: directory
+    mode: "0755"
+  ignore_errors: true
+
+- name: "Tell the gate this job ended, for row {{ row | default('-') }}: {{ job_name }}"
+  when: row is defined
+  delegate_to: localhost
+  become: false
+  ansible.builtin.copy:
+    dest: "{{ lookup('env', 'HOME') }}/.cache/a11ign/lab-jobs/{{ job_name }}-{{ job_invocation.stdout | trim }}.json"
+    mode: "0644"
+    content: >-
+      {{ {
+        "schema": 1,
+        "job": job_name,
+        "row": (row | int),
+        "invocation": (job_invocation.stdout | trim),
+        "outcome": job_outcome,
+        "exit": (job_exit | int),
+        "commit": (lab_commit.stdout | trim | truncate(12, true, "")),
+        "host": inventory_hostname,
+        "finishedAt": now(utc=true, fmt="%Y-%m-%dT%H:%M:%SZ")
+      } | to_json }}
+  ignore_errors: true
 
 - name: "Did this job write into the source tree"
   # THE GENERAL FORM of the defect that cost today, rather than a fix for the one script that caused it.

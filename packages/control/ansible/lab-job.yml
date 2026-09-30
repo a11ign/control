@@ -6,6 +6,14 @@
 #     ansible-playbook lab-job.yml -e job=capture-real-pages -e role=training -e shard=0/4
 #     ansible-playbook lab-job.yml -e job=evidence-check -e only=media-autoplay-audio -e worker=a11y-worker-2
 #
+# ## Being told it ended (#2729): `-e row=<n>`
+#
+#     npm run lab:job -- -e job=evidence-check -e row=2718
+#
+# Name the row that is waiting on the job and the gate's `lab-job-finished` cause wakes that row's holder on
+# its next tick, carrying the outcome and exit code (`tasks/run-job.yml` writes the record). This is what
+# replaces polling `lab:status`. Without `row=` nothing is recorded and nobody is woken.
+#
 # The `capture-real-pages` line carried `-e worker=a11y-worker-2` until #1956, and that job has REFUSED
 # `-e worker=` since it moved to the whole fleet — the file's first example was a command the file itself
 # rejects. `evidence-check` is where a named worker belongs now (#1948): optional there, and it aims a
@@ -1442,6 +1450,40 @@
           Ids and inventory names only, never a path or an address. Omit -e worker= and it runs across the
           whole fleet from the inventory, which is asserted to be an address list before it is used.
 
+    # WHO MAY BE HANDED CORPUS CASES: an enrolled worker that has not declared `a11y_capture: false`
+    # (#2764). This is the Ansible reader of the declaration `fleet-env.mjs`'s `workersFromInventory(...,
+    # { scope: "capture" })` already reads for the Node path (#2660), and the two must agree on one
+    # inventory: an undeclared host is IN, as it is there. The meaning of the key, and why a host would
+    # declare it, is written once, in `inventory.example.yml`.
+    #
+    # `reject('in', ...)` rather than `difference`, so inventory order survives: `-e workers=<n>` takes
+    # "the first n" below, and a reordered pool would be a population nobody chose.
+    - name: Only a literal true or false may be declared as a11y_capture
+      ansible.builtin.assert:
+        that:
+          - groups['a11y_workers'] | map('extract', hostvars) | selectattr('a11y_capture', 'defined')
+              | rejectattr('a11y_capture', 'boolean') | list | length == 0
+        fail_msg: >-
+          Refusing to run: a worker declares a11y_capture as something other than `true` or `false`.
+          A value read as "not declared" would leave a host in the capture pool that meant to be out of it.
+
+    - name: Which enrolled workers take captured cases
+      ansible.builtin.set_fact:
+        lab_capture_hosts: >-
+          {{ groups['a11y_workers']
+             | reject('in', groups['a11y_workers'] | map('extract', hostvars)
+                            | selectattr('a11y_capture', 'defined') | selectattr('a11y_capture', 'sameas', false)
+                            | map(attribute='inventory_hostname') | list)
+             | list }}
+
+    - name: At least one enrolled worker must take captured cases
+      ansible.builtin.assert:
+        that:
+          - lab_capture_hosts | length > 0
+        fail_msg: >-
+          Refusing to run: every worker in a11y_workers declares a11y_capture: false, so there is no
+          capture pool. An empty A11Y_WORKERS sends a run to discovery and a guessed localhost:8765.
+
     # BUILT HERE, from the inventory, and then asserted — not interpolated straight into the env.
     #
     # Extra vars have the highest precedence in Ansible, so a value referenced from the job catalogue is
@@ -1449,10 +1491,10 @@
     # injected `A11Y_WORKERS` inexpressible rather than merely unlikely: the same shape as `isValidCaptureId`
     # and the `--worker` rule above, and the same reason — this env is read by a process that runs as root
     # on the box holding the corpus.
-    - name: Address every worker in the fleet, for the jobs that pool
+    - name: Address every capturing worker in the fleet, for the jobs that pool
       ansible.builtin.set_fact:
         lab_fleet_workers: >-
-          {{ groups['a11y_workers']
+          {{ lab_capture_hosts
              | map('extract', hostvars, 'ansible_host')
              | map('regex_replace', '^(.*)$', 'http://\1:8765')
              | join(',') }}
@@ -1503,13 +1545,16 @@
     # makes inexpressible, arriving through a new door. A caller-supplied NAME is resolved through
     # `hostvars` like every other, so the address still comes from the inventory and the result goes
     # through the identical pattern assert below.
+    # A COUNT or the default draws from `lab_capture_hosts`, so neither can reach a host that declared
+    # `a11y_capture: false`. A NAME is the operator saying which box, out loud, and is still checked only
+    # against the inventory: an excluded host is a control arm someone may mean to measure.
     - name: Which workers this run may use
       ansible.builtin.set_fact:
         lab_selected_hosts: >-
           {{ (workers is not defined) | ternary(
-               groups['a11y_workers'],
+               lab_capture_hosts,
                (workers | default('') | string is match('^[0-9]+$'))
-                 | ternary(groups['a11y_workers'][:workers | default(0) | int],
+                 | ternary(lab_capture_hosts[:workers | default(0) | int],
                            workers | default('') | string | split(',') | map('trim') | select | list)) }}
 
     # EVERY WAY OF NAMING A POOL THE FLEET CANNOT GIVE, refused by name. MEASURED against a five-host
@@ -1524,7 +1569,7 @@
         that:
           - lab_selected_hosts | length > 0
           - lab_selected_hosts | difference(groups['a11y_workers']) | length == 0
-          - (workers | string is not match('^[0-9]+$')) or (workers | int <= groups['a11y_workers'] | length)
+          - (workers | string is not match('^[0-9]+$')) or (workers | int <= lab_capture_hosts | length)
         fail_msg: >-
           Refusing to run: -e workers={{ workers }} against a fleet of
           {{ groups['a11y_workers'] | length }} box(es) ({{ groups['a11y_workers'] | join(', ') }}).
@@ -1535,8 +1580,8 @@
                (lab_selected_hosts | difference(groups['a11y_workers']) | length > 0) | ternary(
                  'These are not in the inventory: '
                    ~ (lab_selected_hosts | difference(groups['a11y_workers']) | join(', ')),
-                 'That is more boxes than the fleet has. Truncating silently would report a run on
-                  ' ~ (groups['a11y_workers'] | length) ~ ' as the one you asked for.')) }}
+                 'That is more boxes than the fleet has to capture on. Truncating silently would report a run on
+                  ' ~ (lab_capture_hosts | length) ~ ' as the one you asked for.')) }}
 
     - name: Address the selected workers
       ansible.builtin.set_fact:
@@ -1561,7 +1606,7 @@
     - name: Say which boxes this run will use
       ansible.builtin.debug:
         msg: >-
-          {{ lab_selected_hosts | length }} of {{ groups['a11y_workers'] | length }} worker(s):
+          {{ lab_selected_hosts | length }} of {{ lab_capture_hosts | length }} capturing worker(s):
           {{ lab_selected_hosts | join(', ') }}
 
     - name: "Run {{ job }}"
