@@ -1306,6 +1306,24 @@ export function overrideUnitParts({ unit, aim, ansibleCfgText }) {
 }
 
 /**
+ * WHAT A FAILURE TO READ OR RECORD THE KEYS MEANS, by playbook. `deploy.yml` and `provision-role.yml` already
+ * refuse when the control plane's inventory cannot be read (the layer-2 gate, #1313), so for them this adds no
+ * new way to fail and "could not ask is not may proceed" holds. Every other worker playbook is a repair or a
+ * read (`recover.yml` is exempt from the busy-worker guard BECAUSE it must work on a box that is wedged), and
+ * refusing one of those over a keys read would block exactly the run that is needed when things are broken:
+ * it warns, and connects with whatever is recorded, as it did before this step existed.
+ *
+ * @param {{ chosen: string, message: string }} input
+ * @returns {{ refuse: boolean, message: string }}
+ */
+export function identityStepFailure({ chosen, message }) {
+  const what = `the workers' host keys could not be read or recorded on the control plane (${message})`;
+  return LINK_GATED.includes(chosen)
+    ? { refuse: true, message: `REFUSING ${chosen}: ${what}. Could not ask is not may proceed.` }
+    : { refuse: false, message: `WARNING ${chosen}: ${what}. This run connects with whatever is recorded, as it did before #2832.` };
+}
+
+/**
  * @param {string} chosen
  * @param {{ moved: { name: string, movedTo: string, pin: string }[], limitFlag: string | undefined }} placement
  * @returns {Promise<{ addresses: Record<string, string>, workers: string[] }>} where each moved worker is aimed
@@ -1315,7 +1333,7 @@ async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
   /** @type {ReturnType<typeof writeIdentityFor>} */
   let result;
   /** @type {string[]} */
-  let workers = [];
+  let workers;
   try {
     const read = readControlPlaneFleet();
     if (read.refusal) throw new Error(read.refusal);
@@ -1326,9 +1344,10 @@ async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
       answering: new Set(probes.filter((probe) => probe.reachable).map((probe) => probe.name)),
       control: (command) => ssh(command, { capture: true, timeoutMs: IDENTITY_STEP_TIMEOUT_MS }) });
   } catch (error) {
-    process.stderr.write(`REFUSING ${chosen}: the workers' host keys could not be read or recorded on the control plane `
-      + `(${String(/** @type {Error} */ (error).message).split("\n")[0]}). Could not ask is not may proceed.\n`);
-    process.exit(2);
+    const failure = identityStepFailure({ chosen, message: String(/** @type {Error} */ (error).message).split("\n")[0] });
+    process.stderr.write(`${failure.message}\n`);
+    if (failure.refuse) process.exit(2);
+    return { addresses: {}, workers: [] };
   }
   if (result.lines.length) process.stdout.write(`${result.lines.join("\n")}\n`);
   if (result.notice) process.stdout.write(`${result.notice}\n\n`);

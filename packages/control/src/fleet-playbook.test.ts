@@ -25,7 +25,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
-  writeIdentityFor, overrideUnitParts, limitTouches }
+  writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure }
   from "./fleet-playbook.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
@@ -1545,4 +1545,19 @@ test("#2832 (6b): the alias covers EVERY playbook that targets workers, and the 
     assert.ok(commands.length > 0, `${playbook} targets workers, so its keys are seeded by name`);
   }
   assert.match(GROUP_VARS, /^ansible_ssh_args:/m, "the alias is a connection-level group var, so every playbook above gets it without opting in");
+});
+
+test("#2832: an unreadable keys file REFUSES deploy and provision (which already refuse without an inventory) and only WARNS a repair path", () => {
+  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+    const failure = identityStepFailure({ chosen, message: "ssh to the control plane failed" });
+    assert.equal(failure.refuse, true, chosen);
+    assert.match(failure.message, /Could not ask is not may proceed/);
+  }
+  const repair = PLAYBOOKS.filter((chosen) => !["deploy.yml", "provision-role.yml"].includes(chosen));
+  assert.ok(repair.includes("recover.yml") && repair.length >= 5, "positive control: the repair paths are in the population");
+  for (const chosen of repair) {
+    const failure = identityStepFailure({ chosen, message: "ssh to the control plane failed" });
+    assert.equal(failure.refuse, false, `${chosen} must still run when the keys cannot be read: recover.yml exists for a box that is wedged`);
+    assert.match(failure.message, /^WARNING /);
+  }
 });
