@@ -75,7 +75,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
 // The first version of this reached `workerUrls` in `check-worker-code.mjs`, which imports
-// `@a11ign/nvda-worker` by package name, and `fleet:deploy` died on the control plane with
+// `@a11ign/screenreader-worker` by package name, and `fleet:deploy` died on the control plane with
 // ERR_MODULE_NOT_FOUND while passing on a laptop that has node_modules. A gate that does not exercise
 // what ships, for the fifth time in this repo.
 //
