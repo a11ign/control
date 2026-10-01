@@ -15,6 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
@@ -23,7 +24,8 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
-  GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf }
+  GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
+  writeIdentityFor, overrideUnitParts, limitTouches }
   from "./fleet-playbook.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
@@ -1363,4 +1365,184 @@ test("#1955 CONTROL: the argv region really is the argv, not an empty slice", ()
   // Two neighbours this row did not add, so the region is pinned by code that was already here.
   assert.match(argv, /-e a11y_git_ref=\$\{ref\}/);
   assert.match(argv, /\+ \(allowEdgeDowngrade \? " -e worker_edge_allow_downgrade=true" : ""\)/);
+});
+
+// --- #2832: what proves a moved worker's identity before a WRITE lands --------------------------------------
+//
+// The decisions are `fleet-host-identity.test.ts`'s; what is pinned HERE is that they are WIRED: the alias is
+// read by name for a worker that did not move, a moved worker whose key does not match refuses the run and
+// writes to nobody, and the strictness really is what ssh will apply.
+
+/** The group var's `ansible_ssh_args`, folded to one line, and rendered for one worker the way Ansible's Jinja would. */
+const renderedSshArgs = (name: string, strict?: string) => {
+  const block = /^ansible_ssh_args: >-\n((?: {2}.+\n)+)/m.exec(GROUP_VARS)?.[1] ?? "";
+  assert.ok(block, "group_vars/a11y_workers.yml sets ansible_ssh_args: ssh_args from ansible.cfg would otherwise win, first");
+  return block.trim().split(/\s*\n\s*/).join(" ")
+    .replace("{{ inventory_hostname }}", name).replaceAll("{{ inventory_hostname }}", name)
+    .replace("{{ a11y_strict_host_key | default('accept-new') }}", strict ?? "accept-new");
+};
+const CFG_SSH_ARGS = /^ssh_args\s*=\s*(.+)$/m.exec(ANSIBLE_CFG)?.[1] ?? "";
+
+/** ssh's own rule, which `man ssh_config` states: for each option the FIRST value obtained wins. */
+const firstWins = (args: string) => {
+  const effective = new Map<string, string>();
+  for (const [, key, value] of args.matchAll(/-o\s+([A-Za-z]+)=(\S+)/g)) if (!effective.has(key.toLowerCase())) effective.set(key.toLowerCase(), value);
+  return effective;
+};
+
+test("#2832: strictness added through common_args LOSES to ansible.cfg's accept-new; the group var's does not", () => {
+  assert.match(CFG_SSH_ARGS, /StrictHostKeyChecking=accept-new/, "positive control: the config really does carry accept-new, first");
+  const viaCommonArgs = firstWins(`${CFG_SSH_ARGS} -o HostKeyAlias=a11y-worker-3 -o StrictHostKeyChecking=yes`);
+  assert.equal(viaCommonArgs.get("stricthostkeychecking"), "accept-new", "the trap: a check added AFTER ssh_args is silently not applied");
+  assert.equal(firstWins(renderedSshArgs("a11y-worker-3", "yes")).get("stricthostkeychecking"), "yes", "the variable replaces ssh_args, so it is");
+  assert.equal(firstWins(renderedSshArgs("a11y-worker-3")).get("stricthostkeychecking"), "accept-new", "and a worker that did not move is as it was");
+});
+
+const sshAvailable = spawnSync("ssh", ["-V"], { encoding: "utf8" }).status === 0;
+test("#2832: the same first-wins reading holds in real ssh (`ssh -G`)", { skip: sshAvailable ? false : "no ssh binary on this machine; the pure reading above still runs" }, () => {
+  const effective = (args: string) => spawnSync("ssh", ["-G", ...args.split(/\s+/), "192.0.2.99"], { encoding: "utf8" }).stdout;
+  assert.match(effective(`${CFG_SSH_ARGS} -o StrictHostKeyChecking=yes`), /^stricthostkeychecking accept-new$/m);
+  assert.match(effective(renderedSshArgs("a11y-worker-3", "yes")), /^stricthostkeychecking true$/m);
+  assert.match(effective(renderedSshArgs("a11y-worker-3", "yes")), /^hostkeyalias a11y-worker-3$/m);
+});
+
+test("#2832 (6a): the control socket carries the worker's NAME, so B at A's address cannot ride A's multiplexed master", () => {
+  const socket = (name: string) => firstWins(renderedSshArgs(name)).get("controlpath")?.replace("%h", "192.0.2.13").replace("%p", "22").replace("%r", "witness");
+  assert.notEqual(socket("a11y-worker-3"), socket("a11y-worker-6"), "two workers at ONE address get two sockets");
+  assert.match(String(socket("a11y-worker-3")), /a11y-worker-3/);
+  const addressKeyed = firstWins(CFG_SSH_ARGS).get("controlpath")?.replace("%h", "192.0.2.13").replace("%p", "22").replace("%r", "witness");
+  assert.equal(addressKeyed, "/tmp/a11y-cm-192.0.2.13-22-witness", "positive control: ansible.cfg's own path is keyed by address alone, which is the hole");
+});
+
+test("#2832: the group var restates ansible.cfg's multiplexing options, bar the three that differ on purpose", () => {
+  const strip = (args: string) => [...firstWins(args)].filter(([key]) => !["stricthostkeychecking", "controlpath", "hostkeyalias"].includes(key))
+    .map(([key, value]) => `${key}=${value}`).sort();
+  const cfg = strip(CFG_SSH_ARGS);
+  assert.ok(cfg.length >= 3, `positive control: ansible.cfg carries options to compare (${cfg.join(" ")})`);
+  assert.deepEqual(strip(renderedSshArgs("a11y-worker-3")), cfg, "ControlMaster, ControlPersist and PreferredAuthentications must not drift between the two");
+});
+
+/** A control-plane double: answers each command by its shape, and records every command it was given. */
+const controlPlane = ({ records, probes }: { records?: string; probes?: Record<string, string> }) => {
+  const commands: string[] = [];
+  const control = (command: string) => {
+    commands.push(command);
+    // The probe script contains `ssh-keygen -F` too (it asks whether a name has a record), so it is matched first.
+    if (command.startsWith("export LC_ALL=C")) {
+      return [...command.matchAll(/; probe (a11y-worker-\d+) ([0-9.]+)/g)].map(([, name, address]) => `${name}\t1\t${(probes ?? {})[address] ?? ""}`).join("\n");
+    }
+    return command.includes("ssh-keygen -F") ? records ?? "" : "";
+  };
+  return { control, commands };
+};
+const SSH_KEY = "AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const PINS = [3, 4, 6].map((n) => ({ name: `a11y-worker-${n}`, address: `192.0.2.1${n}` }));
+const MOVED_3 = { name: "a11y-worker-3", movedTo: "192.0.2.99", pin: "192.0.2.13" };
+const MOVED_6 = { name: "a11y-worker-6", movedTo: "192.0.2.96", pin: "192.0.2.16" };
+const writeIdentity = (over: Partial<Parameters<typeof writeIdentityFor>[0]> & { control: (command: string) => string }) =>
+  writeIdentityFor({ chosen: "deploy.yml", argv: [], limitFlag: undefined, moved: [], fleet: PINS,
+    answering: new Set(PINS.map(({ name }) => name)), ...over });
+
+test("#2832 FIXTURE 3: a worker silent at its pin and found by MAC whose recorded key does NOT match: the whole run is refused, nobody is aimed", () => {
+  const { control, commands } = controlPlane({ probes: {
+    "192.0.2.99": "Host key verification failed.",                        // w3's name has a recorded key; the box at .99 is not it
+    "192.0.2.96": "witness@192.0.2.96: Permission denied (publickey)." } }); // w6 verified fine
+  const result = writeIdentity({ control, moved: [MOVED_3, MOVED_6], answering: new Set(["a11y-worker-4"]) });
+  assert.match(String(result.refusal), /a11y-worker-3: found at 192\.0\.2\.99, pinned 192\.0\.2\.13, NOT IDENTIFIED -- the key that answers is NOT the one recorded/);
+  assert.deepEqual(result.addresses, {}, "w6 verified, and is STILL not aimed: a smaller-than-asked run is not what was asked for");
+  assert.match(String(result.refusal), /Nothing was written\./);
+  const probesRun = commands.filter((command) => command.startsWith("export LC_ALL=C"));
+  assert.equal(probesRun.length, 1, "positive control: the probe really ran, so the refusal came from a verdict and not from silence");
+  assert.match(probesRun[0], /PreferredAuthentications=none/, "and it offered no authentication, so it could not have written to anything");
+  assert.ok(commands.every((command) => !/ansible|systemd-run|rm -f/.test(command)), `no step of this decision starts or stages anything: ${commands.join(" | ")}`);
+});
+
+test("#2832: the refusal is acted on BEFORE anything is staged or started, in main()", () => {
+  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const mainBody = source.slice(source.indexOf("async function main() {"));
+  assert.match(mainBody, /const aim = await enforceWriteIdentity\(chosen, \{ moved, limitFlag \}\)/, "a perfect gate that no run reaches refuses nothing");
+  assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("ssh(controlPlaneCheckout("), "before the control plane's checkout moves");
+  assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("startPlaybookUnit({"), "and before the unit is started");
+  assert.match(mainBody, /startPlaybookUnit\(\{[^}]*\baim \}\)/, "the override that unit gets is the one the check produced");
+  const enforce = source.slice(source.indexOf("async function enforceWriteIdentity"), source.indexOf("async function enforceWriteIdentity") + 2400);
+  assert.match(enforce, /if \(result\.refusal\) \{\s*process\.stderr\.write\(`\$\{result\.refusal\}\\n`\);\s*process\.exit\(2\);/, "a refusal exits");
+  assert.match(source, /\$\{override\.install\} \|\| exit 1;/, "a failed override write ends the command instead of starting the unit without it");
+});
+
+test("#2832 FIXTURE 4: the alias is read BY NAME for a worker that did NOT move, and seeding records the same name", () => {
+  const { control, commands } = controlPlane({
+    records: `=== a11y-worker-4 alias\n=== a11y-worker-4 pin\n192.0.2.14 ssh-ed25519 ${SSH_KEY}\n` });
+  const result = writeIdentity({ control, fleet: [PINS[1]], answering: new Set(["a11y-worker-4"]) });
+  assert.equal(result.refusal, null);
+  assert.deepEqual(result.addresses, {}, "nothing moved: nobody is aimed anywhere but its pin");
+  const append = commands.find((command) => command.includes(">>")) ?? "";
+  const seededName = /'(a11y-worker-\d+) ssh-ed25519 /.exec(append)?.[1];
+  assert.equal(seededName, "a11y-worker-4", `seeding wrote the worker's key under its NAME: ${append}`);
+  const args = renderedSshArgs("a11y-worker-4");
+  assert.equal(firstWins(args).get("hostkeyalias"), seededName, "the connection looks the key up under the SAME string it was recorded under");
+  assert.equal(firstWins(args).get("stricthostkeychecking"), "accept-new", "and a worker that did not move keeps trust-on-first-use for a brand-new box");
+  for (const n of [2, 3, 5, 9, 10]) assert.equal(firstWins(renderedSshArgs(`a11y-worker-${n}`)).get("hostkeyalias"), `a11y-worker-${n}`, "every worker, not a sample");
+  assert.match(result.lines.join("\n"), /a11y-worker-4 by NAME/);
+});
+
+test("#2832: a healthy fleet adds NO override source and asks for no handshake; the unit is what it was", () => {
+  const { control, commands } = controlPlane({});
+  const result = writeIdentity({ control });
+  assert.deepEqual([result.refusal, result.notice, result.addresses], [null, null, {}]);
+  assert.equal(commands.filter((command) => command.startsWith("export LC_ALL=C")).length, 0, "no moved worker, no probe");
+  const parts = overrideUnitParts({ unit: "a11y-fleet-deploy", aim: { addresses: {}, workers: ["a11y-worker-3"] }, ansibleCfgText: ANSIBLE_CFG });
+  assert.deepEqual(parts, { install: "rm -f /run/a11y-fleet-deploy.addresses.yml", setenv: "" });
+});
+
+test("#2832: an identified moved worker is aimed through an inventory source of its own, appended LAST, never the inventory file", () => {
+  const { control } = controlPlane({ probes: { "192.0.2.99": "witness@192.0.2.99: Permission denied (publickey)." } });
+  const { addresses, notice } = writeIdentity({ control, moved: [MOVED_3], answering: new Set(["a11y-worker-4", "a11y-worker-6"]) });
+  assert.deepEqual(addresses, { "a11y-worker-3": "192.0.2.99" });
+  assert.match(String(notice), /aiming a11y-worker-3 at 192\.0\.2\.99/);
+  const { install, setenv } = overrideUnitParts({ unit: "a11y-fleet-deploy", aim: { addresses, workers: PINS.map(({ name }) => name) }, ansibleCfgText: ANSIBLE_CFG });
+  const sources = inventorySources(ANSIBLE_CFG);
+  assert.equal(setenv, ` --setenv=ANSIBLE_INVENTORY=${[...sources, "/run/a11y-fleet-deploy.addresses.yml"].join(",")}`,
+    "the config's own sources, restated in its own order, then the override");
+  assert.match(install, /^rm -f \/run\/a11y-fleet-deploy\.addresses\.yml && printf %s [A-Za-z0-9+/=]+ \| base64 -d > \/run\/a11y-fleet-deploy\.addresses\.yml$/);
+  assert.ok(!sources.includes("/run/a11y-fleet-deploy.addresses.yml") && !install.includes("inventory.yml >"), "the inventory file is not what is written");
+});
+
+test("#2832: only a moved worker THIS RUN touches can refuse it, and --allow-offline names a moved worker", () => {
+  assert.deepEqual([undefined, "a11y_workers", "a11y-worker-3", "a11y-worker-4,a11y-worker-3", "a11y-worker-4"].map((limit) => limitTouches("a11y-worker-3", limit)),
+    [true, true, true, true, false]);
+  const refusing = controlPlane({ probes: { "192.0.2.99": "Host key verification failed." } });
+  assert.equal(writeIdentity({ control: refusing.control, moved: [MOVED_3], limitFlag: "a11y-worker-4" }).refusal, null,
+    "a --limit that never touches the moved worker is not refused over it");
+  assert.equal(refusing.commands.filter((command) => command.startsWith("export LC_ALL=C")).length, 0, "and it is not even probed");
+  assert.ok(writeIdentity({ control: controlPlane({ probes: { "192.0.2.99": "Host key verification failed." } }).control, moved: [MOVED_3], limitFlag: "a11y-worker-3" }).refusal,
+    "positive control: the SAME moved worker, in the limit, is refused");
+  const named = writeIdentity({ control: refusing.control, moved: [MOVED_3], argv: ["--allow-offline=a11y-worker-3"] });
+  assert.equal(named.refusal, null);
+  assert.deepEqual(named.addresses, {});
+  const gate = { hold: false, off: [] as string[], unknown: [] as string[], moved: [{ name: "a11y-worker-3", movedTo: "192.0.2.99" }] };
+  assert.deepEqual(linkGate({ chosen: "deploy.yml", gate, allowOffline: ["a11y-worker-3"] }), { refusal: null, notice: null });
+  assert.match(String(linkGate({ chosen: "deploy.yml", gate, allowOffline: ["a11y-worker-9"] }).refusal), /never held.*Moved by MAC, and so nameable: a11y-worker-3/);
+  assert.match(String(linkGate({ chosen: "deploy.yml", gate: { hold: false, off: [], unknown: [] }, allowOffline: ["a11y-worker-3"] }).refusal), /no box is held/,
+    "and a name for a worker that is neither held nor moved is still refused");
+});
+
+test("#2832 (6b): the alias covers EVERY playbook that targets workers, and the two it skips target the control plane", async () => {
+  const targetsWorkers = (playbook: string) =>
+    [...readFileSync(new URL(`../ansible/${playbook}`, import.meta.url), "utf8").matchAll(/^\s*-?\s*hosts:\s*(.+)$/gm)].some(([, hosts]) => hosts.includes("a11y_workers"));
+  const touching = PLAYBOOKS.filter(targetsWorkers);
+  const skipped = PLAYBOOKS.filter((playbook) => !targetsWorkers(playbook));
+  assert.ok(touching.length >= 5 && touching.includes("deploy.yml") && touching.includes("recover.yml"), `positive control: ${touching.join(", ")}`);
+  assert.deepEqual(skipped.sort(), ["control-host-install.yml", "inventory-install.yml"]);
+  for (const playbook of skipped) {
+    const { control, commands } = controlPlane({});
+    assert.equal(writeIdentity({ chosen: playbook, control }).refusal, null);
+    assert.equal(commands.length, 0, `${playbook} writes to no worker, so it asks the control plane nothing`);
+  }
+  for (const playbook of touching) {
+    const { control, commands } = controlPlane({});
+    writeIdentity({ chosen: playbook, control });
+    assert.ok(commands.length > 0, `${playbook} targets workers, so its keys are seeded by name`);
+  }
+  assert.match(GROUP_VARS, /^ansible_ssh_args:/m, "the alias is a connection-level group var, so every playbook above gets it without opting in");
 });
