@@ -926,7 +926,9 @@ export function linkLine(name, { verdict, detail }) {
 const OFF_ADVICE = [
   "  Layer 2 cannot tell a powered-off box, an OS that is not up, and a running machine whose link is down",
   "  (#918: a loose cable, uptime 1303 min throughout). Try `npm run fleet:wake -- <name>` once; if it stays",
-  "  OFF it is a walk to the machine. Report it to the chairman by inventory name before anything else is tried.",
+  "  OFF it is a walk to the machine, which only the chairman can make. DELIVER IT: label the row `needs:chairman` and",
+  "  @-mention `@DanBeckDev` in the brief naming the box by inventory name (nothing reads a sentence, and the label is read);",
+  "  do that before anything else is tried on it.",
 ];
 
 // --- #2752: a box unreachable at its PINNED address may only have drifted under DHCP -----------------

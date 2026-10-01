@@ -1071,8 +1071,9 @@ function holdRefusal({ chosen, off, unknown, named }) {
     `  off the network:  ${off.join(", ") || "none"}`,
     `  unknown:          ${unknown.join(", ") || "none"}`,
     ...(named.length ? [`  already named with --allow-offline: ${named.join(", ")}`] : []),
-    "  An OFF box goes to the chairman by inventory name before anything else is tried on it; one",
-    "  `npm run fleet:wake -- <name>` first. An UNKNOWN box needs a better read: `npm run fleet:link-view`.",
+    "  An OFF box is a walk only the chairman can make: after one `npm run fleet:wake -- <name>`, label the row",
+    "  `needs:chairman` and @-mention `@DanBeckDev` in the brief naming the box by inventory name (the label is read;",
+    "  a sentence is not). An UNKNOWN box needs a better read: `npm run fleet:link-view`.",
     "  To proceed past them deliberately, name each one: --allow-offline=<name> (repeatable).",
   ].join("\n");
 }
