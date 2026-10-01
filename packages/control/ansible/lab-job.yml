@@ -200,15 +200,15 @@
       # question a candidate exists to settle. Reads files already on disk; no worker, seconds.
       shortcuts:
         params: {out: optional}
-        # `npm run`, not the interpreter directly, so the unclosable-veto map is emitted first — the
+        # `pnpm run`, not the interpreter directly, so the unclosable-veto map is emitted first — the
         # audit reads `runs/unclosable-vetoes.json` to tell a veto worth corpus work from one nothing can
         # close, and that file is gitignored and derived. A box that never emitted it would forgive
         # nothing and report a longer work list than exists.
         #
-        # The chain lives in the npm script, exactly as `corpus:grants-audit` puts its `corpus:grants-map`
+        # The chain lives in the package script, exactly as `corpus:grants-audit` puts its `corpus:grants-map`
         # there. NOT `/bin/sh -c` here: this file's own rule is that a shell reintroduces the quoting
         # class that sent four capture shards at `--worker=http://:8765` for 29 minutes.
-        argv: ["/usr/bin/npm", "run", "--silent", "scorer:shortcuts", "--",
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:shortcuts", "--",
                "--model", "runs/model-{{ out | default('candidate') }}",
                "--data", "runs/screenreader-dataset/with-realism.jsonl",
                "--no-baseline"]
@@ -222,9 +222,9 @@
       # written against whatever map happened to be on the lab's disk. The audit refuses an ABSENT map and
       # cannot see a STALE one, so the failure is silent by construction. Measured 2026-08-30: an entry
       # extended from 5 features to 10 landed in git, the baseline was re-recorded, and the recorded
-      # classification did not move. Same rule as `corpus:grants-audit`: the chain lives in the npm script.
+      # classification did not move. Same rule as `corpus:grants-audit`: the chain lives in the package script.
       shortcuts-baseline:
-        argv: ["/usr/bin/npm", "run", "--silent", "scorer:shortcuts:baseline"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:shortcuts:baseline"]
         timeout: 900
       # THE SAME DELIBERATE ACT, against the CANDIDATE, and without it a new head can never be promoted.
       #
@@ -238,7 +238,7 @@
       # vetoes you are asserting you have read and accepted, and that is exactly the thing a reader of the
       # job list should not have to infer.
       shortcuts-baseline-candidate:
-        argv: ["/usr/bin/npm", "run", "--silent", "scorer:shortcuts:baseline:candidate"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:shortcuts:baseline:candidate"]
         timeout: 900
       acceptance:
         params: {out: optional}
@@ -338,7 +338,7 @@
         # override for the local UTM path and does not apply to bare metal. Truncating names exactly which
         # boxes ran, so the arm is reproducible and `A11Y_WORKERS` still reads as the pool the run used --
         # a run that cannot say which boxes it measured is not a comparison.
-        argv: ["/usr/bin/npm", "run", "training:capture:fresh", "--", "--only={{ only }}", "--no-cache"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture:fresh", "--", "--only={{ only }}", "--no-cache"]
         # `lab_selected_workers`, the asserted fact built above — the ONLY job that reads the selection.
         # Deliberately not applied to the other pooling jobs: a corpus recapture on a subset is a corpus
         # captured on fewer boxes with nothing recording that, and this job is bounded to a handful of
@@ -393,7 +393,7 @@
       # nothing on a run where the pages were already current, including a `--resume`.
       capture:
         progress: runs/screenreader-dataset
-        argv: ["/usr/bin/npm", "run", "training:capture:fresh"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture:fresh"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
         # Above the ~4.4 h a full recapture measures, because a ceiling that expires early turns "still
         # working" into "failed" — and this is the most expensive job in the catalogue to lose.
@@ -414,7 +414,7 @@
         # captures on 2026-09-05. `lab-status.yml` bounds the read to this invocation's start, so the
         # file is reported during the capture and refused after it.
         progress: runs/screenreader-dataset
-        argv: ["/usr/bin/npm", "run", "lab:retrain"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "lab:retrain"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
         # A full corpus capture is the long pole; the rest is minutes. Above the ~9.8 h a full recapture
         # measures on this fleet, because a ceiling that expires early turns "still working" into "failed".
@@ -424,7 +424,7 @@
       # reading were the others). The held-out set is what decides whether a candidate ships, so the way it
       # is produced should be at least as reviewable as the corpus it is compared against.
       generate-acceptance:
-        argv: ["/usr/bin/npm", "run", "training:generate-acceptance"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:generate-acceptance"]
         timeout: 900
       # NEVER CACHES, by design: `DATASET_KIND=acceptance` refuses reuse, because these runs exist to test
       # whether NVDA's output is still stable. So this is a full capture of every acceptance page every
@@ -447,12 +447,12 @@
       # exception somebody widens tomorrow.
       capture-acceptance:
         progress: runs/screenreader-acceptance
-        argv: ["/usr/bin/npm", "run", "training:capture-acceptance"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture-acceptance"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "REPEAT=repeat-1"]
         timeout: 14400
       capture-acceptance-2:
         progress: runs/screenreader-acceptance
-        argv: ["/usr/bin/npm", "run", "training:capture-acceptance"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture-acceptance"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "REPEAT=repeat-2"]
         timeout: 14400
       # EVERY repeat, in one job, because the acceptance evaluator reads every repeat.
@@ -482,12 +482,12 @@
       # is deliberately NOT here: promoting is a MAJOR release of `@a11ign/scorer` (ADR 0007), and a
       # job that can push a release is a job that can release by accident. `lab:job -e job=promote-diff`
       # shows what it produced; a human commits it.
-      # NO SHELL. `argv:` with npm, never `/bin/sh -c`, because this repo's own rule is that a shell here
+      # NO SHELL. `argv:` with pnpm, never `/bin/sh -c`, because this repo's own rule is that a shell here
       # reintroduces the quoting class that sent four capture shards at `--worker=http://:8765` for 29
-      # minutes. The gate-then-promote chain lives in an npm script where it can be read and tested.
+      # minutes. The gate-then-promote chain lives in a package script where it can be read and tested.
       promote:
         params: {out: optional}
-        argv: ["/usr/bin/npm", "run", "--silent", "promote:gated", "--",
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "promote:gated", "--",
                "--from={{ out | default('candidate') }}"]
         timeout: 3600
       # THE SAME PROMOTION, ACCEPTING A DELIBERATE HELD-OUT REGRESSION (#2536, #2580).
@@ -509,7 +509,7 @@
       # `promote` otherwise: same `out`, same timeout, and the same NO SHELL rule above.
       promote-accepting-regression:
         params: {out: optional}
-        argv: ["/usr/bin/npm", "run", "--silent", "promote:gated", "--",
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "promote:gated", "--",
                "--from={{ out | default('candidate') }}", "--accept-regression"]
         timeout: 3600
       # What the promotion actually changed, so it can be reviewed before anyone commits it.
@@ -517,7 +517,7 @@
         argv: ["/usr/bin/git", "status", "--short", "--", "packages/scorer/models", ".changeset"]
         timeout: 300
       export-acceptance:
-        argv: ["/usr/bin/npm", "run", "training:export-acceptance:all"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:export-acceptance:all"]
         timeout: 1800
       # EXPORT FOR A TEST, accepting captures whose page has moved.
       #
@@ -530,7 +530,7 @@
       # trainer sets releaseEligible False at initialisation and says why, and promote-model refuses a
       # model that is not eligible. Three gates, none of them a comment.
       export-test:
-        argv: ["/usr/bin/npm", "run", "training:export:test"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:export:test"]
         timeout: 900
       # REGENERATE THE PAGES AND THE MANIFEST, and nothing else. The one job the catalogue was missing,
       # and its absence was found by the guard that needs it: `export` refuses a manifest whose case
@@ -553,7 +553,7 @@
       # Generation is idempotent: same code, same bytes, so a page file is rewritten byte-identically
       # unless the page actually changed. Running this cannot invalidate a cached capture on its own.
       generate:
-        argv: ["/usr/bin/npm", "run", "training:generate"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "training:generate"]
         timeout: 900
       # Cheap, and here because it is a STEP rather than a check: it rewrites the labels every later stage
       # reads, and it silently used a stale manifest twice in one session before the drift guard existed.
@@ -601,7 +601,7 @@
       # is made here rather than inside the script because a script that copies its own input into a
       # writable place is a script that can no longer refuse.
       acceptance-shipped-copy:
-        argv: ["/usr/bin/npm", "run", "--silent", "training:evaluate-acceptance:shipped"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "training:evaluate-acceptance:shipped"]
         timeout: 1800
       # THE WHOLE CHAIN AS ONE SUPERVISED UNIT — corpus, model and gates, inside systemd.
       #
@@ -625,23 +625,23 @@
         # captures on 2026-09-05. `lab-status.yml` bounds the read to this invocation's start, so the
         # file is reported during the capture and refused after it.
         progress: runs/screenreader-dataset
-        argv: ["/usr/bin/npm", "run", "--silent", "lab:everything"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "lab:everything"]
         setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
         # Above a full recapture plus a train plus every gate, because a ceiling that expires early turns
         # "still working" into "failed" — and this is the most expensive unit in the catalogue to lose.
         timeout: 50400
-      # THE COMPOSITE, and the only entry that delegates to an npm script rather than naming a binary.
+      # THE COMPOSITE, and the only entry that delegates to a package script rather than naming a binary.
       #
       # That is deliberate: `release:gate` IS the ordering -- isolation, then signals, then rules, then
       # held-out acceptance, then judge quality, cheapest first so a cheap failure does not wait behind an
       # expensive one. Re-listing the five here would duplicate that ordering into a second place, and the
       # two would drift; the thing being run is a sequence, not a program.
       #
-      # `npm run <fixed name>` interpolates nothing, so it introduces none of the quoting risk the argv rule
+      # `pnpm run <fixed name>` interpolates nothing, so it introduces none of the quoting risk the argv rule
       # exists to remove. Every component reads from disk and the venv -- none needs a capture worker, which
       # is why this can run while the fleet is doing something else.
       release-gate:
-        argv: ["/usr/bin/npm", "run", "release:gate"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "release:gate"]
         # eval:gate alone is 34 fixtures x EVAL_RUNS=3 against the local scorer.
         timeout: 5400
       # No worker: it scores the rule layer against captures already on disk. Seconds, and here because it
@@ -730,7 +730,7 @@
             INCONCLUSIVE -- fewer real pages were examined than the audit's own population (an unusable
             page not already DECLARED in packages/lab/baselines/real-page-unexaminable.json still counts as a
             shortfall here, by design). Re-run rather than trusting the ratio shown.
-        argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "rules:real-pages"]
         timeout: 900
       # Same, with --update: rewrites the baseline. Separate job because it WRITES a claim that every
       # finding it records is correct, and that is a deliberate act, not a side effect of checking.
@@ -745,7 +745,7 @@
           "2": >-
             INCONCLUSIVE -- fewer real pages were examined than the audit's own population; the baseline
             this writes would then describe a partial run. Re-run rather than trusting it.
-        argv: ["/usr/bin/npm", "run", "--silent", "rules:real-pages", "--", "--update"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "rules:real-pages", "--", "--update"]
         timeout: 900
       # #1614 needs axe-core run over the corpus's calibration pages "under #914's rules", and no route
       # existed: the catalogue had no job that installs a browser (the provisioning playbooks are for
@@ -837,7 +837,7 @@
       # missed. Verifying that against 104 held-out records and shipping would be the "validated on six
       # hand-picked cases" mistake exactly — it failed 44 cases in a live run last time.
       python-tests:
-        argv: ["/usr/bin/npm", "run", "test:python"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "test:python"]
         timeout: 1800
       # THE APPLICABILITY AUDIT, with the interpreter the lab ACTUALLY HAS.
       #
@@ -854,7 +854,7 @@
       # Emits the JS-side map first. The audit REFUSES without it rather than examining an empty set,
       # which is the failure it exists to catch.
       grants-audit:
-        argv: ["/usr/bin/npm", "run", "--silent", "corpus:grants-audit"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "corpus:grants-audit"]
         timeout: 900
       # DOES NVDA EVER ANNOUNCE LEAVING A LANDMARK? The fact `vague_link_lacks_context` rests on and
       # nobody had established. Reports, never blocks: it describes NVDA, not a defect.
@@ -863,7 +863,7 @@
       # COULD take, before a retrain exists to measure. It needs the authoritative export, which is why it
       # is a job: a laptop's copy predates the announcement parse and the audit refuses it by name.
       starvation:
-        argv: ["/usr/bin/npm", "run", "--silent", "corpus:starvation"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "corpus:starvation"]
         timeout: 900
       container-exits:
         argv: ["{{ lab_python }}", "packages/scorer/python/audit_container_exits.py"]
@@ -877,7 +877,7 @@
       # A job because it needs the AUTHORITATIVE captures -- a laptop's copy answers `unknown` everywhere,
       # which is honest and says nothing about the pages. Reports, never blocks.
       observation-ambiguity:
-        argv: ["/usr/bin/npm", "run", "--silent", "corpus:observation-ambiguity"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "corpus:observation-ambiguity"]
         timeout: 900
       # WHY does a feature read what it reads on a subtype's positives? `scorer:shortcuts` says a head
       # vetoed one and `corpus:starvation` says one will be constant; NEITHER says why, and the three
@@ -886,7 +886,7 @@
       # featurizer refuses it by name.
       explain-feature:
         params: {subtype: required, feature: required}
-        argv: ["/usr/bin/npm", "run", "--silent", "scorer:explain-feature", "--",
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain-feature", "--",
                "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]
         timeout: 900
       # WHAT DID THE MODEL SEE on a held-out acceptance case? Its label, each head's score against its cut, and
@@ -909,12 +909,12 @@
       # what it always was.
       explain-case:
         params: {case: required, out: optional, criterion: optional}
-        argv: "{{ ['/usr/bin/npm', 'run', '--silent', 'scorer:explain', '--',
+        argv: "{{ ['/usr/bin/corepack', 'pnpm', 'run', '--silent', 'scorer:explain', '--',
                    '--model=' ~ (out | default('candidate')), '--case=' ~ case]
                   + (['--criterion=' ~ criterion] if criterion is defined else []) }}"
         timeout: 900
       rules-coverage:
-        argv: ["/usr/bin/npm", "run", "--silent", "rules:coverage"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "rules:coverage"]
         timeout: 900
       # HOW MANY REAL-PAGE CAPTURES LOSE REQUIREMENT 2's FULL-PAGE CLAIM, and to which sweep.
       # Reads `runs/real-page-corpus`, so it is a VERDICT only here: a copy in any other checkout is only
@@ -922,7 +922,7 @@
       # longer existed. That is CLAUDE.md's "a gate that reads runs/ is not yours to report", and this
       # entry is what lets the rule be obeyed rather than worked around with a shell loop over SSH.
       full-page-claims:
-        argv: ["/usr/bin/npm", "run", "--silent", "lab:full-page-claims"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "lab:full-page-claims"]
         timeout: 600
       rules-gate:
         # gateVerdict/exitCodeFor -- lab-job.test.ts derives which jobs need this and refuses a fifth
@@ -1013,7 +1013,7 @@
             4,959 of 5,445 files with no error anywhere. A short archive restores as a corpus that looks
             complete and is not, so this refuses rather than reporting a size. The archive is left in
             place to be inspected.
-        argv: ["/usr/bin/npm", "run", "corpus:snapshot"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "corpus:snapshot"]
         timeout: 3600
       corpus-backup:
         # Copies the newest archive off this machine and READS IT BACK to prove it arrived, over the
@@ -1026,7 +1026,7 @@
             nobody has made, the second is a failed backup. Never treat it as "nothing to back up" --
             `npm run corpus:release` is the OTHER, already-working route (GitHub Releases on the private
             `a11ign/corpus-backups`, verified by download), unaffected by this job's own exit code (#1042).
-        argv: ["/usr/bin/npm", "run", "corpus:backup"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "corpus:backup"]
         timeout: 7200
       corpus-backup-verify:
         # A SEPARATE JOB RATHER THAN `-e verify=1`, and the test is why. The first version wrote
@@ -1052,7 +1052,7 @@
             same reason `corpus-backup`'s gloss above names it (#1042). Two hand-dispatches of this job
             against an unconfigured destination, 2026-09-10 and 2026-09-12, left a `failed` unit that
             read as a broken backup for eleven days (#2061).
-        argv: ["/usr/bin/npm", "run", "corpus:backup", "--", "--verify-only"]
+        argv: ["/usr/bin/corepack", "pnpm", "run", "corpus:backup", "--", "--verify-only"]
         timeout: 1800
       capture-check:
         params: {worker: required}
