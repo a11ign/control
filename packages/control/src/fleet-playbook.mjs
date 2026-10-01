@@ -84,6 +84,11 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // that cannot exist there.
 import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
+// #2832: WHAT PROVES A MOVED WORKER'S IDENTITY BEFORE A WRITE LANDS. A sibling and builtin-only, so ADR 0012's
+// no-`npm install` property is unchanged.
+import { overrideInventory, overridePath, installOverrideCommand, inventoryEnvironment, knownHostsReadScript,
+  parseKnownHostsRead, seedPlan, seedCommand, seedReport, identityProbeScript, parseIdentityProbe,
+  identityGate } from "./fleet-host-identity.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 // #1356: THE SHARED SHAPE, moved out of this file so every other operator-host reader of "which boxes are
 // the fleet" (fleet-status.mjs, fleet-wake.mjs, fleet-discover.mjs, lab-job.mjs) can ask the control
@@ -762,11 +767,12 @@ function runBootstrapFromHere(chosen) {
  *
  * @param {{ chosen: string, ref: string, expected: string, limitFlag: string|undefined,
  *           serialFlag: string|undefined, allowEdgeDowngrade: boolean, apply: boolean,
- *           displayMode: string|undefined }} spec
+ *           displayMode: string|undefined, aim: { addresses: Record<string, string>, workers: string[] } }} spec
+ *   `aim` is where each MOVED worker is aimed this run, already identity-checked (#2832); empty for a healthy fleet.
  * @returns {string} the unit name
  */
 function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-  displayMode }) {
+  displayMode, aim }) {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -785,15 +791,20 @@ function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allow
 // `systemd-run` refuses a name that is still loaded — a SUCCEEDED run keeps its name just as a failed
 // one does.
 const unit = `a11y-fleet-${chosen.replace(/\.yml$/, "")}`;
+// #2832: THE ADDRESS OVERRIDE, if any worker moved and was identified. `install` makes the per-unit file hold
+// exactly this run's override or nothing, and a failure to write it ENDS the command (`|| exit 1`): a `;`
+// after an `&&` chain would carry on and start the unit without the override it was meant to have.
+const override = overrideUnitParts({ unit, aim,
+  ansibleCfgText: readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8") });
 try {
   // `-e a11y_git_ref` is what the GUESTS fetch. Without it they default to `main` and stay exactly where
   // they were, while the control plane sits on the branch you asked for — so `expected_code` is computed
   // from your code and `served_code` from theirs, and the deploy fails with a mismatch that reads like a
   // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
   // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
-  ssh(`systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
+  ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
     + `systemd-run --unit=${unit} --remain-after-exit --working-directory=${CHECKOUT}/packages/control/ansible `
-    + `--setenv=ANSIBLE_CONFIG=ansible.cfg `
+    + `--setenv=ANSIBLE_CONFIG=ansible.cfg${override.setenv} `
     // NO `-i` HERE. `ansible.cfg` sets `inventory = /etc/a11ign/inventory.yml,inventory.yml` so the
     // durable copy is read FIRST -- and an explicit `-i` on the command line OVERRIDES that config
     // entirely, which made the whole outside-the-checkout fix inert on the one path that dispatches
@@ -1076,7 +1087,8 @@ function holdRefusal({ chosen, off, unknown, named }) {
  *
  * PURE, the way `buildGate` is, so every case is driven without a fleet; `enforceLinkGate` is the call.
  *
- * @param {{ chosen: string, gate: { hold: boolean, off: string[], unknown: string[] } | null,
+ * @param {{ chosen: string, gate: { hold: boolean, off: string[], unknown: string[],
+ *             moved?: { name: string, movedTo: string }[] } | null,
  *           allowOffline: string[] }} input
  * @returns {{ refusal: string | null, notice: string | null }}
  */
@@ -1087,11 +1099,16 @@ export function linkGate({ chosen, gate, allowOffline }) {
       : null, notice: null };
   }
   const held = gate?.hold ? [...gate.off, ...gate.unknown] : [];
-  const stray = allowOffline.filter((name) => !held.includes(name));
+  // #2832: a MOVED worker is not held (it answers by MAC elsewhere) but it IS a name this flag may take: an
+  // unidentified one refuses the run, and `--allow-offline=<name>` is how a human proceeds without it
+  // (`identityGate`). The flag is still refused for a name that is neither held nor moved.
+  const moved = (gate?.moved ?? []).map(({ name }) => name);
+  const stray = allowOffline.filter((name) => !held.includes(name) && !moved.includes(name));
   if (stray.length) {
     const why = held.length ? `not held (the hold is ${held.join(", ")})` : "no box is held";
     return { refusal: `refusing --allow-offline=${stray.join(", --allow-offline=")}: ${why}. `
-      + "A name for a box that was never held would be accepted and ignored.", notice: null };
+      + "A name for a box that was never held would be accepted and ignored."
+      + (moved.length ? ` (Moved by MAC, and so nameable: ${moved.join(", ")}.)` : ""), notice: null };
   }
   if (!gate?.hold) return { refusal: null, notice: null };
   const unnamed = (/** @type {string[]} */ names) => names.filter((name) => !allowOffline.includes(name));
@@ -1128,14 +1145,34 @@ export function gateFleet({ chosen, reads, sources, groupVarsText }) {
 }
 
 /**
+ * #2832: THE WORKERS THE LAYER-2 READ FOUND ELSEWHERE, each with the pin it left, for the identity check that
+ * decides whether a write may be aimed at the new address. Present ONLY when something moved, the way
+ * `gate.moved` is, so a healthy fleet's result is exactly what it was.
+ *
+ * @param {{ moved?: { name: string, movedTo: string }[] } | null} gate
+ * @param {{ name: string, url: string }[]} workers
+ * @returns {{ moved?: { name: string, movedTo: string, pin: string }[] }}
+ */
+function movedWorkers(gate, workers) {
+  if (!gate?.moved?.length) return {};
+  const pinOf = (/** @type {string} */ name) => {
+    const url = workers.find((w) => w.name === name)?.url;
+    return url ? new URL(url).hostname : "";
+  };
+  return { moved: gate.moved.map(({ name, movedTo }) => ({ name, movedTo, pin: pinOf(name) })) };
+}
+
+/**
  * #1313, AS THE REVIEW ASKED: THE WHOLE GATE, WITH ITS READS INJECTED, so the enforce path is driven by a test
  * and not only its pure decision. `enforceLinkGate` is this plus the real reads and the exits.
  *
  * @param {{ chosen: string, argv: string[], ansibleCfgText: string, groupVarsText: string,
  *           readInventories: (paths: string[]) => { path: string, text: string }[],
  *           status?: (deps: { workers: () => { name: string, url: string }[] }) => Promise<{ linkLayer:
- *             { lines: string[], gate: { hold: boolean, off: string[], unknown: string[] } | null } }> }} input
- * @returns {Promise<{ refusal: string | null, notice: string | null, lines: string[] }>}
+ *             { lines: string[], gate: { hold: boolean, off: string[], unknown: string[],
+ *               moved?: { name: string, movedTo: string }[] } | null } }> }} input
+ * @returns {Promise<{ refusal: string | null, notice: string | null, lines: string[],
+ *                     moved?: { name: string, movedTo: string, pin: string }[] }>}
  */
 export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText, readInventories, status = fleetStatus }) {
   const allowOffline = allowOfflineNames(argv);
@@ -1154,7 +1191,8 @@ export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText,
   if (fleet.refusal) return { refusal: fleet.refusal, notice: null, lines: [] };
   try {
     const { linkLayer } = await status({ workers: () => fleet.workers });
-    return { ...linkGate({ chosen, gate: linkLayer.gate, allowOffline }), lines: linkLayer.lines };
+    return { ...linkGate({ chosen, gate: linkLayer.gate, allowOffline }), lines: linkLayer.lines,
+      ...movedWorkers(linkLayer.gate, fleet.workers) };
   } catch (error) {
     return couldNotAsk(error, "the layer-2 gate could not be read");
   }
@@ -1169,9 +1207,10 @@ export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText,
  * ssh's stderr, not its argv, so a refusal never prints the key path.
  *
  * @param {string} chosen
+ * @returns {Promise<{ moved: { name: string, movedTo: string, pin: string }[] }>} the workers found elsewhere (#2832)
  */
 async function enforceLinkGate(chosen) {
-  const { refusal, notice, lines } = await linkGateFor({
+  const { refusal, notice, lines, moved } = await linkGateFor({
     chosen,
     argv: process.argv.slice(2),
     ansibleCfgText: readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"),
@@ -1191,6 +1230,113 @@ async function enforceLinkGate(chosen) {
     process.stderr.write(`${refusal}\n`);
     process.exit(2);
   }
+  return { moved: moved ?? [] };
+}
+
+// #2832: THE WRITE-IDENTITY STEP, AFTER THE GATES THAT ASK THE LEAST OF THE CONTROL PLANE AND BEFORE ANYTHING
+// IS SHIPPED. It sits here, in `fleet-playbook.mjs`, because it is the one place that both knows which workers
+// this run touches and builds the Ansible invocation, so an address override cannot be built without having
+// passed it.
+
+/**
+ * Playbooks that target the CONTROL PLANE, not the workers: no worker is written to, so there is no worker
+ * identity to check, and `inventory-install.yml` runs when no inventory exists to read. Pinned against each
+ * playbook's own `hosts:` line by `fleet-playbook.test.ts`, so an entry cannot drift out of its class.
+ */
+const CONTROL_PLANE_ONLY = ["inventory-install.yml", "control-host-install.yml"];
+
+/** Two minutes: one strict handshake per moved worker, each bounded by its own 10 s connect timeout. */
+const IDENTITY_STEP_TIMEOUT_MS = 2 * 60 * 1000;
+
+/**
+ * Is a worker inside what this run's `--limit` touches? A moved worker the run will not touch must not refuse
+ * it: the identity of a box nobody is writing to is nobody's concern here.
+ *
+ * @param {string} name
+ * @param {string | undefined} limitFlag
+ */
+export function limitTouches(name, limitFlag) {
+  return limitFlag === undefined || limitFlag === "a11y_workers" || limitFlag.split(",").includes(name);
+}
+
+/**
+ * THE WHOLE STEP, WITH THE CONTROL PLANE INJECTED (the `linkGateFor` split): record each worker's key by NAME
+ * where a key is already recorded for its current pin, check each moved worker's identity with a strict
+ * handshake, and say which it will aim where -- or refuse the run. `control` runs one command on the control
+ * plane and returns its stdout; a throw is the caller's "could not ask".
+ *
+ * @param {{ chosen: string, argv: string[], limitFlag: string | undefined,
+ *           moved: { name: string, movedTo: string, pin?: string }[],
+ *           fleet: { name: string, address: string }[], answering: Set<string>,
+ *           control: (command: string) => string }} input
+ * @returns {{ refusal: string | null, notice: string | null, lines: string[], addresses: Record<string, string> }}
+ */
+export function writeIdentityFor({ chosen, argv, limitFlag, moved, fleet, answering, control }) {
+  if (CONTROL_PLANE_ONLY.includes(chosen)) return { refusal: null, notice: null, lines: [], addresses: {} };
+  const plan = seedPlan({ workers: fleet, answering, records: parseKnownHostsRead(control(knownHostsReadScript(fleet))) });
+  const recordKeys = seedCommand(plan.lines);
+  if (recordKeys) control(recordKeys);
+  const touched = moved.filter(({ name }) => limitTouches(name, limitFlag));
+  const allowOffline = allowOfflineNames(argv);
+  const toCheck = touched.filter(({ name }) => !allowOffline.includes(name));
+  const verdicts = toCheck.length
+    ? parseIdentityProbe(control(identityProbeScript(toCheck.map(({ name, movedTo }) => ({ name, address: movedTo })))))
+    : new Map();
+  return { ...identityGate({ moved: touched, allowOffline, verdicts }), lines: seedReport(plan) };
+}
+
+/**
+ * The two things a run adds to the unit's command for its address override: the command that makes the
+ * override file hold exactly this run's override or NOTHING (so a stale one from an earlier run can never aim
+ * this one), and the `ANSIBLE_INVENTORY` that appends it after the config's own sources -- present only when
+ * an address was resolved, so a healthy fleet's unit is exactly what it was.
+ *
+ * @param {{ unit: string, aim: { addresses: Record<string, string>, workers: string[] },
+ *           ansibleCfgText: string }} input
+ * @returns {{ install: string, setenv: string }}
+ */
+export function overrideUnitParts({ unit, aim, ansibleCfgText }) {
+  const path = overridePath(unit);
+  const yaml = overrideInventory({ addresses: aim.addresses, workers: aim.workers });
+  return {
+    install: installOverrideCommand({ path, yaml }),
+    setenv: yaml === null ? ""
+      : ` --setenv=ANSIBLE_INVENTORY=${inventoryEnvironment({ sources: inventorySources(ansibleCfgText), path })}`,
+  };
+}
+
+/**
+ * @param {string} chosen
+ * @param {{ moved: { name: string, movedTo: string, pin: string }[], limitFlag: string | undefined }} placement
+ * @returns {Promise<{ addresses: Record<string, string>, workers: string[] }>} where each moved worker is aimed
+ */
+async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
+  if (CONTROL_PLANE_ONLY.includes(chosen)) return { addresses: {}, workers: [] };
+  /** @type {ReturnType<typeof writeIdentityFor>} */
+  let result;
+  /** @type {string[]} */
+  let workers = [];
+  try {
+    const read = readControlPlaneFleet();
+    if (read.refusal) throw new Error(read.refusal);
+    workers = read.workers.map(({ name }) => name);
+    const probes = await Promise.all(read.workers.map((worker) => probeWorker(worker)));
+    result = writeIdentityFor({ chosen, argv: process.argv.slice(2), limitFlag, moved,
+      fleet: read.workers.map(({ name, url }) => ({ name, address: new URL(url).hostname })),
+      answering: new Set(probes.filter((probe) => probe.reachable).map((probe) => probe.name)),
+      control: (command) => ssh(command, { capture: true, timeoutMs: IDENTITY_STEP_TIMEOUT_MS }) });
+  } catch (error) {
+    process.stderr.write(`REFUSING ${chosen}: the workers' host keys could not be read or recorded on the control plane `
+      + `(${String(/** @type {Error} */ (error).message).split("\n")[0]}). Could not ask is not may proceed.\n`);
+    process.exit(2);
+  }
+  if (result.lines.length) process.stdout.write(`${result.lines.join("\n")}\n`);
+  if (result.notice) process.stdout.write(`${result.notice}\n\n`);
+  if (result.refusal) {
+    process.stderr.write(`${result.refusal}\n`);
+    process.exit(2);
+  }
+  return { addresses: result.addresses, workers };
 }
 
 /**
@@ -1550,8 +1696,11 @@ async function main() {
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
   const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode } = parseArgs();
   await guardProtocolChange(chosen);
-  await enforceLinkGate(chosen);
+  const { moved } = await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen, { limitFlag });
+  // #2832: AFTER every gate that can refuse cheaply, BEFORE the control plane moves: a moved worker is aimed
+  // at its new address only once its host key, recorded under its NAME, has been verified strictly.
+  const aim = await enforceWriteIdentity(chosen, { moved, limitFlag });
 
   // What that ref means HERE, resolved before anything is asked of the control plane. Comparing a commit
   // to a commit is the only comparison that settles "is it running my code?" — the first version compared
@@ -1598,7 +1747,7 @@ async function main() {
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
   const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-    displayMode });
+    displayMode, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
     + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`

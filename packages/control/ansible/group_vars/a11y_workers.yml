@@ -26,6 +26,36 @@ ansible_port: 22
 # about which key was offered.
 ansible_ssh_private_key_file: "{{ lookup('env', 'A11Y_SSH_KEY') | default('~/.ssh/a11y-witness_ed25519', true) }}"
 
+# ## WHO ANSWERED: the host key is looked up by NAME (#2832)
+#
+# `known_hosts` used to be keyed by ADDRESS, so the only identity check on a write was "the key at this
+# address is the key I saw at this address". That holds at the pin and stops holding the moment a worker is
+# aimed at a new one (DHCP moves boxes, #2752): `accept-new` would remember whatever answered there. So every
+# worker connection looks its key up under the inventory NAME, which follows the box wherever it goes, and a
+# worker aimed at a RESOLVED address (`fleet-playbook.mjs`, `fleet-host-identity.mjs`) is checked with
+# `StrictHostKeyChecking=yes`, set by the override entry that carries the address (`a11y_strict_host_key`).
+#
+# THIS IS `ansible_ssh_args`, NOT `ansible_ssh_common_args`, AND THE DIFFERENCE IS THE WHOLE CHECK. ssh takes
+# the FIRST value of an option, and `ansible.cfg`'s `ssh_args` come first and already carry
+# `StrictHostKeyChecking=accept-new`: a `=yes` appended through `common_args` LOSES, silently (measured with
+# `ansible -vvvv` and `ssh -G`, ansible-core 2.20.1). The variable replaces `ssh_args` for this group
+# wholesale, so the multiplexing options are restated here and `fleet-host-identity.test.ts` pins them equal
+# to `ansible.cfg`'s, bar the three things that differ on purpose.
+#
+# THE CONTROL SOCKET NAME CARRIES THE WORKER'S NAME. Host-key checking happens once, when the master
+# connects; a client riding a live master is never shown another key check. With the socket keyed by address
+# alone (`/tmp/a11y-cm-%h-%p-%r`), a run that aims worker B at the address worker A's master (60 s,
+# `ControlPersist`) is still holding would reuse A's connection with B's alias never consulted -- MEASURED
+# against a throwaway sshd: B's strict check "passed" on A's socket and failed on its own. The name in the
+# path makes a different (name, address) pair a different socket.
+ansible_ssh_args: >-
+  -o ControlMaster=auto
+  -o ControlPath=/tmp/a11y-cm-{{ inventory_hostname }}-%h-%p-%r
+  -o ControlPersist=60s
+  -o PreferredAuthentications=publickey
+  -o HostKeyAlias={{ inventory_hostname }}
+  -o StrictHostKeyChecking={{ a11y_strict_host_key | default('accept-new') }}
+
 # Windows OpenSSH's stock DefaultShell is cmd.exe. Provisioning sets it to PowerShell, because Ansible's
 # Windows modules ARE PowerShell and running them through cmd adds a quoting layer with nothing to gain.
 # A box provisioned before that change answers every task with a parse error; the README has the one-liner.
