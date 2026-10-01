@@ -3,8 +3,8 @@
 > **THE LOCAL UTM WORKER VMs ARE DEPRECATED. Capture on the bare-metal fleet.** Every box
 > `inventory.yml` lists (`a11y-worker-2` upward; `-1` is retired and its number is never reused.
 > [`-10` rejoined 2026-09-09 →](docs/operational-lessons.md#a11y-worker-10-withdrawn-2026-09-07-rejoined-2026-09-09)) serves
-> `/health` without a laptop in the path, and `npm run fleet:status` is the one command that says
-> so. Deploy with **`npm run fleet:deploy`**, never `worker:deploy` — that one is `utmctl file push` to a
+> `/health` without a laptop in the path, and `pnpm run fleet:status` is the one command that says
+> so. Deploy with **`pnpm run fleet:deploy`**, never `worker:deploy` — that one is `utmctl file push` to a
 > VM UUID and cannot reach a physical box.
 >
 > [Why this note exists, and what "kept" means below →](docs/operational-lessons.md#why-the-deprecation-note-exists-and-what-kept-means)
@@ -13,10 +13,10 @@ Everything except capture runs natively. Capture needs a Windows worker. The fle
 `docs/getting-started.md` and `docs/local-worker-vm.md` describe the deprecated local VM.
 
 ```bash
-npm run worker:ctl -- up        # start/resume the VM, wait for /health
-npm run worker:ctl -- status    # state, host cost, health
-npm run worker:ctl -- pause     # see below: UTM cannot actually suspend these guests
-npm run witness -- https://example.com --task "..."   # no A11Y_WORKER needed
+pnpm run worker:ctl -- up        # start/resume the VM, wait for /health
+pnpm run worker:ctl -- status    # state, host cost, health
+pnpm run worker:ctl -- pause     # see below: UTM cannot actually suspend these guests
+pnpm run witness -- https://example.com --task "..."   # no A11Y_WORKER needed
 ```
 
 With no `A11Y_WORKER` set the run finds the local VM, starts it, and **puts it back as it
@@ -28,9 +28,9 @@ already ran.
 what the worker is.**
 
 ```bash
-npm run worker:deploy                     # UTM VMs on this Mac only — utmctl file push, keyed on a VM UUID
-npm run worker:deploy -- --vm=a11y-worker-2
-npm run worker:code                       # each worker's /health.code vs this checkout — works for both
+pnpm run worker:deploy                     # UTM VMs on this Mac only — utmctl file push, keyed on a VM UUID
+pnpm run worker:deploy -- --vm=a11y-worker-2
+pnpm run worker:code                       # each worker's /health.code vs this checkout — works for both
 ```
 
 `worker:deploy` **cannot reach a bare-metal worker**: it is `utmctl file push` plus a `utmctl` reboot, it
@@ -38,18 +38,18 @@ takes a VM UUID rather than a host, and it fails immediately off macOS. Physical
 rather than file-pushed, so they deploy by pulling:
 
 ```bash
-npm run fleet:deploy                  # pull + install + restart + PROVE it (bare metal)
-npm run fleet:provision               # the ROLE: NVDA, the Edge pin, policies, and the provision stamp
-npm run fleet:provision -- --serial=0 # all boxes at once, rather than one at a time
-eval "$(npm run --silent fleet:env)"                                # A11Y_WORKERS from inventory.yml
-npm run fleet:status                                                # what every box is doing, right now
+pnpm run fleet:deploy                  # pull + install + restart + PROVE it (bare metal)
+pnpm run fleet:provision               # the ROLE: NVDA, the Edge pin, policies, and the provision stamp
+pnpm run fleet:provision -- --serial=0 # all boxes at once, rather than one at a time
+eval "$(pnpm run --silent fleet:env)"                                # A11Y_WORKERS from inventory.yml
+pnpm run fleet:status                                                # what every box is doing, right now
 ```
 
 `fleet:provision --serial=0` (all at once) is right here because `provisionRevision` is a MUST_MATCH cache key — a canary box IS the failure mode. [Why →](docs/operational-lessons.md#fleetprovision---serial0-and-the-sre-workbook)
 
 `fleet:deploy`/`fleet:provision` REFUSE a worker that is capturing (a HARD fail, `-e a11y_force_deploy=true` overrides) — `recover.yml`/`restart.yml` are exempt, since they act on a worker that is busy AND wedged, but only against **one named worker** (`target=<worker>`/`-l <worker>`, required since #1829 — omitting it used to reach the whole fleet, including a box a different session is mid-capture on). `fleet:status` surfaces a **degraded** guest: the fault that produces zero failures because the worker's own retry absorbs every recovery. [Why the hard fail →](docs/operational-lessons.md#fleetdeployfleetprovision-refuse-a-capturing-worker)
 
-`npm run fleet:auto-off` reports, per worker, `off` or `keep` and why -- report-only until `--apply` is
+`pnpm run fleet:auto-off` reports, per worker, `off` or `keep` and why -- report-only until `--apply` is
 passed, and even then only for a worker its own pure decision names. It is the timer half of #2656: an
 idle-five-minutes worker powers itself off through `sleep.yml`, reused rather than reimplemented, and the
 `auto-off-schedule.yml` playbook installs its timer LIVE, and the unit passes `--apply` (a unit without it is a
@@ -61,11 +61,11 @@ A multi-round SAME-BUILD sequence (every round must land on one worker build, e.
 real-page captures are named jobs, dispatched with fixed argv and supervised by systemd:
 
 ```bash
-npm run lab:job -- -e job=train                 # the catalogue is in ansible/lab-job.yml
-npm run lab:job -- -e job=capture-real-pages -e worker=a11y-worker-2 -e role=training -e shard=0/4
-npm run lab:status                              # every a11y-job-* unit and its state
-npm run lab:status -- -e job=train              # systemd's view + the journal + the run's own progress file
-npm run lab:stop -- -e job=capture              # end one deliberately; reports what it discards first
+pnpm run lab:job -- -e job=train                 # the catalogue is in ansible/lab-job.yml
+pnpm run lab:job -- -e job=capture-real-pages -e worker=a11y-worker-2 -e role=training -e shard=0/4
+pnpm run lab:status                              # every a11y-job-* unit and its state
+pnpm run lab:status -- -e job=train              # systemd's view + the journal + the run's own progress file
+pnpm run lab:stop -- -e job=capture              # end one deliberately; reports what it discards first
 ```
 
 `lab:stop` exists because the unit name is the lock, so `lab:job` REFUSES a second job of that name — and
