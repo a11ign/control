@@ -48,6 +48,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
+import { pnpmCliInvocation } from "../../../scripts/npm-cli-executable.mjs";
 // RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -364,9 +365,11 @@ function resolveOnOrigin(ref) {
  */
 
 /** One stage, run to completion, with its exit status READ rather than piped away. */
-/** @param {string} label @param {string} command @param {string[]} args */
-function stage(label, command, args) {
-  process.stdout.write(`\n${"=".repeat(78)}\n  ${label}\n  ${command} ${args.join(" ")}\n${"=".repeat(78)}\n`);
+/** @param {string} label @param {string[]} pnpmArgs */
+function stage(label, pnpmArgs) {
+  process.stdout.write(`\n${"=".repeat(78)}\n  ${label}\n  pnpm ${pnpmArgs.join(" ")}\n${"=".repeat(78)}\n`);
+  // Through the helper, never `spawnSync("pnpm")`: that is `pnpm.cmd` on Windows, which CVE-2024-27980 refuses.
+  const { command, args } = pnpmCliInvocation(pnpmArgs);
   // `spawnSync` with inherited stdio, never a pipe. This repo has masked a real `ANSIBLE_EXIT=2` twice in
   // one day with `| tail`, because a pipeline's status is the LAST command's — so the status is read from
   // the child directly and the output goes straight to the terminal.
@@ -381,14 +384,14 @@ function stage(label, command, args) {
  * Spelling out `ansible-playbook -i inventory.yml lab-job.yml ...` here would work and would be a second
  * copy of the invocation — and it would already be wrong, because `lab:job` also sets `ANSIBLE_CONFIG`,
  * without which the collections path and host-key settings differ. This repo's rule for a fact stated
- * twice is to delete a copy; going through the npm script is how.
+ * twice is to delete a copy; going through the package script is how.
  */
 const labJob = (/** @type {string} */ job, /** @type {string} */ ref, /** @type {string[]} */ extra = []) =>
-  stage(job, "npm", ["run", "lab:job", "--", "-e", `job=${job}`, "-e", `ref=${ref}`, ...extra]);
+  stage(job, ["run", "lab:job", "--", "-e", `job=${job}`, "-e", `ref=${ref}`, ...extra]);
 
 const fleetDeploy = (/** @type {string} */ ref) =>
   stage("fleet:deploy — ship this ref to the workers and PROVE it",
-    "npm", ["run", "fleet:deploy", "--", `--ref=${ref}`]);
+    ["run", "fleet:deploy", "--", `--ref=${ref}`]);
 
 /**
  * The `--only=` case ids, validated, or a refusal. Extracted because `main` grew past the complexity gate
