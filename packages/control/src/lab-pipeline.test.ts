@@ -104,7 +104,7 @@ test("a ref is contained by SHAPE, because it reaches a shell on the box holding
   }
 });
 
-test("a stage runs the npm script, never a second spelling of the ansible command", () => {
+test("a stage runs the package script, never a second spelling of the ansible command", () => {
   // `lab:job` sets ANSIBLE_CONFIG; a hand-spelled `ansible-playbook` here would silently use different
   // collections and host-key settings. Asserted structurally because running a stage means running a job.
   const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.mjs", import.meta.url)), "utf8");
@@ -166,8 +166,8 @@ test("the pin comes from ORIGIN, so it cannot be a stale local ref", () => {
  * What each job PRODUCES, declared — because argv cannot be scraped for it.
  *
  * My first version of the ordering guard derived producers from `--out=` in each job's argv, and it did
- * not catch `train` moved ahead of `retrain`: `retrain` delegates to an npm script
- * (`["/usr/bin/npm","run","lab:retrain"]`), so the artifact it writes appears nowhere in its argv. A
+ * not catch `train` moved ahead of `retrain`: `retrain` delegates to a package script
+ * (`["/usr/bin/corepack","pnpm","run","lab:retrain"]`), so the artifact it writes appears nowhere in its argv. A
  * guard that reads the command line can only see jobs that name a binary, which is a subset that happens
  * to exclude the composite jobs an ordering error is most likely to involve.
  *

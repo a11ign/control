@@ -469,7 +469,7 @@ test("#2334/#2386: `explain-case` takes `case` (required), `out` and `criterion`
   // A templated LIST, because the flag is appended or absent (`prune-orphan-captures`' form); what it renders is
   // pinned below, against the list this entry was before `criterion` existed.
   assert.equal(typeof job.argv, "string");
-  assert.match(job.argv as unknown as string, /\['\/usr\/bin\/npm', 'run', '--silent', 'scorer:explain', '--',\s+'--model=' ~ \(out \| default\('candidate'\)\), '--case=' ~ case\]/);
+  assert.match(job.argv as unknown as string, /\['\/usr\/bin\/corepack', 'pnpm', 'run', '--silent', 'scorer:explain', '--',\s+'--model=' ~ \(out \| default\('candidate'\)\), '--case=' ~ case\]/);
   assert.match(job.argv as unknown as string, /\+ \(\['--criterion=' ~ criterion\] if criterion is defined else \[\]\)/);
 });
 
@@ -487,7 +487,7 @@ test("#2334: `case` reaches the argv ONLY as the value of `--case=`, and is asse
 
 test("#2334: no existing job's argv changed -- the neighbours that share its asserts render what they always did", () => {
   const jobs = jobsOf();
-  assert.deepEqual(jobs["explain-feature"].argv, ["/usr/bin/npm", "run", "--silent", "scorer:explain-feature", "--",
+  assert.deepEqual(jobs["explain-feature"].argv, ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain-feature", "--",
     "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]);
   // The three that read `out` beside it, through the assert whose `when` list gained a member.
   assert.ok(jobs.acceptance.argv.at(-1)?.endsWith("model-{{ out | default('candidate') }}/acceptance-report.json"));
@@ -544,20 +544,20 @@ test("#2334 (rendered): a well-formed case id, or a comma-separated list, render
 
 test("#2386 (rendered): with `criterion` unset the argv is byte-identical to what it was before the parameter existed",
   { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
-    const before = ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--", "--model=candidate",
+    const before = ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain", "--", "--model=candidate",
       "--case=acceptance-b3-sections-tree"];
     const run = runExplainCase(["-e", "case=acceptance-b3-sections-tree"]);
     assert.equal(run.status, 0, run.output);
     assert.equal(JSON.stringify(run.argv), JSON.stringify(before));
     const named = runExplainCase(["-e", "case=acceptance-b3-sections-tree", "-e", "out=scratch"]);
-    assert.equal(JSON.stringify(named.argv), JSON.stringify([...before.slice(0, 5), "--model=scratch", before[6]]));
+    assert.equal(JSON.stringify(named.argv), JSON.stringify([...before.slice(0, 6), "--model=scratch", before[7]]));
   });
 
 test("#2386 (rendered): `criterion` set appends `--criterion=<X>` after `--case=`, and nothing else moves",
   { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
     const run = runExplainCase(["-e", "case=acceptance-b3-sections-tree", "-e", "criterion=4.1.3"]);
     assert.equal(run.status, 0, run.output);
-    assert.deepEqual(run.argv, ["/usr/bin/npm", "run", "--silent", "scorer:explain", "--", "--model=candidate",
+    assert.deepEqual(run.argv, ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain", "--", "--model=candidate",
       "--case=acceptance-b3-sections-tree", "--criterion=4.1.3"]);
   });
 

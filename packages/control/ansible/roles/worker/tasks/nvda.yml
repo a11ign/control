@@ -50,7 +50,7 @@
   ansible.windows.win_powershell:
     script: |
       $manifest = Join-Path '{{ worker_repo_path }}' 'node_modules\@guidepup\guidepup\package.json'
-      if (-not (Test-Path $manifest)) { throw '@guidepup/guidepup is not installed. npm install failed.' }
+      if (-not (Test-Path $manifest)) { throw '@guidepup/guidepup is not installed. pnpm install failed.' }
       $Ansible.Changed = $false
       (Get-Content $manifest -Raw | ConvertFrom-Json).version
   register: guidepup_version
