@@ -43,4 +43,5 @@ ExecStart=/usr/bin/systemd-run --unit=a11y-job-corpus-snapshot --remain-after-ex
   --property=ReadWritePaths=/srv/a11y-runs \
   --setenv=PYTHONUNBUFFERED=1 \
   --setenv=PYTHONDONTWRITEBYTECODE=1 \
-  -- /usr/bin/npm run corpus:snapshot
+  --setenv=COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+  -- /usr/bin/corepack pnpm run corpus:snapshot
