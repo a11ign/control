@@ -86,10 +86,12 @@ test("the scheduled snapshot unit and the build step run pnpm too, and no Region
 
 test("a dispatch asks the runner for its version BEFORE it starts a unit, so a lab without corepack fails by name", () => {
   const runJob = ANSIBLE("tasks/run-job.yml");
-  const preflight = runJob.indexOf("argv: [/usr/bin/corepack, pnpm, --version]");
+  const preflight = runJob.indexOf('argv: ["{{ lab_corepack }}", pnpm, --version]');
   const start = runJob.indexOf('- name: "Start it: {{ job_name }}"');
   assert.ok(preflight > 0, "run-job.yml no longer asks `corepack pnpm --version` before dispatch");
   assert.ok(start > preflight, "the version question comes AFTER the unit starts, which is too late to refuse it");
+  assert.match(ANSIBLE("group_vars/a11y_lab.yml"), /^lab_corepack: \/usr\/bin\/corepack$/m,
+    "the preflight's runner defaults to the file the job argvs name");
   assert.match(runJob, /"--setenv=COREPACK_ENABLE_DOWNLOAD_PROMPT=0"/,
     "the unit has no terminal to answer corepack's download prompt");
 });

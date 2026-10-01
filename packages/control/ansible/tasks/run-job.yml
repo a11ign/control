@@ -412,11 +412,13 @@
   # without corepack would otherwise start `corpus-snapshot` and report a unit that failed in 20 ms -- found
   # the next morning, by whoever reads the journal. This way the dispatch fails here, naming the cause.
   #
-  # `lab_corepack` exists for ONE reader, `lab-job-lock-two-rows.test.ts`: a CI runner's Node puts corepack
-  # elsewhere (or nowhere) under `/usr/bin`, and the harness has to ask this task its question of a fake. The
-  # job argvs in `lab-job.yml` stay literal, so nothing a real dispatch runs can be re-pointed by it.
+  # `lab_corepack` (`group_vars/a11y_lab.yml`, `/usr/bin/corepack`) is read by this question ONLY, and is
+  # overridden by ONE caller, `lab-job-lock-two-rows.test.ts`: a CI runner's Node puts corepack elsewhere (or
+  # nowhere) under `/usr/bin`, and the harness has to ask this task its question of a fake. It is a defined
+  # variable and not `| default(...)` because `playbook-variables.test.ts` refuses an undefined `lab_*` read.
+  # The job argvs in `lab-job.yml` stay literal, so nothing a real dispatch runs can be re-pointed by it.
   ansible.builtin.command:
-    argv: ["{{ lab_corepack | default('/usr/bin/corepack') }}", pnpm, --version]
+    argv: ["{{ lab_corepack }}", pnpm, --version]
     chdir: "{{ lab_repo_path }}"
   environment:
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
