@@ -344,7 +344,7 @@
   # about which packages a given job touches.
   when: lab_pull is defined and lab_pull is changed
   ansible.builtin.command:
-    argv: [/usr/bin/npm, run, build]
+    argv: [/usr/bin/corepack, pnpm, run, build]
     chdir: "{{ lab_repo_path }}"
   changed_when: true
 
@@ -400,6 +400,30 @@
          else (('(checkout unchanged, up to date with ' ~ lab_ref ~ ')') if lab_behind_count | int == 0
                else '(checkout unchanged and ' ~ lab_behind_count ~ ' COMMIT(S) BEHIND origin/' ~ lab_ref ~ ')') }}
 
+- name: "Can this host run a package script at all? (the runner every catalogue entry names)"
+  # EVERY job in `lab-job.yml` is `["/usr/bin/corepack", "pnpm", "run", ...]` (#2893: pnpm, where this was
+  # the system npm). There is NO `/usr/bin/pnpm` shim to create: corepack ships with this Node, `packageManager`
+  # in `package.json` pins the version, and `/usr/bin/corepack` is the file the install step above already
+  # names -- read from the host on 2026-10-01 (a symlink into `/usr/lib/node_modules/corepack`, pnpm 10.34.5
+  # answering from a `systemd-run` unit with no login environment). So the argv names a file that exists
+  # because Node does, rather than one a provisioning step must remember to make.
+  #
+  # Asked on EVERY dispatch, not only after a pull, and BEFORE the unit starts: a rebuilt lab whose Node came
+  # without corepack would otherwise start `corpus-snapshot` and report a unit that failed in 20 ms -- found
+  # the next morning, by whoever reads the journal. This way the dispatch fails here, naming the cause.
+  #
+  # `lab_corepack` (`group_vars/a11y_lab.yml`, `/usr/bin/corepack`) is read by this question ONLY, and is
+  # overridden by ONE caller, `lab-job-lock-two-rows.test.ts`: a CI runner's Node puts corepack elsewhere (or
+  # nowhere) under `/usr/bin`, and the harness has to ask this task its question of a fake. It is a defined
+  # variable and not `| default(...)` because `playbook-variables.test.ts` refuses an undefined `lab_*` read.
+  # The job argvs in `lab-job.yml` stay literal, so nothing a real dispatch runs can be re-pointed by it.
+  ansible.builtin.command:
+    argv: ["{{ lab_corepack }}", pnpm, --version]
+    chdir: "{{ lab_repo_path }}"
+  environment:
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  changed_when: false
+
 # NO BYTECODE CACHE. A stale `__pycache__/*.pyc` makes a job execute code that is not in the checkout,
 # which is what `REFUSE to run at a commit other than the one asked for` exists to prevent, one layer
 # below where that guard can see it: it compares git SHAs, and the SHA is correct while the bytecode is
@@ -445,6 +469,7 @@
         "--property=ReadWritePaths=" ~ lab_runs_path,
         "--setenv=PYTHONUNBUFFERED=1",
         "--setenv=PYTHONDONTWRITEBYTECODE=1",
+        "--setenv=COREPACK_ENABLE_DOWNLOAD_PROMPT=0",
       ] + (job_setenv | default([]) | map('regex_replace', '^', '--setenv=') | list) + [
         "--"
       ] + job_argv }}
