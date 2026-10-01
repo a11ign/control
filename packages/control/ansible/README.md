@@ -25,8 +25,8 @@ python3 check-modules.py                        # do the module ARGUMENTS exist?
 The fleet is defined once, in `inventory.yml`. Everything else derives from it:
 
 ```bash
-eval "$(npm run --silent fleet:env)"            # exports A11Y_WORKERS from the inventory
-npm run doctor                                  # now sees the whole fleet
+eval "$(pnpm run --silent fleet:env)"           # exports A11Y_WORKERS from the inventory
+pnpm run doctor                                 # now sees the whole fleet
 ```
 
 **`inventory.yml` is gitignored, not deleted.** Real addresses, in a public repo (#54) — it is restored
@@ -80,8 +80,8 @@ ansible-playbook provision-role.yml -l a11y-worker-1
 # then compare against a script-provisioned box:
 #   /health.environment  — browser, NVDA, guidepup, OS, protocol
 #   provisionRevision    — the machine-checkable equivalence test
-npm run capture:check -- --worker=http://<box>:8765
-npm run evidence:check http://<box>:8765
+pnpm run capture:check --worker=http://<box>:8765
+pnpm run evidence:check http://<box>:8765
 ```
 
 `provisionRevision` is a **capture cache key**, and it currently hashes the script files. Retiring the
@@ -247,11 +247,11 @@ EXISTS, not because it captures: `wake.yml`, `sleep.yml`, `deploy.yml` and `prov
 `a11y_workers` and are unaffected.
 
 ```bash
-npm run lab:job -- -e job=train                 # named jobs only; see lab-job.yml for the catalogue
-npm run lab:job -- -e job=capture-real-pages -e worker=a11y-worker-2 -e role=training -e shard=0/4
-npm run lab:status                              # every a11y-job-* unit and its state
-npm run lab:status -- -e job=train              # one job, systemd's view + its journal + its own progress file
-npm run lab:clear-failed -- -e job=everything  # clear ONE failed job unit (read its journal first); refuses a sweep, #2180
+pnpm run lab:job -e job=train                   # named jobs only; see lab-job.yml for the catalogue
+pnpm run lab:job -e job=capture-real-pages -e worker=a11y-worker-2 -e role=training -e shard=0/4
+pnpm run lab:status                             # every a11y-job-* unit and its state
+pnpm run lab:status -e job=train                # one job, systemd's view + its journal + its own progress file
+pnpm run lab:clear-failed -e job=everything    # clear ONE failed job unit (read its journal first); refuses a sweep, #2180
 ```
 
 > **Run these from YOUR machine, not from the control container.** `a11y_lab` authenticates with
@@ -261,7 +261,7 @@ npm run lab:clear-failed -- -e job=everything  # clear ONE failed job unit (read
 > `no such identity: /root/.ssh/<lab key filename> ... Permission denied (publickey)`, which reads like a
 > broken job path rather than the wrong launch point. Cost twenty minutes to work out once.
 >
-> **`npm run capture:check` is operator-machine-only too, for an unrelated reason.** It imports guidepup,
+> **`pnpm run capture:check` is operator-machine-only too, for an unrelated reason.** It imports guidepup,
 > which resolves a screen reader at IMPORT time and throws `No available supported screen readers` on
 > Linux — so it cannot run on the lab at all, however it is invoked. macOS resolves VoiceOver and the
 > import succeeds, which is why the worker-mode check runs from the Mac and talks to the guest over HTTP.
@@ -346,7 +346,7 @@ separate, each domain's blast radius is bounded by what that one key can reach.
 3. **For lab access:** add their public key to the Proxmox host's authorized-keys for the account this
    repo's docs call `a11y-pve` — done on the host itself, by whoever already holds that access today, not
    scripted here, because a lab-access change is rare enough that automating it would be exercised once and
-   then trusted unread. Confirm with a read-only command (`npm run lab:status`) before anything that could
+   then trusted unread. Confirm with a read-only command (`pnpm run lab:status`) before anything that could
    write, per this repo's own habit of proving a channel with the cheapest possible probe first.
 4. **Never send a private key over any channel, ever, including to move it between your own machines.** If
    a machine holding either private key is being retired, generate a FRESH keypair for its replacement and
@@ -456,7 +456,7 @@ which served the previous code for another hour. A reboot always picks up pushed
   apart and where a bash array evaporated crossing `nohup bash -c`. It also carries a thinner environment,
   which is how the locale failure above was first met.
 
-- **`npm run gate:isolation` cannot complete on the Linux control plane, so neither can `release:gate`.**
+- **`pnpm run gate:isolation` cannot complete on the Linux control plane, so neither can `release:gate`.**
   Two of six packages fail there for platform reasons rather than defects: `nvda-worker` says so honestly
   ("this machine has no screen reader, so guidepup refuses to import … Run the gate on macOS or Windows"),
   but `worker-fleet` fails with a bare `AssertionError` because host capacity is read from `vm_stat`, which

@@ -49,7 +49,7 @@ if you are working in this checkout against an existing one, you already have �
 values, and they do not belong in git.
 
 `A11Y_CONTROL_HOST` has a third state beyond "unset" and "typed into this shell" (#285): once you have set
-it and successfully run any fleet command, `npm run fleet:control-host-install` writes that same address to
+it and successfully run any fleet command, `pnpm run fleet:control-host-install` writes that same address to
 `/etc/a11ign/control-host` on the control plane — the same pattern `fleet:inventory-install` already uses
 for `inventory.yml`. A later shell that never set the variable (a cron job, a fresh login) falls back to
 that file instead of refusing. `A11Y_PVE_KEY` deliberately has no equivalent yet — see #285 for why that
