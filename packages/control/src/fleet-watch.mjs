@@ -48,10 +48,15 @@ export const DEFAULT_THRESHOLD_MS = 10 * MS_PER_MINUTE;
 
 export const DEFAULT_STATE_PATH = "runs/fleet-watch-state.json";
 
+/** Beside the two state files it sits with (#2979): `fleet-watch-state.json` and `fleet-auto-off-state.json`. */
+export const DEFAULT_CAPTURES_STATE_PATH = "runs/fleet-captures-state.json";
+
+const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
+
 /** Exit codes are the contract: 0 nothing needs attention, 1 something does, 2 could not ask. */
 export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
 
-/** @typedef {{name: string, state: string, readiness?: {reason?: string|null}|null}} FleetRow */
+/** @typedef {{name: string, state: string, captures?: number|null, readiness?: {reason?: string|null}|null}} FleetRow */
 /** @typedef {Record<string, number>} SinceState */
 
 /**
@@ -110,6 +115,133 @@ export function advance(rows, previous, now) {
   return next;
 }
 
+/**
+ * ## When did the fleet last capture? (#2979, found by #2937)
+ *
+ * A worker's `/health` `captures` is a count since the worker BOOTED, with no time on it, so "is the fleet
+ * idle while work waits" cannot be read off one snapshot -- the same missing-memory problem the non-ready
+ * ledger above solves, for a different question. This is that memory: per worker, the last count seen, when
+ * it was seen, when it last ROSE, and each rise inside the window.
+ *
+ * @typedef {{at: number, by: number}} Rise
+ * @typedef {{captures: number, seenAt: number, lastRoseAt: number|null, rises: Rise[]}} WorkerCaptures
+ * @typedef {{since: number, workers: Record<string, WorkerCaptures>}} CapturesState
+ * @typedef {{captures24h: number, lastCaptureAt: number|null, observedSince: number}} CaptureTimes
+ */
+
+/** @param {unknown} value */
+const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+/** @param {any} worker */
+function isWorkerCaptures(worker) {
+  return Boolean(worker) && isNumber(worker.captures) && isNumber(worker.seenAt)
+    && (worker.lastRoseAt === null || isNumber(worker.lastRoseAt))
+    && Array.isArray(worker.rises)
+    && worker.rises.every((/** @type {any} */ rise) => Boolean(rise) && isNumber(rise.at) && isNumber(rise.by));
+}
+
+/**
+ * The persisted capture times. UNLIKE `readState`, a missing or corrupt file reads as `null`, not as empty:
+ * an empty ledger answers "zero captures in 24 h", which is a claim about the fleet, and a file nobody could
+ * read makes no such claim. One bad worker entry makes the whole file `null` for the same reason.
+ *
+ * @param {string} path
+ * @param {(path: string, encoding: "utf8") => string} read
+ * @returns {CapturesState|null}
+ */
+export function readCapturesState(path, read = readFileSync) {
+  try {
+    const parsed = JSON.parse(read(path, "utf8"));
+    const workers = parsed?.workers;
+    const wellFormed = isNumber(parsed?.since) && Boolean(workers) && typeof workers === "object"
+      && !Array.isArray(workers) && Object.values(workers).every(isWorkerCaptures);
+    return wellFormed ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} path
+ * @param {CapturesState} state
+ * @param {(path: string, data: string) => void} write
+ */
+export function writeCapturesState(path, state, write = writeFileSync) {
+  write(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/**
+ * One worker's entry after one reading. A count that ROSE records the time it was seen to have risen (the
+ * poll's own clock: the rise happened somewhere since the last reading). A count that FELL is a restart --
+ * the worker booted and counts from zero again -- so it becomes the new baseline and records no capture;
+ * the same result as a count that held still, which is why there are only two branches.
+ *
+ * @param {WorkerCaptures|undefined} previous
+ * @param {number} captures
+ * @param {number} now
+ * @returns {WorkerCaptures}
+ */
+function advanceWorker(previous, captures, now) {
+  // First sight: the count predates this ledger, so none of it can be dated.
+  if (!previous) return { captures, seenAt: now, lastRoseAt: null, rises: [] };
+  const rises = previous.rises.filter((rise) => now - rise.at < CAPTURE_WINDOW_MS);
+  if (captures > previous.captures) {
+    return { captures, seenAt: now, lastRoseAt: now, rises: [...rises, { at: now, by: captures - previous.captures }] };
+  }
+  return { captures, seenAt: now, lastRoseAt: previous.lastRoseAt, rises };
+}
+
+/**
+ * One tick's worth of the capture ledger. `previous: null` (nothing readable) starts a fresh ledger, whose
+ * `since` is what lets a reader tell "no captures in 24 h" from "watched for a minute". A worker with no
+ * count this tick (unreachable) is not a reading: its last entry stays exactly as it was, so a box that was
+ * off and comes back with a higher count is a rise, and with a lower one a restart.
+ *
+ * @param {FleetRow[]} rows
+ * @param {CapturesState|null} previous
+ * @param {number} now
+ * @returns {CapturesState}
+ */
+export function advanceCaptures(rows, previous, now) {
+  const base = previous ?? { since: now, workers: {} };
+  const workers = { ...base.workers };
+  for (const row of rows) {
+    if (!isNumber(row.captures)) continue;
+    workers[row.name] = advanceWorker(base.workers[row.name], /** @type {number} */ (row.captures), now);
+  }
+  return { since: base.since, workers };
+}
+
+/**
+ * The two fields the gate asks for: captures across the fleet in the 24 h before `now`, and the latest
+ * time any worker's count rose (however long ago -- it is what answers "idle since when"). `null` for an
+ * unreadable ledger, never zero. `observedSince` rides along so a zero from a ledger started a minute ago
+ * is not mistaken for a day of idleness.
+ *
+ * @param {CapturesState|null} state
+ * @param {number} now
+ * @returns {CaptureTimes|null}
+ */
+export function captureTimes(state, now) {
+  if (!state) return null;
+  const workers = Object.values(state.workers);
+  const captures24h = workers.flatMap((worker) => worker.rises)
+    .filter((rise) => now - rise.at < CAPTURE_WINDOW_MS)
+    .reduce((sum, rise) => sum + rise.by, 0);
+  const rose = workers.flatMap((worker) => (worker.lastRoseAt === null ? [] : [worker.lastRoseAt]));
+  return { captures24h, lastCaptureAt: rose.length ? Math.max(...rose) : null, observedSince: state.since };
+}
+
+/**
+ * @param {string} path
+ * @param {number} now
+ * @param {(path: string, encoding: "utf8") => string} read
+ * @returns {CaptureTimes|null}
+ */
+export function readCaptureTimes(path, now, read = readFileSync) {
+  return captureTimes(readCapturesState(path, read), now);
+}
+
 /** @typedef {{name: string, state: string, ageMs: number, reason: string|null}} OverdueEntry */
 
 /**
@@ -159,13 +291,22 @@ export function watchBody(entries) {
 }
 
 /**
- * Read the live fleet, advance and persist the non-ready-since state, and report who is overdue.
+ * @param {FleetRow[]} rows
+ * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync }} where
+ */
+function recordCaptures(rows, { path, at, read, write }) {
+  writeCapturesState(path, advanceCaptures(rows, readCapturesState(path, read), at), write);
+}
+
+/**
+ * Read the live fleet, advance and persist the non-ready-since state and the capture times, and report who
+ * is overdue.
  * Everything above this function is pure; this is the one place I/O and the clock meet, and every piece
  * of it is a parameter with a real default -- the shape `runLabStatus`'s `run` parameter already
  * established for the identical reason: a test drives this without a fleet, a fleet, or a clock.
  *
- * @param {{ getStatus?: StatusReader, now?: () => number, statePath?: string, thresholdMs?: number,
- *           read?: typeof readFileSync, write?: typeof writeFileSync }} [deps]
+ * @param {{ getStatus?: StatusReader, now?: () => number, statePath?: string, capturesPath?: string,
+ *           thresholdMs?: number, read?: typeof readFileSync, write?: typeof writeFileSync }} [deps]
  * @returns {Promise<OverdueEntry[]>}
  */
 export async function watch(deps = {}) {
@@ -178,6 +319,7 @@ export async function watch(deps = {}) {
   const previous = readState(statePath, deps.read);
   const next = advance(status.rows, previous, at);
   writeState(statePath, next, deps.write);
+  recordCaptures(status.rows, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at, read: deps.read, write: deps.write });
   return overdue(status.rows, next, at, thresholdMs);
 }
 
