@@ -17,7 +17,7 @@
  *   - no module may be IMPORTED BY PACKAGE NAME, because that resolution goes through `node_modules` and
  *     would simply fail on the machine this package exists to run on
  *
- * The second is the one prose would miss. `@a11ign/worker-fleet/cli-flags` looks harmless and is not:
+ * The second is the one prose would miss. `@a11ign/screenreader-fleet/cli-flags` looks harmless and is not:
  * it works on a laptop, and on the control plane it is a crash.
  */
 import { test } from "node:test";

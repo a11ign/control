@@ -61,7 +61,7 @@ import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // than here -- see the re-export below for what that cost while it did not. Relative and leaf-shaped, so
 // ADR 0012's no-`npm install` property is unchanged.
 import { fleetHoldUntil, fleetHoldWorkers } from "../../agent-org/src/waiting-condition.mjs";
-// RELATIVE, NEVER `@a11ign/worker-fleet/cli-flags`. A package-name import resolves through
+// RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.

@@ -5,7 +5,7 @@
 // bin itself.
 //
 // ceo's ruling on #1356 (2026-09-18), choosing this over duplicating a control-plane reader INTO
-// `@a11ign/worker-fleet`: that package is PUBLISHED, with real external consumers, and is exactly the
+// `@a11ign/screenreader-fleet`: that package is PUBLISHED, with real external consumers, and is exactly the
 // supply-chain surface ADR 0012 keeps the control-plane SSH key away from -- "the credential able to
 // reconfigure the entire fleet would sit next to the largest supply-chain surface in the system." Code
 // that KNOWS HOW TO REACH THE CONTROL PLANE sitting in a published tarball is the coupling the ADR calls
@@ -15,7 +15,7 @@
 // `resolveWorkerPool`'s own precedence (`packages/worker-fleet/src/fleet-env.mjs`) already puts
 // `A11Y_WORKER(S)` first, before it ever touches a local inventory.yml -- so supplying that one
 // environment variable is enough. Nothing about ssh, `A11Y_PVE_KEY`, or the control plane ever enters
-// `@a11ign/worker-fleet`'s source or its published surface; `doctor.mjs`/`check-worker-code.mjs` run
+// `@a11ign/screenreader-fleet`'s source or its published surface; `doctor.mjs`/`check-worker-code.mjs` run
 // exactly as they ship, unaware anything upstream of them changed. An operator's own explicit
 // `A11Y_WORKER(S)` is never overridden -- naming workers means you are managing them.
 //

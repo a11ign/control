@@ -1,6 +1,6 @@
 /**
  * ceo's ruling on #1356 (2026-09-18, option (b)): `doctor`/`worker:code` are PUBLISHED bins
- * (`@a11ign/worker-fleet`) that must never import `packages/control` -- `published-imports.test.ts`
+ * (`@a11ign/screenreader-fleet`) that must never import `packages/control` -- `published-imports.test.ts`
  * forbids it, and ADR 0012 is why. This wrapper achieves the same operational outcome by setting
  * `A11Y_WORKERS` from the control plane before spawning the unchanged, published bin as a CHILD process
  * -- so these tests assert the ENV and ARGV the child receives, never the bin's own behaviour (that is
