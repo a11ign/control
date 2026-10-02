@@ -57,6 +57,13 @@ test("advance: `busy` is not stuck -- a worker mid-capture is occupied, not over
   assert.deepEqual(advance(rows, { "a11y-worker-3": 1_000 }, 999_000), {});
 });
 
+test("advance: `unreachable` is the RESTING state -- absent from the ledger, even if it was tracked before (#3023)", () => {
+  const rows = [row("a11y-worker-3", "unreachable")];
+  assert.deepEqual(advance(rows, {}, 999_000), {}, "a powered-off box never enters the ledger");
+  assert.deepEqual(advance(rows, { "a11y-worker-3": 1_000 }, 999_000), {},
+    "and a box that was warming and then went dark is dropped, not kept ageing");
+});
+
 test("overdue: warming for SECONDS produces nothing -- the positive control this row exists for", () => {
   const rows = [row("a11y-worker-3", "warming")];
   const state = { "a11y-worker-3": 1_000 };
@@ -95,6 +102,53 @@ test("overdue: several overdue workers sort OLDEST FIRST", () => {
     "worker-10 has been stuck longer (since 5,000) than worker-4 (since 10,000)");
 });
 
+const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+
+function memoryStore() {
+  const files = new Map<string, string>();
+  const read = ((path: string) => {
+    const data = files.get(path);
+    if (data === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    return data;
+  }) as never;
+  const write = ((path: string, data: string) => { files.set(path, data); }) as never;
+  return { read, write };
+}
+
+test("watch(): a fleet powered off on purpose stays silent past the threshold, and a warming worker beside it does not (#3023)", async () => {
+  const { read, write } = memoryStore();
+  const off = [row("a11y-worker-1", "unreachable"), row("a11y-worker-2", "unreachable")];
+  const run = (rows: ReturnType<typeof row>[], at: number) => watch({
+    getStatus: async () => ({ rows }), now: () => at, statePath: "runs/fleet-watch-state.json",
+    thresholdMs: DEFAULT_THRESHOLD_MS, read, write,
+  });
+  await run(off, 1_000_000);
+  assert.deepEqual(await run(off, 1_000_000 + TWO_DAYS_MS), [],
+    "every worker unreachable for two days is the resting state, so the watch posts nothing");
+
+  // Positive control: the emptiness above is not the whole assertion -- a reachable non-ready worker still fires.
+  const mixed = [row("a11y-worker-1", "unreachable"), row("a11y-worker-3", "warming", "not ready: noForegroundBlocker")];
+  await run(mixed, 1_000_000 + TWO_DAYS_MS + 1_000);
+  const entries = await run(mixed, 1_000_000 + TWO_DAYS_MS + 1_000 + DEFAULT_THRESHOLD_MS);
+  assert.deepEqual(entries.map((e) => e.name), ["a11y-worker-3"]);
+});
+
+test("watch(): `unreachable` -> `warming` starts a FRESH clock, so a cold start after two days off is not overdue (#3023)", async () => {
+  const { read, write } = memoryStore();
+  const run = (rows: ReturnType<typeof row>[], at: number) => watch({
+    getStatus: async () => ({ rows }), now: () => at, statePath: "runs/fleet-watch-state.json",
+    thresholdMs: DEFAULT_THRESHOLD_MS, read, write,
+  });
+  await run([row("a11y-worker-3", "unreachable")], 0);
+  const wakesAt = TWO_DAYS_MS;
+  assert.deepEqual(await run([row("a11y-worker-3", "warming")], wakesAt), [],
+    "warming for the first tick, not 'warming for 2d' inherited from the unreachable ticks");
+  assert.deepEqual(JSON.parse(String((read as (p: string) => string)("runs/fleet-watch-state.json"))),
+    { "a11y-worker-3": wakesAt }, "`since` is the warming tick, not the unreachable one");
+  const later = await run([row("a11y-worker-3", "warming")], wakesAt + DEFAULT_THRESHOLD_MS);
+  assert.equal(later[0]?.ageMs, DEFAULT_THRESHOLD_MS, "and a genuinely stuck warm-up still fires from that fresh clock");
+});
+
 test("watchBody names the count, every entry with its age and reason, and the fix command", () => {
   const body = watchBody([
     { name: "a11y-worker-3", state: "warming", ageMs: 2 * 60 * 60 * 1000 + 5 * 60 * 1000,
@@ -106,8 +160,8 @@ test("watchBody names the count, every entry with its age and reason, and the fi
 });
 
 test("watchBody with no reason names the worker and age without a dangling separator", () => {
-  const body = watchBody([{ name: "a11y-worker-3", state: "unreachable", ageMs: 60_000, reason: null }]);
-  assert.match(body, /`a11y-worker-3` unreachable for 1m$/m);
+  const body = watchBody([{ name: "a11y-worker-3", state: "warming", ageMs: 60_000, reason: null }]);
+  assert.match(body, /`a11y-worker-3` warming for 1m$/m);
 });
 
 /**

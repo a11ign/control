@@ -25,6 +25,14 @@
  * agent-practices.md`'s "a waiting condition is DATA, not a sentence": clearing itself the moment the
  * condition clears is the whole point, and it is why `advance` below has no code path that writes
  * anything for a `ready` or `busy` row.
+ *
+ * ## `unreachable` is the resting state, not a fault signal (#3023)
+ *
+ * Off is the fleet's normal state (`wake.yml`; `fleet:auto-off` powers it down on purpose), and `/health`
+ * cannot tell a powered-off box from a dead one (`fleet:status`, #918) -- the auto-off stamp lives on the
+ * control host, which this watch does not read. So an unreachable worker is never counted: 73 hourly posts
+ * on #928 read a deliberately-off fleet as broken. A box that is genuinely dead is found when a capture
+ * window wakes it and it does not return (`fleet:wake`, which tells `needs:chairman`).
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -94,11 +102,18 @@ export function writeState(path, state, write = writeFileSync) {
   write(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+/** Not a fault signal: `ready` is fine, `busy` is occupied, and `unreachable` is the fleet's resting state. */
+const RESTING_OR_OCCUPIED = new Set(["ready", "busy", "unreachable"]);
+
 /**
- * One tick's worth of the ledger. A worker not `ready` (and not merely `busy` -- occupied is not stuck)
- * keeps its EXISTING first-seen timestamp if it has one, or gets `now` if this is the first tick it was
- * ever seen non-ready. A worker that recovered is absent from the result entirely: it clears itself the
+ * One tick's worth of the ledger. A worker that ANSWERS and is not `ready` (and not merely `busy` --
+ * occupied is not stuck) keeps its EXISTING first-seen timestamp if it has one, or gets `now` if this is the
+ * first tick it was seen so. A worker that recovered is absent from the result entirely: it clears itself the
  * moment `fleet:status` next reports it `ready`, never lingering as a resolved entry to prune.
+ *
+ * `unreachable` is absent too, and here rather than only in `overdue`: the ledger keeps `since` across state
+ * changes, so a box that wakes `warming` after two days off would otherwise arrive already "warming for 2d"
+ * and fire the fault #1815 exists for on a healthy cold start (#3023).
  *
  * @param {FleetRow[]} rows
  * @param {SinceState} previous
@@ -109,7 +124,7 @@ export function advance(rows, previous, now) {
   /** @type {SinceState} */
   const next = {};
   for (const row of rows) {
-    if (row.state === "ready" || row.state === "busy") continue;
+    if (RESTING_OR_OCCUPIED.has(row.state)) continue;
     next[row.name] = previous[row.name] ?? now;
   }
   return next;
