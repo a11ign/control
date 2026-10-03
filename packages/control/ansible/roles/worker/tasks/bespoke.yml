@@ -122,26 +122,45 @@
 # Reading first is what makes it idempotent — on a box already configured nothing is set, so nothing
 # bounces, so a re-run cannot hang. Setting values that are already correct would re-initialise the
 # adapter on EVERY run for no gain.
+- name: The advanced properties a wakeable adapter must read as
+  # ONE table, read by the diff, the setter and the proof below. It was written out three times, and a table
+  # that is copied is a table whose copies disagree: this one already said pattern wake ENABLED while
+  # a11y_nic_power, a few tasks later, set it Disabled.
+  #
+  # Magic packet ONLY. Pattern wake would bring a box that is meant to be off between runs up for ordinary
+  # broadcast traffic. The last two are Intel's own names for what its driver leaves on its default: whether
+  # the adapter may raise a wake event at all (`Enable PME`) and whether it does so from S5
+  # (`Shutdown Wake-On-Lan`). Energy Efficient Ethernet takes Off/On, not Disabled/Enabled. Measured: passing
+  # 'Disabled' fails with "No matching display value found", which would leave a documented WoL blocker on.
+  ansible.builtin.set_fact:
+    nic_wake_properties:
+      'Wake on Magic Packet': 'Enabled'
+      'Wake on Pattern Match': 'Disabled'
+      'Reduce Speed On Power Down': 'Disabled'
+      'Energy Efficient Ethernet': 'Off'
+      'Shutdown Wake-On-Lan': 'Enabled'
+      'Enable PME': 'Enabled'
+  when: "'VEN_8086' in nic_driver.stdout"
+
+- name: What the diff script is
+  # Run twice: before the change, to decide whether to touch the adapter at all, and AFTER it, as the proof.
+  # A property this adapter does not expose is skipped, not failed: the module's keyword readback decides
+  # whether the box can wake, and it fails by name on the one that settles it.
+  ansible.builtin.set_fact:
+    nic_wake_diff_script: |
+      $a = (Get-NetAdapter -Physical | Select-Object -First 1).Name
+      $want = '{{ nic_wake_properties | to_json }}' | ConvertFrom-Json
+      $differs = @()
+      foreach ($p in $want.PSObject.Properties) {
+        $cur = (Get-NetAdapterAdvancedProperty -Name $a -DisplayName $p.Name -EA SilentlyContinue).DisplayValue
+        if ($cur -and $cur -ne $p.Value) { $differs += "$($p.Name)=$cur" }
+      }
+      ($differs -join ',')
+  when: "'VEN_8086' in nic_driver.stdout"
+
 - name: What the wake properties are now
   become: true
-  ansible.windows.win_shell: |
-    $a = (Get-NetAdapter -Physical | Select-Object -First 1).Name
-    # Energy Efficient Ethernet takes Off/On, not Disabled/Enabled. Measured: passing 'Disabled' fails
-    # with "No matching display value found", which would leave a documented WoL blocker on.
-    $want = [ordered]@{
-      'Wake on Magic Packet'       = 'Enabled'
-      'Wake on Pattern Match'      = 'Enabled'
-      'Reduce Speed On Power Down' = 'Disabled'
-      'Energy Efficient Ethernet'  = 'Off'
-    }
-    $differs = @()
-    foreach ($k in $want.Keys) {
-      $cur = (Get-NetAdapterAdvancedProperty -Name $a -DisplayName $k -EA SilentlyContinue).DisplayValue
-      # A property this adapter does not expose is skipped, not failed: the assert at the end is what
-      # decides whether the box can wake, and it reads the one value that actually settles it.
-      if ($cur -and $cur -ne $want[$k]) { $differs += $k }
-    }
-    ($differs -join ',')
+  ansible.windows.win_shell: "{{ nic_wake_diff_script }}"
   changed_when: false
   register: wake_diff
   when: "'VEN_8086' in nic_driver.stdout"
@@ -150,16 +169,11 @@
   become: true
   ansible.windows.win_shell: |
     $a = (Get-NetAdapter -Physical | Select-Object -First 1).Name
-    $want = [ordered]@{
-      'Wake on Magic Packet'       = 'Enabled'
-      'Wake on Pattern Match'      = 'Enabled'
-      'Reduce Speed On Power Down' = 'Disabled'
-      'Energy Efficient Ethernet'  = 'Off'
-    }
-    foreach ($k in $want.Keys) {
-      try { Set-NetAdapterAdvancedProperty -Name $a -DisplayName $k -DisplayValue $want[$k] -EA Stop }
+    $want = '{{ nic_wake_properties | to_json }}' | ConvertFrom-Json
+    foreach ($p in $want.PSObject.Properties) {
+      try { Set-NetAdapterAdvancedProperty -Name $a -DisplayName $p.Name -DisplayValue $p.Value -EA Stop }
       catch {
-        # See above: absent properties are not failures. The assert below is the gate.
+        # See above: absent properties are not failures. The proof below is the gate.
       }
     }
   async: 120
@@ -171,6 +185,17 @@
     delay: 15
     timeout: 300
   when: "'VEN_8086' in nic_driver.stdout and (wake_diff.stdout | default('') | trim | length) > 0"
+
+- name: Refuse to call this provisioned if a wake property still reads wrong
+  # The diff run again AFTER the change and the reconnect: the set above is fire-and-forget and cannot report
+  # its own result, so what it did is read, and a property that is still not as wanted names itself and the
+  # worker. An adapter that does not expose a property is not in the diff, by design.
+  become: true
+  ansible.windows.win_shell: "{{ nic_wake_diff_script }}"
+  changed_when: false
+  register: wake_diff_after
+  failed_when: (wake_diff_after.stdout | default('') | trim | length) > 0
+  when: "'VEN_8086' in nic_driver.stdout"
 
 - name: Refuse to call this provisioned if the adapter cannot wake
   # The one value that settles it, read AFTER the change rather than returned by the task that made it —
@@ -191,8 +216,38 @@
   # whole machine away, while selective suspend powers the adapter down with the OS still running.
   #
   # The module fails when no physical adapter is Up rather than reporting ok having adjusted nothing.
+  #
+  # It also ARMS THE DEVICE (`powercfg /deviceenablewake`) and READS IT BACK from `powercfg /devicequery
+  # wake_armed`; a worker whose adapter is still not listed fails here, by name (#3230). That checkbox is
+  # separate from the adapter property above and is the one Windows uses to disarm Wake-on-LAN at shutdown.
   become: true
   a11y.worker.a11y_nic_power:
+  register: wake_nic
+
+- name: Say what the wake arming proved, and what it did not
+  # ARMED is a reading and PROVEN is a power cycle. This play cannot turn a box off and send it one packet, so
+  # every worker is reported `wake-armed, UNPROVEN` and never `ok`; the proof is fleet-wake's `woken` outcome
+  # (#3227 holds its ledger).
+  ansible.builtin.debug:
+    msg: "{{ wake_nic.wake_report }}"
+
+- name: Firmware Wake-on-LAN and the adapter's IP configuration
+  # Firmware WoL is read where the model is a Lenovo (Disabled is repaired or fails by name; any other value is
+  # left alone) and said to be unread elsewhere. An address DHCP did not hand out is named and removed.
+  #
+  # `timeout`, because removing the address this play is connected over can drop the connection, and a task
+  # that hangs on its own repair is how the wake-property task cost twenty minutes.
+  become: true
+  a11y.worker.a11y_wake_prereqs:
+  register: wake_prereqs
+  timeout: 180
+
+- name: Say what the firmware read found
+  # `not-read` and `unreadable` are printed, never folded into "fine": a setting nobody read is not one that is on.
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} firmware Wake on LAN: {{ wake_prereqs.firmware_status }}
+      {{ wake_prereqs.firmware_wake_on_lan | default('') }}{{ wake_prereqs.firmware_reason | default('') }}
 
 # The stamp keys the CAPTURE CACHE on what provisioning actually did, and until now only
 # `provision-nvda-worker.ps1` wrote it -- so a box provisioned by this role kept whatever revision its

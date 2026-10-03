@@ -21,6 +21,20 @@
 #
 # The cmdlet route is preferred precisely because it can express the two independently; the registry
 # fallback cannot say "magic packet only", which is recorded rather than hidden.
+#
+# ## A THIRD arming, the one that stopped worker 4, and a module that reported `ok` over it (#3230)
+#
+# `Set-NetAdapterPowerManagement -WakeOnMagicPacket` is the ADAPTER's own property. Windows keeps a
+# separate, device-level record -- Device Manager's "Allow this device to wake the computer", which
+# `powercfg /devicequery wake_armed` lists -- and DISARMS it at every shutdown when it is unticked. On worker 4
+# the firmware was on and the adapter property was on and that box still could not be woken, so this module
+# could report `ok` on a machine that was never going to come back. It now sets it (`powercfg
+# /deviceenablewake`) and READS IT BACK, and a worker that is still not listed fails the play by name: the
+# readback is the done-when, a task that ran the enable and did not read is the defect again.
+#
+# A worker is `wake-armed, UNPROVEN` here and never more. Arming says Windows will honour a packet; only a
+# real power cycle (fleet-wake.mjs's `woken` outcome) says the box comes back, and provisioning cannot power
+# a box off mid-play, so it names what is still owed instead of claiming it.
 
 #AnsibleRequires -CSharpUtil Ansible.Basic
 
@@ -38,6 +52,86 @@ $NIC_CLASS = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-b
 # 24 = that PLUS "allow this device to wake the computer" unchecked, which kills Wake-on-LAN.
 $DISABLE_POWER_DOWN = 8
 $DISABLE_POWER_DOWN_AND_WAKE = 24
+
+# NDIS standard keywords, which -- unlike the display names bespoke.yml sets the same properties by -- do not
+# change with the Windows display language or the driver build. `Required` is whether an adapter that does not
+# expose the keyword CANNOT do the thing: no magic-packet keyword means no magic-packet wake, while a driver
+# with no pattern-wake or EEE keyword has nothing on that needs turning off.
+$WAKE_PROPERTIES = @(
+    @{ Keyword = '*WakeOnMagicPacket'; Want = '1'; Required = $true }
+    @{ Keyword = '*WakeOnPattern';     Want = '0'; Required = $false }
+    @{ Keyword = '*EEE';               Want = '0'; Required = $false }
+)
+# What `powercfg /h off` writes. Read from the registry rather than from hiberfil.sys, which is how
+# a11y_power_timeouts decides: a readback through the writer's own instrument cannot disagree with it.
+$HIBERNATE_KEY = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
+
+# The device names Windows will actually let wake the machine, as `powercfg` prints them, one per line.
+# A failed powercfg is a THROW, not an empty list: an empty list reads as "nothing is armed" and a failed read
+# says nothing about whether anything is.
+function Get-WakeArmedDevice {
+    $lines = @(& powercfg.exe /devicequery wake_armed 2>&1)
+    if ($LASTEXITCODE) {
+        throw "powercfg /devicequery wake_armed exited $LASTEXITCODE -- the armed list was NOT read: $($lines -join ' ')"
+    }
+    return @($lines | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -ne 'NONE' })
+}
+
+function Test-WakeArmed {
+    param([string] $DeviceName)
+    # -contains is case-insensitive, matching how Device Manager names are compared elsewhere.
+    return @(Get-WakeArmedDevice) -contains $DeviceName
+}
+
+# One verdict per wanted keyword: ok / wrong / not-exposed / unreadable. Status is never inferred from a
+# property that was not read -- a box without the NetAdapter cmdlets is `unreadable`, which fails.
+function Get-WakePropertyVerdict {
+    param([string] $AdapterName, [object[]] $Wanted)
+    if (-not (Get-Command Get-NetAdapterAdvancedProperty -ErrorAction SilentlyContinue)) {
+        return @($Wanted | ForEach-Object { [pscustomobject]@{ Keyword = $_.Keyword; Status = 'unreadable'; Got = $null; Required = $_.Required } })
+    }
+    return @($Wanted | ForEach-Object {
+        $p = Get-NetAdapterAdvancedProperty -Name $AdapterName -RegistryKeyword $_.Keyword -ErrorAction SilentlyContinue
+        $got = if ($p) { "$(@($p.RegistryValue)[0])" } else { $null }
+        $status = if (-not $p) { 'not-exposed' } elseif ($got -eq $_.Want) { 'ok' } else { 'wrong' }
+        [pscustomobject]@{ Keyword = $_.Keyword; Status = $status; Got = $got; Required = $_.Required }
+    })
+}
+
+# $null when the value cannot be read, which is NOT the same fact as "hibernation is off".
+function Get-HibernateEnabled {
+    $v = (Get-ItemProperty -Path $HIBERNATE_KEY -Name HibernateEnabled -ErrorAction SilentlyContinue).HibernateEnabled
+    if ($null -eq $v) { return $null }
+    return [int]$v
+}
+
+# Everything that stops THIS adapter being woken, as sentences that name it. Empty means armed AND verified:
+# every line is a thing that was read, never a thing that was merely set.
+function Get-WakeFailure {
+    param([object] $Adapter, [object[]] $Wanted)
+    $problems = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-WakeArmed $Adapter.InterfaceDescription)) {
+        $problems.Add("'$($Adapter.Name)' ('$($Adapter.InterfaceDescription)') is NOT in powercfg /devicequery wake_armed " +
+            "after powercfg /deviceenablewake -- Windows will disarm Wake-on-LAN at shutdown")
+    }
+    foreach ($v in Get-WakePropertyVerdict -AdapterName $Adapter.Name -Wanted $Wanted) {
+        $bad = switch ($v.Status) {
+            'wrong'       { "reads $($v.Got)" }
+            'unreadable'  { 'could NOT be read (no NetAdapter advanced-property cmdlet)' }
+            'not-exposed' { if ($v.Required) { 'is not exposed by this driver' } }
+        }
+        if ($bad) { $problems.Add("'$($Adapter.Name)' $($v.Keyword) $bad") }
+    }
+    return $problems.ToArray()
+}
+
+# Machine-level, not per adapter: Fast Startup (which hibernation off disables) keeps many boards out of S5.
+function Get-HibernateFailure {
+    $h = Get-HibernateEnabled
+    if ($null -eq $h) { return "HibernateEnabled could NOT be read from $HIBERNATE_KEY" }
+    if ($h -ne 0) { return "hibernation is ON (HibernateEnabled=$h), so Fast Startup can keep the box out of S5" }
+    return $null
+}
 
 $adapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
     Where-Object { $_.Status -eq 'Up' -and ($module.Params.interface -eq '*' -or $_.Name -like $module.Params.interface) })
@@ -89,8 +183,31 @@ foreach ($a in $adapters) {
     if (-not $already) { $changed.Add($a.Name) }
 }
 
+# Arm the DEVICE, then read it back. This sits after the loop because the loop's `Set-NetAdapterPowerManagement`
+# re-initialises the adapter, and a readback taken before that settles would be a reading of the old state.
+$wakeFailures = [System.Collections.Generic.List[string]]::new()
+if ($module.Params.wake_on_lan) {
+    foreach ($a in $adapters) {
+        if (-not (Test-WakeArmed $a.InterfaceDescription)) {
+            if ($changed -notcontains $a.Name) { $changed.Add($a.Name) }
+            if (-not $module.CheckMode) { & powercfg.exe /deviceenablewake $a.InterfaceDescription | Out-Null }
+        }
+        # Check mode changed nothing, so a verdict on it would only report its own abstention as a fault.
+        if (-not $module.CheckMode) { $wakeFailures.AddRange([string[]]@(Get-WakeFailure -Adapter $a -Wanted $WAKE_PROPERTIES)) }
+    }
+    $hibernateFailure = Get-HibernateFailure
+    if ($hibernateFailure -and -not $module.CheckMode) { $wakeFailures.Add($hibernateFailure) }
+}
+
 $module.Result.changed = $changed.Count -gt 0
 $module.Result.adjusted = $changed.ToArray()
 $module.Result.adapters = @($adapters | ForEach-Object { $_.Name })
 $module.Result.via_registry = $byRegistry.ToArray()
+$module.Result.wake_failures = $wakeFailures.ToArray()
+# ARMED is a reading; PROVEN needs a power cycle this play cannot perform. Never `ok` on the arming alone.
+$module.Result.wake_proof = 'UNPROVEN'
+$module.Result.wake_report = "$env:COMPUTERNAME wake-armed, UNPROVEN -- a real cycle (box off, one magic packet, /health 200) is still owed"
+if ($wakeFailures.Count -gt 0) {
+    $module.FailJson("$env:COMPUTERNAME CANNOT BE WOKEN -- wake arming did NOT verify: " + ($wakeFailures -join '; '))
+}
 $module.ExitJson()
