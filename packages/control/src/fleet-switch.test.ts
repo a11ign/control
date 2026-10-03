@@ -7,6 +7,10 @@
 // module's reader is not hidden by the same bug in the thing that feeds it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
 import { PDU, buildRequest, decodeResponse, snmpClient, walk, readSwitch, switchStates, switchLine, switchReport,
   readSwitchConfig, switchPortsByHost, readSwitchLive, macOfFdbRow, OID } from "./fleet-switch.mjs";
@@ -339,6 +343,20 @@ const INVENTORY = `all:
 
 test("switch_port is read per worker host; a commented one, an absent one and another group's are not", () => {
   assert.deepEqual([...switchPortsByHost(INVENTORY)], [["192.0.2.14", 17], ["192.0.2.16", 14]]);
+});
+
+// The committed example is what `fleet:status` can be checked against off the control plane: the real inventory
+// is gitignored (#54), so a key only the real file carries is a key nothing tracked shows (#3253).
+const EXAMPLE_INVENTORY = readFileSync(fileURLToPath(new URL("../ansible/inventory.example.yml", import.meta.url)), "utf8");
+
+test("the example inventory declares one switch_port per worker, and no two workers share one", () => {
+  const workerHosts = workersFromInventory(EXAMPLE_INVENTORY).map((url) => new URL(url).hostname);
+  assert.ok(workerHosts.length >= 10, `only ${workerHosts.length} worker(s) found: the worker reader is probably broken, not the file`);
+  const ports = switchPortsByHost(EXAMPLE_INVENTORY);
+  const undeclared = workerHosts.filter((host) => !ports.has(host));
+  assert.deepEqual(undeclared, [], "every worker names the switch port it sits on");
+  assert.equal(ports.size, workerHosts.length, "the reader found a port for nothing but a worker");
+  assert.equal(new Set(ports.values()).size, ports.size, "two workers cannot be on one port");
 });
 
 // --- the live reader, with the transport and the inventory handed in ----------------------------------

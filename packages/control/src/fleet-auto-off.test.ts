@@ -13,17 +13,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, mkdtempSync, linkSync, readdirSync, rmSync, writeFileSync, utimesSync, existsSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, linkSync, readdirSync, rmSync, writeFileSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { captureTimes, readCapturesState, writeCapturesState, withFileLock } from "./fleet-watch.mjs";
+import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.mjs";
+import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
   readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
+  importClosure, staleCheckoutVerdict, checkAgainstMain, FETCH_THROTTLE_MS,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -240,18 +242,21 @@ test("autoOffDecision: exactly at the threshold is off, one past it is off -- th
 // readState / writeState -- absent or corrupt reads as empty, never a crash.
 // ---------------------------------------------------------------------------------------------------------
 
+const EMPTY_STATE = { idleSince: {}, shutdownRequestedAt: {}, fetchedAt: null, refusal: null };
+
 test("readState: a missing file reads as both ledgers empty", () => {
   const read = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
-  assert.deepEqual(readState("nowhere.json", read), { idleSince: {}, shutdownRequestedAt: {} });
+  assert.deepEqual(readState("nowhere.json", read), EMPTY_STATE);
 });
 
 test("readState: corrupt JSON reads as empty, not a thrown error", () => {
-  assert.deepEqual(readState("x.json", () => "{not json"), { idleSince: {}, shutdownRequestedAt: {} });
+  assert.deepEqual(readState("x.json", () => "{not json"), EMPTY_STATE);
 });
 
 test("readState/writeState: round-trips both ledgers", () => {
   let written = "";
-  const state = { idleSince: { "a11y-worker-2": 5 }, shutdownRequestedAt: { "a11y-worker-3": 9 } };
+  const state = { idleSince: { "a11y-worker-2": 5 }, shutdownRequestedAt: { "a11y-worker-3": 9 }, fetchedAt: 7,
+    refusal: { reason: "stale-checkout", detail: "1 file differs: a.mjs", at: 8 } };
   writeState("x.json", state, (_p, data) => { written = data; });
   assert.deepEqual(readState("x.json", () => written), state);
 });
@@ -313,6 +318,9 @@ const WORKERS = [{ name: "a11y-worker-2", host: "192.0.2.12", mac: "aa:bb:cc:dd:
 
 /** The ledger of a worker that proved a wake at time 0, a moment before every `now` these tests use. */
 const PROVEN_AT_0 = JSON.stringify({ provenAt: { "a11y-worker-2": 0 } });
+/** An `--apply` tick under test must not run the real `git fetch` against the repo the tests live in. */
+const PROCEED = () => ({ verdict: { action: "proceed" as const }, fetchedAt: null });
+
 const enoent = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
 
 /** The state file as given (or missing). The wake-proof ledger is NOT read through this: it is the control plane's (#3269). */
@@ -351,7 +359,7 @@ test("tick: --apply dispatches exactly the workers decided off, and stamps shutd
     statePath: "x.json",
     read: alreadyIdleSince0, proofTransport: provenAt0,
     write: (_p, data) => { savedState = JSON.parse(String(data)); },
-    apply: true,
+    apply: true, checkout: PROCEED,
     dispatch: (name: string) => { dispatchedNames.push(name); return { status: 0, log: "" }; },
   });
   assert.deepEqual(dispatchedNames, ["a11y-worker-2"]);
@@ -372,7 +380,7 @@ test("tick: a failed dispatch is logged to stderr and does not stamp shutdownReq
       statePath: "x.json",
       read: alreadyIdleSince0, proofTransport: provenAt0,
       write: (_p, data) => { savedState = JSON.parse(String(data)); },
-      apply: true,
+      apply: true, checkout: PROCEED,
       dispatch: () => ({ status: null, log: "spawnSync ansible-playbook ENOENT" }),
     });
   } finally {
@@ -393,7 +401,7 @@ test("tick: a worker still idle but under the threshold is kept, and never dispa
     statePath: "x.json",
     read: filesWith(null), proofTransport: provenAt0,
     write: () => {},
-    apply: true,
+    apply: true, checkout: PROCEED,
     dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
   });
   assert.equal(dispatched, 0);
@@ -409,6 +417,7 @@ async function applyOver(proof: string | null, now = IDLE_THRESHOLD_MS) {
   const { decisions } = await tick({
     workers: TWO_WORKERS, probe: async () => ({ outcome: "idle" }), now: () => now, statePath: "x.json",
     read: filesWith(BOTH_IDLE_SINCE_0), proofTransport: ledgerSays(proof), write: () => {}, apply: true,
+    checkout: PROCEED,
     dispatch: (name: string) => { dispatched.push(name); return { status: 0, log: "" }; },
   });
   return { dispatched, reasons: Object.fromEntries(decisions.map((d) => [d.worker.name, d.decision.reason])) };
@@ -725,7 +734,7 @@ test("#3269 3: a control plane that cannot be reached is an empty ledger, every 
   try {
     const { decisions } = await tick({
       workers: WORKERS, probe: async () => ({ outcome: "idle" }), now: () => IDLE_THRESHOLD_MS, statePath: "x.json",
-      read: alreadyIdleSince0, write: () => {}, apply: true,
+      read: alreadyIdleSince0, write: () => {}, apply: true, checkout: PROCEED,
       proofTransport: (() => { throw new Error("ssh: Connection refused"); }) as never,
       dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
     });
@@ -735,4 +744,230 @@ test("#3269 3: a control plane that cannot be reached is an empty ledger, every 
   }
   assert.equal(dispatched, 0, "no proof, no power-off");
   assert.match(stderr.join(""), new RegExp(`could not be read \\(${DEFAULT_PROOF_PATH}\\).*Connection refused`));
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Refuse to power anything off when the files this runs differ from main -- #3275.
+// ---------------------------------------------------------------------------------------------------------
+
+const REPO = fileURLToPath(new URL("../../../", import.meta.url));
+const THIS = "packages/control/src/fleet-auto-off.mjs";
+const BESIDE = [
+  "packages/control/ansible/sleep.yml",
+  "packages/control/ansible/files/a11y-fleet-auto-off.service",
+  "packages/control/ansible/files/a11y-fleet-auto-off.timer",
+];
+
+test("#3275 the watch reads the file the timer writes: one path, stated in both files and pinned equal", () => {
+  assert.equal(AUTO_OFF_STATE_PATH, DEFAULT_STATE_PATH);
+});
+
+test("#3275 staleCheckoutVerdict: only a fresh ref and NO difference proceeds", () => {
+  assert.deepEqual(staleCheckoutVerdict({ differing: [], fetchOk: true }), { action: "proceed" });
+  const stale = staleCheckoutVerdict({ differing: ["a.mjs", "b.mjs"], fetchOk: true });
+  assert.deepEqual(stale, { action: "refuse", reason: "stale-checkout", detail: "2 files differ: a.mjs, b.mjs" });
+  assert.equal((staleCheckoutVerdict({ differing: ["a.mjs"], fetchOk: true }) as { detail: string }).detail,
+    "1 file differs: a.mjs");
+  // A failed fetch refuses even when nothing differs from the (possibly old) ref: identical to a stale ref is no answer.
+  assert.equal((staleCheckoutVerdict({ differing: [], fetchOk: false }) as { reason: string }).reason, "fetch-failed");
+  assert.equal((staleCheckoutVerdict({ differing: null, fetchOk: false }) as { reason: string }).reason, "fetch-failed");
+  // "Could not tell" is its own refusal and never reads as "identical".
+  assert.equal((staleCheckoutVerdict({ differing: null, fetchOk: true }) as { reason: string }).reason, "cannot-tell");
+});
+
+test("#3275 importClosure: follows import, export-from, multi-line and dynamic imports; ignores bare and cyclic ones", () => {
+  const files: Record<string, string> = {
+    "p/a.mjs": 'import { x } from "./b.mjs";\nimport {\n  y,\n  z,\n} from "../q/c.mjs";\nimport { spawnSync } from "node:child_process";\n',
+    "p/b.mjs": 'export * from "./d.mjs";\nconst later = () => import("./e.mjs");\nimport "./a.mjs";\n',
+    "q/c.mjs": '// import { no } from "./comment.mjs";\n',
+    "p/d.mjs": "", "p/e.mjs": "",
+  };
+  assert.deepEqual(importClosure("p/a.mjs", (path) => files[path]),
+    ["p/a.mjs", "p/b.mjs", "p/d.mjs", "p/e.mjs", "q/c.mjs"]);
+});
+
+test("#3275 importClosure on the real program: every file it names exists, and the ones that decide a shutdown are in", () => {
+  const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
+  for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
+  for (const expected of [THIS, "packages/control/src/fleet-watch.mjs", "packages/control/src/fleet-wake.mjs",
+    "packages/worker-fleet/src/worker-http.mjs"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
+  assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
+  for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
+});
+
+type GitCall = string[];
+/** A scripted `git`: records every call, answers `fetch` with `fetchStatus`, `diff` with `diffOut`, `ls-files` with all paths. */
+function scriptedGit(opts: { fetchStatus?: number; diffStatus?: number; diffOut?: string; tracked?: (paths: string[]) => string[] }) {
+  const calls: GitCall[] = [];
+  const git = (args: string[]) => {
+    calls.push(args);
+    if (args[0] === "fetch") return { status: opts.fetchStatus ?? 0, stdout: "", stderr: "" };
+    const paths = args.slice(args.indexOf("--") + 1);
+    if (args[0] === "diff") return { status: opts.diffStatus ?? 0, stdout: opts.diffOut ?? "", stderr: "" };
+    return { status: 0, stdout: (opts.tracked ? opts.tracked(paths) : paths).join("\n"), stderr: "" };
+  };
+  return { git, calls, fetches: () => calls.filter((c) => c[0] === "fetch").length };
+}
+const fakeSource = (path: string) => (path === THIS ? 'import "./other.mjs";\n' : "");
+
+test("#3275 checkAgainstMain: identical proceeds; a differing closure file refuses and is NAMED", () => {
+  const same = scriptedGit({});
+  const proceed = checkAgainstMain({ now: 1, fetchedAt: null, git: same.git, readSource: fakeSource });
+  assert.deepEqual(proceed.verdict, { action: "proceed" });
+  const diffArgs = same.calls.find((c) => c[0] === "diff")!;
+  for (const path of [THIS, "packages/control/src/other.mjs", ...BESIDE]) assert.ok(diffArgs.includes(path), `${path} compared`);
+
+  const differs = scriptedGit({ diffOut: "packages/control/src/other.mjs\n" });
+  const refused = checkAgainstMain({ now: 1, fetchedAt: null, git: differs.git, readSource: fakeSource }).verdict;
+  assert.deepEqual(refused, { action: "refuse", reason: "stale-checkout",
+    detail: "1 file differs: packages/control/src/other.mjs" });
+});
+
+test("#3275 checkAgainstMain: a file the checkout does not track counts as differing", () => {
+  const git = scriptedGit({ tracked: (paths) => paths.filter((p) => p !== "packages/control/ansible/sleep.yml") });
+  const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: fakeSource });
+  assert.equal(verdict.action, "refuse");
+  assert.match((verdict as { detail: string }).detail, /sleep\.yml/);
+});
+
+test("#3275 checkAgainstMain: a failed fetch, an unresolvable origin/main and an empty closure each REFUSE", () => {
+  const failedFetch = scriptedGit({ fetchStatus: 1 });
+  const fetched = checkAgainstMain({ now: 1, fetchedAt: null, git: failedFetch.git, readSource: fakeSource });
+  assert.equal((fetched.verdict as { reason: string }).reason, "fetch-failed");
+  assert.equal(fetched.fetchedAt, null, "a failed fetch does not stamp");
+  assert.ok(!failedFetch.calls.some((c) => c[0] === "diff"), "no comparison against a ref that is not known to be current");
+
+  const old = checkAgainstMain({ now: 10 * FETCH_THROTTLE_MS, fetchedAt: 1, git: failedFetch.git, readSource: fakeSource });
+  assert.equal((old.verdict as { reason: string }).reason, "fetch-failed", "an old stamp is never reused as the answer");
+  assert.equal(old.fetchedAt, 1, "and the old stamp is kept, not advanced");
+
+  const unresolvable = scriptedGit({ diffStatus: 128 });
+  assert.equal((checkAgainstMain({ now: 1, fetchedAt: null, git: unresolvable.git, readSource: fakeSource })
+    .verdict as { reason: string }).reason, "cannot-tell");
+
+  for (const readSource of [() => "", () => { throw new Error("ENOENT"); }]) {
+    const empty = scriptedGit({});
+    assert.equal((checkAgainstMain({ now: 1, fetchedAt: null, git: empty.git, readSource })
+      .verdict as { reason: string }).reason, "cannot-tell", "a walk that finds nothing is CANNOT_TELL, never identical");
+    assert.ok(!empty.calls.some((c) => c[0] === "diff"));
+  }
+});
+
+test("#3275 checkAgainstMain: fetches at most once a minute, and a stamp from the future is not fresh", () => {
+  const git = scriptedGit({});
+  const first = checkAgainstMain({ now: 1000, fetchedAt: null, git: git.git, readSource: fakeSource });
+  assert.equal(first.fetchedAt, 1000);
+  assert.equal(git.fetches(), 1);
+  const within = checkAgainstMain({ now: 1000 + FETCH_THROTTLE_MS - 1, fetchedAt: 1000, git: git.git, readSource: fakeSource });
+  assert.equal(git.fetches(), 1, "inside the throttle: no second fetch");
+  assert.equal(within.fetchedAt, 1000);
+  assert.equal(within.verdict.action, "proceed", "the comparison still runs against the fetched ref");
+  checkAgainstMain({ now: 1000 + FETCH_THROTTLE_MS, fetchedAt: 1000, git: git.git, readSource: fakeSource });
+  assert.equal(git.fetches(), 2, "at the throttle: fetch again");
+  checkAgainstMain({ now: 5, fetchedAt: 1000, git: git.git, readSource: fakeSource });
+  assert.equal(git.fetches(), 3, "a stamp from the future is a clock fault: fetch");
+});
+
+test("#3275 tick --apply: a refusal dispatches NOTHING, says why in the report, and is recorded for fleet-watch", async () => {
+  const dispatched: string[] = [];
+  let saved: { refusal: unknown, fetchedAt: number, shutdownRequestedAt: unknown } | null = null;
+  const result = await tick({
+    workers: WORKERS, probe: async () => ({ outcome: "idle" }), now: () => IDLE_THRESHOLD_MS, statePath: "x.json",
+    read: alreadyIdleSince0, proofTransport: provenAt0, write: (_p, data) => { saved = JSON.parse(String(data)); },
+    apply: true,
+    checkout: () => ({ verdict: { action: "refuse", reason: "stale-checkout", detail: "1 file differs: a.mjs" }, fetchedAt: 42 }),
+    dispatch: (name: string) => { dispatched.push(name); return { status: 0, log: "" }; },
+  });
+  assert.deepEqual(dispatched, []);
+  assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "stale-checkout" });
+  assert.deepEqual(result.refusal, { reason: "stale-checkout", detail: "1 file differs: a.mjs", at: IDLE_THRESHOLD_MS });
+  assert.deepEqual(saved!.refusal, result.refusal);
+  assert.equal(saved!.fetchedAt, 42);
+  assert.deepEqual(saved!.shutdownRequestedAt, {}, "nothing was requested, so nothing is stamped");
+});
+
+test("#3275 tick: the checkout is asked only when --apply has something to power off", async () => {
+  let asked = 0;
+  const checkout = () => { asked += 1; return { verdict: { action: "proceed" as const }, fetchedAt: 1 }; };
+  const base = { workers: WORKERS, probe: async () => ({ outcome: "idle" as const }), statePath: "x.json",
+    read: alreadyIdleSince0, proofTransport: provenAt0, write: () => {}, checkout,
+    dispatch: () => ({ status: 0, log: "" }) };
+  await tick({ ...base, now: () => IDLE_THRESHOLD_MS, apply: false });
+  assert.equal(asked, 0, "report-only never fetches");
+  await tick({ ...base, now: () => IDLE_THRESHOLD_MS - 1, apply: true });
+  assert.equal(asked, 0, "nothing decided `off`: an idle fleet costs no fetch");
+  const result = await tick({ ...base, now: () => IDLE_THRESHOLD_MS, apply: true });
+  assert.equal(asked, 1, "positive control: something to power off asks");
+  assert.equal(result.refusal, null);
+  assert.equal(result.decisions[0].decision.action, "off");
+});
+
+test("#3275 checkAgainstMain against REAL git: a change on origin/main refuses, the same tree after catching up proceeds", () => {
+  const root = mkdtempSync(join(tmpdir(), "auto-off-3275-"));
+  const sh = (cwd: string, ...args: string[]) => {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv() });
+    assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    return r;
+  };
+  const write = (dir: string, path: string, text: string) => {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), text);
+  };
+  const seed = join(root, "seed");
+  mkdirSync(seed);
+  sh(seed, "init", "-q", "-b", "main");
+  sh(seed, "config", "user.email", "t@example.com");
+  sh(seed, "config", "user.name", "t");
+  write(seed, THIS, 'import "./other.mjs";\n');
+  write(seed, "packages/control/src/other.mjs", "export const v = 1;\n");
+  for (const file of BESIDE) write(seed, file, "x\n");
+  sh(seed, "add", "-A");
+  sh(seed, "commit", "-q", "-m", "seed");
+  sh(root, "clone", "-q", "--bare", seed, "origin.git");
+  sh(root, "clone", "-q", "origin.git", "run");
+  const run = join(root, "run");
+  const git = (args: string[]) => spawnSync("git", args, { cwd: run, encoding: "utf8", env: sandboxGitEnv() });
+  const readSource = (path: string) => readFileSync(join(run, path), "utf8");
+
+  try {
+    const headBefore = sh(run, "rev-parse", "HEAD").stdout;
+    const clean = checkAgainstMain({ now: 1, fetchedAt: null, git, readSource });
+    assert.deepEqual(clean.verdict, { action: "proceed" }, "positive control: an identical checkout proceeds");
+
+    write(seed, "packages/control/src/other.mjs", "export const v = 2;\n");
+    sh(seed, "commit", "-q", "-am", "main moves");
+    sh(seed, "push", "-q", join(root, "origin.git"), "main");
+    const moved = checkAgainstMain({ now: 1, fetchedAt: null, git, readSource });
+    assert.deepEqual(moved.verdict, { action: "refuse", reason: "stale-checkout",
+      detail: "1 file differs: packages/control/src/other.mjs" });
+    assert.equal(sh(run, "rev-parse", "HEAD").stdout, headBefore, "fetch left HEAD where it was");
+    assert.equal(readFileSync(join(run, "packages/control/src/other.mjs"), "utf8"), "export const v = 1;\n",
+      "and the working tree is untouched: the check can never race a running play");
+
+    sh(run, "merge", "-q", "--ff-only", "origin/main");
+    assert.deepEqual(checkAgainstMain({ now: 1, fetchedAt: null, git, readSource }).verdict, { action: "proceed" });
+    writeFileSync(join(run, "packages/control/src/other.mjs"), "export const v = 3; // edited in place\n");
+    assert.equal(checkAgainstMain({ now: 1, fetchedAt: null, git, readSource }).verdict.action, "refuse",
+      "what RUNS is the working tree, so an uncommitted edit counts");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#3275 fleet-watch surfaces the recorded refusal, reads 'nothing refused' as null, and never reads an unreadable host as clean", () => {
+  const refusal = { reason: "stale-checkout", detail: "2 files differ: a.mjs, b.mjs", at: 1_000 };
+  // What `tick` actually writes is what the watch must read: the round trip is the contract between the two files.
+  let written = "";
+  writeState("x.json", { idleSince: {}, shutdownRequestedAt: {}, fetchedAt: 5, refusal }, (_p, data) => { written = data; });
+  assert.deepEqual(readAutoOffRefusal(() => written), refusal);
+  assert.equal(readAutoOffRefusal(() => JSON.stringify({ idleSince: {}, refusal: null })), null);
+  assert.equal(readAutoOffRefusal(() => "{}"), null, "a timer that never ticked has refused nothing");
+  assert.equal(readAutoOffRefusal(() => JSON.stringify({ refusal: { reason: "x" } })), null, "a malformed record is not a refusal");
+  assert.throws(() => readAutoOffRefusal(() => { throw new Error("ssh: connect timed out"); }), /timed out/,
+    "an unreadable host is an error the caller must say, not 'no refusal'");
+  const body = refusalBody(refusal, 1_000 + 3 * 60_000);
+  assert.match(body, /refusing to power workers off/);
+  assert.match(body, /stale-checkout/);
+  assert.match(body, /3m ago/);
+  assert.match(body, /2 files differ: a\.mjs, b\.mjs/);
 });
