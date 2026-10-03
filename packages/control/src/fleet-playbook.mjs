@@ -57,10 +57,6 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
-// #2027: THE `Fleet-hold-until:` READER IS A WAITING CONDITION, so it lives with the other three rather
-// than here -- see the re-export below for what that cost while it did not. Relative and leaf-shaped, so
-// ADR 0012's no-`npm install` property is unchanged.
-import { fleetHoldUntil, fleetHoldWorkers } from "agent-org/src/waiting-condition.mjs";
 // RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
@@ -1381,26 +1377,50 @@ async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
  */
 
 /**
- * THE READER MOVED TO `waiting-condition.mjs` (#2027), AND THE MOVE IS THE FIX RATHER THAN TIDYING.
+ * THE READER IS THE TOOL'S, AND THIS IS ITS TWIN (#2975). `Fleet-hold-until:` is a WAITING CONDITION, so the tool's `waiting-condition.mjs`
+ * reads it for the work gate (#2027: when it was declared only here, the gate's fleet batch dispatched rows that were holding the fleet, one
+ * field over from #2005's defect). `fleetHoldUntil`/`fleetHoldWorkers` below are those two functions, copied, because this package may import
+ * NOTHING BY NAME: ADR 0012's control plane runs from a raw git checkout with no `npm install`, and `control-has-no-dependencies.test.ts`
+ * walks this graph to prove it. While the tool lived in this repository a relative import was the one kind this package may have; the tool is
+ * a pinned dependency now, so there is no relative path to it.
  *
- * The comment above calls this "the fourth" waiting condition, and it was declared here -- so the module
- * that promises to be the ONE reader of "is this row waiting on something" could not read it, and the
- * work gate's fleet batch dispatched rows that were holding the fleet. That is #2005's defect exactly,
- * one field over: a condition spelled in its consumer is invisible to every other consumer.
- *
- * RE-EXPORTED, NOT RELOCATED FROM THE CALLER'S POINT OF VIEW: `activeFleetHolds` below, this package's
- * own tests and `fleet:deploy`/`fleet:provision` all keep importing `fleetHoldUntil` from here.
- *
- * A RELATIVE IMPORT, WHICH IS THE ONLY KIND THIS PACKAGE MAY HAVE -- ADR 0012's control plane runs from a
- * raw git checkout with no `npm install`, and `control-has-no-dependencies.test.ts` walks this graph
- * transitively to prove it. `waiting-condition.mjs` imports NOTHING AT ALL, so the walk gains one pure
- * leaf and no surface beside the key.
- *
- * `fleetHoldWorkers` TRAVELS WITH IT, for the identical reason (ceo's #928 ruling, point 2): the worker
- * list is parsed off the same line by the same module, and a second reader of it here would be exactly
- * the #2027 defect this comment already describes, one field further narrowed.
+ * THE TWO READERS CANNOT DRIFT SILENTLY: `fleet-hold-readers-agree.test.ts` (in `lab`, the one package that may import both) runs the same
+ * bodies through this copy and the tool's and requires identical answers, so the #2027 defect -- a second reader that disagrees -- is a red
+ * test, not a rows-stranded-in-production discovery. `activeFleetHolds` below, this package's own tests and `fleet:deploy`/`fleet:provision`
+ * keep importing both from here.
  */
-export { fleetHoldUntil, fleetHoldWorkers };
+const FLEET_HOLD_LINE = /^[ \t]*#{0,6}[ \t]*Fleet-hold-until:[ \t]*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)(?:[ \t]+(a11y-worker-[0-9]{1,3}(?:,a11y-worker-[0-9]{1,3})*))?[ \t]*$/im;
+
+/** `Date.parse` rolls `2026-02-31` over to March rather than refusing it, so the matched text is round-tripped and a date `Date` had to repair is refused (#1841). */
+function roundTripsUtc(/** @type {string} */ iso) {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.toISOString().slice(0, 19) === iso.slice(0, 19);
+}
+
+/**
+ * The `Fleet-hold-until:` timestamp, or `null`. A MALFORMED TIMESTAMP IS NOT A HOLD: it fails OPEN, so a typo leaves the row visible to a human
+ * and never hides a live sequence.
+ * @param {string | null | undefined} body
+ * @returns {string | null}
+ */
+export function fleetHoldUntil(body) {
+  const m = FLEET_HOLD_LINE.exec(String(body ?? ""));
+  if (!m) return null;
+  return roundTripsUtc(m[1]) ? m[1] : null;
+}
+
+/**
+ * The workers the line names, or `[]` -- which MEANS "the whole fleet". A typo'd worker name fails the whole LINE (`FLEET_HOLD_LINE` matches the
+ * list or nothing), so a hold never silently widens to the whole fleet because of a typo.
+ * @param {string | null | undefined} body
+ * @returns {string[]}
+ */
+export function fleetHoldWorkers(body) {
+  const m = FLEET_HOLD_LINE.exec(String(body ?? ""));
+  if (!m || !roundTripsUtc(m[1])) return [];
+  return m[2] ? m[2].split(",") : [];
+}
 
 /**
  * Every row still holding the fleet, RIGHT NOW -- pure, over issues the caller has already scoped to
