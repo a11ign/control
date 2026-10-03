@@ -92,6 +92,7 @@ import { inventoryHosts } from "./fleet-discover.mjs";
 import { inventoryPathFor } from "./control-plane-fleet.mjs";
 import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
 import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.mjs";
+/** @typedef {import("./fleet-wake.mjs").ProofTransport} ProofTransport */
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
 
@@ -601,7 +602,7 @@ function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
  * @param {{
  *   workers?: { name: string, host: string, mac: string | null }[],
  *   probe?: typeof probeIdle, now?: () => number, statePath?: string, capturesPath?: string, proofPath?: string,
- *   read?: typeof readFileSync, write?: typeof writeFileSync,
+ *   proofTransport?: ProofTransport, read?: typeof readFileSync, write?: typeof writeFileSync,
  *   batchQueued?: () => boolean, leasePending?: () => boolean,
  *   apply?: boolean, dispatch?: typeof dispatchShutdown,
  *   checkout?: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain>,
@@ -624,7 +625,10 @@ export async function tick(deps = {}) {
     }));
 
   const previous = readState(statePath, deps.read);
-  const wakeProof = readWakeProof(deps.proofPath ?? DEFAULT_PROOF_PATH, deps.read);
+  // The wake-proof ledger is the CONTROL PLANE's, read through its transport wherever this runs (#3269); an
+  // unreadable one reads as empty (every box kept on) and says so on stderr.
+  const proofPath = deps.proofPath ?? DEFAULT_PROOF_PATH;
+  const wakeProof = readWakeProof(proofPath, deps.proofTransport, (line) => process.stderr.write(`fleet-auto-off:${line}\n`));
 
   const probes = await Promise.all(workers.map(async (w) => ({
     name: w.name, host: w.host, ...(await probe(`http://${w.host}:${PORT}`)),
@@ -647,8 +651,16 @@ export async function tick(deps = {}) {
   if (apply) dispatchOff(decisions, { dispatch, shutdownRequestedAt, now });
 
   writeState(statePath, { idleSince, shutdownRequestedAt, fetchedAt, refusal }, deps.write);
-  return { decisions, refusal };
+  return { decisions, refusal, proofPath };
 }
+
+/**
+ * Which ledger the decisions above were read against, so a `wake-unproven` can be traced to a file and a host
+ * rather than to a checkout nobody knows the cwd of (#3269 done-when 5).
+ *
+ * @param {string} proofPath
+ */
+export const ledgerLine = (proofPath) => `  wake-proof ledger read: ${proofPath} (on the control plane)\n`;
 
 async function main() {
   const apply = process.argv.includes("--apply");
@@ -669,8 +681,9 @@ async function main() {
     return;
   }
 
-  const { decisions, refusal } = await tick({ workers: declared, apply });
+  const { decisions, refusal, proofPath } = await tick({ workers: declared, apply });
   for (const { worker, decision } of decisions) process.stdout.write(`${reportLine(worker, decision)}\n`);
+  process.stdout.write(ledgerLine(proofPath));
   if (refusal) {
     // Every tick that holds a shutdown back says so, and the unit FAILS: a refusal nobody sees is a fleet left on.
     process.stdout.write(`\n  refuse ${refusal.reason} -- ${refusal.detail}\n`);

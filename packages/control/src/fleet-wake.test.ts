@@ -3,11 +3,16 @@
 // the box simply never wakes, which is indistinguishable from a firmware setting being off.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
-  HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, PROOF_WINDOW_MS, magicPacket, probeWorker, wakeFleet, wakeReportLine,
-  readWakeProof, advanceWakeProof,
+  HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, PROOF_WINDOW_MS, DEFAULT_PROOF_PATH, magicPacket, probeWorker, wakeFleet,
+  wakeReportLine, readWakeProof, advanceWakeProof, recordWakeProof, proofWriteCommand,
 } from "./fleet-wake.mjs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
 test("a magic packet is 6 x 0xFF then the MAC sixteen times", () => {
   const packet = magicPacket("00:1a:2b:3c:4d:5e");
@@ -214,24 +219,30 @@ test("#2655 5.1: every probe is made with T, never with a shorter number, and T 
 // at the inventory's own address; dropped by a wake that failed; per worker, so one box moves no other.
 // ---------------------------------------------------------------------------------------------------
 
-const PROOF = "proof.json";
 const SILENT = { delayMs: Infinity };
 
-/** A ledger file in memory behind the injected read/write, so nothing touches `runs/`. */
-function proofFile(initial?: Record<string, number>) {
-  let text: string | undefined = initial ? JSON.stringify({ provenAt: initial }) : undefined;
-  let writes = 0;
+/**
+ * The control plane's filesystem, as a directory of this machine's: the transport runs the REAL command (the
+ * real `flock`, the real `node`) with the control plane's checkout path rewritten to the sandbox. So the
+ * address the code names is the address that is exercised, and nothing here reaches a network or `/root`.
+ */
+function controlPlane() {
+  const root = mkdtempSync(join(tmpdir(), "wake-proof-"));
+  const commands: string[] = [];
+  const transport = (command: string) => {
+    commands.push(command);
+    return execFileSync("sh", ["-c", command.replaceAll(CONTROL_PLANE_CHECKOUT_PATH, root)], { encoding: "utf8" });
+  };
+  const file = DEFAULT_PROOF_PATH.replace(CONTROL_PLANE_CHECKOUT_PATH, root);
   return {
-    options: {
-      proofPath: PROOF,
-      readProofFile: ((path: string) => {
-        if (path !== PROOF || text === undefined) throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" });
-        return text;
-      }) as never,
-      writeProofFile: ((path: string, data: string) => { assert.equal(path, PROOF); text = String(data); writes += 1; }) as never,
+    root, commands, transport, file,
+    options: { proofTransport: transport as never },
+    proven: () => readWakeProof(DEFAULT_PROOF_PATH, transport),
+    seed: (initial: Record<string, number>) => {
+      execFileSync("mkdir", ["-p", join(root, "runs")]);
+      writeFileSync(file, JSON.stringify({ provenAt: initial }));
     },
-    proven: () => readWakeProof(PROOF, (() => text ?? "") as never),
-    writes: () => writes,
+    dispose: () => rmSync(root, { recursive: true, force: true }),
   };
 }
 
@@ -246,41 +257,53 @@ const ONE_OF_EACH = {
   "192.0.2.7": [{ json: { ok: true, ready: false, reason: "browserConfigured" } }], // never-ready
 };
 
+test("#3269 1: the ledger's address is ONE absolute path under the control plane's checkout, never the cwd's", () => {
+  assert.equal(DEFAULT_PROOF_PATH, `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-wake-proof.json`);
+  assert.ok(DEFAULT_PROOF_PATH.startsWith("/"), "a relative path is whichever checkout the process happened to run in");
+});
+
 test("#3227 2: ONLY a worker that was silent and then came up ready earns a proof; every other outcome writes none", async () => {
   const world = fakeWorld();
-  const file = proofFile();
-  const results = await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
-    ...world.options, ...file.options, request: fakeHealth(ONE_OF_EACH).request,
-  });
-  assert.deepEqual(results.map((r) => r.state),
-    ["woken", "already-up", "busy", "came-up", "no-answer", "not-listening", "never-ready"],
-    "positive control: the fixture really produces each state, or an absent proof proves nothing");
-  assert.deepEqual(Object.keys(file.proven()), ["w1"], "w1 woke from silence on its own address; nobody else proved a thing");
-  assert.equal(file.proven().w1, world.sleepCalls(), "the proof is stamped with the wake's own clock");
+  const plane = controlPlane();
+  try {
+    const results = await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
+      ...world.options, ...plane.options, request: fakeHealth(ONE_OF_EACH).request,
+    });
+    assert.deepEqual(results.map((r) => r.state),
+      ["woken", "already-up", "busy", "came-up", "no-answer", "not-listening", "never-ready"],
+      "positive control: the fixture really produces each state, or an absent proof proves nothing");
+    assert.deepEqual(Object.keys(plane.proven()), ["w1"], "w1 woke from silence on its own address; nobody else proved a thing");
+    assert.equal(plane.proven().w1, world.sleepCalls(), "the proof is stamped with the wake's own clock");
+  } finally { plane.dispose(); }
 });
 
 test("#3227 2: a wake that FAILS revokes the proof that worker held, and every other worker's proof is untouched", async () => {
   const world = fakeWorld();
-  const held = { w1: 111, w2: 222, w3: 333, w4: 444, w5: 555, w6: 666, w7: 777, w8: 888 };
-  const file = proofFile(held);
-  await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
-    ...world.options, ...file.options, request: fakeHealth(ONE_OF_EACH).request,
-  });
-  const after = file.proven();
-  assert.deepEqual(["w5", "w6", "w7"].filter((n) => n in after), [], "no-answer, not-listening and never-ready each drop their proof");
-  assert.equal(after.w1, world.sleepCalls(), "the worker that woke has its proof renewed");
-  assert.deepEqual([after.w2, after.w3, after.w4, after.w8], [222, 333, 444, 888],
-    "already-up, busy, came-up and a worker not asked about keep what they held -- no refresh, no revocation");
+  const plane = controlPlane();
+  try {
+    plane.seed({ w1: 111, w2: 222, w3: 333, w4: 444, w5: 555, w6: 666, w7: 777, w8: 888 });
+    await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
+      ...world.options, ...plane.options, request: fakeHealth(ONE_OF_EACH).request,
+    });
+    const after = plane.proven();
+    assert.deepEqual(["w5", "w6", "w7"].filter((n) => n in after), [], "no-answer, not-listening and never-ready each drop their proof");
+    assert.equal(after.w1, world.sleepCalls(), "the worker that woke has its proof renewed");
+    assert.deepEqual([after.w2, after.w3, after.w4, after.w8], [222, 333, 444, 888],
+      "already-up, busy, came-up and a worker not asked about keep what they held -- no refresh, no revocation");
+  } finally { plane.dispose(); }
 });
 
 test("#3227 2: a worker with no mac that never answered is a failed wake and drops its proof (it cannot be woken at all)", async () => {
-  const file = proofFile({ w1: 5 });
-  const world = fakeWorld();
-  const [r] = await wakeFleet([{ name: "w1", host: "192.0.2.1", mac: null }], {
-    ...world.options, ...file.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request,
-  });
-  assert.equal(r.state, "no-mac");
-  assert.deepEqual(file.proven(), {});
+  const plane = controlPlane();
+  try {
+    plane.seed({ w1: 5 });
+    const world = fakeWorld();
+    const [r] = await wakeFleet([{ name: "w1", host: "192.0.2.1", mac: null }], {
+      ...world.options, ...plane.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request,
+    });
+    assert.equal(r.state, "no-mac");
+    assert.deepEqual(plane.proven(), {});
+  } finally { plane.dispose(); }
 });
 
 test("#3227 5: advanceWakeProof is per worker -- adding or dropping one entry leaves every other exactly as it was", () => {
@@ -290,31 +313,126 @@ test("#3227 5: advanceWakeProof is per worker -- adding or dropping one entry le
   assert.deepEqual(before, { a: 1, b: 2, c: 3 }, "the ledger it was given is not mutated");
 });
 
-test("#3227: a wake with an injected socket is no real wake -- it earns no proof and never touches a file", async () => {
-  const world = fakeWorld();
-  const results = await wakeFleet(workers("w1"), {
-    ...world.options, request: fakeHealth({ "192.0.2.1": [SILENT, { json: READY }] }).request,
-    readProofFile: (() => { throw new Error("must not read"); }) as never,
-    writeProofFile: (() => { throw new Error("must not write"); }) as never,
-  });
-  assert.equal(results[0].state, "woken", "positive control: it did wake, so the silence above is the injected socket's doing");
-});
-
-test("#3227: a ledger that cannot be written is reported through log and the wake's results still come back", async () => {
+test("#3227: a wake with an injected socket and no transport is no real wake -- it earns no proof and reaches no machine", async () => {
   const world = fakeWorld();
   const lines: string[] = [];
   const results = await wakeFleet(workers("w1"), {
-    ...world.options, proofPath: PROOF, log: (l: string) => lines.push(l),
+    ...world.options, log: (l: string) => lines.push(l),
     request: fakeHealth({ "192.0.2.1": [SILENT, { json: READY }] }).request,
-    readProofFile: (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }) as never,
-    writeProofFile: (() => { throw new Error("EROFS: read-only file system"); }) as never,
   });
-  assert.equal(results[0].state, "woken");
-  assert.ok(lines.some((l) => /wake-proof ledger was not updated.*EROFS/.test(l)), `logged: ${lines.join(" | ")}`);
+  assert.equal(results[0].state, "woken", "positive control: it did wake, so the silence above is the injected socket's doing");
+  assert.deepEqual(lines.filter((l) => /ledger/.test(l)), [], "the real transport was never tried: it would have said it failed");
+});
+
+test("#3269 3: a transport that FAILS leaves the wake's result unchanged, the worker unproven, and says so through log", async () => {
+  const plane = controlPlane();
+  try {
+    const world = fakeWorld();
+    const lines: string[] = [];
+    const refused = () => { throw new Error("ssh: connect to host 192.0.2.250 port 22: Connection refused"); };
+    const health = { "192.0.2.1": [SILENT, { json: READY }] };
+    const failing = await wakeFleet(workers("w1"), {
+      ...world.options, log: (l: string) => lines.push(l), proofTransport: refused as never, request: fakeHealth(health).request,
+    });
+    const working = await wakeFleet(workers("w1"), { ...fakeWorld().options, ...plane.options, request: fakeHealth(health).request });
+    assert.deepEqual(failing.map((r) => r.state), working.map((r) => r.state), "the wake itself completes the same either way");
+    assert.equal(failing[0].state, "woken");
+    assert.ok(lines.some((l) => /wake-proof ledger was not updated.*Connection refused/.test(l)), `logged: ${lines.join(" | ")}`);
+    assert.deepEqual(Object.keys(plane.proven()), ["w1"], "positive control: the same wake over a working transport DOES prove it");
+    const nothing = controlPlane();
+    try { assert.deepEqual(nothing.proven(), {}, "and the failed one left no ledger at all"); } finally { nothing.dispose(); }
+  } finally { plane.dispose(); }
+});
+
+test("#3269 3: an unreachable control plane reads as an EMPTY ledger and is said aloud, never a guess", () => {
+  const lines: string[] = [];
+  const refused = () => { throw new Error("ssh: Connection timed out"); };
+  assert.deepEqual(readWakeProof(DEFAULT_PROOF_PATH, refused as never, (l) => lines.push(l)), {});
+  assert.ok(lines.some((l) => l.includes(DEFAULT_PROOF_PATH) && /Connection timed out/.test(l)), `logged: ${lines.join(" | ")}`);
+});
+
+test("#3269 2: a wake from the agents host and one on the control plane leave the SAME file with the SAME ledger", async () => {
+  const fromAgentsHost = controlPlane();
+  const onControlPlane = controlPlane();
+  try {
+    const health = { "192.0.2.1": [SILENT, { json: READY }] };
+    for (const plane of [fromAgentsHost, onControlPlane]) {
+      await wakeFleet(workers("w1"), { ...fakeWorld().options, ...plane.options, request: fakeHealth(health).request });
+    }
+    assert.deepEqual(fromAgentsHost.commands, onControlPlane.commands, "one command, whichever host sends it");
+    assert.ok(fromAgentsHost.commands.every((c) => c.includes(DEFAULT_PROOF_PATH)), "and it names the shared absolute path");
+    assert.ok(existsSync(fromAgentsHost.file) && existsSync(onControlPlane.file),
+      "positive control: the ledger EXISTS at that path, so 'reads empty' cannot stand in for 'wrote nothing'");
+    const [a, b] = [fromAgentsHost, onControlPlane].map((p) => readFileSync(p.file, "utf8"));
+    assert.equal(a, b);
+    assert.deepEqual(Object.keys(fromAgentsHost.proven()), ["w1"]);
+  } finally { fromAgentsHost.dispose(); onControlPlane.dispose(); }
+});
+
+test("#3269 4: two wakes finishing together leave BOTH workers; the write waits on the ledger's lock", async () => {
+  const plane = controlPlane();
+  try {
+    plane.seed({ w0: 1 });
+    const run = (command: string) => new Promise<number | null>((resolve) => {
+      spawn("sh", ["-c", command.replaceAll(CONTROL_PLANE_CHECKOUT_PATH, plane.root)]).on("close", resolve);
+    });
+    // Somebody else holds the lock until the test says so. A writer that ignores it lands inside the window, and
+    // the window is GENEROUS: `node` alone takes ~0.3 s to start in the sandbox, so a shorter one proves nothing.
+    const [held, release] = [join(plane.root, "held"), join(plane.root, "release")];
+    const holder = run(`flock '${DEFAULT_PROOF_PATH}.lock' sh -c 'touch ${held}; while [ ! -e ${release} ]; do sleep 0.05; done'`);
+    while (!existsSync(held)) await new Promise((r) => setTimeout(r, 20));
+    const before = readFileSync(plane.file, "utf8");
+    const writes = [run(proofWriteCommand(DEFAULT_PROOF_PATH, { set: { w1: 10 }, drop: [] })),
+      run(proofWriteCommand(DEFAULT_PROOF_PATH, { set: { w2: 20 }, drop: [] }))];
+    try {
+      await new Promise((r) => setTimeout(r, 1_500));
+      assert.equal(readFileSync(plane.file, "utf8"), before, "no write got past a held lock");
+    } finally {
+      writeFileSync(release, ""); // a red run must still free the holder (and wait for it), or it spins forever
+      await holder;
+    }
+    assert.deepEqual(await Promise.all([holder, ...writes]), [0, 0, 0]);
+    assert.deepEqual(plane.proven(), { w0: 1, w1: 10, w2: 20 }, "both writers' workers and the one already there");
+  } finally { plane.dispose(); }
+});
+
+test("#3269 4: the remote step agrees with advanceWakeProof, including over a ledger that is corrupt or half-numeric", () => {
+  const results = [{ name: "w1", state: "woken" }, { name: "w2", state: "no-answer" }, { name: "w3", state: "busy" }];
+  const cases: [string, string | null, Record<string, number>][] = [
+    ["absent", null, {}],
+    ["populated", JSON.stringify({ provenAt: { w2: 1, w3: 3, w4: 4 } }), { w2: 1, w3: 3, w4: 4 }],
+    ["corrupt", "{ nope", {}],
+    ["wrongly shaped", JSON.stringify({ provenAt: [1] }), {}],
+    ["a stamp that is not a number", JSON.stringify({ provenAt: { w3: "yesterday", w4: 4 } }), { w4: 4 }],
+  ];
+  for (const [label, text, expected] of cases) {
+    const plane = controlPlane();
+    try {
+      if (text !== null) { execFileSync("mkdir", ["-p", join(plane.root, "runs")]); writeFileSync(plane.file, text); }
+      recordWakeProof(results, { path: DEFAULT_PROOF_PATH, at: 9, transport: plane.transport });
+      assert.deepEqual(plane.proven(), advanceWakeProof(results, expected, 9), label);
+      assert.equal(plane.proven().w1, 9, `${label}: positive control, the proving worker is in it`);
+    } finally { plane.dispose(); }
+  }
+});
+
+test("#3269: a wake that changes nothing sends nothing, and a path that is not a plain absolute one is refused before any command", () => {
+  const sent: string[] = [];
+  const lines: string[] = [];
+  const transport = (c: string) => { sent.push(c); return ""; };
+  recordWakeProof([{ name: "w1", state: "already-up" }, { name: "w2", state: "busy" }], { path: DEFAULT_PROOF_PATH, at: 1, transport });
+  assert.deepEqual(sent, []);
+  recordWakeProof([{ name: "w1", state: "woken" }], { path: DEFAULT_PROOF_PATH, at: 1, transport });
+  assert.equal(sent.length, 1, "positive control: a proving wake does send one command");
+  for (const path of [DEFAULT_PROOF_PATH.replace(`${CONTROL_PLANE_CHECKOUT_PATH}/`, ""), "/tmp/a b.json", "/tmp/x'; rm -rf /; '"]) {
+    recordWakeProof([{ name: "w1", state: "woken" }], { path, at: 1, transport, log: (l) => lines.push(l) });
+  }
+  assert.equal(sent.length, 1, "none of the three reached the transport");
+  assert.equal(lines.length, 3, "and each said why");
 });
 
 test("#3227: a missing, corrupt or wrongly-shaped ledger reads as EMPTY, which is no proof for anyone", () => {
-  const reading = (text: string) => readWakeProof(PROOF, (() => text) as never);
+  const reading = (text: string) => readWakeProof(DEFAULT_PROOF_PATH, (() => text) as never);
   assert.deepEqual(reading(JSON.stringify({ provenAt: { w1: 5 } })), { w1: 5 }, "positive control");
   for (const bad of ["", "{ nope", "null", "[]", JSON.stringify({ provenAt: [1] }), JSON.stringify({ other: { w1: 5 } })]) {
     assert.deepEqual(reading(bad), {}, `${JSON.stringify(bad)} must read as empty`);

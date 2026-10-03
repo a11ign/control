@@ -20,10 +20,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.mjs";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
-  readState, writeState, dispatchShutdown, reportLine, tick, DEFAULT_STATE_PATH,
+  readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
   importClosure, staleCheckoutVerdict, checkAgainstMain, FETCH_THROTTLE_MS,
 } from "./fleet-auto-off.mjs";
 
@@ -322,12 +323,15 @@ const PROCEED = () => ({ verdict: { action: "proceed" as const }, fetchedAt: nul
 
 const enoent = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
 
-/** `state` for every path but the proof ledger's; the proof ledger as given. One fake serves both reads. */
-const filesWith = (state: string | null, proof: string | null) =>
-  ((path: string) => { const text = path === DEFAULT_PROOF_PATH ? proof : state; return text ?? enoent(); }) as never;
+/** The state file as given (or missing). The wake-proof ledger is NOT read through this: it is the control plane's (#3269). */
+const filesWith = (state: string | null) => (() => state ?? enoent()) as never;
+
+/** The control plane's transport answering a ledger read: `proof` as its text, or nothing for a ledger that is not there. */
+const ledgerSays = (proof: string | null) => (() => proof ?? "") as never;
+const provenAt0 = ledgerSays(PROVEN_AT_0);
 
 /** A worker already idle-since time 0 and already proven -- so `now = IDLE_THRESHOLD_MS` lands exactly at the boundary. */
-const alreadyIdleSince0 = filesWith(JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} }), PROVEN_AT_0);
+const alreadyIdleSince0 = filesWith(JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} }));
 
 test("tick: report only (apply omitted) never dispatches, even for a worker decided off", async () => {
   let dispatched = 0;
@@ -336,7 +340,7 @@ test("tick: report only (apply omitted) never dispatches, even for a worker deci
     probe: async () => ({ outcome: "idle" }),
     now: () => IDLE_THRESHOLD_MS,
     statePath: "x.json",
-    read: alreadyIdleSince0,
+    read: alreadyIdleSince0, proofTransport: provenAt0,
     write: () => {},
     dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
   });
@@ -353,7 +357,7 @@ test("tick: --apply dispatches exactly the workers decided off, and stamps shutd
     probe: async () => ({ outcome: "idle" }),
     now: () => IDLE_THRESHOLD_MS,
     statePath: "x.json",
-    read: alreadyIdleSince0,
+    read: alreadyIdleSince0, proofTransport: provenAt0,
     write: (_p, data) => { savedState = JSON.parse(String(data)); },
     apply: true, checkout: PROCEED,
     dispatch: (name: string) => { dispatchedNames.push(name); return { status: 0, log: "" }; },
@@ -374,7 +378,7 @@ test("tick: a failed dispatch is logged to stderr and does not stamp shutdownReq
       probe: async () => ({ outcome: "idle" }),
       now: () => IDLE_THRESHOLD_MS,
       statePath: "x.json",
-      read: alreadyIdleSince0,
+      read: alreadyIdleSince0, proofTransport: provenAt0,
       write: (_p, data) => { savedState = JSON.parse(String(data)); },
       apply: true, checkout: PROCEED,
       dispatch: () => ({ status: null, log: "spawnSync ansible-playbook ENOENT" }),
@@ -395,7 +399,7 @@ test("tick: a worker still idle but under the threshold is kept, and never dispa
     probe: async () => ({ outcome: "idle" }),
     now: () => IDLE_THRESHOLD_MS - 1,
     statePath: "x.json",
-    read: filesWith(null, PROVEN_AT_0),
+    read: filesWith(null), proofTransport: provenAt0,
     write: () => {},
     apply: true, checkout: PROCEED,
     dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
@@ -412,7 +416,8 @@ async function applyOver(proof: string | null, now = IDLE_THRESHOLD_MS) {
   const dispatched: string[] = [];
   const { decisions } = await tick({
     workers: TWO_WORKERS, probe: async () => ({ outcome: "idle" }), now: () => now, statePath: "x.json",
-    read: filesWith(BOTH_IDLE_SINCE_0, proof), write: () => {}, apply: true, checkout: PROCEED,
+    read: filesWith(BOTH_IDLE_SINCE_0), proofTransport: ledgerSays(proof), write: () => {}, apply: true,
+    checkout: PROCEED,
     dispatch: (name: string) => { dispatched.push(name); return { status: 0, log: "" }; },
   });
   return { dispatched, reasons: Object.fromEntries(decisions.map((d) => [d.worker.name, d.decision.reason])) };
@@ -475,7 +480,7 @@ test("tick: an unreadable GitHub cannot change the decision -- no seam left for 
       probe: async () => ({ outcome: "idle" }),
       now: () => IDLE_THRESHOLD_MS,
       statePath: "x.json",
-      read: alreadyIdleSince0,
+      read: alreadyIdleSince0, proofTransport: provenAt0,
       write: () => {},
     });
     assert.deepEqual(result.decisions[0].decision, { action: "off", reason: "idle-five-minutes" },
@@ -567,7 +572,7 @@ test("tick: a ledger that cannot be written is reported and does not stop the sh
       now: () => IDLE_THRESHOLD_MS,
       statePath: "state.json",
       capturesPath: LEDGER,
-      read: alreadyIdleSince0,
+      read: alreadyIdleSince0, proofTransport: provenAt0,
       write: ((path: string, data: string) => {
         if (path === LEDGER) throw new Error("ENOSPC");
         files.write(path, data);
@@ -702,6 +707,46 @@ test("#2784: the timer polls under the shortest capture and fires the service th
 });
 
 // ---------------------------------------------------------------------------------------------------------
+// #3269: the ledger is the control plane's, read through its transport from wherever the timer or an operator runs.
+// ---------------------------------------------------------------------------------------------------------
+
+test("#3269 5: auto-off reads the SAME absolute file `fleet:wake` writes, through the transport, and says which", async () => {
+  const commands: string[] = [];
+  const result = await tick({
+    workers: WORKERS, probe: async () => ({ outcome: "idle" }), now: () => IDLE_THRESHOLD_MS, statePath: "x.json",
+    read: filesWith(null), write: () => {},
+    proofTransport: ((command: string) => { commands.push(command); return PROVEN_AT_0; }) as never,
+  });
+  assert.equal(result.proofPath, DEFAULT_PROOF_PATH);
+  assert.equal(DEFAULT_PROOF_PATH, `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-wake-proof.json`);
+  assert.equal(commands.length, 1);
+  assert.ok(commands[0].includes(DEFAULT_PROOF_PATH), `the command names the shared path: ${commands[0]}`);
+  assert.equal(result.decisions[0].decision.reason, "not-yet-five-minutes",
+    "positive control: the proof it read counted, so the worker is NOT `wake-unproven`");
+  assert.match(ledgerLine(result.proofPath), new RegExp(`${DEFAULT_PROOF_PATH}.*control plane`));
+});
+
+test("#3269 3: a control plane that cannot be reached is an empty ledger, every worker kept, and stderr names the file", async () => {
+  const stderr: string[] = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => { stderr.push(String(chunk)); return true; }) as never;
+  let dispatched = 0;
+  try {
+    const { decisions } = await tick({
+      workers: WORKERS, probe: async () => ({ outcome: "idle" }), now: () => IDLE_THRESHOLD_MS, statePath: "x.json",
+      read: alreadyIdleSince0, write: () => {}, apply: true, checkout: PROCEED,
+      proofTransport: (() => { throw new Error("ssh: Connection refused"); }) as never,
+      dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
+    });
+    assert.equal(decisions[0].decision.reason, "wake-unproven");
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  assert.equal(dispatched, 0, "no proof, no power-off");
+  assert.match(stderr.join(""), new RegExp(`could not be read \\(${DEFAULT_PROOF_PATH}\\).*Connection refused`));
+});
+
+// ---------------------------------------------------------------------------------------------------------
 // Refuse to power anything off when the files this runs differ from main -- #3275.
 // ---------------------------------------------------------------------------------------------------------
 
@@ -828,7 +873,8 @@ test("#3275 tick --apply: a refusal dispatches NOTHING, says why in the report, 
   let saved: { refusal: unknown, fetchedAt: number, shutdownRequestedAt: unknown } | null = null;
   const result = await tick({
     workers: WORKERS, probe: async () => ({ outcome: "idle" }), now: () => IDLE_THRESHOLD_MS, statePath: "x.json",
-    read: alreadyIdleSince0, write: (_p, data) => { saved = JSON.parse(String(data)); }, apply: true,
+    read: alreadyIdleSince0, proofTransport: provenAt0, write: (_p, data) => { saved = JSON.parse(String(data)); },
+    apply: true,
     checkout: () => ({ verdict: { action: "refuse", reason: "stale-checkout", detail: "1 file differs: a.mjs" }, fetchedAt: 42 }),
     dispatch: (name: string) => { dispatched.push(name); return { status: 0, log: "" }; },
   });
@@ -844,7 +890,8 @@ test("#3275 tick: the checkout is asked only when --apply has something to power
   let asked = 0;
   const checkout = () => { asked += 1; return { verdict: { action: "proceed" as const }, fetchedAt: 1 }; };
   const base = { workers: WORKERS, probe: async () => ({ outcome: "idle" as const }), statePath: "x.json",
-    read: alreadyIdleSince0, write: () => {}, checkout, dispatch: () => ({ status: 0, log: "" }) };
+    read: alreadyIdleSince0, proofTransport: provenAt0, write: () => {}, checkout,
+    dispatch: () => ({ status: 0, log: "" }) };
   await tick({ ...base, now: () => IDLE_THRESHOLD_MS, apply: false });
   assert.equal(asked, 0, "report-only never fetches");
   await tick({ ...base, now: () => IDLE_THRESHOLD_MS - 1, apply: true });
