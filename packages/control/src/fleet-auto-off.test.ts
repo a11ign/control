@@ -12,12 +12,12 @@
 // process's `GH_TOKEN` to prove no code path in this file reads it anymore, and needs no real credential.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync, mkdtempSync, linkSync, readdirSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, mkdtempSync, linkSync, readdirSync, rmSync, writeFileSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { captureTimes, readCapturesState, writeCapturesState } from "./fleet-watch.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { captureTimes, readCapturesState, writeCapturesState, withFileLock } from "./fleet-watch.mjs";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
@@ -514,6 +514,60 @@ test("writeCapturesState: the real write REPLACES the file, so a reader never se
     assert.equal(readCapturesState(alias)?.since, 1, "the old inode was written over in place, not replaced");
     assert.deepEqual(readdirSync(dir).sort(), ["fleet-captures-state.json", "reader-holds-the-old-file.json"],
       "no staging file is left behind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A real process that records one worker's reading, its read held open for 150 ms and released only at a shared
+// instant -- so two of them are inside read-modify-write at once, the interleave that rename alone cannot stop.
+const RECORDER = `
+  import { readFileSync } from "node:fs";
+  const { WATCH: watch, LEDGER: path, WORKER: name, START: start } = process.env;
+  const { recordCaptures } = await import(watch);
+  const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const read = (p, enc) => { const text = readFileSync(p, enc); pause(150); return text; };
+  while (Date.now() < Number(start)) pause(1);
+  recordCaptures([{ name, state: "busy", captures: 12, uptimeMinutes: null }], { path, at: 1000, read });
+`;
+
+function recordFromAnotherProcess(path: string, name: string, start: number): Promise<number | null> {
+  const watch = pathToFileURL(fileURLToPath(new URL("./fleet-watch.mjs", import.meta.url))).href;
+  // Through the environment, not argv: fleet-watch's main guard `realpathSync`s `process.argv[1]` on import.
+  const child = spawn(process.execPath, ["--input-type=module", "-e", RECORDER],
+    { stdio: "inherit", env: { ...process.env, WATCH: watch, LEDGER: path, WORKER: name, START: String(start) } });
+  return new Promise((resolve) => child.on("close", resolve));
+}
+
+test("recordCaptures: two processes recording at once both land in the ledger -- the second reads the first's write (#3208)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ledger-"));
+  try {
+    const path = join(dir, "fleet-captures-state.json");
+    writeCapturesState(path, { since: 1, workers: {} });
+    const start = Date.now() + 1500;
+    const exits = await Promise.all([recordFromAnotherProcess(path, "a11y-worker-2", start),
+      recordFromAnotherProcess(path, "a11y-worker-3", start)]);
+    assert.deepEqual(exits, [0, 0]);
+    assert.deepEqual(Object.keys(readCapturesState(path)?.workers ?? {}).sort(), ["a11y-worker-2", "a11y-worker-3"],
+      "one writer's reading was overwritten by the other's snapshot");
+    assert.equal(existsSync(`${path}.lock`), false, "the lock was left behind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("withFileLock: a dead writer's aged lock is broken, and the lock is released after the work or a throw (#3208)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ledger-"));
+  try {
+    const path = join(dir, "fleet-captures-state.json");
+    const lock = `${path}.lock`;
+    writeFileSync(lock, "");
+    const abandoned = new Date(Date.now() - 60_000);
+    utimesSync(lock, abandoned, abandoned);
+    assert.equal(withFileLock(path, () => "ran"), "ran");
+    assert.equal(existsSync(lock), false, "released after the work");
+    assert.throws(() => withFileLock(path, () => { throw new Error("boom"); }), /boom/);
+    assert.equal(existsSync(lock), false, "released when the work throws");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

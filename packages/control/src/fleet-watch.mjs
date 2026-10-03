@@ -34,7 +34,7 @@
  * on #928 read a deliberately-off fleet as broken. A box that is genuinely dead is found when a capture
  * window wakes it and it does not return (`fleet:wake`, which tells `needs:chairman`).
  */
-import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, openSync, closeSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -181,8 +181,7 @@ export function readCapturesState(path, read = readFileSync) {
  * `fleet-auto-off.mjs` every tick, #3208), and a reader landing inside `writeFileSync`'s truncate-then-write
  * sees a half file, which `readCapturesState` reads as `null` and the next write turns into a fresh ledger
  * whose `since` starts over. A rename within one directory is atomic, so no reader sees anything between.
- * It does not serialize the two writers: a read-modify-write that interleaves with the other's can drop that
- * one's rise, but counts are cumulative, so the next probe of a worker still up re-derives it.
+ * The rename does not stop two read-modify-writes interleaving; `withFileLock` does.
  *
  * @param {string} path
  * @param {string} data
@@ -192,6 +191,71 @@ function replaceFile(path, data) {
   writeFileSync(staging, data);
   renameSync(staging, path);
 }
+
+/** A lock held longer than this belongs to a writer that died: the critical section is a read and a rename. */
+const LOCK_STALE_MS = 2000;
+const LOCK_RETRY_MS = 5;
+
+/** @param {number} ms */
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * A lock that vanished between the failed create and this look is not stale; the next create decides.
+ *
+ * @param {string} lock
+ */
+function lockIsStale(lock) {
+  try {
+    return Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string} lock */
+function acquire(lock) {
+  for (;;) {
+    try {
+      closeSync(openSync(lock, "wx"));
+      return;
+    } catch (err) {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== "EEXIST") throw err;
+    }
+    if (lockIsStale(lock)) rmSync(lock, { force: true });
+    else sleep(LOCK_RETRY_MS);
+  }
+}
+
+/**
+ * Run `fn` holding an exclusive lock file beside `path`, so the hourly watch and the 10 s auto-off tick cannot
+ * both read state S and rename S+A and S+B over each other, which drops A (#3208: A may be the last reading a
+ * worker ever gives). Creation with `wx` is atomic. A lock older than `LOCK_STALE_MS` is taken to be a dead
+ * writer's and broken; two processes breaking the same stale lock at once can both proceed, which needs a
+ * crash inside the critical section first.
+ *
+ * @template T
+ * @param {string} path
+ * @param {() => T} fn
+ * @returns {T}
+ */
+export function withFileLock(path, fn) {
+  const lock = `${path}.lock`;
+  acquire(lock);
+  try {
+    return fn();
+  } finally {
+    rmSync(lock, { force: true });
+  }
+}
+
+/**
+ * A test double has no file to lock, so an injected writer runs `fn` bare.
+ *
+ * @type {typeof withFileLock}
+ */
+const unlocked = (_path, fn) => fn();
 
 /**
  * @param {string} path
@@ -395,11 +459,14 @@ export function watchBody(entries) {
  * same ledger from its own 10 s probe: the hourly poll alone never sees a worker that boots, works and is
  * powered off between two polls (#3208).
  *
+ * The read, the advance and the write happen under `withFileLock`, so concurrent writers each see the other's rise.
+ *
  * @param {FleetRow[]} rows
- * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync }} where
+ * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync,
+ *           lock?: typeof withFileLock }} where
  */
-export function recordCaptures(rows, { path, at, read, write }) {
-  writeCapturesState(path, advanceCaptures(rows, readCapturesState(path, read), at), write);
+export function recordCaptures(rows, { path, at, read, write, lock = write ? unlocked : withFileLock }) {
+  lock(path, () => writeCapturesState(path, advanceCaptures(rows, readCapturesState(path, read), at), write));
 }
 
 /**
