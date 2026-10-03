@@ -24,7 +24,7 @@
  * start its own workers because of an install problem in something unrelated.
  */
 import { createSocket } from "node:dgram";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.mjs's
@@ -81,6 +81,36 @@ const POLL_MS = 5_000;
  * the worst case is the deadline plus one probe timeout.
  */
 export const WAKE_DEADLINE_MS = 300_000;
+
+/** The wake-proof ledger, in the checkout's ignored `runs/` beside the other fleet bookkeeping. */
+export const DEFAULT_PROOF_PATH = "runs/fleet-wake-proof.json";
+const MS_PER_DAY = 86_400_000;
+/**
+ * HOW LONG A PROOF STAYS TRUE, WITH ITS READING (#3227 done-when 3). A proof says "this box came up on
+ * its reserved address from one packet, under the configuration it had THEN". It stops being true when
+ * that configuration changes without anyone watching a wake, so the window is bounded by how often that
+ * happens and not chosen for looking reasonable.
+ *
+ * What changes whether a box wakes, and how often (measured from the repo 2026-10-03 unless said):
+ *   - OUR provisioning: the worker role and its modules changed on 16 of the 27 days from 2026-09-04 to
+ *     2026-10-01, longest gap 5 days (`git log`), so a box is usually re-provisioned inside any week. The
+ *     NIC power module itself (`a11y_nic_power`, which sets Wake-on-LAN) has not changed since the package
+ *     was extracted on 2026-08-29, so none of those changes is known to have moved the NIC.
+ *   - A Windows servicing update resetting the NIC's power setting: monthly (Patch Tuesday), so under 31
+ *     days between two. INFERRED from Microsoft's published cadence, not read on this fleet.
+ *   - A BIOS or NIC setting changed by hand (worker 4's "Allow this device to wake the computer" was found
+ *     unticked on 2026-10-03), and a lease or reservation moving (worker 6 woke at another address on both
+ *     2026-09-28 and 2026-10-03). Both are persistent, not intermittent: neither flipped by itself in the
+ *     five days between the two readings, and neither has a cadence at all.
+ * So the unobserved changes that DO have a cadence recur at most monthly, which puts the ceiling under 31
+ * days; the cost side picks the value below it. A proof that has lapsed costs a box that stays on (the
+ * direction auto-off may always err in), and a proof that outlived a change costs a box nobody can restore,
+ * so lapsing early is cheap and lapsing late is not. A week is about a quarter of the ceiling, long enough that
+ * the proof an operator earns by one deliberate `fleet:sleep` then `fleet:wake` (or a lab job's own wake)
+ * is not a daily chore, and short enough that a proof lapses about four times between two monthly changes.
+ * The ceiling is derived; the choice of a week below it is a judgment, and the row says so.
+ */
+export const PROOF_WINDOW_MS = 7 * MS_PER_DAY;
 
 /**
  * The 102-byte magic packet: six 0xFF bytes, then the target MAC sixteen times.
@@ -172,7 +202,8 @@ export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request 
  * @typedef {{ name: string, host: string, mac?: string | null }} WakeTarget
  * @typedef {{ port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number,
  *   log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>,
- *   request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number }} WakeOptions
+ *   request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number,
+ *   proofPath?: string | null, readProofFile?: typeof readFileSync, writeProofFile?: typeof writeFileSync }} WakeOptions
  * @typedef {Required<Omit<WakeOptions, "broadcast">> & { broadcast?: string }} WakeConfig
  * @typedef {WakeTarget & { state: string, packets: number, detail?: string }} WakeResult
  */
@@ -272,9 +303,74 @@ export async function wakeFleet(workers, options = {}) {
     port: 8765, deadlineMs: WAKE_DEADLINE_MS, pollMs: POLL_MS, probeTimeoutMs: HEALTH_TIMEOUT_MS,
     log: () => {}, send: sendMagicPacket, request: requestJson,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: Date.now,
+    // A test double for the socket means no real wake, so it earns no proof and touches no file.
+    proofPath: options.send ? null : DEFAULT_PROOF_PATH, readProofFile: readFileSync, writeProofFile: writeFileSync,
     ...options,
   };
-  return Promise.all(workers.map((w) => wakeOne(w, cfg)));
+  const results = await Promise.all(workers.map((w) => wakeOne(w, cfg)));
+  if (cfg.proofPath !== null) recordWakeProof(results, {
+    path: cfg.proofPath, at: cfg.now(), read: cfg.readProofFile, write: cfg.writeProofFile, log: cfg.log,
+  });
+  return results;
+}
+
+/**
+ * THE PROOF LEDGER (#3227): per worker, when it last came up from silence on its own address after one
+ * packet. `fleet-auto-off.mjs` powers a box off only while this is recent, because a box that cannot be
+ * brought back must never be the one auto-off removes. Missing, corrupt or unreadable reads as EMPTY, which
+ * is no proof for anyone: every box is kept on, the direction auto-off may always err in.
+ *
+ * @typedef {Record<string, number>} WakeProof worker name -> epoch ms of its last proving wake
+ * @param {string} path
+ * @param {typeof readFileSync} read
+ * @returns {WakeProof}
+ */
+export function readWakeProof(path, read = readFileSync) {
+  try {
+    const provenAt = JSON.parse(read(path, "utf8"))?.provenAt;
+    if (!provenAt || typeof provenAt !== "object" || Array.isArray(provenAt)) return {};
+    return Object.fromEntries(Object.entries(provenAt).filter(([, at]) => Number.isFinite(at)));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The ledger after one set of wakes. ONLY `woken` writes: the worker was silent, our one packet went out,
+ * and it then answered ready at the inventory's own address. `already-up`, `busy` and `came-up` saw no
+ * silence to wake from, so they prove nothing (and change nothing); a worker that answered at another
+ * address reads as `no-answer`, because the wake only ever probes the inventory's. A wake that FAILED drops
+ * the proof that worker held. Every other worker's entry is carried over untouched.
+ *
+ * @param {{ name: string, state: string }[]} results
+ * @param {WakeProof} previous
+ * @param {number} at
+ * @returns {WakeProof}
+ */
+export function advanceWakeProof(results, previous, at) {
+  const next = { ...previous };
+  for (const r of results) {
+    if (r.state === "woken") next[r.name] = at;
+    else if (wakeFailed(r)) delete next[r.name];
+  }
+  return next;
+}
+
+/**
+ * Fold a wake's outcomes into the ledger file. Bookkeeping never takes a wake down: a ledger that cannot be
+ * written is reported through `log`, and the worker is simply not proven, which keeps it on.
+ *
+ * @param {{ name: string, state: string }[]} results
+ * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync,
+ *   log?: (line: string) => void }} where
+ */
+export function recordWakeProof(results, { path, at, read = readFileSync, write = writeFileSync, log = () => {} }) {
+  try {
+    const next = advanceWakeProof(results, readWakeProof(path, read), at);
+    write(path, `${JSON.stringify({ provenAt: next }, null, 2)}\n`);
+  } catch (cause) {
+    log(`  the wake-proof ledger was not updated (${path}): ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
 }
 
 /**
@@ -298,7 +394,18 @@ export function wakeReportLine(r) {
     "not-listening": `the box refuses connections (it is up) and the worker never started listening${said} `
       + "— `fleet:recover`",
   })[r.state] ?? r.state;
-  return `  ${r.name.padEnd(16)} ${r.host.padEnd(15)} ${detail}`;
+  return `  ${r.name.padEnd(16)} ${r.host.padEnd(15)} ${detail}${proofClause(r)}`;
+}
+
+/**
+ * What the outcome does to the worker's wake proof (#3227), so a box that stops waking is named as one
+ * auto-off will now keep on, in the wake's own output and not only in auto-off's.
+ *
+ * @param {{ state: string }} r
+ */
+function proofClause(r) {
+  if (r.state === "woken") return " -- wake proved: auto-off may power it off again";
+  return wakeFailed(r) ? " -- wake proof dropped: auto-off keeps it on until a wake proves it" : "";
 }
 
 /** Did this worker end somewhere a capture cannot use? (`busy` is a worker that is fine and taken.) */

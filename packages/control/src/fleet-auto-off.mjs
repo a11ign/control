@@ -43,6 +43,18 @@
  * guard below is unrelated and unaffected: it is `probeIdle`'s own per-worker `busy` read, re-confirmed by
  * `sleep.yml` itself immediately before any shutdown.
  *
+ * ## A worker is powered off only while it has PROVED it comes back (#3227)
+ *
+ * The idle test says a box is not needed. It says nothing about whether the box can be brought BACK, and
+ * auto-off used to remove any worker with a well-formed MAC, so two boxes that never woke on their reserved
+ * address were in the pool (worker 4 never appeared on the network, worker 6 woke at another address).
+ * The pool's admission is now a proof, written by `fleet-wake.mjs` when a worker that was SILENT came up
+ * ready on its inventory address after one packet, and dropped by any wake that fails. Without a recent
+ * proof the worker is `keep wake-unproven` and named so in every report, so a box that has never proved a
+ * wake is a visible to-do and never a silent absence. A fresh checkout holds no proof: nothing is powered
+ * off until an operator has put one box through `fleet:sleep` then `fleet:wake`, which is the safe direction.
+ * The proof is read per worker, so one box's proof, revocation or shutdown moves no other box's decision.
+ *
  * ## `batchQueued` and `leasePending` are an honest gap
  *
  * Done-when 1 names them as keep reasons a pure function must carry. Nothing in this codebase today
@@ -57,7 +69,7 @@ import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { inventoryHosts } from "./fleet-discover.mjs";
 import { inventoryPathFor } from "./control-plane-fleet.mjs";
-import { magicPacket } from "./fleet-wake.mjs";
+import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
 import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.mjs";
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
@@ -252,11 +264,23 @@ export function advanceShutdownRequested(probes, previous) {
 /**
  * @typedef {{
  *   name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer",
- *   idleSince: number | null, shutdownRequestedAt: number | null,
+ *   idleSince: number | null, shutdownRequestedAt: number | null, wakeProvenAt: number | null,
  *   batchQueued: boolean, leasePending: boolean,
  * }} DecisionInput
  * @typedef {{ action: "off" | "keep", reason: string }} Decision
  */
+
+/**
+ * Did this worker prove a wake inside `PROOF_WINDOW_MS`? A proof stamped in the future is a clock fault, and
+ * is no proof: the answer to "can it be brought back" is never guessed in the direction of powering off.
+ *
+ * @param {number | null} provenAt
+ * @param {number} now
+ * @returns {boolean}
+ */
+function hasRecentWakeProof(provenAt, now) {
+  return provenAt !== null && provenAt <= now && now - provenAt <= PROOF_WINDOW_MS;
+}
 
 /**
  * THE DECISION, PURE (done-when 1). Given every named input, `off` or `keep` and exactly one reason.
@@ -270,6 +294,7 @@ export function advanceShutdownRequested(probes, previous) {
  */
 export function autoOffDecision(input, now, idleThresholdMs = IDLE_THRESHOLD_MS) {
   if (!input.hasMac) return { action: "keep", reason: "no-mac" };
+  if (!hasRecentWakeProof(input.wakeProvenAt, now)) return { action: "keep", reason: "wake-unproven" };
   if (input.shutdownRequestedAt !== null) return { action: "keep", reason: "already-off" };
   if (input.probe === "no-answer") return { action: "keep", reason: "no-answer" };
   if (input.probe === "busy") return { action: "keep", reason: "busy" };
@@ -351,13 +376,60 @@ function recordProbedCaptures(probes, where) {
 }
 
 /**
+ * One worker's decision input, from what the tick knows about the whole fleet. Every field is read BY NAME,
+ * so no worker's proof, idle streak or shutdown stamp can reach another worker's decision (#3227).
+ *
+ * @param {{ name: string, mac: string | null }} w
+ * @param {string} outcome
+ * @param {{ idleSince: SinceState, shutdownRequestedAt: SinceState, wakeProof: Record<string, number>,
+ *   batchQueued: () => boolean, leasePending: () => boolean }} known
+ * @returns {DecisionInput}
+ */
+function decisionInput(w, outcome, known) {
+  return {
+    name: w.name,
+    hasMac: hasWakeableMac(w.mac),
+    probe: /** @type {"idle" | "busy" | "no-answer"} */ (outcome),
+    idleSince: known.idleSince[w.name] ?? null,
+    shutdownRequestedAt: known.shutdownRequestedAt[w.name] ?? null,
+    wakeProvenAt: known.wakeProof[w.name] ?? null,
+    batchQueued: known.batchQueued(),
+    leasePending: known.leasePending(),
+  };
+}
+
+/**
+ * Dispatch `sleep.yml` at every worker decided `off`, stamping each success into `shutdownRequestedAt`.
+ *
+ * @param {{ worker: { name: string }, decision: Decision }[]} decisions
+ * @param {{ dispatch: typeof dispatchShutdown, shutdownRequestedAt: SinceState, now: number }} where
+ */
+function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
+  for (const { worker, decision } of decisions) {
+    if (decision.action !== "off") continue;
+    const dispatched = dispatch(worker.name);
+    // SURFACE A FAILED DISPATCH (done-when 2) -- before this, a `spawnSync` failure (ENOENT when
+    // `ansible-playbook` was not on PATH, #2725) was silently discarded here, so a broken dispatch
+    // environment read as an infinite, successful-looking retry instead of a visible error. A failed
+    // dispatch never actually reached `sleep.yml`, so it does not stamp `shutdownRequestedAt` either --
+    // that field means a shutdown was requested, and none was.
+    if (dispatched.status !== 0) {
+      process.stderr.write(`fleet-auto-off: dispatchShutdown failed for ${worker.name} `
+        + `(status=${dispatched.status}): ${dispatched.log}\n`);
+      continue;
+    }
+    shutdownRequestedAt[worker.name] = now;
+  }
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.mjs`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
  *
  * @param {{
  *   workers?: { name: string, host: string, mac: string | null }[],
- *   probe?: typeof probeIdle, now?: () => number, statePath?: string, capturesPath?: string,
+ *   probe?: typeof probeIdle, now?: () => number, statePath?: string, capturesPath?: string, proofPath?: string,
  *   read?: typeof readFileSync, write?: typeof writeFileSync,
  *   batchQueued?: () => boolean, leasePending?: () => boolean,
  *   apply?: boolean, dispatch?: typeof dispatchShutdown,
@@ -376,6 +448,7 @@ export async function tick(deps = {}) {
   const dispatch = deps.dispatch ?? dispatchShutdown;
 
   const previous = readState(statePath, deps.read);
+  const wakeProof = readWakeProof(deps.proofPath ?? DEFAULT_PROOF_PATH, deps.read);
 
   const probes = await Promise.all(workers.map(async (w) => ({
     name: w.name, host: w.host, ...(await probe(`http://${w.host}:${PORT}`)),
@@ -386,38 +459,13 @@ export async function tick(deps = {}) {
   const idleSince = advance(probes, previous.idleSince, now);
   const shutdownRequestedAt = advanceShutdownRequested(probes, previous.shutdownRequestedAt);
 
+  const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending };
   const decisions = workers.map((w) => {
     const p = probes.find((probed) => probed.name === w.name);
-    /** @type {DecisionInput} */
-    const input = {
-      name: w.name,
-      hasMac: hasWakeableMac(w.mac),
-      probe: /** @type {"idle" | "busy" | "no-answer"} */ (p?.outcome ?? "no-answer"),
-      idleSince: idleSince[w.name] ?? null,
-      shutdownRequestedAt: shutdownRequestedAt[w.name] ?? null,
-      batchQueued: batchQueued(),
-      leasePending: leasePending(),
-    };
-    return { worker: w, decision: autoOffDecision(input, now) };
+    return { worker: w, decision: autoOffDecision(decisionInput(w, p?.outcome ?? "no-answer", known), now) };
   });
 
-  if (apply) {
-    for (const { worker, decision } of decisions) {
-      if (decision.action !== "off") continue;
-      const dispatched = dispatch(worker.name);
-      // SURFACE A FAILED DISPATCH (done-when 2) -- before this, a `spawnSync` failure (ENOENT when
-      // `ansible-playbook` was not on PATH, #2725) was silently discarded here, so a broken dispatch
-      // environment read as an infinite, successful-looking retry instead of a visible error. A failed
-      // dispatch never actually reached `sleep.yml`, so it does not stamp `shutdownRequestedAt` either --
-      // that field means a shutdown was requested, and none was.
-      if (dispatched.status !== 0) {
-        process.stderr.write(`fleet-auto-off: dispatchShutdown failed for ${worker.name} `
-          + `(status=${dispatched.status}): ${dispatched.log}\n`);
-        continue;
-      }
-      shutdownRequestedAt[worker.name] = now;
-    }
-  }
+  if (apply) dispatchOff(decisions, { dispatch, shutdownRequestedAt, now });
 
   writeState(statePath, { idleSince, shutdownRequestedAt }, deps.write);
   return { decisions };
@@ -444,6 +492,11 @@ async function main() {
 
   const { decisions } = await tick({ workers: declared, apply });
   for (const { worker, decision } of decisions) process.stdout.write(`${reportLine(worker, decision)}\n`);
+  const unproven = decisions.filter(({ decision }) => decision.reason === "wake-unproven").map(({ worker }) => worker.name);
+  if (unproven.length) {
+    process.stdout.write(`\n  kept on for want of a recent wake proof: ${unproven.join(", ")}. A proof is earned by `
+      + "`fleet:sleep` then `fleet:wake` of that one worker, answering on its own address.\n");
+  }
   process.stdout.write(apply
     ? "\n  --apply: every `off` above was just dispatched to sleep.yml.\n"
     : "\n  report only: nothing was powered off. Pass --apply to actually dispatch a shutdown.\n");
