@@ -53,6 +53,9 @@ export function defaultTokenPath(home = homedir()) {
   return join(home, ".config", "a11y-witness", TOKEN_FILE_NAME);
 }
 
+const HTTP_CREATED = 201;
+const BODY_EXCERPT = 200;
+
 export const EXIT = { POSTED: 0, REFUSED: 1, NOT_YET: 3 };
 
 /**
@@ -99,9 +102,9 @@ export async function postQualificationStatus(input) {
     },
     body: JSON.stringify(payload),
   });
-  if (response.status !== 201) {
+  if (response.status !== HTTP_CREATED) {
     return { posted: false, reason: "rejected", payload,
-      detail: `GitHub answered ${response.status} ${(await response.text()).slice(0, 200)}` };
+      detail: `GitHub answered ${response.status} ${(await response.text()).slice(0, BODY_EXCERPT)}` };
   }
   return { posted: true, payload };
 }
