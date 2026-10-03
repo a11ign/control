@@ -374,10 +374,14 @@ export function watchBody(entries) {
 }
 
 /**
+ * Fold one reading of the fleet into the persisted ledger. Exported so `fleet-auto-off.mjs` can feed the
+ * same ledger from its own 10 s probe: the hourly poll alone never sees a worker that boots, works and is
+ * powered off between two polls (#3208).
+ *
  * @param {FleetRow[]} rows
  * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync }} where
  */
-function recordCaptures(rows, { path, at, read, write }) {
+export function recordCaptures(rows, { path, at, read, write }) {
   writeCapturesState(path, advanceCaptures(rows, readCapturesState(path, read), at), write);
 }
 
