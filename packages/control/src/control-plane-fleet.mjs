@@ -225,6 +225,68 @@ export function readControlPlaneFleet({
 }
 
 /**
+ * #3239: THE ONE SOURCE, AND HOW A COPY OF IT IS CAUGHT DIFFERING.
+ *
+ * Two inventories described one fleet and disagreed about its size: the control plane's installed copy
+ * named workers 2 to 16 while the agents host's hand-placed one named 2 to 11, so `fleet:wake` there said
+ * "No worker named a11y-worker-12" for a box auto-off on the control plane could power down. THE CONTROL
+ * PLANE'S `/etc/a11ign/inventory.yml` IS THE SOURCE: it is what dispatch, deploy, auto-off and `lab:job`
+ * act on, and the one copy a `git pull` cannot take. Every other host's file is DERIVED from it by
+ * `fleet:inventory-install`, which calls this to say what the copy was missing before it overwrites it.
+ *
+ * Compared on what a reader of the copy acts on, name by name -- address and MAC included, because a worker
+ * the copy names with the wrong MAC is a wake that sends its packet to somebody else. A copy can be AHEAD
+ * too (a hand edit the source never got), and that is reported rather than lost: overwriting it silently
+ * is the same surprise as a stale one.
+ *
+ * @param {{ source: string, copy: string, groupVarsText?: string }} input the two inventories' TEXT
+ * @returns {{ missing: string[], extra: string[], changed: string[], report: string | null }}
+ *          `report` is null only when the two name the same workers the same way
+ */
+export function inventoryDrift({
+  source, copy, groupVarsText = readFileSync(resolve(ANSIBLE_DIR, "group_vars/a11y_workers.yml"), "utf8"),
+}) {
+  const sourceFleet = fleetByName(source, groupVarsText);
+  let copyFleet;
+  let unreadable = "";
+  try {
+    copyFleet = fleetByName(copy, groupVarsText);
+  } catch (error) {
+    // A copy that does not parse is the worst drift there is, and the one this must still be able to repair.
+    copyFleet = new Map();
+    unreadable = `this copy could not be read (${/** @type {Error} */ (error).message}); `;
+  }
+  const missing = [...sourceFleet.keys()].filter((name) => !copyFleet.has(name));
+  const extra = [...copyFleet.keys()].filter((name) => !sourceFleet.has(name));
+  const changed = [...sourceFleet].filter(([name, worker]) => {
+    const theirs = copyFleet.get(name);
+    return theirs && (theirs.url !== worker.url || theirs.mac !== worker.mac);
+  }).map(([name]) => name);
+  const parts = [
+    missing.length && `in the source, not in this copy: ${shortNames(missing)}`,
+    extra.length && `in this copy, not in the source: ${shortNames(extra)}`,
+    changed.length && `named with another address or MAC in this copy: ${shortNames(changed)}`,
+  ].filter(Boolean);
+  return { missing, extra, changed, report: parts.length ? `${unreadable}the worker set differs: ${parts.join("; ")}` : null };
+}
+
+/**
+ * @param {string} text one inventory
+ * @param {string} groupVarsText
+ * @returns {Map<string, { name: string, url: string, mac?: string }>} worker name -> what it declares
+ */
+function fleetByName(text, groupVarsText) {
+  const { workers, refusal } = controlPlaneFleet({ reads: [{ path: "inventory", text }], sources: [], groupVarsText });
+  if (refusal) throw new Error(refusal);
+  return new Map(workers.map((worker) => [worker.name, worker]));
+}
+
+/** `a11y-worker-12 a11y-worker-3` as `3 12`: the fleet's own prefix is noise in a list of fifteen. */
+const shortNames = (/** @type {string[]} */ names) => names
+  .map((name) => name.replace(/^a11y-worker-/, ""))
+  .sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).join(" ");
+
+/**
  * #1683/#1684: THE DURABLE COPY FIRST, exactly the precedence `ansible.cfg`'s own `inventory =` line
  * states (`/etc/a11ign/inventory.yml,inventory.yml`) -- a plain LOCAL file read either way, never ssh,
  * never a credential. This is what lets a zero-credential reader (`fleet-wake.mjs`) or one with no
