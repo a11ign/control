@@ -289,18 +289,18 @@ test("ledger: a worker that did NOT restart (uptime longer than the gap) still r
 });
 
 test("ledger: a worker that woke at a NEW ADDRESS is the same worker, and the old address's entry is folded in", () => {
-  const before = advanceCaptures([counted("w2  REDACTED-INTERNAL-ADDRESS:8080", 5)], null, NOW - 2 * HOUR);
-  const rose = advanceCaptures([counted("w2  REDACTED-INTERNAL-ADDRESS:8080", 8)], before, NOW - HOUR);
-  const after = advanceCaptures([counted("w2  REDACTED-INTERNAL-ADDRESS:8080", 11)], rose, NOW);
+  const before = advanceCaptures([counted("w2  203.0.113.1:8080", 5)], null, NOW - 2 * HOUR);
+  const rose = advanceCaptures([counted("w2  203.0.113.1:8080", 8)], before, NOW - HOUR);
+  const after = advanceCaptures([counted("w2  203.0.113.9:8080", 11)], rose, NOW);
   assert.deepEqual(Object.keys(after.workers), ["w2"], "one entry, keyed by the name without the address");
   assert.deepEqual(after.workers.w2.rises, [{ at: NOW - HOUR, by: 3 }, { at: NOW, by: 3 }]);
 });
 
 test("ledger: a ledger written when keys still carried the address is read by name", () => {
   const legacy = { since: NOW - 3 * HOUR, workers: {
-    "w2  REDACTED-INTERNAL-ADDRESS:8080": { captures: 5, seenAt: NOW - HOUR, lastRoseAt: null, rises: [] },
+    "w2  203.0.113.1:8080": { captures: 5, seenAt: NOW - HOUR, lastRoseAt: null, rises: [] },
   } };
-  const after = advanceCaptures([counted("w2  REDACTED-INTERNAL-ADDRESS:8080", 9)], legacy, NOW);
+  const after = advanceCaptures([counted("w2  203.0.113.1:8080", 9)], legacy, NOW);
   assert.deepEqual(Object.keys(after.workers), ["w2"]);
   assert.deepEqual(after.workers.w2.rises, [{ at: NOW, by: 4 }]);
 });
