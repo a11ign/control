@@ -71,8 +71,4 @@ wake_proof:
   description: Always UNPROVEN. Provisioning cannot power a box off mid-play, so it never claims the cycle.
   returned: always
   type: str
-wake_report:
-  description: The one-line report for this worker.
-  returned: always
-  type: str
 """

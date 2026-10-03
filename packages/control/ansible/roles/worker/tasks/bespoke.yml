@@ -224,12 +224,36 @@
   a11y.worker.a11y_nic_power:
   register: wake_nic
 
+- name: Read the wake-proof ledger that fleet:wake writes (#3227)
+  # The control host's own record of which workers came up from silence after ONE packet. Read through the
+  # reader auto-off uses (`readWakeProof`), so this play and auto-off cannot disagree about what a ledger is;
+  # a missing or corrupt ledger reads as empty there, which is no proof for anyone, and a node that could
+  # not run at all is treated the same way here. Never a reason to fail provisioning.
+  delegate_to: localhost
+  become: false
+  run_once: true
+  ansible.builtin.command:
+    argv:
+      - node
+      - --input-type=module
+      - -e
+      - "import { readWakeProof, DEFAULT_PROOF_PATH } from './packages/control/src/fleet-wake.mjs'; console.log(JSON.stringify(readWakeProof(DEFAULT_PROOF_PATH)))"
+    chdir: "{{ playbook_dir }}/../../.."
+  register: wake_proof_ledger
+  changed_when: false
+  failed_when: false
+
 - name: Say what the wake arming proved, and what it did not
   # ARMED is a reading and PROVEN is a power cycle. This play cannot turn a box off and send it one packet, so
-  # every worker is reported `wake-armed, UNPROVEN` and never `ok`; the proof is fleet-wake's `woken` outcome
-  # (#3227 holds its ledger).
+  # a worker is `wake-armed, UNPROVEN` and never `ok` -- unless fleet:wake's ledger holds a real cycle for it.
+  vars:
+    wake_proof_by_worker: "{{ (wake_proof_ledger.stdout | from_json) if (wake_proof_ledger.rc | default(1)) == 0 else {} }}"
   ansible.builtin.debug:
-    msg: "{{ wake_nic.wake_report }}"
+    msg: >-
+      {{ inventory_hostname }} wake-armed, {{ ('PROVEN: last cycled by fleet:wake at '
+      ~ ('%Y-%m-%dT%H:%M:%SZ' | strftime((wake_proof_by_worker[inventory_hostname] / 1000) | int, utc=true))
+      ) if inventory_hostname in wake_proof_by_worker else
+      'UNPROVEN -- a real cycle (box off, one magic packet, /health 200 on its address) is still owed, and fleet:wake writes that proof' }}
 
 - name: Firmware Wake-on-LAN and the adapter's IP configuration
   # Firmware WoL is read where the model is a Lenovo (Disabled is repaired or fails by name; any other value is

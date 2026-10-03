@@ -206,7 +206,6 @@ $module.Result.via_registry = $byRegistry.ToArray()
 $module.Result.wake_failures = $wakeFailures.ToArray()
 # ARMED is a reading; PROVEN needs a power cycle this play cannot perform. Never `ok` on the arming alone.
 $module.Result.wake_proof = 'UNPROVEN'
-$module.Result.wake_report = "$env:COMPUTERNAME wake-armed, UNPROVEN -- a real cycle (box off, one magic packet, /health 200) is still owed"
 if ($wakeFailures.Count -gt 0) {
     $module.FailJson("$env:COMPUTERNAME CANNOT BE WOKEN -- wake arming did NOT verify: " + ($wakeFailures -join '; '))
 }
