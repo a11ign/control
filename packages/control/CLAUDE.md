@@ -51,7 +51,8 @@ pnpm run fleet:status                                                # what ever
 
 `pnpm run fleet:auto-off` reports, per worker, `off` or `keep` and why -- report-only until `--apply` is
 passed, and even then only for a worker its own pure decision names. It is the timer half of #2656: an
-idle-five-minutes worker powers itself off through `sleep.yml`, reused rather than reimplemented, and the
+idle-five-minutes worker powers itself off through `sleep.yml`, reused rather than reimplemented, but only one with a
+wake proof under a week old from `fleet:wake` (#3227; every other worker is `keep wake-unproven`, named in the report), and the
 `auto-off-schedule.yml` playbook installs its timer LIVE, and the unit passes `--apply` (a unit without it is a
 report on a clock; the installed copy is the program, so read `systemctl list-timers` on the control host, #2784).
 

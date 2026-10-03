@@ -4,7 +4,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, magicPacket, probeWorker, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
+import {
+  HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, PROOF_WINDOW_MS, magicPacket, probeWorker, wakeFleet, wakeReportLine,
+  readWakeProof, advanceWakeProof,
+} from "./fleet-wake.mjs";
 
 test("a magic packet is 6 x 0xFF then the MAC sixteen times", () => {
   const packet = magicPacket("00:1a:2b:3c:4d:5e");
@@ -204,4 +207,133 @@ test("#2655 5.1: every probe is made with T, never with a shorter number, and T 
   assert.deepEqual([...new Set(health.timeouts)], [HEALTH_TIMEOUT_MS]);
   assert.notEqual(HEALTH_TIMEOUT_MS, 2_000);
   assert.ok(WAKE_DEADLINE_MS > HEALTH_TIMEOUT_MS, "the overall wait is a separate, larger number");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// #3227: the wake PROOF auto-off reads. Written only by a wake that began from silence and ended `ready`
+// at the inventory's own address; dropped by a wake that failed; per worker, so one box moves no other.
+// ---------------------------------------------------------------------------------------------------
+
+const PROOF = "proof.json";
+const SILENT = { delayMs: Infinity };
+
+/** A ledger file in memory behind the injected read/write, so nothing touches `runs/`. */
+function proofFile(initial?: Record<string, number>) {
+  let text: string | undefined = initial ? JSON.stringify({ provenAt: initial }) : undefined;
+  let writes = 0;
+  return {
+    options: {
+      proofPath: PROOF,
+      readProofFile: ((path: string) => {
+        if (path !== PROOF || text === undefined) throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" });
+        return text;
+      }) as never,
+      writeProofFile: ((path: string, data: string) => { assert.equal(path, PROOF); text = String(data); writes += 1; }) as never,
+    },
+    proven: () => readWakeProof(PROOF, (() => text ?? "") as never),
+    writes: () => writes,
+  };
+}
+
+/** One host per state: what `wakeFleet` must read to end in each. Worker n answers at 192.0.2.n. */
+const ONE_OF_EACH = {
+  "192.0.2.1": [SILENT, { json: READY }],                                   // woken
+  "192.0.2.2": [{ json: READY }],                                           // already-up
+  "192.0.2.3": [{ json: { ok: true, ready: false, busy: true } }],          // busy
+  "192.0.2.4": [{ json: { ok: true, ready: false, reason: "starting" } }, { json: READY }], // came-up
+  "192.0.2.5": [SILENT],                                                    // no-answer: it may answer elsewhere, never here
+  "192.0.2.6": [{ code: "ECONNREFUSED", message: "refused" }],              // not-listening
+  "192.0.2.7": [{ json: { ok: true, ready: false, reason: "browserConfigured" } }], // never-ready
+};
+
+test("#3227 2: ONLY a worker that was silent and then came up ready earns a proof; every other outcome writes none", async () => {
+  const world = fakeWorld();
+  const file = proofFile();
+  const results = await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
+    ...world.options, ...file.options, request: fakeHealth(ONE_OF_EACH).request,
+  });
+  assert.deepEqual(results.map((r) => r.state),
+    ["woken", "already-up", "busy", "came-up", "no-answer", "not-listening", "never-ready"],
+    "positive control: the fixture really produces each state, or an absent proof proves nothing");
+  assert.deepEqual(Object.keys(file.proven()), ["w1"], "w1 woke from silence on its own address; nobody else proved a thing");
+  assert.equal(file.proven().w1, world.sleepCalls(), "the proof is stamped with the wake's own clock");
+});
+
+test("#3227 2: a wake that FAILS revokes the proof that worker held, and every other worker's proof is untouched", async () => {
+  const world = fakeWorld();
+  const held = { w1: 111, w2: 222, w3: 333, w4: 444, w5: 555, w6: 666, w7: 777, w8: 888 };
+  const file = proofFile(held);
+  await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
+    ...world.options, ...file.options, request: fakeHealth(ONE_OF_EACH).request,
+  });
+  const after = file.proven();
+  assert.deepEqual(["w5", "w6", "w7"].filter((n) => n in after), [], "no-answer, not-listening and never-ready each drop their proof");
+  assert.equal(after.w1, world.sleepCalls(), "the worker that woke has its proof renewed");
+  assert.deepEqual([after.w2, after.w3, after.w4, after.w8], [222, 333, 444, 888],
+    "already-up, busy, came-up and a worker not asked about keep what they held -- no refresh, no revocation");
+});
+
+test("#3227 2: a worker with no mac that never answered is a failed wake and drops its proof (it cannot be woken at all)", async () => {
+  const file = proofFile({ w1: 5 });
+  const world = fakeWorld();
+  const [r] = await wakeFleet([{ name: "w1", host: "192.0.2.1", mac: null }], {
+    ...world.options, ...file.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request,
+  });
+  assert.equal(r.state, "no-mac");
+  assert.deepEqual(file.proven(), {});
+});
+
+test("#3227 5: advanceWakeProof is per worker -- adding or dropping one entry leaves every other exactly as it was", () => {
+  const before = { a: 1, b: 2, c: 3 };
+  assert.deepEqual(advanceWakeProof([{ name: "b", state: "no-answer" }], before, 9), { a: 1, c: 3 });
+  assert.deepEqual(advanceWakeProof([{ name: "d", state: "woken" }], before, 9), { a: 1, b: 2, c: 3, d: 9 });
+  assert.deepEqual(before, { a: 1, b: 2, c: 3 }, "the ledger it was given is not mutated");
+});
+
+test("#3227: a wake with an injected socket is no real wake -- it earns no proof and never touches a file", async () => {
+  const world = fakeWorld();
+  const results = await wakeFleet(workers("w1"), {
+    ...world.options, request: fakeHealth({ "192.0.2.1": [SILENT, { json: READY }] }).request,
+    readProofFile: (() => { throw new Error("must not read"); }) as never,
+    writeProofFile: (() => { throw new Error("must not write"); }) as never,
+  });
+  assert.equal(results[0].state, "woken", "positive control: it did wake, so the silence above is the injected socket's doing");
+});
+
+test("#3227: a ledger that cannot be written is reported through log and the wake's results still come back", async () => {
+  const world = fakeWorld();
+  const lines: string[] = [];
+  const results = await wakeFleet(workers("w1"), {
+    ...world.options, proofPath: PROOF, log: (l: string) => lines.push(l),
+    request: fakeHealth({ "192.0.2.1": [SILENT, { json: READY }] }).request,
+    readProofFile: (() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }) as never,
+    writeProofFile: (() => { throw new Error("EROFS: read-only file system"); }) as never,
+  });
+  assert.equal(results[0].state, "woken");
+  assert.ok(lines.some((l) => /wake-proof ledger was not updated.*EROFS/.test(l)), `logged: ${lines.join(" | ")}`);
+});
+
+test("#3227: a missing, corrupt or wrongly-shaped ledger reads as EMPTY, which is no proof for anyone", () => {
+  const reading = (text: string) => readWakeProof(PROOF, (() => text) as never);
+  assert.deepEqual(reading(JSON.stringify({ provenAt: { w1: 5 } })), { w1: 5 }, "positive control");
+  for (const bad of ["", "{ nope", "null", "[]", JSON.stringify({ provenAt: [1] }), JSON.stringify({ other: { w1: 5 } })]) {
+    assert.deepEqual(reading(bad), {}, `${JSON.stringify(bad)} must read as empty`);
+  }
+  assert.deepEqual(reading(JSON.stringify({ provenAt: { w1: "yesterday", w2: 7 } })), { w2: 7 }, "a stamp that is not a number is not a proof");
+});
+
+test("#3227 4: the report names a failed wake's worker and says its proof was dropped; a proving wake says so too", () => {
+  const failed = wakeReportLine({ name: "a11y-worker-4", host: "192.0.2.4", state: "no-answer", detail: "ETIMEDOUT" });
+  assert.match(failed, /a11y-worker-4/);
+  assert.match(failed, /wake proof dropped: auto-off keeps it on/);
+  assert.match(wakeReportLine({ name: "a11y-worker-3", host: "192.0.2.3", state: "woken" }), /wake proved: auto-off may power it off/);
+  for (const state of ["already-up", "busy", "came-up"]) {
+    assert.doesNotMatch(wakeReportLine({ name: "w", host: "h", state }), /proof/, `${state} neither proves nor drops`);
+  }
+});
+
+test("#3227 3: the window is a derived bound, not a round number: under the monthly servicing cadence it is derived from", () => {
+  const DAY = 86_400_000;
+  assert.ok(PROOF_WINDOW_MS < 31 * DAY, "a proof must lapse before the next monthly Windows servicing update can have changed the NIC");
+  assert.ok(PROOF_WINDOW_MS > WAKE_DEADLINE_MS, "and it must outlive one wake, or every proof would lapse as it was earned");
 });
