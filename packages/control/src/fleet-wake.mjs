@@ -24,7 +24,7 @@
  * start its own workers because of an install problem in something unrelated.
  */
 import { createSocket } from "node:dgram";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.mjs's
@@ -37,7 +37,8 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 // first, the in-tree checkout second", and defining it here would make fleet-discover.mjs (which this
 // file already imports `inventoryHosts` from) import back FROM here, a cycle. `control-plane-fleet.mjs`
 // is neither's dependent, so it is the shared home.
-import { inventoryPathFor } from "./control-plane-fleet.mjs";
+import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.mjs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
 /**
  * takes no flags: it wakes every box in the inventory.
@@ -82,8 +83,14 @@ const POLL_MS = 5_000;
  */
 export const WAKE_DEADLINE_MS = 300_000;
 
-/** The wake-proof ledger, in the checkout's ignored `runs/` beside the other fleet bookkeeping. */
-export const DEFAULT_PROOF_PATH = "runs/fleet-wake-proof.json";
+/**
+ * The wake-proof ledger's ONE address (#3269): the control plane's checkout, absolute, because `fleet:auto-off`'s
+ * timer reads it THERE. It used to be `runs/fleet-wake-proof.json` relative to the cwd, so a wake from the agents
+ * host, a laptop or a `role-*` tree wrote a ledger in its own checkout that no timer ever read, and the box stayed
+ * on with no error (#3255: worker 15 `woken`, auto-off still `keep wake-unproven`). Both the writer here and the
+ * reader in `fleet-auto-off.mjs` take THIS constant, and reach it through `sshToControlPlane`.
+ */
+export const DEFAULT_PROOF_PATH = `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-wake-proof.json`;
 const MS_PER_DAY = 86_400_000;
 /**
  * HOW LONG A PROOF STAYS TRUE, WITH ITS READING (#3227 done-when 3). A proof says "this box came up on
@@ -203,7 +210,7 @@ export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request 
  * @typedef {{ port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number,
  *   log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>,
  *   request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number,
- *   proofPath?: string | null, readProofFile?: typeof readFileSync, writeProofFile?: typeof writeFileSync }} WakeOptions
+ *   proofPath?: string | null, proofTransport?: ProofTransport }} WakeOptions
  * @typedef {Required<Omit<WakeOptions, "broadcast">> & { broadcast?: string }} WakeConfig
  * @typedef {WakeTarget & { state: string, packets: number, detail?: string }} WakeResult
  */
@@ -303,13 +310,14 @@ export async function wakeFleet(workers, options = {}) {
     port: 8765, deadlineMs: WAKE_DEADLINE_MS, pollMs: POLL_MS, probeTimeoutMs: HEALTH_TIMEOUT_MS,
     log: () => {}, send: sendMagicPacket, request: requestJson,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: Date.now,
-    // A test double for the socket means no real wake, so it earns no proof and touches no file.
-    proofPath: options.send ? null : DEFAULT_PROOF_PATH, readProofFile: readFileSync, writeProofFile: writeFileSync,
+    // A test double for the socket means no real wake, so it earns no proof and reaches no machine, unless the
+    // test also hands over the transport the proof would travel by.
+    proofPath: options.send && !options.proofTransport ? null : DEFAULT_PROOF_PATH, proofTransport: sshToControlPlane,
     ...options,
   };
   const results = await Promise.all(workers.map((w) => wakeOne(w, cfg)));
   if (cfg.proofPath !== null) recordWakeProof(results, {
-    path: cfg.proofPath, at: cfg.now(), read: cfg.readProofFile, write: cfg.writeProofFile, log: cfg.log,
+    path: cfg.proofPath, at: cfg.now(), transport: cfg.proofTransport, log: cfg.log,
   });
   return results;
 }
@@ -320,14 +328,32 @@ export async function wakeFleet(workers, options = {}) {
  * brought back must never be the one auto-off removes. Missing, corrupt or unreadable reads as EMPTY, which
  * is no proof for anyone: every box is kept on, the direction auto-off may always err in.
  *
+ * The file is on the control plane (#3269), so it is reached by `sshToControlPlane`, which runs the command
+ * in place when this process IS the control plane and over ssh otherwise. A transport that FAILS reads as
+ * empty too, but is said aloud through `log`, because a ledger nobody can read keeps every box on.
+ *
  * @typedef {Record<string, number>} WakeProof worker name -> epoch ms of its last proving wake
+ * @typedef {(command: string, options?: { capture?: boolean }) => string} ProofTransport
  * @param {string} path
- * @param {typeof readFileSync} read
+ * @param {ProofTransport} transport
+ * @param {(line: string) => void} log
  * @returns {WakeProof}
  */
-export function readWakeProof(path, read = readFileSync) {
+export function readWakeProof(path, transport = sshToControlPlane, log = () => {}) {
+  let text;
   try {
-    const provenAt = JSON.parse(read(path, "utf8"))?.provenAt;
+    text = transport(proofReadCommand(path), { capture: true });
+  } catch (cause) {
+    log(`  the wake-proof ledger could not be read (${path}): ${cause instanceof Error ? cause.message : String(cause)}`);
+    return {};
+  }
+  return parseWakeProof(text);
+}
+
+/** @param {string} text @returns {WakeProof} */
+function parseWakeProof(text) {
+  try {
+    const provenAt = JSON.parse(text)?.provenAt;
     if (!provenAt || typeof provenAt !== "object" || Array.isArray(provenAt)) return {};
     return Object.fromEntries(Object.entries(provenAt).filter(([, at]) => Number.isFinite(at)));
   } catch {
@@ -335,12 +361,85 @@ export function readWakeProof(path, read = readFileSync) {
   }
 }
 
+// The path goes into a remote shell, so it is refused unless it is a plain path (as `inventorySources` does).
+const PROOF_PATH_SHAPE = /^\/[\w./-]+$/;
+
+/** @param {string} path */
+function shellPath(path) {
+  if (!PROOF_PATH_SHAPE.test(path)) throw new Error(`the wake-proof ledger path is not a plain absolute path: ${path}`);
+  return `'${path}'`;
+}
+
 /**
- * The ledger after one set of wakes. ONLY `woken` writes: the worker was silent, our one packet went out,
- * and it then answered ready at the inventory's own address. `already-up`, `busy` and `came-up` saw no
+ * A MISSING file prints nothing and succeeds, so it reads as an empty ledger; a transport that fails throws.
+ * The two must not share a value (an absent ledger is an answer, an unreachable one is not).
+ *
+ * @param {string} path
+ */
+export const proofReadCommand = (path) => `if [ -f ${shellPath(path)} ]; then cat ${shellPath(path)}; fi`;
+
+/**
+ * What the remote step does with a delta, in the words of `advanceWakeProof` and `parseWakeProof` (a test runs
+ * this and compares). It is INLINE and not `import`ed from the control plane's checkout because that checkout is
+ * not moved when `main` moves (#3271): a writer that needed new code there would fail on exactly the host that
+ * needs it. No single quote may appear in it, since it travels inside one.
+ */
+const REMOTE_ADVANCE = [
+  'const fs = require("fs");',
+  'const [path, encoded] = process.argv.slice(1);',
+  'const delta = JSON.parse(Buffer.from(encoded, "base64").toString());',
+  'let held = {};',
+  'try { const read = JSON.parse(fs.readFileSync(path, "utf8")).provenAt;',
+  '  if (read && typeof read === "object" && !Array.isArray(read)) held = read; } catch (e) {}',
+  'const next = {};',
+  'for (const [name, at] of Object.entries(held)) if (Number.isFinite(at)) next[name] = at;',
+  'Object.assign(next, delta.set);',
+  'for (const name of delta.drop) delete next[name];',
+  'fs.writeFileSync(path + ".tmp", JSON.stringify({ provenAt: next }, null, 2) + "\\n");',
+  'fs.renameSync(path + ".tmp", path);',
+].join(" ");
+
+/**
+ * ONE remote step: read, advance and write the ledger under a lock, so two wakes finishing together leave
+ * both proofs (#3269 done-when 4). What travels is the DELTA (who proved, who failed), never a ledger read
+ * here and written back: that is the read-modify-write that loses a peer's worker. Rename-over keeps a reader
+ * from ever seeing half a file.
+ *
+ * @param {string} path
+ * @param {{ set: WakeProof, drop: string[] }} delta
+ */
+export function proofWriteCommand(path, delta) {
+  const encoded = Buffer.from(JSON.stringify(delta)).toString("base64");
+  const file = shellPath(path);
+  const lock = shellPath(`${path}.lock`);
+  return `mkdir -p "$(dirname ${file})" && flock ${lock} node -e '${REMOTE_ADVANCE}' ${file} ${encoded}`;
+}
+
+/**
+ * What a set of wakes changes in the ledger. ONLY `woken` writes: the worker was silent, our one packet went
+ * out, and it then answered ready at the inventory's own address. `already-up`, `busy` and `came-up` saw no
  * silence to wake from, so they prove nothing (and change nothing); a worker that answered at another
  * address reads as `no-answer`, because the wake only ever probes the inventory's. A wake that FAILED drops
- * the proof that worker held. Every other worker's entry is carried over untouched.
+ * the proof that worker held.
+ *
+ * @param {{ name: string, state: string }[]} results
+ * @param {number} at
+ * @returns {{ set: WakeProof, drop: string[] }}
+ */
+export function wakeProofDelta(results, at) {
+  /** @type {WakeProof} */
+  const set = {};
+  /** @type {string[]} */
+  const drop = [];
+  for (const r of results) {
+    if (r.state === "woken") set[r.name] = at;
+    else if (wakeFailed(r)) drop.push(r.name);
+  }
+  return { set, drop };
+}
+
+/**
+ * The ledger after one set of wakes. Every other worker's entry is carried over untouched.
  *
  * @param {{ name: string, state: string }[]} results
  * @param {WakeProof} previous
@@ -348,26 +447,26 @@ export function readWakeProof(path, read = readFileSync) {
  * @returns {WakeProof}
  */
 export function advanceWakeProof(results, previous, at) {
-  const next = { ...previous };
-  for (const r of results) {
-    if (r.state === "woken") next[r.name] = at;
-    else if (wakeFailed(r)) delete next[r.name];
-  }
+  const { set, drop } = wakeProofDelta(results, at);
+  const next = { ...previous, ...set };
+  for (const name of drop) delete next[name];
   return next;
 }
 
 /**
- * Fold a wake's outcomes into the ledger file. Bookkeeping never takes a wake down: a ledger that cannot be
- * written is reported through `log`, and the worker is simply not proven, which keeps it on.
+ * Fold a wake's outcomes into the control plane's ledger. Bookkeeping never takes a wake down: a ledger that
+ * cannot be reached or written (an unreachable control plane, a refused ssh, an unwritable file) is reported
+ * through `log`, and the worker is simply not proven, which keeps it on. A wake that changes nothing sends
+ * nothing.
  *
  * @param {{ name: string, state: string }[]} results
- * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync,
- *   log?: (line: string) => void }} where
+ * @param {{ path: string, at: number, transport?: ProofTransport, log?: (line: string) => void }} where
  */
-export function recordWakeProof(results, { path, at, read = readFileSync, write = writeFileSync, log = () => {} }) {
+export function recordWakeProof(results, { path, at, transport = sshToControlPlane, log = () => {} }) {
   try {
-    const next = advanceWakeProof(results, readWakeProof(path, read), at);
-    write(path, `${JSON.stringify({ provenAt: next }, null, 2)}\n`);
+    const delta = wakeProofDelta(results, at);
+    if (!Object.keys(delta.set).length && !delta.drop.length) return;
+    transport(proofWriteCommand(path, delta), { capture: true });
   } catch (cause) {
     log(`  the wake-proof ledger was not updated (${path}): ${cause instanceof Error ? cause.message : String(cause)}`);
   }
