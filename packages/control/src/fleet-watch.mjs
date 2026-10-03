@@ -39,6 +39,8 @@ import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { fleetStatus } from "./fleet-status.mjs";
+import { sshToControlPlane } from "./control-plane-fleet.mjs";
+import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
 
 export const ORG_READING_ISSUE = 928;
 
@@ -57,6 +59,9 @@ export const DEFAULT_THRESHOLD_MS = 10 * MS_PER_MINUTE;
 export const DEFAULT_STATE_PATH = "runs/fleet-watch-state.json";
 
 /** Beside the two state files it sits with (#2979): `fleet-watch-state.json` and `fleet-auto-off-state.json`. */
+/** Written by `fleet-auto-off.mjs`; here so the path is one fact and the import points only one way. */
+export const AUTO_OFF_STATE_PATH = "runs/fleet-auto-off-state.json";
+
 export const DEFAULT_CAPTURES_STATE_PATH = "runs/fleet-captures-state.json";
 
 const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
@@ -455,6 +460,50 @@ export function watchBody(entries) {
 }
 
 /**
+ * @typedef {{ reason: string, detail: string, at: number }} AutoOffRefusal
+ * The refusal `fleet-auto-off.mjs` recorded on its last tick that held a shutdown back (#3275).
+ */
+
+/**
+ * @param {string} text the control host's auto-off state file, or `{}` when it has none
+ * @returns {AutoOffRefusal | null} `null` when the last tick refused nothing
+ */
+export function parseAutoOffRefusal(text) {
+  const refusal = JSON.parse(text)?.refusal;
+  const valid = refusal && typeof refusal.reason === "string" && typeof refusal.detail === "string"
+    && Number.isFinite(refusal.at);
+  return valid ? { reason: refusal.reason, detail: refusal.detail, at: refusal.at } : null;
+}
+
+/**
+ * The auto-off timer's refusal, read FROM the control host (this watch runs on the agents host, where the state file
+ * is not): ssh, or local when this is the control plane. A host that cannot be read THROWS rather than answering
+ * `null`: "no refusal" and "I did not look" are different states. A missing file is `{}`, a timer that never ticked.
+ *
+ * @param {() => string} [readState]
+ * @returns {AutoOffRefusal | null}
+ */
+export function readAutoOffRefusal(
+  readState = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${AUTO_OFF_STATE_PATH} 2>/dev/null || echo '{}'`,
+    { capture: true }),
+) {
+  return parseAutoOffRefusal(readState());
+}
+
+/**
+ * @param {AutoOffRefusal} refusal
+ * @param {number} now
+ * @returns {string}
+ */
+export function refusalBody(refusal, now) {
+  return [
+    `**The auto-off timer is refusing to power workers off** (\`${refusal.reason}\`, ${describeAge(now - refusal.at)} ago, #3275).`,
+    `- ${refusal.detail}`,
+    "The checkout it runs from is not `main`'s, so an idle fleet stays powered on until a `fleet:*` play moves it.",
+  ].join("\n");
+}
+
+/**
  * Fold one reading of the fleet into the persisted ledger. Exported so `fleet-auto-off.mjs` can feed the
  * same ledger from its own 10 s probe: the hourly poll alone never sees a worker that boots, works and is
  * powered off between two polls (#3208).
@@ -494,6 +543,16 @@ export async function watch(deps = {}) {
   return overdue(status.rows, next, at, thresholdMs);
 }
 
+/** The auto-off refusal, or `null` — and when the host could not be read, SAYS so on stderr rather than reading as clean. */
+function readRefusalOrSay() {
+  try {
+    return readAutoOffRefusal();
+  } catch (cause) {
+    console.error(`CANNOT READ the auto-off refusal from the control host: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return null;
+  }
+}
+
 async function main() {
   const post = process.argv.includes("--post");
   const thresholdArg = process.argv.find((a) => a.startsWith("--threshold-ms="));
@@ -506,11 +565,13 @@ async function main() {
     process.exitCode = EXIT.CANNOT_ASK;
     return;
   }
-  if (!entries.length) {
+  const refusal = readRefusalOrSay();
+  if (!entries.length && !refusal) {
     process.exitCode = EXIT.QUIET;
     return;
   }
-  const body = watchBody(entries);
+  const body = [entries.length ? watchBody(entries) : null, refusal ? refusalBody(refusal, Date.now()) : null]
+    .filter(Boolean).join("\n\n");
   console.log(body);
   if (post) {
     execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });

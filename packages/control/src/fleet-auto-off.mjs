@@ -55,6 +55,25 @@
  * off until an operator has put one box through `fleet:sleep` then `fleet:wake`, which is the safe direction.
  * The proof is read per worker, so one box's proof, revocation or shutdown moves no other box's decision.
  *
+ * ## It refuses to power anything off when the files it RUNS differ from `main` (#3275, same class as #3269)
+ *
+ * The timer executes `/root/a11y-witness` on the control plane, and nothing moves that checkout when `main` moves:
+ * its only fast-forward is `controlPlaneCheckout()`, a side effect of some play. So a safety property merged to `main`
+ * (a wake proof, a busy check) is absent from the program that actually powers boxes off. Under `--apply`, and only
+ * when some worker is about to be powered off, `checkAgainstMain` compares this program's own import closure (derived
+ * by walking its `import`s, so a new import is covered the day it lands) plus `sleep.yml` and the two unit files
+ * against `origin/main`, and `staleCheckoutVerdict` refuses on any difference. NOT all of `packages/control/`: 192
+ * first-parent merges touched that in 30 days, the closure 7, and a refusal on the former would idle the timer most days.
+ *
+ * It fails CLOSED, the only direction auto-off may err in: a failed fetch, an unresolvable `origin/main`, an errored
+ * diff or an empty closure each refuse (`CANNOT_TELL` is never `identical`). The fetch moves only the remote-tracking
+ * ref, never the working tree, so it cannot race a running play; it is throttled to once a minute by a stamp in the
+ * state file, and a failed fetch is a refusal whatever the stamp says, never "reuse the last answer".
+ *
+ * A refusal is LOUD, because fail-closed that nobody sees is a fleet left powered on for days (#2784): the tick prints
+ * `refuse <reason>` on every tick that holds a shutdown back, exits 1 so the oneshot unit shows FAILED in
+ * `systemctl --failed` and the journal, and records the refusal in the state file for `fleet-watch.mjs`.
+ *
  * ## `batchQueued` and `leasePending` are an honest gap
  *
  * Done-when 1 names them as keep reasons a pure function must carry. Nothing in this codebase today
@@ -64,7 +83,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { inventoryHosts } from "./fleet-discover.mjs";
@@ -180,32 +201,41 @@ export async function probeIdle(url, { timeoutMs = PROBE_TIMEOUT_MS, request = r
 /** @typedef {Record<string, number>} SinceState */
 
 /**
- * The persisted idle-since / shutdown-requested-at state. Missing or corrupt reads as EMPTY, never a
- * crash -- `fleet-watch.mjs`'s own rule, one file over: a tick must not take itself down over its own
- * bookkeeping.
+ * @typedef {{ reason: string, detail: string, at: number }} Refusal why a shutdown was held back, and when
+ * @typedef {{ idleSince: SinceState, shutdownRequestedAt: SinceState, fetchedAt: number | null,
+ *   refusal: Refusal | null }} AutoOffState
+ */
+
+/** @param {unknown} value @returns {Record<string, number>} */
+const recordOf = (value) => (value && typeof value === "object" && !Array.isArray(value) ? /** @type {any} */ (value) : {});
+
+/**
+ * The persisted state: idle-since, shutdown-requested-at, when `origin/main` was last fetched, and the refusal the
+ * last tick made (#3275). Missing or corrupt reads as EMPTY, never a crash -- `fleet-watch.mjs`'s own rule, one file
+ * over: a tick must not take itself down over its own bookkeeping. An empty `fetchedAt` only costs a fetch.
  *
  * @param {string} path
  * @param {(path: string, encoding: "utf8") => string} read
- * @returns {{ idleSince: SinceState, shutdownRequestedAt: SinceState }}
+ * @returns {AutoOffState}
  */
 export function readState(path, read = readFileSync) {
   try {
     const parsed = JSON.parse(read(path, "utf8"));
-    const idleSince = parsed?.idleSince;
-    const shutdownRequestedAt = parsed?.shutdownRequestedAt;
+    const refusal = parsed?.refusal;
     return {
-      idleSince: idleSince && typeof idleSince === "object" && !Array.isArray(idleSince) ? idleSince : {},
-      shutdownRequestedAt: shutdownRequestedAt && typeof shutdownRequestedAt === "object"
-        && !Array.isArray(shutdownRequestedAt) ? shutdownRequestedAt : {},
+      idleSince: recordOf(parsed?.idleSince),
+      shutdownRequestedAt: recordOf(parsed?.shutdownRequestedAt),
+      fetchedAt: finiteNumber(parsed?.fetchedAt) ?? null,
+      refusal: refusal && typeof refusal.reason === "string" ? refusal : null,
     };
   } catch {
-    return { idleSince: {}, shutdownRequestedAt: {} };
+    return { idleSince: {}, shutdownRequestedAt: {}, fetchedAt: null, refusal: null };
   }
 }
 
 /**
  * @param {string} path
- * @param {{ idleSince: SinceState, shutdownRequestedAt: SinceState }} state
+ * @param {Partial<AutoOffState> & { idleSince: SinceState, shutdownRequestedAt: SinceState }} state
  * @param {(path: string, data: string) => void} write
  */
 export function writeState(path, state, write = writeFileSync) {
@@ -330,6 +360,124 @@ export function dispatchShutdown(name, { run = spawnSync } = {}) {
 }
 
 /**
+ * The files this program RUNS, repo-relative: `entry` and everything reachable from it by a relative `import`,
+ * `export … from` or `import("…")`. Derived rather than listed, so an import added tomorrow is compared tomorrow.
+ * Bare specifiers (`node:`, packages) are not followed: they are not files of this checkout. A file that cannot be
+ * read throws, which the caller turns into `CANNOT_TELL`.
+ *
+ * @param {string} entry repo-relative path
+ * @param {(path: string) => string} readSource repo-relative path in, file text out
+ * @returns {string[]} sorted
+ */
+export function importClosure(entry, readSource) {
+  const seen = new Set([entry]);
+  const pending = [entry];
+  const specifier = /(?:^\s*(?:import|export)\b[^;'"]*?\bfrom\s*|^\s*import\s*|\bimport\s*\(\s*)["'](\.{1,2}\/[^"']+)["']/gm;
+  for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
+    if (!/\.m?[jt]s$/.test(file)) continue;
+    for (const [, relative] of readSource(file).matchAll(specifier)) {
+      const target = posix.join(posix.dirname(file), relative);
+      if (seen.has(target)) continue;
+      seen.add(target);
+      pending.push(target);
+    }
+  }
+  return [...seen].sort();
+}
+
+const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+
+/** Repo-relative, derived from where this file is rather than typed, so a move of the package moves the comparison. */
+const THIS_FILE = fileURLToPath(import.meta.url).slice(REPO_ROOT.length);
+
+/** Files that decide what a shutdown does but are not imported: the playbook it dispatches and the unit that runs it. */
+const RUN_BESIDE_THE_CODE = [
+  `${ANSIBLE_DIR.slice(REPO_ROOT.length)}sleep.yml`,
+  `${ANSIBLE_DIR.slice(REPO_ROOT.length)}files/a11y-fleet-auto-off.service`,
+  `${ANSIBLE_DIR.slice(REPO_ROOT.length)}files/a11y-fleet-auto-off.timer`,
+];
+
+export const FETCH_THROTTLE_MS = MS_PER_MINUTE;
+
+const FETCH_TIMEOUT_MS = 20_000;
+
+/** @typedef {(args: string[]) => { status: number | null, stdout: string, stderr: string }} Git */
+
+/**
+ * THE DECISION, PURE. `differing` is the repo-relative files whose content differs from `origin/main`, or `null`
+ * when that could not be established (unresolvable `origin/main`, errored diff, empty closure): "could not tell" and
+ * "identical" never share a value. `fetchOk` is whether `origin/main` is known to be at most `FETCH_THROTTLE_MS`
+ * old. Only a fresh ref and an empty difference proceed.
+ *
+ * @param {{ differing: string[] | null, fetchOk: boolean }} input
+ * @returns {{ action: "proceed" } | { action: "refuse", reason: "fetch-failed" | "cannot-tell" | "stale-checkout",
+ *   detail: string }}
+ */
+export function staleCheckoutVerdict({ differing, fetchOk }) {
+  if (!fetchOk) return { action: "refuse", reason: "fetch-failed", detail: "`git fetch origin main` did not succeed" };
+  if (differing === null) {
+    return { action: "refuse", reason: "cannot-tell", detail: "origin/main could not be compared with the files that run" };
+  }
+  if (differing.length) {
+    return { action: "refuse", reason: "stale-checkout",
+      detail: `${differing.length} ${differing.length === 1 ? "file differs" : "files differ"}: ${differing.join(", ")}` };
+  }
+  return { action: "proceed" };
+}
+
+/**
+ * Files of `paths` that differ from `origin/main`, in the working tree (what RUNS, not what is committed). A file
+ * `git diff` cannot see because the checkout does not track it counts as differing.
+ *
+ * @param {string[]} paths
+ * @param {Git} git
+ * @returns {string[] | null} `null` when `git` could not say
+ */
+function filesDifferingFromMain(paths, git) {
+  const diff = git(["diff", "--name-only", "origin/main", "--", ...paths]);
+  const tracked = git(["ls-files", "--", ...paths]);
+  if (diff.status !== 0 || tracked.status !== 0) return null;
+  const known = new Set(tracked.stdout.split("\n"));
+  const untracked = paths.filter((path) => !known.has(path));
+  return [...new Set([...diff.stdout.split("\n").filter(Boolean), ...untracked])].sort();
+}
+
+/**
+ * Is the checkout this program runs from the same, where it matters, as `origin/main`?
+ *
+ * @param {{ now: number, fetchedAt: number | null, git: Git, readSource: (path: string) => string }} where
+ * @returns {{ verdict: ReturnType<typeof staleCheckoutVerdict>, fetchedAt: number | null }}
+ */
+export function checkAgainstMain({ now, fetchedAt, git, readSource }) {
+  // A stamp from the future is a clock fault, not a fresh fetch.
+  const fresh = fetchedAt !== null && fetchedAt <= now && now - fetchedAt < FETCH_THROTTLE_MS;
+  const fetchOk = fresh || git(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"]).status === 0;
+  const stamp = fetchOk && !fresh ? now : fetchedAt;
+  let differing = null;
+  if (fetchOk) {
+    try {
+      const closure = importClosure(THIS_FILE, readSource);
+      // This file imports plenty; a closure of just itself means the walk found nothing, which is not "no differences".
+      differing = closure.length > 1 ? filesDifferingFromMain([...closure, ...RUN_BESIDE_THE_CODE], git) : null;
+    } catch {
+      differing = null;
+    }
+  }
+  return { verdict: staleCheckoutVerdict({ differing, fetchOk }), fetchedAt: stamp };
+}
+
+/** @type {Git} */
+const gitInRepo = (args) => {
+  const result = spawnSync("git", ["-C", REPO_ROOT, ...args], {
+    encoding: "utf8", timeout: FETCH_TIMEOUT_MS, env: sandboxGitEnv(),
+  });
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+};
+
+/** @param {string} path repo-relative */
+const readFromRepo = (path) => readFileSync(`${REPO_ROOT}${path}`, "utf8");
+
+/**
  * One line per worker, in the words of what was decided -- `fleet-wake.mjs`'s `wakeReportLine` shape,
  * one file over. `no-answer` names the seconds waited (done-when 7.4), read off the probe's own timeout
  * rather than re-measured.
@@ -423,6 +571,29 @@ function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
 }
 
 /**
+ * Hold every shutdown back while this checkout differs from `main` (#3275). Asked only when something is about to be
+ * powered off, so an idle fleet costs no fetch; the held workers read `keep <reason>` in the report, which is where an
+ * operator looks.
+ *
+ * @param {{ worker: { name: string, host: string }, decision: Decision }[]} decisions
+ * @param {{ now: number, fetchedAt: number | null,
+ *   checkout: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain> }} where
+ */
+function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
+  if (!decisions.some(({ decision }) => decision.action === "off")) return { decisions, refusal: null, fetchedAt };
+  const checked = checkout({ now, fetchedAt });
+  if (checked.verdict.action === "proceed") return { decisions, refusal: null, fetchedAt: checked.fetchedAt };
+  const { reason, detail } = checked.verdict;
+  return {
+    decisions: decisions.map(({ worker, decision }) => ({
+      worker, decision: decision.action === "off" ? { action: /** @type {const} */ ("keep"), reason } : decision,
+    })),
+    refusal: { reason, detail, at: now },
+    fetchedAt: checked.fetchedAt,
+  };
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.mjs`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
@@ -433,6 +604,7 @@ function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
  *   read?: typeof readFileSync, write?: typeof writeFileSync,
  *   batchQueued?: () => boolean, leasePending?: () => boolean,
  *   apply?: boolean, dispatch?: typeof dispatchShutdown,
+ *   checkout?: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain>,
  * }} [deps]
  */
 export async function tick(deps = {}) {
@@ -446,6 +618,10 @@ export async function tick(deps = {}) {
   const leasePending = deps.leasePending ?? (() => false);
   const apply = deps.apply ?? false;
   const dispatch = deps.dispatch ?? dispatchShutdown;
+  const checkout = deps.checkout
+    ?? ((/** @type {{ now: number, fetchedAt: number | null }} */ where) => checkAgainstMain({
+      ...where, git: gitInRepo, readSource: readFromRepo,
+    }));
 
   const previous = readState(statePath, deps.read);
   const wakeProof = readWakeProof(deps.proofPath ?? DEFAULT_PROOF_PATH, deps.read);
@@ -460,15 +636,18 @@ export async function tick(deps = {}) {
   const shutdownRequestedAt = advanceShutdownRequested(probes, previous.shutdownRequestedAt);
 
   const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending };
-  const decisions = workers.map((w) => {
+  const decided = workers.map((w) => {
     const p = probes.find((probed) => probed.name === w.name);
     return { worker: w, decision: autoOffDecision(decisionInput(w, p?.outcome ?? "no-answer", known), now) };
   });
+  const { decisions, refusal, fetchedAt } = apply
+    ? holdBackIfStale(decided, { now, fetchedAt: previous.fetchedAt, checkout })
+    : { decisions: decided, refusal: null, fetchedAt: previous.fetchedAt };
 
   if (apply) dispatchOff(decisions, { dispatch, shutdownRequestedAt, now });
 
-  writeState(statePath, { idleSince, shutdownRequestedAt }, deps.write);
-  return { decisions };
+  writeState(statePath, { idleSince, shutdownRequestedAt, fetchedAt, refusal }, deps.write);
+  return { decisions, refusal };
 }
 
 async function main() {
@@ -490,14 +669,21 @@ async function main() {
     return;
   }
 
-  const { decisions } = await tick({ workers: declared, apply });
+  const { decisions, refusal } = await tick({ workers: declared, apply });
   for (const { worker, decision } of decisions) process.stdout.write(`${reportLine(worker, decision)}\n`);
+  if (refusal) {
+    // Every tick that holds a shutdown back says so, and the unit FAILS: a refusal nobody sees is a fleet left on.
+    process.stdout.write(`\n  refuse ${refusal.reason} -- ${refusal.detail}\n`);
+    process.exitCode = 1;
+  }
   const unproven = decisions.filter(({ decision }) => decision.reason === "wake-unproven").map(({ worker }) => worker.name);
   if (unproven.length) {
     process.stdout.write(`\n  kept on for want of a recent wake proof: ${unproven.join(", ")}. A proof is earned by `
       + "`fleet:sleep` then `fleet:wake` of that one worker, answering on its own address.\n");
   }
-  process.stdout.write(apply
+  process.stdout.write(refusal
+    ? "\n  --apply: NOTHING was dispatched; the checkout this runs from is not main's (see `refuse` above).\n"
+    : apply
     ? "\n  --apply: every `off` above was just dispatched to sleep.yml.\n"
     : "\n  report only: nothing was powered off. Pass --apply to actually dispatch a shutdown.\n");
 }
