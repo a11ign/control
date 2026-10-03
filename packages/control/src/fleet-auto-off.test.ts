@@ -26,6 +26,7 @@ import {
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
   readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
   importClosure, staleCheckoutVerdict, checkAgainstMain, FETCH_THROTTLE_MS,
+  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -970,4 +971,100 @@ test("#3275 fleet-watch surfaces the recorded refusal, reads 'nothing refused' a
   assert.match(body, /stale-checkout/);
   assert.match(body, /3m ago/);
   assert.match(body, /2 files differ: a\.mjs, b\.mjs/);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// #3309: a wake proof is NAMED before it lapses, and a lapsed one says when. Nothing here moves a decision.
+// ---------------------------------------------------------------------------------------------------------
+
+const LAPSING_FROM = PROOF_WINDOW_MS - LAPSE_WARNING_MS;
+
+test("#3309 proofStanding: each boundary, one millisecond either side -- the window's last millisecond is still a proof", () => {
+  assert.equal(proofStanding(null, NOW), "never");
+  assert.equal(proofStanding(NOW + 1, NOW), "never", "a proof stamped in the future is a clock fault, not `proven`");
+  assert.equal(proofStanding(NOW, NOW), "proven", "positive control: a proof earned this instant is proven");
+  assert.equal(proofStanding(0, LAPSING_FROM), "proven", "exactly LAPSE_WARNING_MS from lapsing is not yet named");
+  assert.equal(proofStanding(0, LAPSING_FROM + 1), "lapsing");
+  assert.equal(proofStanding(0, PROOF_WINDOW_MS), "lapsing", "exactly at the window it still counts");
+  assert.equal(proofStanding(0, PROOF_WINDOW_MS + 1), "lapsed");
+});
+
+test("#3309 there is ONE definition of recent: autoOffDecision agrees with proofStanding at every standing", () => {
+  const readAt = (now: number) => autoOffDecision({ ...BASE, wakeProvenAt: 0, idleSince: now - IDLE_THRESHOLD_MS }, now);
+  assert.equal(readAt(LAPSING_FROM).action, "off");
+  assert.equal(readAt(PROOF_WINDOW_MS).action, "off", "a `lapsing` proof is a valid proof, so the worker is still `off`");
+  assert.deepEqual(readAt(PROOF_WINDOW_MS + 1), { action: "keep", reason: "wake-unproven" });
+  assert.deepEqual(autoOffDecision({ ...BASE, wakeProvenAt: null }, NOW), { action: "keep", reason: "wake-unproven" });
+});
+
+const W2 = { name: "a11y-worker-2", host: "192.0.2.12" };
+const UNPROVEN = { action: "keep" as const, reason: "wake-unproven" };
+const LAPSES_AT = "1970-01-08T00:00:00Z"; // a proof earned at the epoch stops counting seven days on
+
+test("#3309 reportLine: a lapsed proof says WHEN, a never-earned one says so, and the reason is still `wake-unproven`", () => {
+  const lapsed = reportLine(W2, UNPROVEN, 12_000, { standing: "lapsed", provenAt: 0 });
+  assert.match(lapsed, /keep wake-unproven \(lapsed 1970-01-08T00:00:00Z\)$/);
+  assert.match(reportLine(W2, UNPROVEN, 12_000, { standing: "never", provenAt: null }), /keep wake-unproven \(never proved\)$/);
+  assert.match(reportLine(W2, UNPROVEN, 12_000, { standing: "never", provenAt: NOW + 1 }), /\(never proved\)$/, "a future stamp reads as never");
+  assert.ok(!reportLine(W2, UNPROVEN).includes("lapsed"), "a caller with no reading adds nothing");
+});
+
+test("#3309 reportLine: a lapsing proof is named whatever the decision is, and a proven one is not named", () => {
+  const lapsing = { standing: "lapsing" as const, provenAt: 0 };
+  assert.match(reportLine(W2, { action: "off", reason: "idle-five-minutes" }, 12_000, lapsing), new RegExp(`off  idle-five-minutes \\(proof lapses ${LAPSES_AT}\\)$`));
+  assert.match(reportLine(W2, { action: "keep", reason: "busy" }, 12_000, lapsing), new RegExp(`keep busy \\(proof lapses ${LAPSES_AT}\\)$`));
+  assert.ok(!reportLine(W2, { action: "keep", reason: "busy" }, 12_000, { standing: "proven", provenAt: 0 }).includes("("));
+  assert.ok(!reportLine(W2, { action: "keep", reason: "busy" }, 12_000, { standing: "lapsed", provenAt: 0 }).includes("lapsed"),
+    "only a `wake-unproven` line carries the lapse time; the decision's own reason is what the line is about");
+});
+
+test("#3309 renewalFooter: names every lapsing and lapsed worker with the one command, and no proven or never one", () => {
+  const entry = (name: string, standing: "proven" | "lapsing" | "lapsed" | "never", provenAt: number | null) =>
+    ({ worker: { name }, proof: { standing, provenAt } });
+  const footer = renewalFooter([entry("a11y-worker-2", "lapsing", 0), entry("a11y-worker-3", "lapsed", 0),
+    entry("a11y-worker-4", "never", null), entry("a11y-worker-5", "proven", 0)]);
+  assert.match(footer, new RegExp(`a11y-worker-2 \\(lapses ${LAPSES_AT}\\): pnpm run fleet:sleep -- --limit=a11y-worker-2 && pnpm run fleet:wake -- a11y-worker-2`));
+  assert.match(footer, new RegExp(`a11y-worker-3 \\(lapsed ${LAPSES_AT}\\): pnpm run fleet:sleep`));
+  assert.ok(!footer.includes("a11y-worker-4") && !footer.includes("a11y-worker-5"));
+  assert.equal(renewalFooter([entry("a11y-worker-5", "proven", 0), entry("a11y-worker-4", "never", null)]), "",
+    "positive control: nothing due, nothing said");
+});
+
+test("#3309 tick: a `lapsing` worker is STILL powered off (the proof is valid) and a `lapsed` one is kept -- nothing weakens", async () => {
+  const proof = proofOf({ "a11y-worker-2": 0, "a11y-worker-3": 0 });
+  const lapsing = await applyOver(proof, PROOF_WINDOW_MS);
+  assert.deepEqual(lapsing.dispatched, ["a11y-worker-2", "a11y-worker-3"]);
+  const lapsed = await applyOver(proof, PROOF_WINDOW_MS + 1);
+  assert.deepEqual(lapsed.dispatched, []);
+  assert.deepEqual(lapsed.reasons, { "a11y-worker-2": "wake-unproven", "a11y-worker-3": "wake-unproven" });
+});
+
+/** A tick over both workers, the proof ledger as given, and the checkout either proceeding or refusing. */
+async function tickWith(proof: string, now: number, checkout: () => unknown = PROCEED) {
+  return tick({
+    workers: TWO_WORKERS, probe: async () => ({ outcome: "idle" }), now: () => now, statePath: "x.json",
+    read: filesWith(BOTH_IDLE_SINCE_0), proofTransport: ledgerSays(proof), write: () => {}, apply: true, checkout: checkout as typeof PROCEED,
+    dispatch: () => ({ status: 0, log: "" }),
+  });
+}
+const STALE = () => ({ verdict: { action: "refuse" as const, reason: "stale-checkout", detail: "differs" }, fetchedAt: null });
+
+test("#3309 renderReport: the unit FAILS for a lapsing or lapsed proof, and for nothing else about a proof", async () => {
+  const ok = await tickWith(proofOf({ "a11y-worker-2": 0, "a11y-worker-3": 0 }), LAPSING_FROM);
+  assert.equal(renderReport(ok, true).failed, false, "positive control: two proven workers, a quiet exit 0");
+  const lapsing = renderReport(await tickWith(proofOf({ "a11y-worker-2": 0, "a11y-worker-3": LAPSING_FROM }), LAPSING_FROM + 1), true);
+  assert.equal(lapsing.failed, true);
+  assert.match(lapsing.out, /a11y-worker-2 \(lapses 1970-01-08T00:00:00Z\)/);
+  const onlyProven = renderReport(await tickWith(proofOf({ "a11y-worker-3": LAPSING_FROM }), PROOF_WINDOW_MS + 1), true);
+  assert.equal(onlyProven.failed, false, "a worker that NEVER proved (worker-2 here) and one still proven fail nothing");
+  const lapsedOne = renderReport(await tickWith(proofOf({ "a11y-worker-2": 0, "a11y-worker-3": LAPSING_FROM }), PROOF_WINDOW_MS + 1), true);
+  assert.equal(lapsedOne.failed, true);
+  assert.match(lapsedOne.out, /a11y-worker-2 +\S+ +keep wake-unproven \(lapsed 1970-01-08T00:00:00Z\)/);
+});
+
+test("#3309 renderReport: a refusal still fails the unit, and the proof readings survive being held back", async () => {
+  const held = await tickWith(proofOf({ "a11y-worker-2": 0, "a11y-worker-3": 0 }), LAPSING_FROM, STALE);
+  assert.ok(held.decisions.every(({ decision }) => decision.reason === "stale-checkout"));
+  assert.ok(held.decisions.every(({ proof }) => proof?.standing === "proven"), "holdBackIfStale must keep the reading");
+  assert.equal(renderReport(held, true).failed, true);
 });

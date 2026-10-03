@@ -299,18 +299,47 @@ export function advanceShutdownRequested(probes, previous) {
  *   batchQueued: boolean, leasePending: boolean,
  * }} DecisionInput
  * @typedef {{ action: "off" | "keep", reason: string }} Decision
+ * @typedef {{ standing: ReturnType<typeof proofStanding>, provenAt: number | null }} ProofReading
  */
 
+const MS_PER_HOUR = 60 * MS_PER_MINUTE;
+
 /**
- * Did this worker prove a wake inside `PROOF_WINDOW_MS`? A proof stamped in the future is a clock fault, and
- * is no proof: the answer to "can it be brought back" is never guessed in the direction of powering off.
+ * How long before a proof lapses it is named. Renewal is a human-run cycle on a calendar (#3308), so the warning
+ * has to reach a person while they can still act: two days means a lapse landing on a weekend is first named on the
+ * Thursday before it. A judgment, not a derived number -- against a seven-day window it keeps a proof quiet for five
+ * days of seven, and a shorter lead would let a lapse arrive before anyone had a working day to renew it.
+ */
+export const LAPSE_WARNING_MS = 48 * MS_PER_HOUR;
+
+/**
+ * THE ONE DEFINITION OF "RECENT" (#3309). `proven` is a proof inside `PROOF_WINDOW_MS` that is more than
+ * `LAPSE_WARNING_MS` from lapsing, `lapsing` one that lapses within it (still a valid proof), `lapsed` one older than
+ * the window, `never` no proof at all. A proof stamped in the future is a clock fault and is `never`, not `proven`:
+ * the answer to "can it be brought back" is never guessed in the direction of powering off. The window's last
+ * millisecond is still a proof, so `lapsed` begins one past `PROOF_WINDOW_MS`.
+ *
+ * @param {number | null} provenAt
+ * @param {number} now
+ * @returns {"proven" | "lapsing" | "lapsed" | "never"}
+ */
+export function proofStanding(provenAt, now) {
+  if (provenAt === null || provenAt > now) return "never";
+  const age = now - provenAt;
+  if (age > PROOF_WINDOW_MS) return "lapsed";
+  return age > PROOF_WINDOW_MS - LAPSE_WARNING_MS ? "lapsing" : "proven";
+}
+
+/**
+ * Did this worker prove a wake inside `PROOF_WINDOW_MS`? Both `proven` and `lapsing` are proofs.
  *
  * @param {number | null} provenAt
  * @param {number} now
  * @returns {boolean}
  */
 function hasRecentWakeProof(provenAt, now) {
-  return provenAt !== null && provenAt <= now && now - provenAt <= PROOF_WINDOW_MS;
+  const standing = proofStanding(provenAt, now);
+  return standing === "proven" || standing === "lapsing";
 }
 
 /**
@@ -478,19 +507,59 @@ const gitInRepo = (args) => {
 /** @param {string} path repo-relative */
 const readFromRepo = (path) => readFileSync(`${REPO_ROOT}${path}`, "utf8");
 
+/** The instant a proof stops counting: the moment it was earned plus `PROOF_WINDOW_MS`, to the second, in UTC. */
+const lapseInstant = (/** @type {number} */ provenAt) => new Date(provenAt + PROOF_WINDOW_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * What a line says about the worker's proof, beyond the decision (#3309). The decision and its reason are unchanged:
+ * `wake-unproven` stays the one reason, and this only says WHICH way it is unproven -- lapsed (and when), or never
+ * earned -- so the first sign of a lapse is a line in the report. A proof that still counts but will not for long is
+ * named whatever the decision is, since the decision says nothing about the day it stops being `off`-able.
+ *
+ * @param {Decision} decision
+ * @param {ProofReading | undefined} proof
+ * @returns {string}
+ */
+function proofNote(decision, proof) {
+  if (!proof || proof.provenAt === null) return decision.reason === "wake-unproven" ? " (never proved)" : "";
+  if (proof.standing === "lapsing") return ` (proof lapses ${lapseInstant(proof.provenAt)})`;
+  if (decision.reason !== "wake-unproven") return "";
+  return proof.standing === "lapsed" ? ` (lapsed ${lapseInstant(proof.provenAt)})` : " (never proved)";
+}
+
 /**
  * One line per worker, in the words of what was decided -- `fleet-wake.mjs`'s `wakeReportLine` shape,
  * one file over. `no-answer` names the seconds waited (done-when 7.4), read off the probe's own timeout
- * rather than re-measured.
+ * rather than re-measured. `proof` is the worker's wake-proof reading when the caller has one.
  *
  * @param {{ name: string, host: string }} worker
  * @param {Decision} decision
  * @param {number} probeTimeoutMs
+ * @param {ProofReading} [proof]
  * @returns {string}
  */
-export function reportLine(worker, decision, probeTimeoutMs = PROBE_TIMEOUT_MS) {
+export function reportLine(worker, decision, probeTimeoutMs = PROBE_TIMEOUT_MS, proof = undefined) {
   const waited = decision.reason === "no-answer" ? ` (waited ${(probeTimeoutMs / 1000).toFixed(1)}s)` : "";
-  return `  ${worker.name.padEnd(16)} ${worker.host.padEnd(15)} ${decision.action.padEnd(4)} ${decision.reason}${waited}`;
+  return `  ${worker.name.padEnd(16)} ${worker.host.padEnd(15)} ${decision.action.padEnd(4)} ${decision.reason}${waited}${proofNote(decision, proof)}`;
+}
+
+/**
+ * The footer block naming every worker whose proof is `lapsing` or `lapsed`, each with the one command that renews it
+ * (#3309). A proof is earned by a worker that was SILENT coming back, hence sleep then wake of that one worker. Empty
+ * when nothing needs renewing; the caller fails the unit on a non-empty one, because a warning that exits 0 is the
+ * quiet failure again. A `never` worker is not here: it is a standing to-do the existing footer names, not a deadline.
+ *
+ * @param {{ worker: { name: string }, proof?: ProofReading }[]} decisions
+ * @returns {string}
+ */
+export function renewalFooter(decisions) {
+  const due = decisions.filter(({ proof }) => proof && proof.provenAt !== null && (proof.standing === "lapsing" || proof.standing === "lapsed"));
+  if (!due.length) return "";
+  const lines = due.map(({ worker, proof }) => {
+    const when = `${proof?.standing === "lapsed" ? "lapsed" : "lapses"} ${lapseInstant(/** @type {number} */ (proof?.provenAt))}`;
+    return `    ${worker.name} (${when}): pnpm run fleet:sleep -- --limit=${worker.name} && pnpm run fleet:wake -- ${worker.name}`;
+  });
+  return `\n  wake proof to renew (a lapsing proof still counts; a lapsed one keeps the worker on):\n${lines.join("\n")}\n`;
 }
 
 /**
@@ -576,7 +645,8 @@ function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
  * powered off, so an idle fleet costs no fetch; the held workers read `keep <reason>` in the report, which is where an
  * operator looks.
  *
- * @param {{ worker: { name: string, host: string }, decision: Decision }[]} decisions
+ * @template {{ decision: Decision }} T
+ * @param {T[]} decisions
  * @param {{ now: number, fetchedAt: number | null,
  *   checkout: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain> }} where
  */
@@ -586,8 +656,8 @@ function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
   if (checked.verdict.action === "proceed") return { decisions, refusal: null, fetchedAt: checked.fetchedAt };
   const { reason, detail } = checked.verdict;
   return {
-    decisions: decisions.map(({ worker, decision }) => ({
-      worker, decision: decision.action === "off" ? { action: /** @type {const} */ ("keep"), reason } : decision,
+    decisions: decisions.map(({ decision, ...rest }) => ({
+      ...rest, decision: decision.action === "off" ? { action: /** @type {const} */ ("keep"), reason } : decision,
     })),
     refusal: { reason, detail, at: now },
     fetchedAt: checked.fetchedAt,
@@ -642,7 +712,11 @@ export async function tick(deps = {}) {
   const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending };
   const decided = workers.map((w) => {
     const p = probes.find((probed) => probed.name === w.name);
-    return { worker: w, decision: autoOffDecision(decisionInput(w, p?.outcome ?? "no-answer", known), now) };
+    const provenAt = wakeProof[w.name] ?? null;
+    return {
+      worker: w, decision: autoOffDecision(decisionInput(w, p?.outcome ?? "no-answer", known), now),
+      proof: { standing: proofStanding(provenAt, now), provenAt },
+    };
   });
   const { decisions, refusal, fetchedAt } = apply
     ? holdBackIfStale(decided, { now, fetchedAt: previous.fetchedAt, checkout })
@@ -681,24 +755,37 @@ async function main() {
     return;
   }
 
-  const { decisions, refusal, proofPath } = await tick({ workers: declared, apply });
-  for (const { worker, decision } of decisions) process.stdout.write(`${reportLine(worker, decision)}\n`);
-  process.stdout.write(ledgerLine(proofPath));
-  if (refusal) {
-    // Every tick that holds a shutdown back says so, and the unit FAILS: a refusal nobody sees is a fleet left on.
-    process.stdout.write(`\n  refuse ${refusal.reason} -- ${refusal.detail}\n`);
-    process.exitCode = 1;
-  }
+  const { out, failed } = renderReport(await tick({ workers: declared, apply }), apply);
+  process.stdout.write(out);
+  if (failed) process.exitCode = 1;
+}
+
+/**
+ * The whole report, and whether the unit FAILS. Two things fail it, both because a quiet exit 0 would hide them: a
+ * `refuse` (every tick that holds a shutdown back says so, since a refusal nobody sees is a fleet left on) and a
+ * wake proof that is `lapsing` or `lapsed` (#3309, a deadline that exits 0 is the quiet failure again).
+ *
+ * @param {Awaited<ReturnType<typeof tick>>} result
+ * @param {boolean} apply
+ * @returns {{ out: string, failed: boolean }}
+ */
+export function renderReport({ decisions, refusal, proofPath }, apply) {
+  let out = decisions.map(({ worker, decision, proof }) => `${reportLine(worker, decision, PROBE_TIMEOUT_MS, proof)}\n`).join("");
+  out += ledgerLine(proofPath);
+  if (refusal) out += `\n  refuse ${refusal.reason} -- ${refusal.detail}\n`;
   const unproven = decisions.filter(({ decision }) => decision.reason === "wake-unproven").map(({ worker }) => worker.name);
   if (unproven.length) {
-    process.stdout.write(`\n  kept on for want of a recent wake proof: ${unproven.join(", ")}. A proof is earned by `
-      + "`fleet:sleep` then `fleet:wake` of that one worker, answering on its own address.\n");
+    out += `\n  kept on for want of a recent wake proof: ${unproven.join(", ")}. A proof is earned by `
+      + "`fleet:sleep` then `fleet:wake` of that one worker, answering on its own address.\n";
   }
-  process.stdout.write(refusal
+  const renewals = renewalFooter(decisions);
+  out += renewals;
+  out += refusal
     ? "\n  --apply: NOTHING was dispatched; the checkout this runs from is not main's (see `refuse` above).\n"
     : apply
     ? "\n  --apply: every `off` above was just dispatched to sleep.yml.\n"
-    : "\n  report only: nothing was powered off. Pass --apply to actually dispatch a shutdown.\n");
+    : "\n  report only: nothing was powered off. Pass --apply to actually dispatch a shutdown.\n";
+  return { out, failed: refusal !== null || renewals !== "" };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) await main();
