@@ -13,9 +13,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, linkSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { captureTimes, readCapturesState } from "./fleet-watch.mjs";
+import { captureTimes, readCapturesState, writeCapturesState } from "./fleet-watch.mjs";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
@@ -495,6 +497,26 @@ test("tick: a ledger that cannot be written is reported and does not stop the sh
     process.stderr.write = realWrite;
   }
   assert.match(stderr.join(""), /capture ledger was not updated.*ENOSPC/);
+});
+
+test("writeCapturesState: the real write REPLACES the file, so a reader never sees a truncated one (#3208)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ledger-"));
+  try {
+    const path = join(dir, "fleet-captures-state.json");
+    const alias = join(dir, "reader-holds-the-old-file.json");
+    writeCapturesState(path, { since: 1, workers: {} });
+    // A second name for the same inode stands in for a reader that has the file open: an in-place write
+    // (`writeFileSync` on `path`) truncates and rewrites THAT inode and the alias changes with it, while a
+    // rename leaves it the old, whole file.
+    linkSync(path, alias);
+    writeCapturesState(path, { since: 2, workers: {} });
+    assert.equal(readCapturesState(path)?.since, 2);
+    assert.equal(readCapturesState(alias)?.since, 1, "the old inode was written over in place, not replaced");
+    assert.deepEqual(readdirSync(dir).sort(), ["fleet-captures-state.json", "reader-holds-the-old-file.json"],
+      "no staging file is left behind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------------------------------------

@@ -34,7 +34,7 @@
  * on #928 read a deliberately-off fleet as broken. A box that is genuinely dead is found when a capture
  * window wakes it and it does not return (`fleet:wake`, which tells `needs:chairman`).
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -177,11 +177,28 @@ export function readCapturesState(path, read = readFileSync) {
 }
 
 /**
+ * Replace a file whole or not at all. Two processes write the capture ledger (this watch hourly,
+ * `fleet-auto-off.mjs` every tick, #3208), and a reader landing inside `writeFileSync`'s truncate-then-write
+ * sees a half file, which `readCapturesState` reads as `null` and the next write turns into a fresh ledger
+ * whose `since` starts over. A rename within one directory is atomic, so no reader sees anything between.
+ * It does not serialize the two writers: a read-modify-write that interleaves with the other's can drop that
+ * one's rise, but counts are cumulative, so the next probe of a worker still up re-derives it.
+ *
+ * @param {string} path
+ * @param {string} data
+ */
+function replaceFile(path, data) {
+  const staging = `${path}.${process.pid}.tmp`;
+  writeFileSync(staging, data);
+  renameSync(staging, path);
+}
+
+/**
  * @param {string} path
  * @param {CapturesState} state
  * @param {(path: string, data: string) => void} write
  */
-export function writeCapturesState(path, state, write = writeFileSync) {
+export function writeCapturesState(path, state, write = replaceFile) {
   write(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
