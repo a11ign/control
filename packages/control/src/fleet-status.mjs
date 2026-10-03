@@ -216,6 +216,8 @@ export function summarise(probes) {
       state: stateOf(probe),
       code: probe.health?.code ?? null,
       captures: vitals?.captures ?? null,
+      // Machine uptime, so the capture ledger can tell a worker booted since its last poll from one that predates it (#3205).
+      uptimeMinutes: vitals?.uptimeMinutes ?? null,
       recoveries: vitals?.recoveries ?? null,
       degraded: assessment.degraded,
       degradedReason: assessment.reason,

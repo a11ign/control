@@ -39,7 +39,7 @@ test("first sight of a worker records its count and NO capture: the count predat
   assert.deepEqual(state?.workers.w2.rises, []);
 });
 
-test("a count that FALLS is a restart: a reset baseline, no capture recorded, no negative captures", () => {
+test("a count that FALLS is a restart: a reset baseline, and the new count is what it captured since boot (#3205)", () => {
   const state = ledgerAfter([
     [NOW - 3 * HOUR, [row("w2", 10)]],
     [NOW - 2 * HOUR, [row("w2", 12)]],
@@ -47,9 +47,9 @@ test("a count that FALLS is a restart: a reset baseline, no capture recorded, no
   ]);
   const worker = state?.workers.w2;
   assert.equal(worker?.captures, 1, "the lower count is the new baseline");
-  assert.equal(worker?.lastRoseAt, NOW - 2 * HOUR, "the restart is not a capture, so the last rise stays put");
-  assert.deepEqual(worker?.rises, [{ at: NOW - 2 * HOUR, by: 2 }]);
-  assert.equal(captureTimes(state, NOW)?.captures24h, 2);
+  assert.equal(worker?.lastRoseAt, NOW - HOUR, "the restart's capture is a capture");
+  assert.deepEqual(worker?.rises, [{ at: NOW - 2 * HOUR, by: 2 }, { at: NOW - HOUR, by: 1 }]);
+  assert.equal(captureTimes(state, NOW)?.captures24h, 3, "never negative, and never the old count minus the new");
 
   const after = advanceCaptures([row("w2", 3)], state, NOW);
   assert.deepEqual(after.workers.w2.rises.at(-1), { at: NOW, by: 2 }, "and counting resumes from the new baseline");

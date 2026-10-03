@@ -64,7 +64,7 @@ const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
 /** Exit codes are the contract: 0 nothing needs attention, 1 something does, 2 could not ask. */
 export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
 
-/** @typedef {{name: string, state: string, captures?: number|null, readiness?: {reason?: string|null}|null}} FleetRow */
+/** @typedef {{name: string, state: string, captures?: number|null, uptimeMinutes?: number|null, readiness?: {reason?: string|null}|null}} FleetRow */
 /** @typedef {Record<string, number>} SinceState */
 
 /**
@@ -186,24 +186,87 @@ export function writeCapturesState(path, state, write = writeFileSync) {
 }
 
 /**
- * One worker's entry after one reading. A count that ROSE records the time it was seen to have risen (the
- * poll's own clock: the rise happened somewhere since the last reading). A count that FELL is a restart --
- * the worker booted and counts from zero again -- so it becomes the new baseline and records no capture;
- * the same result as a count that held still, which is why there are only two branches.
+ * The worker's name without its address. `fleetStatus` names a row `<inventory name>  <address>`, and a
+ * worker woken by `wake.yml` can come back at a new address -- keyed whole it was a NEW worker and started at
+ * a baseline again, losing what it did first (#3205). A worker the inventory does not name is its address.
  *
- * @param {WorkerCaptures|undefined} previous
- * @param {number} captures
- * @param {number} now
+ * @param {string} name
+ */
+function workerKey(name) {
+  return name.split("  ")[0];
+}
+
+/** @param {number|null} a @param {number|null} b */
+function latest(a, b) {
+  return a === null || b === null ? (a ?? b) : Math.max(a, b);
+}
+
+/**
+ * Two entries for one worker (a ledger written when the key still carried the address, or after it moved):
+ * the later reading's count, every rise of both, so a rename loses nothing the ledger already knew.
+ *
+ * @param {WorkerCaptures} one
+ * @param {WorkerCaptures} other
  * @returns {WorkerCaptures}
  */
-function advanceWorker(previous, captures, now) {
-  // First sight: the count predates this ledger, so none of it can be dated.
-  if (!previous) return { captures, seenAt: now, lastRoseAt: null, rises: [] };
-  const rises = previous.rises.filter((rise) => now - rise.at < CAPTURE_WINDOW_MS);
-  if (captures > previous.captures) {
-    return { captures, seenAt: now, lastRoseAt: now, rises: [...rises, { at: now, by: captures - previous.captures }] };
+function mergeEntries(one, other) {
+  const [older, newer] = one.seenAt <= other.seenAt ? [one, other] : [other, one];
+  const rises = [...older.rises, ...newer.rises].sort((a, b) => a.at - b.at);
+  return { ...newer, lastRoseAt: latest(older.lastRoseAt, newer.lastRoseAt), rises };
+}
+
+/** @param {Record<string, WorkerCaptures>} workers @returns {Record<string, WorkerCaptures>} */
+function byWorkerKey(workers) {
+  /** @type {Record<string, WorkerCaptures>} */
+  const merged = {};
+  for (const [name, entry] of Object.entries(workers)) {
+    const key = workerKey(name);
+    merged[key] = merged[key] ? mergeEntries(merged[key], entry) : entry;
   }
-  return { captures, seenAt: now, lastRoseAt: previous.lastRoseAt, rises };
+  return merged;
+}
+
+/**
+ * How many captures a reading adds that the ledger has not counted. What the poll sees is a COUNT since
+ * boot, so three things move it without a plain rise (#3205):
+ *
+ * - A count that FELL is a restart: the worker booted and counts from zero, and every capture it holds was
+ *   taken since the last reading. Discarding them discarded exactly the work done between boot and the poll.
+ * - A worker whose UPTIME is shorter than the time since the last reading booted in between, so its whole
+ *   count is new even when it did not fall (it may have restarted and passed the old number).
+ * - FIRST SIGHT counts only when the uptime says it booted after the ledger began: then every capture was
+ *   taken inside the ledger. A longer uptime (or none: a row without `uptimeMinutes`) predates the ledger
+ *   and is a baseline, so the first poll of a new ledger over a fleet that has run for weeks cannot read as
+ *   a day of captures -- `since` equals `now` there, and no uptime is shorter than zero.
+ *
+ * @param {WorkerCaptures|undefined} previous
+ * @param {{captures: number, uptimeMs: number|null}} reading
+ * @param {{now: number, since: number}} when
+ */
+function newCaptures(previous, { captures, uptimeMs }, { now, since }) {
+  const bootedSince = (/** @type {number} */ at) => uptimeMs !== null && uptimeMs < now - at;
+  if (!previous) return bootedSince(since) ? captures : 0;
+  const restarted = captures < previous.captures || bootedSince(previous.seenAt);
+  return restarted ? captures : captures - previous.captures;
+}
+
+/**
+ * One worker's entry after one reading. New captures record the time they were seen (the poll's own clock:
+ * they happened somewhere since the last reading).
+ *
+ * @param {WorkerCaptures|undefined} previous
+ * @param {{captures: number, uptimeMs: number|null}} reading
+ * @param {{now: number, since: number}} when
+ * @returns {WorkerCaptures}
+ */
+function advanceWorker(previous, reading, when) {
+  const { now } = when;
+  const rises = (previous?.rises ?? []).filter((rise) => now - rise.at < CAPTURE_WINDOW_MS);
+  const by = newCaptures(previous, reading, when);
+  if (by > 0) {
+    return { captures: reading.captures, seenAt: now, lastRoseAt: now, rises: [...rises, { at: now, by }] };
+  }
+  return { captures: reading.captures, seenAt: now, lastRoseAt: previous?.lastRoseAt ?? null, rises };
 }
 
 /**
@@ -219,10 +282,15 @@ function advanceWorker(previous, captures, now) {
  */
 export function advanceCaptures(rows, previous, now) {
   const base = previous ?? { since: now, workers: {} };
-  const workers = { ...base.workers };
+  const known = byWorkerKey(base.workers);
+  const workers = { ...known };
   for (const row of rows) {
     if (!isNumber(row.captures)) continue;
-    workers[row.name] = advanceWorker(base.workers[row.name], /** @type {number} */ (row.captures), now);
+    const captures = /** @type {number} */ (row.captures);
+    const uptimeMs = isNumber(row.uptimeMinutes) ? /** @type {number} */ (row.uptimeMinutes) * MS_PER_MINUTE : null;
+    const reading = { captures, uptimeMs };
+    const key = workerKey(row.name);
+    workers[key] = advanceWorker(known[key], reading, { now, since: base.since });
   }
   return { since: base.since, workers };
 }
