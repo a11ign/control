@@ -13,6 +13,10 @@
 # `claude-md-counts.test.ts` reads them to check CLAUDE.md's stated fleet size. Only the addresses and
 # MAC addresses are placeholders.
 #
+# `switch_port:` is the port on the network switch a worker is cabled to, read by `fleet:status`
+# (`switchPortsByHost`, #3242). Ports are not secrets, so these are the real numbers; `fleet-switch.test.ts`
+# pins one per worker, all distinct.
+#
 # KEEP THIS FILE'S SHAPE IN STEP WITH THE REAL ONE. `inventory-example-parity.test.ts` compares the two
 # structurally (group names, host names, and the set of keys each host declares) whenever the real file is
 # present locally — it skips honestly, not silently, when it is not (a fresh clone or CI).
@@ -23,34 +27,42 @@ all:
         a11y-worker-2:
           ansible_host: 192.0.2.12
           mac: "00:00:00:00:00:12"
+          switch_port: 15
 
         a11y-worker-3:
           ansible_host: 192.0.2.13
           mac: "00:00:00:00:00:13"
+          switch_port: 16
 
         a11y-worker-4:
           ansible_host: 192.0.2.14
           mac: "00:00:00:00:00:14"
+          switch_port: 17
 
         a11y-worker-5:
           ansible_host: 192.0.2.15
           mac: "00:00:00:00:00:15"
+          switch_port: 18
 
         a11y-worker-6:
           ansible_host: 192.0.2.16
           mac: "00:00:00:00:00:16"
+          switch_port: 14
 
         a11y-worker-7:
           ansible_host: 192.0.2.17
           mac: "00:00:00:00:00:17"
+          switch_port: 2
 
         a11y-worker-8:
           ansible_host: 192.0.2.18
           mac: "00:00:00:00:00:18"
+          switch_port: 3
 
         a11y-worker-9:
           ansible_host: 192.0.2.19
           mac: "00:00:00:00:00:19"
+          switch_port: 4
 
         # a11y-worker-10 — REJOINED 2026-09-09, withdrawn 2026-09-07. It never needed the console visit.
         #
@@ -68,10 +80,12 @@ all:
         a11y-worker-10:
           ansible_host: 192.0.2.20
           mac: "00:00:00:00:00:20"
+          switch_port: 5
 
         a11y-worker-11:
           ansible_host: 192.0.2.21
           mac: "00:00:00:00:00:21"
+          switch_port: 6
           # OPTIONAL, and absent on every host above: `a11y_capture: false` keeps a host ENROLLED (deployed
           # to, served, named by `fleet:env --list`, `doctor`, `fleet:status`) but leaves it out of
           # `A11Y_WORKERS`, so it is handed no corpus cases. `fleet:env` names each host it leaves out on
