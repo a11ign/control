@@ -164,18 +164,35 @@ Python, so every task addresses it by MAC and by HTTP. It uses **`community.gene
 `community.windows.win_wakeonlan` — the latter sends the packet *from* a Windows host, and this control
 plane is Linux. One word apart, and only one of them can work here.
 
-Three prerequisites, and only two are automated:
+Four prerequisites, **all enforced and read back** (#3230), and each fails the play for the worker, by name:
 
-1. **WoL enabled in each box's firmware.** A console visit, once per machine. Nothing can automate it —
-   the box is off and has no OS to ask.
-2. The adapter must stay armed to wake. `a11y_nic_power` handles it, and this is where the danger was:
-   its registry fallback originally wrote `PnPCapabilities = 24`, which Microsoft documents as *also*
-   preventing the adapter from waking the computer. On any box without the cmdlet that would have made
-   Wake-on-LAN impossible while reporting success. It writes `8` now, and sets `WakeOnMagicPacket`
-   explicitly via the cmdlet where it exists.
+1. **Firmware Wake-on-LAN.** Not a console visit on a Lenovo: the installed OS reaches the BIOS through
+   `root\wmi` (`Lenovo_BiosSetting`, `Lenovo_SetBiosSetting`, `Lenovo_SaveBiosSettings`), so
+   `a11y_wake_prereqs` reads the value and repairs `Disabled`. Any other value is left alone (`Automatic` is
+   not rewritten to `Primary`; that is a separate decision, see `wake.yml`). A box that is not a Lenovo, or
+   whose classes are absent, reports `not-read` / `unreadable` and is never called ok. The earlier sentence
+   here, "nothing can automate it -- the box is off and has no OS to ask", was true of a box that is off and
+   wrong of one being provisioned.
+2. **The adapter armed to wake, in TWO places.** `a11y_nic_power` sets the adapter's own property
+   (`WakeOnMagicPacket`) *and* arms the device (`powercfg /deviceenablewake`, Device Manager's "Allow this
+   device to wake the computer"), then reads `powercfg /devicequery wake_armed` back. The second is what
+   stopped worker 4: the firmware and the adapter property were both on and Windows disarmed the device at
+   every shutdown. The module also reads `*WakeOnMagicPacket=1`, `*WakeOnPattern=0` and `*EEE=0`, and warns
+   of the trap already recorded: its registry fallback originally wrote `PnPCapabilities = 24`, which
+   Microsoft documents as *also* preventing the adapter from waking the computer. It writes `8` now.
 3. **Fast Startup must be off**, or many boards never truly reach S5 and never wake.
-   `a11y_power_timeouts` turns hibernation off, which disables Fast Startup as a side effect. That is a
-   real dependency between two modules, not a coincidence — do not "tidy" the hibernation setting.
+   `a11y_power_timeouts` turns hibernation off, which disables Fast Startup as a side effect, and
+   `a11y_nic_power` now reads `HibernateEnabled` back. That is a real dependency between two modules, not a
+   coincidence — do not "tidy" the hibernation setting.
+4. **The adapter holds a DHCP address and nothing else.** A static or link-local address is named and
+   removed by `a11y_wake_prereqs`; it is how worker 6 came up where nobody was looking.
+
+**What provisioning does not claim.** Every worker is reported `wake-armed, UNPROVEN`, never `ok`: the arming
+says Windows will honour a packet, and only a real cycle (box off, one magic packet from the agents host,
+`/health` 200 on its reserved address within `WAKE_DEADLINE_MS`) says it comes back. A play cannot power a
+box off mid-run, so that proof is `fleet-wake.mjs`'s `woken` outcome, not this role's: the role reads
+`runs/fleet-wake-proof.json` (#3227) through the reader auto-off uses and says `PROVEN` only for a worker
+that ledger holds.
 
 ## The leak check: one worker, a fake credential, and the box put back (#2399)
 

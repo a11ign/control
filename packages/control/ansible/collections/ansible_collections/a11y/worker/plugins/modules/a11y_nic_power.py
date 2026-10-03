@@ -23,6 +23,13 @@ description:
   exists because the network disappears.
 - 'Sets two INDEPENDENT things: the adapter is not powered down while the machine runs, and it may still
   wake the machine. Conflating them is how Wake-on-LAN gets silently disabled.'
+- 'Arms the DEVICE as well (powercfg /deviceenablewake, Device Manager''s "Allow this device to wake the
+  computer"), which is separate from the adapter property: Windows disarms Wake-on-LAN at every shutdown while
+  it is unticked, whatever the adapter property says. Then READS IT BACK from powercfg /devicequery wake_armed.'
+- 'Reads back, never writes, the NDIS keywords *WakeOnMagicPacket=1, *WakeOnPattern=0 and *EEE=0 (bespoke.yml
+  sets them, because setting one re-initialises the adapter and drops the connection) and HibernateEnabled=0.'
+- 'FAILS BY NAME, listing every problem it read, when the box cannot be woken. Reports wake-armed, UNPROVEN and
+  never more: arming says Windows will honour a packet, and only a real power cycle says the box comes back.'
 options:
   interface:
     description:
@@ -56,4 +63,12 @@ via_registry:
   description: Adapters that needed the registry fallback because the cmdlet was absent.
   returned: always
   type: list
+wake_failures:
+  description: Every reason this box cannot be woken, as sentences naming the adapter. Empty when armed and verified.
+  returned: always
+  type: list
+wake_proof:
+  description: Always UNPROVEN. Provisioning cannot power a box off mid-play, so it never claims the cycle.
+  returned: always
+  type: str
 """
