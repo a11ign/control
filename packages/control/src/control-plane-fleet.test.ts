@@ -130,3 +130,74 @@ test("#2655: macsByHost agrees with fleet-discover's inventoryHosts on every hos
   assert.deepEqual([...macsByHost(MACS_INVENTORY)], viaDiscover);
   assert.ok(viaDiscover.length >= 2, "positive control: the fixture has hosts with a mac, so equality is not two empty lists");
 });
+
+// --- #3239: ONE source. The control plane's inventory names workers 2 to 16; the agents host's copy named
+// 2 to 11. `inventoryDrift` is what `fleet:inventory-install` says before it overwrites a copy.
+import { readFileSync } from "node:fs";
+import { inventoryDrift } from "./control-plane-fleet.mjs";
+
+const GROUP_VARS_TEXT = "a11y_port: 8765\n";
+const hex = (n: number) => n.toString(16).padStart(2, "0");
+function inventoryOf(numbers: number[], { macFor = (n: number) => `aa:bb:cc:dd:ee:${hex(n)}` } = {}): string {
+  const hosts = numbers.flatMap((n) => [`        a11y-worker-${n}:`, `          ansible_host: 192.0.2.${n}`,
+    `          mac: "${macFor(n)}"`]);
+  return ["all:", "  children:", "    a11y_workers:", "      hosts:", ...hosts].join("\n") + "\n";
+}
+const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+const SOURCE = inventoryOf(range(2, 16));
+const drift = (copy: string, source = SOURCE) => inventoryDrift({ source, copy, groupVarsText: GROUP_VARS_TEXT });
+
+test("#3239: a copy naming the same workers the same way is no drift -- the control the missing-five case is judged against", () => {
+  assert.deepEqual(drift(inventoryOf(range(2, 16))), { missing: [], extra: [], changed: [], report: null });
+});
+
+test("#3239: a copy missing five workers is told which five, in the wording the done-when asks for", () => {
+  const { missing, extra, report } = drift(inventoryOf(range(2, 11)));
+  assert.deepEqual(missing, [12, 13, 14, 15, 16].map((n) => `a11y-worker-${n}`));
+  assert.deepEqual(extra, []);
+  assert.equal(report, "the worker set differs: in the source, not in this copy: 12 13 14 15 16");
+});
+
+test("#3239: a copy that is AHEAD of the source is reported too, because overwriting it unseen loses a worker", () => {
+  const { missing, extra, report } = drift(inventoryOf(range(2, 17)), inventoryOf(range(2, 16)));
+  assert.deepEqual(missing, []);
+  assert.deepEqual(extra, ["a11y-worker-17"]);
+  assert.equal(report, "the worker set differs: in this copy, not in the source: 17");
+});
+
+test("#3239: a worker named with another MAC is drift: a wake would send its packet to somebody else", () => {
+  const wrongMacFor3 = inventoryOf(range(2, 16), { macFor: (n) => (n === 3 ? "00:00:00:00:00:99" : `aa:bb:cc:dd:ee:${hex(n)}`) });
+  const { changed, report } = drift(wrongMacFor3);
+  assert.deepEqual(changed, ["a11y-worker-3"]);
+  assert.match(String(report), /another address or MAC in this copy: 3$/);
+});
+
+test("#3239: a copy that does not parse is drift against every worker, so the repair still has something to say", () => {
+  const { missing, report } = drift("not: [an inventory\n");
+  assert.equal(missing.length, 15);
+  assert.match(String(report), /^this copy could not be read \(.+\); the worker set differs: in the source, not in this copy: 2 3 /);
+});
+
+test("#3239: a source that does not parse is an error, never 'no drift'", () => {
+  assert.throws(() => drift(SOURCE, "all:\n"), /lists no|refused|inventory/);
+});
+
+test("#3239: fleet:wake's own resolution -- inventoryHosts over the file it reads -- finds worker 12 with the "
+  + "control plane's MAC once the copy is the source, and 'no worker named' before (no packet is sent)", () => {
+  const stale = inventoryOf(range(2, 11));
+  const named = (text: string) => inventoryHosts(text).find((h) => h.name === "a11y-worker-12");
+  assert.equal(named(stale), undefined, "positive control: the stale copy is the one that refuses the name");
+  const control = readControlPlaneFleet({
+    ansibleCfgText: ANSIBLE_CFG, groupVarsText: GROUP_VARS_TEXT,
+    readInventories: (sources) => [{ path: sources[0], text: SOURCE }],
+  }).workers.find((w) => w.name === "a11y-worker-12");
+  assert.equal(control?.mac, "aa:bb:cc:dd:ee:0c");
+  assert.equal(named(SOURCE)?.mac, control?.mac);
+});
+
+test("#3239: the install play derives the copy through inventoryDrift and refuses an AHEAD copy, rather than restating either", () => {
+  const play = readFileSync(new URL("../ansible/inventory-install.yml", import.meta.url), "utf8");
+  assert.match(play, /inventoryDrift/);
+  assert.match(play, /ansible\.builtin\.fetch:/);
+  assert.match(play, /\.extra \| length == 0/);
+});

@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureTimes, readCapturesState, writeCapturesState, withFileLock } from "./fleet-watch.mjs";
+import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
@@ -166,7 +167,7 @@ test("advanceShutdownRequested: a worker with no prior request stays absent", ()
 
 const BASE = {
   name: "a11y-worker-2", hasMac: true, probe: "idle" as const,
-  idleSince: 0, shutdownRequestedAt: null,
+  idleSince: 0, shutdownRequestedAt: null, wakeProvenAt: 0 as number | null,
   batchQueued: false, leasePending: false,
 };
 const NOW = IDLE_THRESHOLD_MS; // idleSince 0 -> exactly at the threshold
@@ -177,6 +178,27 @@ test("autoOffDecision: POSITIVE CONTROL -- idle past the threshold, MAC present,
 
 test("autoOffDecision: no-mac keeps, even when otherwise idle past the threshold", () => {
   assert.deepEqual(autoOffDecision({ ...BASE, hasMac: false }, NOW), { action: "keep", reason: "no-mac" });
+});
+
+// #3227: a worker is powered off only while it has PROVED it comes back. Each fixture below is otherwise `off`
+// (BASE is the positive control), so the proof is the one thing that differs between off and keep.
+test("autoOffDecision: wake-unproven keeps an otherwise-off worker with NO proof, and outranks idle-five-minutes (#3227)", () => {
+  const unproven = { ...BASE, wakeProvenAt: null };
+  assert.notDeepEqual(unproven, BASE, "the proven and unproven fixtures must differ before the decision is run");
+  assert.equal(autoOffDecision(BASE, NOW).action, "off", "positive control: the same worker WITH a proof powers off");
+  assert.deepEqual(autoOffDecision(unproven, NOW), { action: "keep", reason: "wake-unproven" });
+});
+
+test("autoOffDecision: wake-unproven keeps an otherwise-off worker whose proof has EXPIRED -- not the same case as absent (#3227)", () => {
+  const stale = { ...BASE, wakeProvenAt: NOW - PROOF_WINDOW_MS - 1 };
+  assert.notEqual(stale.wakeProvenAt, null, "an expired proof is a value, so 'absent' cannot stand for it by accident");
+  assert.deepEqual(autoOffDecision(stale, NOW), { action: "keep", reason: "wake-unproven" });
+  assert.equal(autoOffDecision({ ...BASE, wakeProvenAt: NOW - PROOF_WINDOW_MS }, NOW).action, "off",
+    "the last instant of the window still proves: the boundary is inclusive, as the idle threshold's is");
+});
+
+test("autoOffDecision: a proof stamped in the FUTURE is a clock fault and proves nothing (#3227)", () => {
+  assert.deepEqual(autoOffDecision({ ...BASE, wakeProvenAt: NOW + 1 }, NOW), { action: "keep", reason: "wake-unproven" });
 });
 
 test("autoOffDecision: already-off keeps once a shutdown was requested, regardless of the current probe", () => {
@@ -288,9 +310,16 @@ test("reportLine: any other reason carries no wait clause", () => {
 
 const WORKERS = [{ name: "a11y-worker-2", host: "192.0.2.12", mac: "aa:bb:cc:dd:ee:ff" }];
 
-/** A worker already idle-since time 0 -- so `now = IDLE_THRESHOLD_MS` lands exactly at the boundary. */
-const alreadyIdleSince0 = (() =>
-  JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} })) as never;
+/** The ledger of a worker that proved a wake at time 0, a moment before every `now` these tests use. */
+const PROVEN_AT_0 = JSON.stringify({ provenAt: { "a11y-worker-2": 0 } });
+const enoent = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
+
+/** `state` for every path but the proof ledger's; the proof ledger as given. One fake serves both reads. */
+const filesWith = (state: string | null, proof: string | null) =>
+  ((path: string) => { const text = path === DEFAULT_PROOF_PATH ? proof : state; return text ?? enoent(); }) as never;
+
+/** A worker already idle-since time 0 and already proven -- so `now = IDLE_THRESHOLD_MS` lands exactly at the boundary. */
+const alreadyIdleSince0 = filesWith(JSON.stringify({ idleSince: { "a11y-worker-2": 0 }, shutdownRequestedAt: {} }), PROVEN_AT_0);
 
 test("tick: report only (apply omitted) never dispatches, even for a worker decided off", async () => {
   let dispatched = 0;
@@ -358,13 +387,57 @@ test("tick: a worker still idle but under the threshold is kept, and never dispa
     probe: async () => ({ outcome: "idle" }),
     now: () => IDLE_THRESHOLD_MS - 1,
     statePath: "x.json",
-    read: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+    read: filesWith(null, PROVEN_AT_0),
     write: () => {},
     apply: true,
     dispatch: () => { dispatched += 1; return { status: 0, log: "" }; },
   });
   assert.equal(dispatched, 0);
   assert.equal(result.decisions[0].decision.reason, "not-yet-five-minutes");
+});
+
+const TWO_WORKERS = [WORKERS[0], { name: "a11y-worker-3", host: "192.0.2.13", mac: "aa:bb:cc:dd:ee:00" }];
+const BOTH_IDLE_SINCE_0 = JSON.stringify({ idleSince: { "a11y-worker-2": 0, "a11y-worker-3": 0 }, shutdownRequestedAt: {} });
+
+/** One `--apply` tick over both workers, both idle past the threshold, reading `proof` as the wake-proof ledger. */
+async function applyOver(proof: string | null, now = IDLE_THRESHOLD_MS) {
+  const dispatched: string[] = [];
+  const { decisions } = await tick({
+    workers: TWO_WORKERS, probe: async () => ({ outcome: "idle" }), now: () => now, statePath: "x.json",
+    read: filesWith(BOTH_IDLE_SINCE_0, proof), write: () => {}, apply: true,
+    dispatch: (name: string) => { dispatched.push(name); return { status: 0, log: "" }; },
+  });
+  return { dispatched, reasons: Object.fromEntries(decisions.map((d) => [d.worker.name, d.decision.reason])) };
+}
+const proofOf = (provenAt: Record<string, number>) => JSON.stringify({ provenAt });
+
+test("tick: an idle worker with no proof is kept and never dispatched under --apply, and is NAMED by its reason (#3227)", async () => {
+  const proven = await applyOver(proofOf({ "a11y-worker-2": 0, "a11y-worker-3": 0 }));
+  assert.deepEqual(proven.dispatched, ["a11y-worker-2", "a11y-worker-3"], "positive control: with proofs both power off");
+  for (const proof of [null, "{ not json", proofOf({})]) {
+    const none = await applyOver(proof);
+    assert.deepEqual(none.dispatched, [], `no proof (${proof}) must power nothing off`);
+    assert.deepEqual(none.reasons, { "a11y-worker-2": "wake-unproven", "a11y-worker-3": "wake-unproven" });
+  }
+});
+
+test("tick: an expired proof keeps the worker, one tick before and one after the window (#3227)", async () => {
+  const proof = proofOf({ "a11y-worker-2": 0, "a11y-worker-3": 0 });
+  assert.equal((await applyOver(proof, PROOF_WINDOW_MS)).dispatched.length, 2, "at the window's edge both still prove");
+  const lapsed = await applyOver(proof, PROOF_WINDOW_MS + 1);
+  assert.deepEqual(lapsed.dispatched, []);
+  assert.deepEqual(lapsed.reasons, { "a11y-worker-2": "wake-unproven", "a11y-worker-3": "wake-unproven" });
+});
+
+test("tick: revoking ONE worker's proof changes no other worker's decision (#3227, done-when 5)", async () => {
+  const both = await applyOver(proofOf({ "a11y-worker-2": 0, "a11y-worker-3": 0 }));
+  const without2 = await applyOver(proofOf({ "a11y-worker-3": 0 }));
+  const without3 = await applyOver(proofOf({ "a11y-worker-2": 0 }));
+  assert.notDeepEqual(without2.reasons, both.reasons, "the revocation must be visible, or this compares nothing");
+  assert.equal(without2.reasons["a11y-worker-3"], both.reasons["a11y-worker-3"]);
+  assert.equal(without3.reasons["a11y-worker-2"], both.reasons["a11y-worker-2"]);
+  assert.deepEqual(without2.dispatched, ["a11y-worker-3"]);
+  assert.deepEqual(without3.dispatched, ["a11y-worker-2"]);
 });
 
 test("tick: a worker with no MAC is never decided off, even idle past the threshold, and the report names it", async () => {

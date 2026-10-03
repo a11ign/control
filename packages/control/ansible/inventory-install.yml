@@ -1,5 +1,5 @@
 ---
-# Put `inventory.yml` where a `git pull` cannot delete it, on the CONTROL PLANE.
+# Make the control plane's `inventory.yml` the one fleet definition, and derive this machine's from it.
 #
 #     npm run fleet:inventory-install
 #
@@ -18,9 +18,25 @@
 #
 # ## What it does, and what it deliberately does not
 #
-# Reads the inventory from THIS checkout and installs it at `/etc/a11ign/inventory.yml` on the control
-# plane, then reads it back and compares SHA-256 both sides. `ansible.cfg` already prefers that path, so
-# once this has run the fleet definition outlives every future pull on that machine.
+# ## THE SOURCE IS THE CONTROL PLANE'S `/etc/a11ign/inventory.yml` (#3239)
+#
+# Two inventories described one fleet and disagreed about its size: the control plane's named workers 2 to
+# 16, the agents host's hand-placed copy 2 to 11, so `fleet:wake` there refused "No worker named
+# a11y-worker-12" for a box auto-off on the control plane could power down. There is ONE source now, the
+# control plane's installed file (what dispatch, deploy, auto-off and `lab:job` act on, and the copy a pull
+# cannot delete). ADDING A WORKER IS ONE EDIT, THERE. This play derives every other host's file from it:
+#
+# - the control plane HOLDS a copy: it is fetched here and written over the operator's `inventory.yml`
+#   (the file `fleet:wake` and `fleet:discover` read when no `/etc/a11ign` copy exists on this machine),
+#   after `inventoryDrift` (`control-plane-fleet.mjs`) has said what that file was missing, loudly. A copy
+#   AHEAD of the source (a worker only the local file names) STOPS the play: add it on the control plane,
+#   or delete the local file, but never let it be overwritten unseen.
+# - the control plane holds NONE (the bootstrap this play was written for): the operator's file seeds it.
+#
+# Either way it then reads the control plane's file back and compares SHA-256 with the operator's, so a
+# difference the play did not close is a failure. It does NOT touch the in-tree copy ON THE CONTROL PLANE:
+# that is the migration fallback and removing it is a separate decision. Running it twice changes nothing
+# the second time.
 #
 # It does NOT touch the in-tree copy, on either machine. That copy is the migration fallback and removing
 # it is a separate decision; this play is additive, so running it twice changes nothing the second time.
@@ -60,50 +76,123 @@
 # The systemd-unit path exists for a measured reason (2026-09-05: a caller killed 100 s into a ten-machine
 # reboot, the unit survived). A sub-second file copy has nothing to outlive, which is what makes this
 # exception principled rather than convenient. A playbook that takes MINUTES must never carry this marker.
-- name: Install the fleet inventory outside the control plane's checkout
+- name: Make the control plane's inventory the one source, and this machine's copy derived from it
   hosts: all
   gather_facts: false
   vars:
     inventory_source: "{{ playbook_dir }}/inventory.yml"
     inventory_destination: /etc/a11ign/inventory.yml
+    drift_script: >-
+      import { readFileSync } from "node:fs";
+      import { inventoryDrift } from "{{ playbook_dir }}/../src/control-plane-fleet.mjs";
+      const [source, copy] = process.argv.slice(1).map((path) => readFileSync(path, "utf8"));
+      console.log(JSON.stringify(inventoryDrift({ source, copy })));
 
   tasks:
-    - name: The source must exist, and saying so beats installing an empty file
-      # An absent source with `copy` would be a task error; naming it here says WHICH file and on which
-      # machine, because "no such file" about a gitignored path is the least useful message available.
-      ansible.builtin.assert:
-        that: inventory_source is file
-        fail_msg: >-
-          {{ inventory_source }} is not on the OPERATOR'S machine, so there is nothing to install. It is
-          gitignored and a pull deletes it -- restore it here first from wherever secrets are kept.
-      # ON THE CONTROLLER. `hosts: all` is the control plane now, and the source file lives HERE -- that
-      # asymmetry is the whole point of a bootstrap. Dropped when the target changed from `localhost` to
-      # `all`, which moved this check onto the machine that by definition does not have the file.
+    - name: What the control plane holds now
+      ansible.builtin.stat:
+        path: "{{ inventory_destination }}"
+        checksum_algorithm: sha256
+      register: held
+
+    - name: What THIS machine holds now
+      ansible.builtin.stat:
+        path: "{{ inventory_source }}"
+        checksum_algorithm: sha256
+      register: mine
       delegate_to: localhost
 
-    - name: The directory it lives in
-      ansible.builtin.file:
-        path: "{{ inventory_destination | dirname }}"
-        state: directory
-        mode: "0750"
+    - name: Seed the control plane from this machine, because it holds no copy of its own
+      when: not held.stat.exists
+      block:
+        - name: The source must exist, and saying so beats installing an empty file
+          # An absent source with `copy` would be a task error; naming it here says WHICH file and on which
+          # machine, because "no such file" about a gitignored path is the least useful message available.
+          ansible.builtin.assert:
+            that: mine.stat.exists
+            fail_msg: >-
+              {{ inventory_source }} is not on the OPERATOR'S machine and the control plane holds none, so
+              there is nothing to install. It is gitignored and a pull deletes it -- restore it here first
+              from wherever secrets are kept.
 
-    - name: Install it
-      ansible.builtin.copy:
-        src: "{{ inventory_source }}"
-        dest: "{{ inventory_destination }}"
-        mode: "0640"
-      register: installed
+        - name: The directory it lives in
+          ansible.builtin.file:
+            path: "{{ inventory_destination | dirname }}"
+            state: directory
+            mode: "0750"
 
-    - name: What is on this machine now
-      # PROVE IT ARRIVED, over a read that shares no failure mode with the write. `copy` reporting changed
-      # says the module ran; a hash read back says the bytes are there. This repo's own rule -- a
-      # verification that shares a failure mode with the action verifies nothing.
+        - name: Install it
+          ansible.builtin.copy:
+            src: "{{ inventory_source }}"
+            dest: "{{ inventory_destination }}"
+            mode: "0640"
+
+    - name: Derive this machine's copy from the control plane's
+      when: held.stat.exists and (not mine.stat.exists or mine.stat.checksum != held.stat.checksum)
+      block:
+        - name: A place on this machine to read the control plane's copy into
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .inventory.yml
+          register: fetched
+          delegate_to: localhost
+
+        - name: Read the control plane's copy (`fetch` checks the checksum it arrived with)
+          ansible.builtin.fetch:
+            src: "{{ inventory_destination }}"
+            dest: "{{ fetched.path }}"
+            flat: true
+
+        - name: Say what this machine's copy was missing, from the one comparison the tests pin
+          # The same SHA-256 stat as above decided there is a difference to describe; WHAT differs is
+          # `inventoryDrift`, in code, so this play carries no second reading of an inventory.
+          ansible.builtin.command:
+            argv: [node, --input-type=module, -e, "{{ drift_script }}", "{{ fetched.path }}", "{{ inventory_source }}"]
+          register: drift_read
+          changed_when: false
+          delegate_to: localhost
+          when: mine.stat.exists
+
+        - name: Report it, loudly
+          ansible.builtin.debug:
+            msg: "{{ inventory_source }}: {{ (drift_read.stdout | from_json).report | default('names the same workers; the bytes differ', true) }}"
+          when: mine.stat.exists
+
+        - name: Refuse to overwrite a copy that is AHEAD of the source
+          ansible.builtin.assert:
+            that: (drift_read.stdout | from_json).extra | length == 0
+            fail_msg: >-
+              {{ inventory_source }} names workers the control plane's {{ inventory_destination }} does not
+              ({{ (drift_read.stdout | from_json).report }}). Overwriting it would lose them unseen. The
+              control plane's file is the one source: add them THERE, then run this again -- or delete the
+              local file if it was never meant to differ.
+          when: mine.stat.exists
+
+        - name: Write this machine's copy
+          ansible.builtin.copy:
+            src: "{{ fetched.path }}"
+            dest: "{{ inventory_source }}"
+            mode: "0640"
+          delegate_to: localhost
+
+      always:
+        - name: The temporary read is not left behind
+          ansible.builtin.file:
+            path: "{{ fetched.path }}"
+            state: absent
+          when: fetched.path is defined
+          delegate_to: localhost
+
+    - name: What is on the control plane now
+      # PROVE IT, over a read that shares no failure mode with the write. `copy` reporting changed says the
+      # module ran; a hash read back says the bytes are there. This repo's own rule -- a verification that
+      # shares a failure mode with the action verifies nothing.
       ansible.builtin.stat:
         path: "{{ inventory_destination }}"
         checksum_algorithm: sha256
       register: landed
 
-    - name: And what it should be
+    - name: And what this machine holds now
       ansible.builtin.stat:
         path: "{{ inventory_source }}"
         checksum_algorithm: sha256
@@ -119,10 +208,10 @@
         # no `checksum` when the file is absent -- which is exactly the case this assert exists to catch.
         # A guard that stops the job and explains nothing gets distrusted, then bypassed.
         fail_msg: >-
-          {{ inventory_destination }} is {{ landed.stat.checksum | default('ABSENT') }} but the source is
-          {{ expected.stat.checksum | default('ABSENT (not on the operator machine)') }}. It did NOT
-          arrive intact; do not deploy until this is resolved.
+          {{ inventory_destination }} is {{ landed.stat.checksum | default('ABSENT') }} but this machine's
+          {{ inventory_source }} is {{ expected.stat.checksum | default('ABSENT') }}. The two are NOT one
+          inventory; do not deploy until this is resolved.
         success_msg: >-
-          {{ inventory_destination }} installed and verified, sha256 {{ landed.stat.checksum }}.
-          `ansible.cfg` reads this path first, so a future `git pull` here can no longer take the fleet
-          definition with it.
+          {{ inventory_destination }} and {{ inventory_source }} are one inventory, sha256
+          {{ landed.stat.checksum }}. `ansible.cfg` reads the control plane's path first, so a future
+          `git pull` there can no longer take the fleet definition with it.
