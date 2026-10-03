@@ -58,6 +58,7 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { inventoryHosts } from "./fleet-discover.mjs";
 import { inventoryPathFor } from "./control-plane-fleet.mjs";
 import { magicPacket } from "./fleet-wake.mjs";
+import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.mjs";
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
 
@@ -119,8 +120,31 @@ export function hasWakeableMac(mac) {
  * `busy` field that is not a plain boolean -- is folded into `no-answer`: it is "answered but unreadable",
  * which done-when 7.1 says must `keep`, exactly as a true timeout does.
  *
- * @typedef {{ outcome: "idle" } | { outcome: "busy" } | { outcome: "no-answer", detail: string }} IdleProbe
+ * An answered probe also carries the worker's `vitals.captures` and `vitals.uptimeMinutes` when it reports
+ * them, because this poll is the one that sees the worker's LAST reading before the power-off (#3208).
+ *
+ * @typedef {{ captures?: number, uptimeMinutes?: number }} Vitals
+ * @typedef {({ outcome: "idle" } | { outcome: "busy" }) & Vitals | { outcome: "no-answer", detail: string }} IdleProbe
  */
+
+/**
+ * @param {unknown} value
+ * @returns {number | undefined}
+ */
+const finiteNumber = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+
+/**
+ * @param {any} json a `/health` body
+ * @returns {Vitals}
+ */
+function vitalsOf(json) {
+  const captures = finiteNumber(json?.vitals?.captures);
+  const uptimeMinutes = finiteNumber(json?.vitals?.uptimeMinutes);
+  return {
+    ...(captures === undefined ? {} : { captures }),
+    ...(uptimeMinutes === undefined ? {} : { uptimeMinutes }),
+  };
+}
 
 /**
  * @param {string} url the worker's base URL
@@ -136,8 +160,8 @@ export async function probeIdle(url, { timeoutMs = PROBE_TIMEOUT_MS, request = r
     return { outcome: "no-answer", detail: `${code ? `${code}: ` : ""}${message}` };
   }
   if (!response.ok) return { outcome: "no-answer", detail: `/health answered HTTP ${response.status}` };
-  if (response.json?.busy === true) return { outcome: "busy" };
-  if (response.json?.busy === false) return { outcome: "idle" };
+  if (response.json?.busy === true) return { outcome: "busy", ...vitalsOf(response.json) };
+  if (response.json?.busy === false) return { outcome: "idle", ...vitalsOf(response.json) };
   return { outcome: "no-answer", detail: "/health answered without a boolean `busy`" };
 }
 
@@ -296,13 +320,44 @@ export function reportLine(worker, decision, probeTimeoutMs = PROBE_TIMEOUT_MS) 
 }
 
 /**
+ * Feed what the probes read into the capture ledger `fleet-watch.mjs` keeps hourly (#3208). That poll sees a
+ * worker only while it is up AT the poll, and this idle auto-off keeps a worker up for its job plus five
+ * minutes, so a short job's worker came and went between two polls and its captures vanished with its
+ * process. This loop reads every up worker every `POLL_INTERVAL_MS`, so the last reading before a power-off
+ * lands here. A worker that answered without `vitals.captures` (or not at all) is no reading and records
+ * nothing. Rows are named as `fleet-status.mjs` names them, `<name>  <address>`, so the two writers agree
+ * on a worker's key whichever of them saw it first.
+ *
+ * Bookkeeping never takes the tick down: a ledger that cannot be read or written is reported on stderr and
+ * the shutdown decisions go on, since a worker left up because of a bad file is a cost, not a safeguard.
+ *
+ * @param {(IdleProbe & { name: string, host: string })[]} probes
+ * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync }} where
+ */
+function recordProbedCaptures(probes, where) {
+  const rows = probes.flatMap((probe) => (probe.outcome === "no-answer" || probe.captures === undefined ? [] : [{
+    name: probe.name === probe.host ? probe.host : `${probe.name}  ${probe.host}`,
+    state: probe.outcome,
+    captures: probe.captures,
+    uptimeMinutes: probe.uptimeMinutes ?? null,
+  }]));
+  if (!rows.length) return;
+  try {
+    recordCaptures(rows, where);
+  } catch (cause) {
+    process.stderr.write(`fleet-auto-off: the capture ledger was not updated (${where.path}): `
+      + `${cause instanceof Error ? cause.message : String(cause)}\n`);
+  }
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.mjs`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
  *
  * @param {{
  *   workers?: { name: string, host: string, mac: string | null }[],
- *   probe?: typeof probeIdle, now?: () => number, statePath?: string,
+ *   probe?: typeof probeIdle, now?: () => number, statePath?: string, capturesPath?: string,
  *   read?: typeof readFileSync, write?: typeof writeFileSync,
  *   batchQueued?: () => boolean, leasePending?: () => boolean,
  *   apply?: boolean, dispatch?: typeof dispatchShutdown,
@@ -325,6 +380,8 @@ export async function tick(deps = {}) {
   const probes = await Promise.all(workers.map(async (w) => ({
     name: w.name, host: w.host, ...(await probe(`http://${w.host}:${PORT}`)),
   })));
+
+  recordProbedCaptures(probes, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at: now, read: deps.read, write: deps.write });
 
   const idleSince = advance(probes, previous.idleSince, now);
   const shutdownRequestedAt = advanceShutdownRequested(probes, previous.shutdownRequestedAt);

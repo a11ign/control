@@ -12,6 +12,7 @@ import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
   from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { readSwitchLive } from "./fleet-switch.mjs";
 
 const ready = { name: "w1", url: "http://REDACTED-INTERNAL-ADDRESS:8765", reachable: true, health: { ready: true, busy: false }, progress: { busy: false, capturing: null } };
 
@@ -1278,4 +1279,50 @@ test("#2752 MUTATION, both directions: the MAC fallback is asked ONLY for a box 
     macRead: countingMacRead,
   });
   assert.equal(macAsked, 1, "OFF plus a declared MAC is exactly the population #2752 exists for");
+});
+
+// --- #3242: the switch's reading of each worker, beside the neighbour table ---------------------------
+
+const switchReading = (lines: string[]) => ({ lines, states: [], table: null, ifIndexIsPort: null });
+
+test("#3242: the switch is asked about EVERY worker, not only the silent ones, and its reading rides on the status", async () => {
+  let askedAbout: string[] = [];
+  const status = await fleetStatus({
+    workers: () => [inventoryBox(2), inventoryBox(3)],
+    probe: async (w) => ({ ...fakeProbe(w.name, "ready"), url: w.url }),
+    switchRead: (workers) => { askedAbout = workers.map((w) => w.name); return switchReading(["a11y-worker-2: on, MAC on port 15"]); },
+  });
+  assert.equal(askedAbout.length, 2, "both healthy workers were put to the switch");
+  assert.deepEqual(status.switch.lines, ["a11y-worker-2: on, MAC on port 15"]);
+});
+
+test("#3242: the switch lines print beside the neighbour-table lines, before the table", async () => {
+  const status = await fleetStatus({
+    workers: () => [inventoryBox(2), inventoryBox(3)],
+    probe: async (w) => (w.url.includes(".3:") ? { name: w.name, url: w.url, reachable: false, error: "EHOSTDOWN" }
+      : { ...fakeProbe(w.name, "ready"), url: w.url }),
+    linkRead: () => new Map([[inventoryBox(3).name, { verdict: LINK.OFF, detail: "FAILED" }]]),
+    switchRead: () => switchReading(["a11y-worker-3: off, link up 100 Mb, no MAC on port 16"]),
+  });
+  const head = renderHead(status);
+  const at = (needle: RegExp) => head.findIndex((line) => needle.test(line));
+  assert.ok(at(/OFF THE NETWORK/) >= 0 && at(/off, link up 100 Mb/) >= 0 && at(/ready/) >= 0, `all three printed:\n${head.join("\n")}`);
+  assert.ok(at(/OFF THE NETWORK/) < at(/off, link up 100 Mb/), "the neighbour-table reading first");
+  assert.ok(at(/off, link up 100 Mb/) < at(/ready/), "and both before the table");
+  assert.equal(head.filter((line) => /armed/i.test(line)).length, 0, "the word is not printed");
+});
+
+test("#3242: a switch that does not answer prints one unread line and does not hide the capture-port reading", async () => {
+  const workers = () => [inventoryBox(2), inventoryBox(3)];
+  const probe = async (w: { name: string; url: string }) => ({ ...fakeProbe(w.name, "ready"), url: w.url });
+  const withSwitch = await fleetStatus({ workers, probe,
+    switchRead: (rows) => readSwitchLive(rows, { config: { host: "h", community: "c" }, readInventories: () => [""],
+      send: async () => { throw new Error("no reply in 2000 ms x 2"); } }) });
+  const without = await fleetStatus({ workers, probe, switchRead: () => switchReading([]) });
+  assert.equal(withSwitch.switch.lines.length, 1);
+  assert.match(withSwitch.switch.lines[0], /^switch: unread \(.*no reply in 2000 ms x 2.*\)/);
+  assert.deepEqual(withSwitch.rows, without.rows, "the capture-port rows are the same with or without the switch");
+  assert.equal(withSwitch.reachable, without.reachable);
+  assert.equal(withSwitch.reachable, 2, "a control: the workers WERE reachable, so the equality above is not two empties");
+  assert.equal(renderHead(withSwitch).filter((line) => /^\s*switch:/.test(line)).length, 1);
 });

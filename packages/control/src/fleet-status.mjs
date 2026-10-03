@@ -63,6 +63,8 @@ import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 // #2752: the MAC fallback below reuses fleet-discover.mjs's own `normaliseMac` rather than restating it --
 // two MAC parsers is how a colon-vs-dash disagreement becomes a resolution that silently never matches.
 import { normaliseMac } from "./fleet-discover.mjs";
+// #3242: where each worker is and whether it is on, from the switch's read-only SNMP. Never throws.
+import { readSwitchLive } from "./fleet-switch.mjs";
 
 /**
  * as `doctor`.
@@ -1108,16 +1110,18 @@ async function linkLayerFor(rows, linkRead, macByName = new Map(), macRead = res
 }
 
 /**
- * What a reader sees first: the link-layer lines for any box that did not answer, THEN the table -- #1298's
- * "prints that FIRST". A function rather than two writes in `main`, so the order is asserted, not hoped.
+ * What a reader sees first: the link-layer lines for any box that did not answer, THEN the switch's reading
+ * of each worker (#3242, beside them: both say where the wire stands), THEN the table -- #1298's "prints that
+ * FIRST". A function rather than two writes in `main`, so the order is asserted, not hoped.
  *
- * @param {{ rows: WorkerRow[], linkLayer: { lines: string[] } }} status
+ * @param {{ rows: WorkerRow[], linkLayer: { lines: string[] }, switch?: { lines: string[] } }} status
  * @returns {string[]}
  */
 export function renderHead(status) {
   const table = renderTable(status.rows);
-  if (!status.linkLayer.lines.length) return table;
-  return [...status.linkLayer.lines.map((line) => `  ${line}`), "", ...table];
+  const lines = [...status.linkLayer.lines, ...(status.switch?.lines ?? [])];
+  if (!lines.length) return table;
+  return [...lines.map((line) => `  ${line}`), "", ...table];
 }
 
 /**
@@ -1125,7 +1129,9 @@ export function renderHead(status) {
  *           probe?: (worker: { name: string, url: string }) => Promise<any>,
  *           linkRead?: (rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers>,
  *           macRead?: (candidates: { name: string, host: string, mac: string }[]) =>
- *             Map<string, string> | Promise<Map<string, string>> }} [deps]
+ *             Map<string, string> | Promise<Map<string, string>>,
+ *           switchRead?: (workers: { name: string, url: string, mac?: string }[]) =>
+ *             import("./fleet-switch.mjs").SwitchReport | Promise<import("./fleet-switch.mjs").SwitchReport> }} [deps]
  *   injectable ONLY so a
  *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
  *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
@@ -1141,6 +1147,10 @@ export async function fleetStatus(deps) {
   const macByName = new Map(workers.filter((w) => w.mac).map((w) => [inventoryName(w.name), /** @type {string} */ (w.mac)]));
   // #1298: only the boxes that did not answer are asked about at LAYER 2, so a healthy fleet pays nothing.
   const linkLayer = await linkLayerFor(rows, deps?.linkRead ?? readLinkLayer, macByName, deps?.macRead ?? resolveMovedByMacLive);
+  // #3242: the switch is asked about EVERY worker, not only the silent ones -- a box that answers /health on a
+  // port that is not its own is exactly what the neighbour table cannot say. It never throws and never
+  // changes `reachable`, so a switch that does not answer cannot hide the capture-port reading above.
+  const switchReading = await (deps?.switchRead ?? readSwitchLive)(workers);
   const guests = probes
     .filter((p) => p.reachable)
     // `policy: undefined`, not null. `fleetConsistency` takes `policy?: Record<string, unknown>` -- an
@@ -1172,7 +1182,7 @@ export async function fleetStatus(deps) {
   // headline through `mismatches` instead.
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
     fields, reportedOnly });
-  return { rows, linkLayer, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
+  return { rows, linkLayer, switch: switchReading, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
     reportedOnly, reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
