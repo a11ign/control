@@ -257,6 +257,11 @@
   register: lab_pull
   changed_when: "'Already up to date' not in (lab_pull.stdout | default(''))"
 
+- name: "Each layer's checkout, beside the core's"
+  # THE LAYERS' HALF OF THE MOVE (ADR 0039 item 6, row 6c, #3396), after the core's so the pair is settled
+  # together. A no-op while no layer lives in its own repository; the file's header says what it refuses.
+  ansible.builtin.include_tasks: lab-layer-checkouts.yml
+
 - name: "Say why the checkout was left alone"
   when: not lab_should_pull
   ansible.builtin.debug:
