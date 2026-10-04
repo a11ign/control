@@ -26,7 +26,7 @@ import {
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
   readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
   importClosure, staleCheckoutVerdict, checkAgainstMain, FETCH_THROTTLE_MS,
-  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight, LAUNCHABLE_PLAYBOOKS,
+  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight, LAUNCHABLE_PLAYBOOK_NAMES,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1156,7 +1156,7 @@ test("#3543 readPlaysInFlight: running is a play; exited, failed, inactive and t
 });
 
 test("#3543 readPlaysInFlight: the default counts exactly the units the launcher can create, and ignores every other a11y-fleet unit", () => {
-  const launchable = LAUNCHABLE_PLAYBOOKS.map((f) => `a11y-fleet-${f.replace(/\.yml$/, "")}.service`);
+  const launchable = LAUNCHABLE_PLAYBOOK_NAMES.map((name) => `a11y-fleet-${name}.service`);
   // `provision.yml` and `lab-job.yml` are files in ansible/ the launcher cannot start; `provision` would be the unit of the first.
   const notLaunchable = ["provision", "lab-job", "auto-off", "auto-off-schedule", "unrelated"].map((n) => `a11y-fleet-${n}.service`);
   const answer = (names: string[]) => ({ status: 0, stdout: JSON.stringify(names.map((unit) => ({ unit, active: "active", sub: "running" }))) });
@@ -1167,13 +1167,13 @@ test("#3543 readPlaysInFlight: the default counts exactly the units the launcher
   assert.ok(launchable.includes("a11y-fleet-provision-role.service") && !launchable.includes("a11y-fleet-provision.service"));
 });
 
-test("#3543 LAUNCHABLE_PLAYBOOKS is the launcher's own PLAYBOOKS, read from fleet-playbook.mjs's source (importing it would run its CLI)", () => {
+test("#3543 LAUNCHABLE_PLAYBOOK_NAMES is the launcher's own PLAYBOOKS without the .yml, read from fleet-playbook.mjs's source (importing it would run its CLI)", () => {
   const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
   const declared = /^const PLAYBOOKS = \[([^\]]*)\]/m.exec(source);
   assert.ok(declared, "the launcher still declares `const PLAYBOOKS = [...]`; if it moved, this pin must follow it");
-  const names = [...declared[1].matchAll(/"([^"]+\.yml)"/g)].map((m) => m[1]);
+  const names = [...declared[1].matchAll(/"([^"]+)\.yml"/g)].map((m) => m[1]);
   assert.ok(names.length > 0, "the positive control: the parse found names, so the equality below is not empty against empty");
-  assert.deepEqual(LAUNCHABLE_PLAYBOOKS, names);
+  assert.deepEqual(LAUNCHABLE_PLAYBOOK_NAMES, names);
 });
 
 test("#3543 readPlaysInFlight asks systemd exactly, and a row missing any one field is unreadable", () => {

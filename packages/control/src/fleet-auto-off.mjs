@@ -342,17 +342,20 @@ const MS_PER_HOUR = 60 * MS_PER_MINUTE;
  */
 
 /**
- * The playbooks `fleet-playbook.mjs` can start, and ONLY those: its `PLAYBOOKS`, enforced at `parseArgs`, is the whole
- * set of names `startPlaybookUnit` can turn into a unit. Not every `ansible/*.yml`: a file there that the launcher
- * cannot start (`provision.yml`, `lab-job.yml`) is no play, and counting it would let a stale or unrelated
- * `a11y-fleet-*` unit keep every worker powered on. A copy rather than an import, because importing the launcher runs
- * its CLI; `fleet-auto-off.test.ts` pins this list equal to the launcher's own, so a playbook added there fails here.
+ * The playbooks `fleet-playbook.mjs` can start, and ONLY those, by the name its unit carries: its `PLAYBOOKS` minus the
+ * `.yml`, which is how `startPlaybookUnit` builds `a11y-fleet-<name>`. `PLAYBOOKS`, enforced at `parseArgs`, is the whole
+ * set of names it can turn into a unit. Not every `ansible/*.yml`: a file there that the launcher cannot start
+ * (`provision.yml`, `lab-job.yml`) is no play, and counting it would let a stale or unrelated `a11y-fleet-*` unit keep
+ * every worker powered on. A copy rather than an import, because importing the launcher runs its CLI;
+ * `fleet-auto-off.test.ts` pins this list equal to the launcher's own, so a playbook added there fails here. Stems and
+ * not file names: `protocol-guard.test.ts` counts a source that says `ansible-playbook` and the deploy playbook's file
+ * name as a path that SHIPS worker code, and this file only reads a unit's state.
  */
-export const LAUNCHABLE_PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml",
-  "control-host-install.yml", "os-rollback.yml", "collect-logs.yml"];
+export const LAUNCHABLE_PLAYBOOK_NAMES = ["deploy", "sleep", "provision-role", "recover", "inventory-install",
+  "control-host-install", "os-rollback", "collect-logs"];
 
 /** Each launchable playbook's unit, `a11y-fleet-<name>.service`. @returns {string[]} */
-const playbookUnits = () => LAUNCHABLE_PLAYBOOKS.map((f) => `a11y-fleet-${f.replace(/\.yml$/, "")}.service`);
+const playbookUnits = () => LAUNCHABLE_PLAYBOOK_NAMES.map((name) => `a11y-fleet-${name}.service`);
 
 /**
  * A play unit is finished when systemd says so: `failed`, `inactive`, or `active (exited)` -- what
@@ -366,7 +369,7 @@ const playFinished = ({ active, sub }) => active === "failed" || active === "ina
 /**
  * Read the play signal (#3543): the `a11y-fleet-<playbook>` units on this host, via `systemctl list-units`. Pure over
  * `run`, so a test supplies systemd's answer. The tick's own unit `a11y-fleet-auto-off.service` is running whenever
- * this runs and is not a playbook's unit, so only the units of `LAUNCHABLE_PLAYBOOKS` are counted.
+ * this runs and is not a playbook's unit, so only the units of `LAUNCHABLE_PLAYBOOK_NAMES` are counted.
  *
  * @param {{ run?: typeof spawnSync, units?: string[] }} [deps]
  * @returns {{ reading: PlayReading, detail: string }}
