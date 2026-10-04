@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -185,4 +185,39 @@ test("positive control: a diff that edits a hashed file is the one the check abo
   assert.ok(runServer, "the stamp lists run-server.cmd; without it this control proves nothing");
   assert.deepEqual(hashedFilesTouched([ROW_CHANGESET, "README.md", runServer], hashed), [runServer]);
   assert.deepEqual(hashedFilesTouched([ROW_CHANGESET, "packages/nvda-worker/src/launcher-reach.cmd"], hashed), []);
+});
+
+/**
+ * A LAUNCHER'S EXIT CODE MUST REACH ITS LOG (#3397, found on a real worker).
+ *
+ * In cmd a digit directly before `>>` is a HANDLE number, so `echo EXITCODE=0>> log` redirects handle 0 and
+ * writes NOTHING to the file, and `echo EXITCODE=1>> log` writes `EXITCODE=` without its digit. Measured on
+ * a11y-worker-4 with `cmd /c`; the launcher's header called the line "recorded the same way a verdict is" and
+ * the first real run of `run-capture-check.cmd` had no such line. The redirect goes FIRST, where no digit can
+ * touch it. Lines that record an exit code are found by the word, not by the old shape, so a new launcher that
+ * copies the broken one is refused here too.
+ */
+const REDIRECT_FIRST = /^\s*>> \S+ echo EXITCODE[= ]/;
+const EXITCODE_LINE = /EXITCODE/;
+
+function exitCodeLinesRefused(source: string): string[] {
+  return source.split("\n").filter((line) => EXITCODE_LINE.test(line) && !REDIRECT_FIRST.test(line));
+}
+
+test("every launcher line that records an exit code redirects FIRST, so no digit can be read as a handle", () => {
+  const dir = resolve(REPO, LAYER_SRC);
+  const launchers = readdirSync(dir).filter((f) => f.endsWith(".cmd"));
+  const lines = launchers.flatMap((f) => read(`${LAYER_SRC}/${f}`).split("\n").filter((l) => EXITCODE_LINE.test(l)));
+  // The population is the run-capture-check.cmd lines (two early exits and the verdict) plus run-capture.cmd's;
+  // the positive control below shows the filter refuses the shape, so this count is what keeps it from being vacuous.
+  assert.ok(lines.length >= 4, `expected the launchers' EXITCODE lines, found ${lines.length}`);
+  for (const f of launchers) assert.deepEqual(exitCodeLinesRefused(read(`${LAYER_SRC}/${f}`)), [], `${f} records an exit code the log never receives`);
+});
+
+test("positive control: the shapes that lost the digit are the ones refused", () => {
+  assert.deepEqual(exitCodeLinesRefused("echo EXITCODE=0>> capture-check.log"), ["echo EXITCODE=0>> capture-check.log"]);
+  assert.deepEqual(exitCodeLinesRefused("  echo EXITCODE=1>> capture-check.log"), ["  echo EXITCODE=1>> capture-check.log"]);
+  assert.deepEqual(exitCodeLinesRefused("echo EXITCODE %ERRORLEVEL%>> capture.log"), ["echo EXITCODE %ERRORLEVEL%>> capture.log"]);
+  assert.deepEqual(exitCodeLinesRefused(">> capture-check.log echo EXITCODE=%ERRORLEVEL%"), []);
+  assert.deepEqual(exitCodeLinesRefused("  >> capture-check.log echo EXITCODE=1"), []);
 });
