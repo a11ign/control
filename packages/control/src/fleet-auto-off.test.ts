@@ -26,7 +26,7 @@ import {
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
   readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
   importClosure, staleCheckoutVerdict, checkAgainstMain, FETCH_THROTTLE_MS,
-  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport,
+  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1067,4 +1067,112 @@ test("#3309 renderReport: a refusal still fails the unit, and the proof readings
   assert.ok(held.decisions.every(({ decision }) => decision.reason === "stale-checkout"));
   assert.ok(held.decisions.every(({ proof }) => proof?.standing === "proven"), "holdBackIfStale must keep the reading");
   assert.equal(renderReport(held, true).failed, true);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// #3543 -- a play in flight is not idle. The incident is #3524's 19:33Z failure: a box probed idle past the
+// threshold while `fleet:provision` still had it ahead, powered off by this timer.
+// ---------------------------------------------------------------------------------------------------------
+
+const playIs = (reading: "none" | "running" | "unreadable") => () => ({ reading, detail: reading === "unreadable" ? "systemctl: gone" : "" });
+
+/** One tick of the idle box (idle since 0, wake-proven, `now` at the threshold) against whatever the play signal says. */
+const idleBoxTick = (playsInFlight: () => { reading: "none" | "running" | "unreadable", detail: string }, extra: Record<string, unknown> = {}) => tick({
+  workers: WORKERS,
+  probe: async () => ({ outcome: "idle" }),
+  now: () => IDLE_THRESHOLD_MS,
+  statePath: "x.json",
+  read: alreadyIdleSince0, proofTransport: provenAt0,
+  write: () => {},
+  playsInFlight,
+  ...extra,
+});
+
+test("#3543 1 the incident: an idle-past-threshold box with a play in flight is KEPT, naming the play; the same box with none is put off", async () => {
+  const withPlay = await idleBoxTick(playIs("running"));
+  assert.deepEqual(withPlay.decisions[0].decision, { action: "keep", reason: "play-in-flight" });
+  const control = await idleBoxTick(playIs("none"));
+  assert.deepEqual(control.decisions[0].decision, { action: "off", reason: "idle-five-minutes" },
+    "the control: without the play this box is decided off, so the keep above is the play's doing");
+});
+
+test("#3543 2 the signal needs no GitHub: with no GH_TOKEN the decision is the same, and the reader runs only systemctl", async () => {
+  const savedToken = process.env.GH_TOKEN;
+  delete process.env.GH_TOKEN;
+  try {
+    const calls: string[] = [];
+    const reader = () => readPlaysInFlight({
+      units: ["a11y-fleet-provision.service"],
+      run: ((command: string, args: string[]) => {
+        calls.push(`${command} ${args[0]}`);
+        return { status: 0, stdout: JSON.stringify([{ unit: "a11y-fleet-provision.service", active: "active", sub: "running" }]) };
+      }) as never,
+    });
+    const result = await idleBoxTick(reader);
+    assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "play-in-flight" });
+    assert.deepEqual(calls, ["systemctl list-units"], "one local systemctl read and nothing that could reach GitHub");
+  } finally {
+    if (savedToken === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = savedToken;
+  }
+});
+
+test("#3543 3 a signal that cannot be read is not `no play`: the box is kept with its own reason, and stderr says why", async () => {
+  const written: string[] = [];
+  const realWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string) => { written.push(String(chunk)); return true; }) as never;
+  try {
+    const result = await idleBoxTick(playIs("unreadable"));
+    assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "play-unreadable" });
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  assert.match(written.join(""), /the play signal could not be read, every box kept: systemctl: gone/);
+});
+
+test("#3543 3 readPlaysInFlight: every way the read can fail is `unreadable`, never `none`", () => {
+  const says = (result: object) => readPlaysInFlight({ units: ["a11y-fleet-deploy.service"], run: (() => result) as never }).reading;
+  assert.equal(says({ error: new Error("spawn systemctl ENOENT"), status: null }), "unreadable", "systemctl absent");
+  assert.equal(says({ status: 1, stdout: "[]" }), "unreadable", "systemctl failed");
+  assert.equal(says({ status: 0, stdout: "not json" }), "unreadable", "not JSON");
+  assert.equal(says({ status: 0, stdout: "{}" }), "unreadable", "JSON that is not a list of units");
+  assert.equal(says({ status: 0, stdout: JSON.stringify([{ unit: "a11y-fleet-deploy.service" }]) }), "unreadable", "a row with no state");
+  assert.equal(says({ status: 0, stdout: "[]" }), "none", "the positive control: a readable empty answer IS no play");
+});
+
+test("#3543 readPlaysInFlight: running is a play; exited, failed, inactive and the timer's own unit are not; an unseen sub-state is", () => {
+  const units = ["a11y-fleet-deploy.service", "a11y-fleet-provision.service"];
+  const reading = (rows: [string, string, string][]) => readPlaysInFlight({ units, run: (() => ({
+    status: 0, stdout: JSON.stringify(rows.map(([unit, active, sub]) => ({ unit, active, sub }))),
+  })) as never });
+  const deploy = "a11y-fleet-deploy.service";
+  assert.deepEqual(reading([[deploy, "active", "running"]]), { reading: "running", detail: deploy });
+  assert.equal(reading([[deploy, "active", "exited"]]).reading, "none", "--remain-after-exit leaves a finished play `active (exited)`");
+  assert.equal(reading([[deploy, "failed", "failed"]]).reading, "none");
+  assert.equal(reading([[deploy, "inactive", "dead"]]).reading, "none");
+  assert.equal(reading([["a11y-fleet-auto-off.service", "active", "running"]]).reading, "none",
+    "this timer's own service is running whenever it reads, and is not a play");
+  assert.equal(reading([[deploy, "active", "start"]]).reading, "running", "a sub-state nobody has seen is not `finished`");
+  assert.equal(reading([[deploy, "deactivating", "stop-sigterm"]]).reading, "running");
+});
+
+test("#3543 readPlaysInFlight: the units counted are the playbooks `fleet-playbook.mjs` can start, derived from the ansible directory", () => {
+  const rows = ["deploy", "provision", "sleep", "auto-off"].map((n) => ({ unit: `a11y-fleet-${n}.service`, active: "active", sub: "running" }));
+  const { detail } = readPlaysInFlight({ run: (() => ({ status: 0, stdout: JSON.stringify(rows) })) as never });
+  assert.equal(detail, "a11y-fleet-deploy.service, a11y-fleet-provision.service, a11y-fleet-sleep.service",
+    "deploy, provision and sleep are playbooks in ansible/; `auto-off` is the timer's own unit and is not one");
+});
+
+test("#3543 4 the play ending releases the box, and the idle clock is NOT restarted from the play's end", async () => {
+  let saved = "";
+  const during = await idleBoxTick(playIs("running"), { write: (_path: string, data: string) => { saved = data; } });
+  assert.deepEqual(during.decisions[0].decision, { action: "keep", reason: "play-in-flight" });
+  assert.equal(JSON.parse(saved).idleSince["a11y-worker-2"], 0, "the streak kept counting through the play");
+  const after = await idleBoxTick(playIs("none"), { read: filesWith(saved) });
+  assert.deepEqual(after.decisions[0].decision, { action: "off", reason: "idle-five-minutes" },
+    "off on the first tick after the play: the box was idle throughout, and the code comment says the clock does not restart");
+});
+
+test("#3543 main passes the real reader: tick's default is `no play`, so only this wiring makes the signal live", () => {
+  const source = readFileSync(fileURLToPath(new URL("./fleet-auto-off.mjs", import.meta.url)), "utf8");
+  assert.match(source, /await tick\(\{ workers: declared, apply, playsInFlight: readPlaysInFlight \}\)/);
 });

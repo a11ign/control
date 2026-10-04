@@ -74,6 +74,36 @@
  * `refuse <reason>` on every tick that holds a shutdown back, exits 1 so the oneshot unit shows FAILED in
  * `systemctl --failed` and the journal, and records the refusal in the state file for `fleet-watch.mjs`.
  *
+ * ## A play in flight is not idle (#3543, from #3524's 19:33Z failure)
+ *
+ * THE INCIDENT: the 14-box `fleet:provision` of 2026-10-04 woke the boxes at 19:27Z, and this timer, deciding from
+ * `/health` `busy` alone, was putting boxes to sleep at `idle-five-minutes` with the play still ahead of them.
+ * Worker 2's first provision failed at 19:33:52Z (`Module result deserialization failed`) with its `/health` dead.
+ * Likely the cause, not proven for worker 2: nobody read this timer's decision line for that box. A play changes a
+ * box's stamp AND needs the box up, and a box waiting its turn in a serial play answers `busy: false` throughout.
+ *
+ * THE SIGNAL is systemd's own. `fleet-playbook.mjs`'s `startPlaybookUnit` runs every play as the transient unit
+ * `a11y-fleet-<playbook>` (`systemd-run --remain-after-exit`), so "a play is running" is "such a unit is not
+ * finished". WRITTEN by `systemd-run` when the play starts; CLEARED by systemd when ansible exits (`active (exited)`
+ * or `failed`), so no session has to remember to clear it. `readPlaysInFlight` reads it with a local `systemctl`
+ * and needs no credential, which is why it is not what #2737 removed: that was a GitHub read (`Fleet-hold-until:`)
+ * answering a question a power cycle cannot change, and a play can change it.
+ *
+ * It keeps EVERY box while any play runs, not only the one the play's `-l` names. A limit is an ansible pattern
+ * (names, groups, `:` unions, `!` exclusions) that this file would have to evaluate per box, and a wrong answer is a
+ * box powered off mid-play. The cost is a box kept up for the length of a play it was not in.
+ *
+ * A signal that cannot be read keeps the box too (`play-unreadable`) and never reads as "no play": the direction
+ * `no-answer` already takes, since a shutdown nobody can undo is the wrong default.
+ *
+ * THE IDLE CLOCK DOES NOT RESTART when the play ends. `advance` keeps counting a box probed `idle` through the play,
+ * so a box that sat idle for the whole play is off one tick after it ends. Deliberate: the box WAS idle, and a
+ * restart needs a second ledger for a grace nobody asked for. An operator who wants the box next wakes it
+ * with `fleet:wake`, as for any idle box.
+ *
+ * `tick`'s default reads "no play", as `batchQueued`'s default reads `false`, so a test needs no systemd.
+ * `main()` passes the real reader and `fleet-auto-off.test.ts` pins that it does.
+ *
  * ## `batchQueued` and `leasePending` are an honest gap
  *
  * Done-when 1 names them as keep reasons a pure function must carry. Nothing in this codebase today
@@ -82,7 +112,7 @@
  * directly, positive and negative) so that the day a producer exists, only `main()` changes.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, realpathSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
@@ -296,13 +326,60 @@ export function advanceShutdownRequested(probes, previous) {
  * @typedef {{
  *   name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer",
  *   idleSince: number | null, shutdownRequestedAt: number | null, wakeProvenAt: number | null,
- *   batchQueued: boolean, leasePending: boolean,
+ *   batchQueued: boolean, leasePending: boolean, playInFlight?: PlayReading,
  * }} DecisionInput
  * @typedef {{ action: "off" | "keep", reason: string }} Decision
  * @typedef {{ standing: ReturnType<typeof proofStanding>, provenAt: number | null }} ProofReading
  */
 
 const MS_PER_HOUR = 60 * MS_PER_MINUTE;
+
+/**
+ * Is a play running on the control plane? `unreadable` is its own answer and never "none" (#3543). Absent on a
+ * `DecisionInput` means the caller did not ask: `tick` always supplies it, and `main` supplies the real reader.
+ *
+ * @typedef {"none" | "running" | "unreadable"} PlayReading
+ */
+
+/** The playbooks `startPlaybookUnit` can run, each as the unit `a11y-fleet-<name>`. @returns {string[]} */
+const playbookUnits = () => readdirSync(ANSIBLE_DIR).filter((f) => f.endsWith(".yml"))
+  .map((f) => `a11y-fleet-${f.replace(/\.yml$/, "")}.service`);
+
+/**
+ * A play unit is finished when systemd says so: `failed`, `inactive`, or `active (exited)` -- what
+ * `--remain-after-exit` leaves behind. Anything else, including a sub-state this file has not seen, is a play still
+ * going: unknown reads as running because the other reading powers a box off mid-play.
+ *
+ * @param {{ active: string, sub: string }} unit
+ */
+const playFinished = ({ active, sub }) => active === "failed" || active === "inactive" || (active === "active" && sub === "exited");
+
+/**
+ * Read the play signal (#3543): the `a11y-fleet-<playbook>` units on this host, via `systemctl list-units`. Pure over
+ * `run`, so a test supplies systemd's answer. The tick's own unit `a11y-fleet-auto-off.service` is running whenever
+ * this runs and is not a playbook's unit, so only the names `playbookUnits` derives are counted.
+ *
+ * @param {{ run?: typeof spawnSync, units?: string[] }} [deps]
+ * @returns {{ reading: PlayReading, detail: string }}
+ */
+export function readPlaysInFlight({ run = spawnSync, units = playbookUnits() } = {}) {
+  const result = run("systemctl", ["list-units", "--all", "--type=service", "--no-pager", "--output=json", "a11y-fleet-*.service"],
+    { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    return { reading: "unreadable", detail: `systemctl list-units ${result.error ? result.error.message : `exited ${result.status}`}` };
+  }
+  let listed;
+  try {
+    listed = JSON.parse(result.stdout);
+  } catch (cause) {
+    return { reading: "unreadable", detail: `systemctl list-units did not answer JSON (${/** @type {Error} */ (cause).message})` };
+  }
+  if (!Array.isArray(listed) || listed.some((u) => typeof u?.unit !== "string" || typeof u?.active !== "string" || typeof u?.sub !== "string")) {
+    return { reading: "unreadable", detail: "systemctl list-units answered JSON without unit/active/sub on every row" };
+  }
+  const running = listed.filter((u) => units.includes(u.unit) && !playFinished(u)).map((u) => u.unit);
+  return running.length ? { reading: "running", detail: running.join(", ") } : { reading: "none", detail: "" };
+}
 
 /**
  * How long before a proof lapses it is named. Renewal is a human-run cycle on a calendar (#3308), so the warning
@@ -356,6 +433,8 @@ export function autoOffDecision(input, now, idleThresholdMs = IDLE_THRESHOLD_MS)
   if (!input.hasMac) return { action: "keep", reason: "no-mac" };
   if (!hasRecentWakeProof(input.wakeProvenAt, now)) return { action: "keep", reason: "wake-unproven" };
   if (input.shutdownRequestedAt !== null) return { action: "keep", reason: "already-off" };
+  if (input.playInFlight === "running") return { action: "keep", reason: "play-in-flight" };
+  if (input.playInFlight === "unreadable") return { action: "keep", reason: "play-unreadable" };
   if (input.probe === "no-answer") return { action: "keep", reason: "no-answer" };
   if (input.probe === "busy") return { action: "keep", reason: "busy" };
   if (input.batchQueued) return { action: "keep", reason: "batch-queued" };
@@ -600,7 +679,7 @@ function recordProbedCaptures(probes, where) {
  * @param {{ name: string, mac: string | null }} w
  * @param {string} outcome
  * @param {{ idleSince: SinceState, shutdownRequestedAt: SinceState, wakeProof: Record<string, number>,
- *   batchQueued: () => boolean, leasePending: () => boolean }} known
+ *   batchQueued: () => boolean, leasePending: () => boolean, play: PlayReading }} known
  * @returns {DecisionInput}
  */
 function decisionInput(w, outcome, known) {
@@ -613,6 +692,7 @@ function decisionInput(w, outcome, known) {
     wakeProvenAt: known.wakeProof[w.name] ?? null,
     batchQueued: known.batchQueued(),
     leasePending: known.leasePending(),
+    playInFlight: known.play,
   };
 }
 
@@ -665,6 +745,19 @@ function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
 }
 
 /**
+ * The play signal for this tick, read once for the whole fleet. Absent reads `none` (see the header); an unreadable
+ * one keeps every box and says why on stderr, since a fleet kept on for a reason nobody can see is the quiet failure.
+ *
+ * @param {typeof readPlaysInFlight | undefined} read
+ * @returns {PlayReading}
+ */
+function askForPlays(read) {
+  const { reading, detail } = read ? read() : { reading: /** @type {const} */ ("none"), detail: "" };
+  if (reading === "unreadable") process.stderr.write(`fleet-auto-off: the play signal could not be read, every box kept: ${detail}\n`);
+  return reading;
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.mjs`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
@@ -673,7 +766,7 @@ function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
  *   workers?: { name: string, host: string, mac: string | null }[],
  *   probe?: typeof probeIdle, now?: () => number, statePath?: string, capturesPath?: string, proofPath?: string,
  *   proofTransport?: ProofTransport, read?: typeof readFileSync, write?: typeof writeFileSync,
- *   batchQueued?: () => boolean, leasePending?: () => boolean,
+ *   batchQueued?: () => boolean, leasePending?: () => boolean, playsInFlight?: typeof readPlaysInFlight,
  *   apply?: boolean, dispatch?: typeof dispatchShutdown,
  *   checkout?: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain>,
  * }} [deps]
@@ -709,7 +802,7 @@ export async function tick(deps = {}) {
   const idleSince = advance(probes, previous.idleSince, now);
   const shutdownRequestedAt = advanceShutdownRequested(probes, previous.shutdownRequestedAt);
 
-  const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending };
+  const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending, play: askForPlays(deps.playsInFlight) };
   const decided = workers.map((w) => {
     const p = probes.find((probed) => probed.name === w.name);
     const provenAt = wakeProof[w.name] ?? null;
@@ -755,7 +848,7 @@ async function main() {
     return;
   }
 
-  const { out, failed } = renderReport(await tick({ workers: declared, apply }), apply);
+  const { out, failed } = renderReport(await tick({ workers: declared, apply, playsInFlight: readPlaysInFlight }), apply);
   process.stdout.write(out);
   if (failed) process.exitCode = 1;
 }
