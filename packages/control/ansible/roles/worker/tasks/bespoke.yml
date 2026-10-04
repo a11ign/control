@@ -274,9 +274,9 @@
       {{ wake_prereqs.firmware_wake_on_lan | default('') }}{{ wake_prereqs.firmware_reason | default('') }}
 
 - name: Firmware boot order, and whether network boot is in it (#3387)
-  # SHIPS OFF: with `worker_enforce_boot_order` false (the default) this READS and reports and calls no setter.
-  # A true value writes the box's own order minus its network members and reads it back, and a read-back that
-  # is not the target fails the play for the worker by name. `not-read` / `unreadable` / `needs-change` do not
+  # ON by default (#3492): `worker_enforce_boot_order` is true, so this writes the box's own order minus its
+  # network members and reads it back, and a read-back that is not the target fails the play for the worker by
+  # name. `-e worker_enforce_boot_order=false` READS and reports and calls no setter. `not-read` / `unreadable` / `needs-change` do not
   # fail it: a box this read cannot speak for is not a box with a fault.
   become: true
   a11y.worker.a11y_boot_order:
