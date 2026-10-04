@@ -46,15 +46,16 @@
  * runs from a raw git checkout with none (ADR 0012; `control-has-no-dependencies.test.ts` enforces it).
  * `code-drift.mjs` is the part of that file with no opinion about what "expected" means — pure comparison
  * and message-building, importing nothing but `node:child_process` — and this file computes `expected`
- * itself, the same way `fleet-playbook.mjs` already does, through the SAME relative path
- * `code-version.mjs` documents as safe: it imports nothing but node stdlib and `worker-files.mjs`.
+ * itself, the same way `fleet-playbook.mjs` already does, through `layer-checkouts.mjs`, which says where
+ * the layer lives and reaches the `code-version.mjs` that documents itself as safe: it imports nothing but
+ * node stdlib and `worker-files.mjs`.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWorkersServe } from "../../worker-fleet/src/code-drift.mjs";
-import { codeVersion, workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
+import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.mjs";
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
@@ -412,7 +413,7 @@ const withAddress = (url, address) => url.replace(new URL(url).hostname, address
  *
  * @param {string[]} argv
  * @param {{ catalogueText?: string, workers?: string[], expected?: string,
- *           checkFleet?: (expected: string, workers: string[], options: object) => Promise<void>,
+ *           checkFleet?: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
  *           dispatch?: (forwarded: string[]) => void,
  *           readFleet?: () => { workers: Worker[], refusal: string | null },
  *           wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
@@ -464,7 +465,7 @@ export async function run(argv, {
  * Resolve, wake, then check staleness -- in that order, each for a reason the comments below give.
  *
  * @param {{ needs: { needed: Worker[], selected: boolean }, catalogue: string, job: string }} run
- * @param {{ expected?: string, checkFleet: (expected: string, workers: string[], options: object) => Promise<void>,
+ * @param {{ expected?: string, checkFleet: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
  *           allowStale: boolean, wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
  *           resolvePool?: typeof resolvePoolAtUseTime }} deps
  * @returns {Promise<{ moved: Record<string, string>, leftOut: string[] }>}
@@ -480,8 +481,11 @@ async function placeWakeAndCheck({ needs, catalogue, job }, { expected, checkFle
   const leftOut = wake && placed.needed.length ? await wakeOrRefuse({ ...needs, needed: placed.needed }, wake, placed.why) : [];
   const pool = placed.needed.filter((w) => !leftOut.includes(w.name)).map((w) => w.url);
   if (captureBearingJobs(catalogue).includes(job)) {
-    const hash = expected ?? codeVersion(workerSourceDir());
-    await checkFleet(hash, pool, { when: "before dispatching to the lab", allow: allowStale, bareMetalUrls: pool });
+    const hash = expected ?? await layerCodeVersion("nvda-worker");
+    await checkFleet(hash, pool, {
+      when: "before dispatching to the lab", allow: allowStale, bareMetalUrls: pool,
+      sourceDir: layerSourceDir("nvda-worker"),
+    });
     // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
   }
   return { moved: placed.moved, leftOut };
