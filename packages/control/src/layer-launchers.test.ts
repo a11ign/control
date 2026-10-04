@@ -154,7 +154,7 @@ const PRE_CHANGE_PROVISION_REVISION = "9ed0c82508499854";
 
 /** The stamp's own algorithm, restated: CRLF to LF, UTF-8 without a BOM, SHA-256 each, then over the joined hex. */
 const fileHash = (rel: string) => createHash("sha256")
-  .update(read(rel).replace(/^﻿/, "").replaceAll("\r\n", "\n")).digest("hex").toUpperCase();
+  .update(read(rel).replace(/^\uFEFF/, "").replaceAll("\r\n", "\n")).digest("hex").toUpperCase();
 const provisionRevision = (files: string[]) =>
   createHash("sha256").update(files.map(fileHash).join("")).digest("hex").slice(0, 16);
 
