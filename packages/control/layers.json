@@ -1,0 +1,6 @@
+{
+  "//": "WHERE EACH LAYER'S CODE LIVES, in ONE place and listed here by hand rather than discovered by glob (ADR 0039 item 6, #3394). `path` is relative to the repository root this checkout is. Today the only layer is inside the monorepo, so this changes nothing; when it moves, this is the line that says where it went, and every control-side reader of the worker's code version follows it. Read through `src/layer-checkouts.mjs`, never by hand.",
+  "layers": {
+    "nvda-worker": { "path": "packages/nvda-worker" }
+  }
+}

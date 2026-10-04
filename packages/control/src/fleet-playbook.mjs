@@ -78,7 +78,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // `fleet-env.mjs` imports only node builtins and its own siblings. And the inventory is the RIGHT source
 // here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
 // that cannot exist there.
-import { workerSourceDir } from "../../nvda-worker/src/code-version.mjs";
+import { layerSourceDir } from "./layer-checkouts.mjs";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
 // #2832: WHAT PROVES A MOVED WORKER'S IDENTITY BEFORE A WRITE LANDS. A sibling and builtin-only, so ADR 0012's
 // no-`npm install` property is unchanged.
@@ -673,7 +673,7 @@ async function guardProtocolChange(chosen, { readFleet = readControlPlaneFleet }
   // `no-win32-imports.test.ts` had to find it. A control-plane script must not depend on the operator's
   // machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
   const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(
-    readFileSync(resolve(workerSourceDir(), PROTOCOL_VERSION_FILE), "utf8"))?.[1] ?? null;
+    readFileSync(resolve(layerSourceDir("nvda-worker"), PROTOCOL_VERSION_FILE), "utf8"))?.[1] ?? null;
   // THE CONTROL PLANE'S OWN INVENTORY, DIRECTLY — deliberately not `resolveWorkerPool`, and this is the
   // one place that is right. That resolver answers "which workers should I use", and honours
   // `A11Y_WORKER(S)` first because naming workers means you are managing them. This guard asks a different
