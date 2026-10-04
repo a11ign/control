@@ -113,3 +113,46 @@ export const layerSourceDir = declared.layerSourceDir;
 export const layerCodeVersion = declared.layerCodeVersion;
 export const separateLayers = declared.separateLayers;
 export const layerPins = declared.layerPins;
+
+/**
+ * Every `--layer-ref=<name>=<sha>`, in order. REPEATABLE, which `flagValue` (first match only) is not: one
+ * layer per flag, so the pair grows by a flag per layer rather than by a packed value.
+ *
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+export function layerRefValues(argv) {
+  const prefix = "--layer-ref=";
+  return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
+}
+
+/** The playbooks that move a guest's checkout and so hold a layer's second half of the pair (#3395). */
+const LAYER_PINNED = ["deploy.yml", "provision-role.yml"];
+
+/**
+ * The refusal for `--layer-ref` on a playbook that pins no layer, or for a layer left unpinned on one that does;
+ * else the pins. Silently dropping a pin the operator typed is the failure `refuseUnknownFlags` exists to end.
+ *
+ * @param {{ chosen: string, given: string[] }} args
+ * @returns {{ pins: Record<string, string>, refusal: string | null }}
+ */
+export function layerPinsFor({ chosen, given }) {
+  if (!LAYER_PINNED.includes(chosen)) {
+    return { pins: {}, refusal: given.length
+      ? `refusing --layer-ref with --playbook=${chosen}: only ${LAYER_PINNED.join(" and ")} pin a layer.` : null };
+  }
+  return layerPins(given);
+}
+
+/**
+ * The one `-e` that carries the layers' half of the commit pair, or "" when no layer has its own repository.
+ * Single-quoted for the remote shell that parses this string; `layerPins` has already restricted every name to
+ * `[a-z0-9-]` and every sha to 40 hex digits, so nothing that reaches here can close the quote.
+ *
+ * @param {Record<string, string>} pins a value that has passed `layerPinsFor`
+ * @returns {string} the argv fragment, leading space included, or ""
+ */
+export function layerCommitsExtraVars(pins) {
+  if (!Object.keys(pins).length) return "";
+  return ` -e '${JSON.stringify({ a11y_layer_commits: pins })}'`;
+}

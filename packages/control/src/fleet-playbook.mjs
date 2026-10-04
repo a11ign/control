@@ -65,7 +65,7 @@ import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
-import { layerPins } from "./layer-checkouts.mjs";
+import { layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.mjs";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
@@ -1063,36 +1063,6 @@ export function allowOfflineNames(argv) {
 }
 
 /**
- * Every `--layer-ref=<name>=<sha>`, in order. REPEATABLE, which `flagValue` (first match only) is not: one
- * layer per flag, so the pair grows by a flag per layer rather than by a packed value.
- *
- * @param {string[]} argv
- * @returns {string[]}
- */
-export function layerRefValues(argv) {
-  const prefix = "--layer-ref=";
-  return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
-}
-
-/** The playbooks that move a guest's checkout and so hold a layer's second half of the pair (#3395). */
-const LAYER_PINNED = ["deploy.yml", "provision-role.yml"];
-
-/**
- * The refusal for `--layer-ref` on a playbook that pins no layer, or for a layer left unpinned on one that does;
- * else the pins. Silently dropping a pin the operator typed is the failure `refuseUnknownFlags` exists to end.
- *
- * @param {{ chosen: string, given: string[] }} args
- * @returns {{ pins: Record<string, string>, refusal: string | null }}
- */
-export function layerPinsFor({ chosen, given }) {
-  if (!LAYER_PINNED.includes(chosen)) {
-    return { pins: {}, refusal: given.length
-      ? `refusing --layer-ref with --playbook=${chosen}: only ${LAYER_PINNED.join(" and ")} pin a layer.` : null };
-  }
-  return layerPins(given);
-}
-
-/**
  * `--layer-ref`, read off argv and refused or accepted, so `parseArgs` stays under its complexity budget.
  *
  * @param {{ chosen: string, refuse: (message: string) => void }} args
@@ -1102,19 +1072,6 @@ function layerCommitsOrRefuse({ chosen, refuse }) {
   const { pins, refusal } = layerPinsFor({ chosen, given: layerRefValues(process.argv) });
   if (refusal) refuse(refusal);
   return pins;
-}
-
-/**
- * The one `-e` that carries the layers' half of the commit pair, or "" when no layer has its own repository.
- * Single-quoted for the remote shell that parses this string; `layerPins` has already restricted every name to
- * `[a-z0-9-]` and every sha to 40 hex digits, so nothing that reaches here can close the quote.
- *
- * @param {Record<string, string>} pins a value that has passed `layerPinsFor`
- * @returns {string} the argv fragment, leading space included, or ""
- */
-export function layerCommitsExtraVars(pins) {
-  if (!Object.keys(pins).length) return "";
-  return ` -e '${JSON.stringify({ a11y_layer_commits: pins })}'`;
 }
 
 /**

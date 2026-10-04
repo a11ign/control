@@ -17,8 +17,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { layersFrom, separateLayers } from "./layer-checkouts.mjs";
-import { layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./fleet-playbook.mjs";
+import { layerCommitsExtraVars, layerPinsFor, layerRefValues, layersFrom, separateLayers } from "./layer-checkouts.mjs";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const ANSIBLE = resolve(REPO, "packages/control/ansible");
