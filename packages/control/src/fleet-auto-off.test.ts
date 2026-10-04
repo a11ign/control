@@ -26,7 +26,7 @@ import {
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
   readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
   importClosure, staleCheckoutVerdict, checkAgainstMain, FETCH_THROTTLE_MS,
-  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight,
+  LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight, LAUNCHABLE_PLAYBOOKS,
 } from "./fleet-auto-off.mjs";
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1155,11 +1155,36 @@ test("#3543 readPlaysInFlight: running is a play; exited, failed, inactive and t
   assert.equal(reading([[deploy, "deactivating", "stop-sigterm"]]).reading, "running");
 });
 
-test("#3543 readPlaysInFlight: the units counted are the playbooks `fleet-playbook.mjs` can start, derived from the ansible directory", () => {
-  const rows = ["deploy", "provision", "sleep", "auto-off"].map((n) => ({ unit: `a11y-fleet-${n}.service`, active: "active", sub: "running" }));
-  const { detail } = readPlaysInFlight({ run: (() => ({ status: 0, stdout: JSON.stringify(rows) })) as never });
-  assert.equal(detail, "a11y-fleet-deploy.service, a11y-fleet-provision.service, a11y-fleet-sleep.service",
-    "deploy, provision and sleep are playbooks in ansible/; `auto-off` is the timer's own unit and is not one");
+test("#3543 readPlaysInFlight: the default counts exactly the units the launcher can create, and ignores every other a11y-fleet unit", () => {
+  const launchable = LAUNCHABLE_PLAYBOOKS.map((f) => `a11y-fleet-${f.replace(/\.yml$/, "")}.service`);
+  // `provision.yml` and `lab-job.yml` are files in ansible/ the launcher cannot start; `provision` would be the unit of the first.
+  const notLaunchable = ["provision", "lab-job", "auto-off", "auto-off-schedule", "unrelated"].map((n) => `a11y-fleet-${n}.service`);
+  const answer = (names: string[]) => ({ status: 0, stdout: JSON.stringify(names.map((unit) => ({ unit, active: "active", sub: "running" }))) });
+  const counted = (names: string[]) => readPlaysInFlight({ run: (() => answer(names)) as never }).detail;
+  assert.equal(counted([...notLaunchable, ...launchable]), launchable.join(", "), "all eight launchable units, and not one of the others");
+  assert.equal(counted(notLaunchable), "", "the control: running units that are not plays read as no play");
+  assert.equal(readPlaysInFlight({ run: (() => answer(notLaunchable)) as never }).reading, "none");
+  assert.ok(launchable.includes("a11y-fleet-provision-role.service") && !launchable.includes("a11y-fleet-provision.service"));
+});
+
+test("#3543 LAUNCHABLE_PLAYBOOKS is the launcher's own PLAYBOOKS, read from fleet-playbook.mjs's source (importing it would run its CLI)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
+  const declared = /^const PLAYBOOKS = \[([^\]]*)\]/m.exec(source);
+  assert.ok(declared, "the launcher still declares `const PLAYBOOKS = [...]`; if it moved, this pin must follow it");
+  const names = [...declared[1].matchAll(/"([^"]+\.yml)"/g)].map((m) => m[1]);
+  assert.ok(names.length > 0, "the positive control: the parse found names, so the equality below is not empty against empty");
+  assert.deepEqual(LAUNCHABLE_PLAYBOOKS, names);
+});
+
+test("#3543 readPlaysInFlight asks systemd exactly, and a row missing any one field is unreadable", () => {
+  let asked: unknown[] = [];
+  readPlaysInFlight({ units: [], run: ((...args: unknown[]) => { asked = args; return { status: 0, stdout: "[]" }; }) as never });
+  assert.deepEqual(asked, ["systemctl", ["list-units", "--all", "--type=service", "--no-pager", "--output=json", "a11y-fleet-*.service"], { encoding: "utf8" }]);
+  const unit = "a11y-fleet-deploy.service";
+  for (const row of [{ active: "active", sub: "running" }, { unit, sub: "running" }, { unit, active: "active" }]) {
+    const says = readPlaysInFlight({ units: [unit], run: (() => ({ status: 0, stdout: JSON.stringify([row]) })) as never });
+    assert.equal(says.reading, "unreadable", JSON.stringify(row));
+  }
 });
 
 test("#3543 4 the play ending releases the box, and the idle clock is NOT restarted from the play's end", async () => {

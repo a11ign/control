@@ -112,7 +112,7 @@
  * directly, positive and negative) so that the day a producer exists, only `main()` changes.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, writeFileSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
@@ -341,9 +341,18 @@ const MS_PER_HOUR = 60 * MS_PER_MINUTE;
  * @typedef {"none" | "running" | "unreadable"} PlayReading
  */
 
-/** The playbooks `startPlaybookUnit` can run, each as the unit `a11y-fleet-<name>`. @returns {string[]} */
-const playbookUnits = () => readdirSync(ANSIBLE_DIR).filter((f) => f.endsWith(".yml"))
-  .map((f) => `a11y-fleet-${f.replace(/\.yml$/, "")}.service`);
+/**
+ * The playbooks `fleet-playbook.mjs` can start, and ONLY those: its `PLAYBOOKS`, enforced at `parseArgs`, is the whole
+ * set of names `startPlaybookUnit` can turn into a unit. Not every `ansible/*.yml`: a file there that the launcher
+ * cannot start (`provision.yml`, `lab-job.yml`) is no play, and counting it would let a stale or unrelated
+ * `a11y-fleet-*` unit keep every worker powered on. A copy rather than an import, because importing the launcher runs
+ * its CLI; `fleet-auto-off.test.ts` pins this list equal to the launcher's own, so a playbook added there fails here.
+ */
+export const LAUNCHABLE_PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml",
+  "control-host-install.yml", "os-rollback.yml", "collect-logs.yml"];
+
+/** Each launchable playbook's unit, `a11y-fleet-<name>.service`. @returns {string[]} */
+const playbookUnits = () => LAUNCHABLE_PLAYBOOKS.map((f) => `a11y-fleet-${f.replace(/\.yml$/, "")}.service`);
 
 /**
  * A play unit is finished when systemd says so: `failed`, `inactive`, or `active (exited)` -- what
@@ -357,7 +366,7 @@ const playFinished = ({ active, sub }) => active === "failed" || active === "ina
 /**
  * Read the play signal (#3543): the `a11y-fleet-<playbook>` units on this host, via `systemctl list-units`. Pure over
  * `run`, so a test supplies systemd's answer. The tick's own unit `a11y-fleet-auto-off.service` is running whenever
- * this runs and is not a playbook's unit, so only the names `playbookUnits` derives are counted.
+ * this runs and is not a playbook's unit, so only the units of `LAUNCHABLE_PLAYBOOKS` are counted.
  *
  * @param {{ run?: typeof spawnSync, units?: string[] }} [deps]
  * @returns {{ reading: PlayReading, detail: string }}
