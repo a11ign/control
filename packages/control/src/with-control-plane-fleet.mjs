@@ -64,13 +64,14 @@ function withHost(url, address) {
  * machine holds that address next (the worker has no authentication, SECURITY.md). So the MAC read is made
  * TWICE and must name the same address both times, and then that address must answer `/health` before it is
  * used -- `/health` carries no identity, so the repeated read is the identity check and `/health` proves only
- * that something serving a worker is there.
+ * that something serving a worker is there. EXPORTED so `fleet-wake.mjs` asks the same question the same way
+ * (#3401): a second copy that read once would aim a wake at whichever machine holds that address next.
  *
  * @param {PoolWorker[]} silent workers that did not answer at their pin
  * @param {{ macRead: typeof resolveMovedByMacLive, probe: (url: string) => Promise<boolean> }} deps
  * @returns {Promise<{ found: Map<string, string>, why: Map<string, string> }>} name -> verified url, name -> reason
  */
-async function locateByMac(silent, { macRead, probe }) {
+export async function locateByMac(silent, { macRead, probe }) {
   /** @type {Map<string, string>} */
   const found = new Map();
   /** @type {Map<string, string>} */

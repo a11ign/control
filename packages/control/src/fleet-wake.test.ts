@@ -10,7 +10,7 @@ import { join } from "node:path";
 
 import {
   HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, PROOF_WINDOW_MS, DEFAULT_PROOF_PATH, magicPacket, probeWorker, wakeFleet,
-  wakeReportLine, readWakeProof, advanceWakeProof, recordWakeProof, proofWriteCommand,
+  wakeReportLine, readWakeProof, advanceWakeProof, recordWakeProof, proofWriteCommand, wakeFailed,
 } from "./fleet-wake.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
@@ -255,7 +255,14 @@ const ONE_OF_EACH = {
   "192.0.2.5": [SILENT],                                                    // no-answer: it may answer elsewhere, never here
   "192.0.2.6": [{ code: "ECONNREFUSED", message: "refused" }],              // not-listening
   "192.0.2.7": [{ json: { ok: true, ready: false, reason: "browserConfigured" } }], // never-ready
+  "192.0.2.8": [SILENT],                                                    // moved: silent here, found by MAC (below)
+  "192.0.2.99": [{ json: READY }],                                          // ... and answering where the MAC says
 };
+const MOVED_TO = "192.0.2.99";
+const MAC_OF_W8 = "aa:bb:cc:dd:ee:08";
+/** The MAC reader the wake is handed: names `MOVED_TO` for w8's MAC every time, and nothing for any other. */
+const findsW8 = (candidates: { name: string, mac: string }[]) =>
+  new Map(candidates.filter((c) => c.mac === MAC_OF_W8).map((c) => [c.name, MOVED_TO]));
 
 test("#3269 1: the ledger's address is ONE absolute path under the control plane's checkout, never the cwd's", () => {
   assert.equal(DEFAULT_PROOF_PATH, `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-wake-proof.json`);
@@ -266,11 +273,11 @@ test("#3227 2: ONLY a worker that was silent and then came up ready earns a proo
   const world = fakeWorld();
   const plane = controlPlane();
   try {
-    const results = await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7"), {
-      ...world.options, ...plane.options, request: fakeHealth(ONE_OF_EACH).request,
+    const results = await wakeFleet(workers("w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8"), {
+      ...world.options, ...plane.options, request: fakeHealth(ONE_OF_EACH).request, macRead: findsW8,
     });
     assert.deepEqual(results.map((r) => r.state),
-      ["woken", "already-up", "busy", "came-up", "no-answer", "not-listening", "never-ready"],
+      ["woken", "already-up", "busy", "came-up", "no-answer", "not-listening", "never-ready", "moved"],
       "positive control: the fixture really produces each state, or an absent proof proves nothing");
     assert.deepEqual(Object.keys(plane.proven()), ["w1"], "w1 woke from silence on its own address; nobody else proved a thing");
     assert.equal(plane.proven().w1, world.sleepCalls(), "the proof is stamped with the wake's own clock");
@@ -454,4 +461,104 @@ test("#3227 3: the window is a derived bound, not a round number: under the mont
   const DAY = 86_400_000;
   assert.ok(PROOF_WINDOW_MS < 31 * DAY, "a proof must lapse before the next monthly Windows servicing update can have changed the NIC");
   assert.ok(PROOF_WINDOW_MS > WAKE_DEADLINE_MS, "and it must outlive one wake, or every proof would lapse as it was earned");
+});
+
+// ---- #3401: a silent worker is asked for by MAC BEFORE any packet goes out ----
+
+/** A MAC reader that answers from a script, one entry per call, and records every candidate list it was given. */
+function fakeMacRead(...reads: Record<string, string>[]) {
+  const asked: string[][] = [];
+  const macRead = (candidates: { name: string }[]) => {
+    asked.push(candidates.map((c) => c.name));
+    const read = reads[Math.min(asked.length - 1, reads.length - 1)] ?? {};
+    return new Map(candidates.flatMap((c) => (c.name in read ? [[c.name, read[c.name]] as [string, string]] : [])));
+  };
+  return { macRead, asked };
+}
+const ANSWERS_ELSEWHERE = { "192.0.2.1": [SILENT], [MOVED_TO]: [{ json: READY }] };
+
+test("#3401 2: a silent worker the MAC finds elsewhere is `moved` AT ONCE -- ZERO packets, no deadline wait, and no 'NOTHING ANSWERED'", async () => {
+  const world = fakeWorld();
+  const mac = fakeMacRead({ w1: MOVED_TO });
+  const [r] = await wakeFleet(workers("w1"), { ...world.options, request: fakeHealth(ANSWERS_ELSEWHERE).request, macRead: mac.macRead });
+  assert.equal(r.state, "moved");
+  assert.equal(world.sent.length, 0, "positive control for 'no packet': the same silent box WITHOUT a find sends one (next test)");
+  assert.equal(r.packets, 0);
+  assert.equal(world.sleepCalls(), 0, "it did not wait on the 300 s deadline, or on any poll");
+  const line = wakeReportLine(r);
+  assert.match(line, new RegExp(`answers at ${MOVED_TO.replaceAll(".", "\\.")}`));
+  assert.match(line, /192\.0\.2\.1/, "and names the address the inventory pins");
+  assert.match(line, /fix inventory\.yml and ask for a DHCP reservation/, "the remedy fleet:status already names");
+  assert.doesNotMatch(line, /NOTHING ANSWERED|Wake-on-LAN|firmware|\bis down\b/, "not the no-answer story, and not 'down'");
+});
+
+test("#3401 4: a silent worker the MAC does NOT find behaves as today -- ONE packet, the deadline, `no-answer`, the unchanged line", async () => {
+  const world = fakeWorld();
+  const mac = fakeMacRead({});
+  const [r] = await wakeFleet(workers("w1"), {
+    ...world.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request, macRead: mac.macRead, deadlineMs: 60_000,
+  });
+  assert.deepEqual(mac.asked, [["w1"]], "positive control: the reader WAS asked, and found nothing");
+  assert.equal(r.state, "no-answer");
+  assert.equal(world.sent.length, 1);
+  assert.ok(world.sleepCalls() >= 60_000);
+  assert.match(wakeReportLine(r), /one packet sent and NOTHING ANSWERED within the deadline/);
+});
+
+test("#3401 4: a MAC that reads at an address once and NOT AGAIN is not trusted -- today's path, one packet, `no-answer`", async () => {
+  const world = fakeWorld();
+  const mac = fakeMacRead({ w1: MOVED_TO }, {});
+  const health = fakeHealth(ANSWERS_ELSEWHERE);
+  const [r] = await wakeFleet(workers("w1"), { ...world.options, request: health.request, macRead: mac.macRead, deadlineMs: 20_000 });
+  assert.equal(mac.asked.length, 2, "positive control: the identity check read twice");
+  assert.equal(r.state, "no-answer");
+  assert.equal(world.sent.length, 1);
+  assert.ok(!health.calls.includes(MOVED_TO), "an address that failed the identity check is never even probed");
+});
+
+test("#3401 4: two reads that agree but an address that answers no /health is not `moved` either", async () => {
+  const world = fakeWorld();
+  const [r] = await wakeFleet(workers("w1"), {
+    ...world.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request, macRead: fakeMacRead({ w1: MOVED_TO }).macRead,
+    deadlineMs: 20_000,
+  });
+  assert.equal(r.state, "no-answer");
+  assert.equal(world.sent.length, 1);
+});
+
+test("#3401 4: a box with no mac is still `no-mac`, and the MAC reader is never asked", async () => {
+  const world = fakeWorld();
+  const mac = fakeMacRead({ w1: MOVED_TO });
+  const [r] = await wakeFleet([{ name: "w1", host: "192.0.2.1", mac: null }], {
+    ...world.options, request: fakeHealth(ANSWERS_ELSEWHERE).request, macRead: mac.macRead,
+  });
+  assert.equal(r.state, "no-mac");
+  assert.deepEqual(mac.asked, []);
+});
+
+test("#3401 5: a worker that answers at its pin never reaches the MAC read -- a healthy fleet pays one /health each", async () => {
+  const world = fakeWorld();
+  const mac = fakeMacRead({ w1: MOVED_TO, w2: MOVED_TO, w3: MOVED_TO });
+  const health = fakeHealth({
+    "192.0.2.1": [{ json: READY }], "192.0.2.2": [{ json: { ok: true, ready: false, busy: true } }],
+    "192.0.2.3": [{ code: "ECONNREFUSED", message: "refused" }],
+  });
+  const results = await wakeFleet(workers("w1", "w2", "w3"), { ...world.options, request: health.request, macRead: mac.macRead, deadlineMs: 10_000 });
+  assert.deepEqual(results.map((r) => r.state), ["already-up", "busy", "not-listening"]);
+  assert.deepEqual(mac.asked, [], "ready, busy and refused all KNOW the box is up at its pin: nothing to look for");
+});
+
+test("#3401 3: `moved` is a failure for the exit code and the ledger: it writes no proof and DROPS a held one, as no-answer does", () => {
+  assert.equal(wakeFailed({ state: "moved" }), true);
+  assert.deepEqual(advanceWakeProof([{ name: "a", state: "moved" }], { a: 1, b: 2 }, 9), { b: 2 }, "a held proof is dropped");
+  assert.deepEqual(advanceWakeProof([{ name: "a", state: "moved" }], { b: 2 }, 9), { b: 2 }, "and none is ever written");
+  assert.match(wakeReportLine({ name: "w1", host: "192.0.2.1", state: "moved", detail: MOVED_TO }), /wake proof dropped/);
+});
+
+test("#3401 2: the MAC reader the wake defaults to is the live one -- but an injected socket is no real wake and never reaches it", async () => {
+  const world = fakeWorld();
+  const [r] = await wakeFleet(workers("w1"), {
+    ...world.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request, deadlineMs: 5_000,
+  });
+  assert.equal(r.state, "no-answer", "no `macRead` given with an injected socket: nothing is found, and nothing is run over ssh");
 });

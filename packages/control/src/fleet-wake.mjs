@@ -39,6 +39,10 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 // is neither's dependent, so it is the shared home.
 import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+// #3401: where a silent worker is by MAC is asked the way the lab jobs ask it (two reads that agree, then
+// `/health`), never restated here.
+import { resolveMovedByMacLive } from "./fleet-status.mjs";
+import { locateByMac } from "./with-control-plane-fleet.mjs";
 
 /**
  * takes no flags: it wakes every box in the inventory.
@@ -210,7 +214,7 @@ export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request 
  * @typedef {{ port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number,
  *   log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>,
  *   request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number,
- *   proofPath?: string | null, proofTransport?: ProofTransport }} WakeOptions
+ *   macRead?: typeof resolveMovedByMacLive, proofPath?: string | null, proofTransport?: ProofTransport }} WakeOptions
  * @typedef {Required<Omit<WakeOptions, "broadcast">> & { broadcast?: string }} WakeConfig
  * @typedef {WakeTarget & { state: string, packets: number, detail?: string }} WakeResult
  */
@@ -224,6 +228,7 @@ export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request 
  *   woken       our one packet, then ready           came-up    ready without a packet (it was up, still starting)
  *   no-mac      silent and no `mac` in inventory     -> add it to inventory.yml
  *   no-answer   packet sent, nothing ever answered   -> Wake-on-LAN, the broadcast path, or the box is off
+ *   moved       silent at its pin, up at another     -> fix inventory.yml and the DHCP reservation; no packet (#3401)
  *   never-ready answered, `ready` never true         -> its own `reason` says why
  *   not-listening  refused throughout, no packet     -> the box is up and the worker is not: `fleet:recover`
  */
@@ -253,6 +258,8 @@ async function wakeOne(w, cfg) {
   let packets = 0;
   if (first.outcome === "no-answer") {
     if (!w.mac) return { ...w, state: "no-mac", packets, detail: first.message };
+    const movedTo = await whereByMac({ ...w, mac: w.mac }, cfg);
+    if (movedTo) return { ...w, state: "moved", packets, detail: movedTo };
     await cfg.send(w.mac, cfg.broadcast);
     packets = 1;
     cfg.log(`  ${w.name}: magic packet sent to ${w.mac} (first probe: ${first.message})`);
@@ -275,6 +282,27 @@ async function wakeOne(w, cfg) {
     if (last.outcome !== "no-answer") lastKnown = last;
   }
   return { ...w, packets, ...verdictAtDeadline(lastKnown, last) };
+}
+
+/**
+ * #3401: WHERE A SILENT WORKER IS, asked BEFORE the packet. A box already up at another address (a lease from a
+ * second DHCP server while the inventory pins the reservation) is not off, so a packet changes nothing on it and
+ * the wait is five minutes spent on a question `fleet:status` answers with `MOVED`. Only an address that two MAC
+ * reads agree on and that then answers `/health` counts (`locateByMac`); anything less is "not found", and the
+ * wake goes on exactly as it did. Answering is not proof (`wakeProofDelta`): the ledger is about waking a box AT
+ * ITS RESERVATION.
+ *
+ * @param {WakeTarget & { mac: string }} w
+ * @param {WakeConfig} cfg
+ * @returns {Promise<string | null>} the address it answers at, or null when it was not found
+ */
+async function whereByMac(w, cfg) {
+  const answers = async (/** @type {string} */ candidate) =>
+    ["ready", "busy", "not-ready"].includes((await probeWorker(candidate, { timeoutMs: cfg.probeTimeoutMs, request: cfg.request })).outcome);
+  const { found } = await locateByMac([{ name: w.name, url: `http://${w.host}:${cfg.port}`, mac: w.mac }],
+    { macRead: cfg.macRead, probe: answers });
+  const url = found.get(w.name);
+  return url ? new URL(url).hostname : null;
 }
 
 /**
@@ -313,6 +341,8 @@ export async function wakeFleet(workers, options = {}) {
     // A test double for the socket means no real wake, so it earns no proof and reaches no machine, unless the
     // test also hands over the transport the proof would travel by.
     proofPath: options.send && !options.proofTransport ? null : DEFAULT_PROOF_PATH, proofTransport: sshToControlPlane,
+    // The same stand-in for the MAC read: it runs over ssh, so a test that does not hand one over finds nothing.
+    macRead: options.send ? () => new Map() : resolveMovedByMacLive,
     ...options,
   };
   const results = await Promise.all(workers.map((w) => wakeOne(w, cfg)));
@@ -489,6 +519,8 @@ export function wakeReportLine(r) {
     "no-mac": `did not answer and has no mac in inventory.yml, so it cannot be woken${said}`,
     "no-answer": `one packet sent and NOTHING ANSWERED within the deadline${said} — Wake-on-LAN and Deep Sleep in its `
       + "firmware, or the broadcast not reaching it from here. Not known to be down",
+    moved: `answers at ${r.detail} while inventory.yml pins ${r.host}: no packet sent, and it is not down -- `
+      + "fix inventory.yml and ask for a DHCP reservation",
     "never-ready": `answered but never became ready: ${r.detail}`,
     "not-listening": `the box refuses connections (it is up) and the worker never started listening${said} `
       + "— `fleet:recover`",
