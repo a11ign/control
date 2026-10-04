@@ -60,6 +60,7 @@ import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.
 import { journalScope } from "./fleet-playbook.mjs";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+import { layerCheckoutMove, layerPins, layerRefValues } from "./layer-checkouts.mjs";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -68,7 +69,7 @@ import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
  * An unrecognised flag is otherwise IGNORED — every CLI here parses argv by looking for the flags it
  * knows — so it runs the default and reports success. See `cli-flags.mjs`.
  */
-refuseUnknownFlags(["--pipeline=", "--ref=", "--only=", "--list", "--local", "--status", "--log"],
+refuseUnknownFlags(["--pipeline=", "--ref=", "--layer-ref=", "--only=", "--list", "--local", "--status", "--log"],
   { entry: import.meta.url, command: "npm run lab:pipeline" });
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -600,11 +601,12 @@ function dispatchToControlUnlessLocal() {
   // while every unit did" that made this item necessary. `--remain-after-exit` so the exit code is
   // readable afterwards; `--collect` would unload the unit and discard it at the moment it matters.
   const pipelineName = (flagValue(args, "pipeline") || "run").replace(/[^a-z0-9-]/gi, "");
+  const layerMove = layerMoveOrRefuse(args);
   const unit = `a11y-pipeline-${pipelineName}`;
   // ABSOLUTE, because the second `cd` below runs from inside the first when they are relative — which is
   // exactly how the first attempt failed, with `cd: a11ign: No such file or directory`.
   const remote = `cd ${CONTROL_CHECKOUT} && git fetch --quiet origin && git checkout --quiet ${ref} `
-    + `&& git merge --quiet --ff-only origin/${ref} `
+    + `&& git merge --quiet --ff-only origin/${ref}${layerMove} `
     // THE LOCK IS "RUNNING", NOT "LOADED", and reading it wrong makes every pipeline single-use.
     //
     // The unit name is the lock, exactly as it is for a lab job: a second operator dispatching the same
@@ -646,6 +648,24 @@ function dispatchToControlUnlessLocal() {
   // which is the whole point of detaching. Exit 0: the dispatch succeeded, and the pipeline's own verdict
   // is read from the unit.
   process.exit(0);
+}
+
+/**
+ * The layers' half of the pair (ADR 0039 item 6, row 6c, #3396): the shell that puts each separate layer's
+ * checkout on its `--layer-ref=<name>=<sha>`, or the refusal. A pin the operator typed is never dropped, and a
+ * layer in its own repository with no pin is refused, because the pipeline would otherwise run the core at one
+ * commit and the layer at whichever its branch last was. Empty while no layer has a repository of its own.
+ *
+ * @param {string[]} args
+ * @returns {string}
+ */
+function layerMoveOrRefuse(args) {
+  const { pins, refusal } = layerPins(layerRefValues(args));
+  if (refusal) {
+    process.stderr.write(`${refusal}\n`);
+    process.exit(2);
+  }
+  return layerCheckoutMove(pins);
 }
 
 /** The ref the remote should stand on. Defaults to this checkout's branch, as `fleet:deploy` does. */

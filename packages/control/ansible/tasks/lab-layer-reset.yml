@@ -1,0 +1,112 @@
+# THE LAB'S RESET CLEANS EACH LAYER'S CHECKOUT AS IT CLEANS THE CORE'S (ADR 0039 item 6, row 6c, #3396). `lab-reset.yml`
+# restores tracked files against `origin/<ref>` and refuses to throw away work origin does not have; a layer in its
+# own repository is a second working tree whose `git status` the core's never sees, so a layer left dirty would
+# block the next job's pull (`lab_dirty` reads the layer's tree, not the core's) with nothing here to clear it.
+#
+# THE LAYERS ARE READ FROM `layers.json` AND FROM NOWHERE ELSE, and with none that declares a `remote` every task
+# below loops over nothing. Same three refusals as `lab-layer-checkouts.yml`, same pattern for a ref as `lab_ref`:
+# a dirty layer with no `layer_refs` entry (there is nothing to compare against, and no default), a ref that does
+# not look like a ref, and a layer whose checkout is not there. The same two-step as the core: REPORT and fail,
+# then `-e apply=true` discards what origin already carries and refuses what it does not. UNTRACKED files in a
+# layer are reported and left: nothing here has the core's "origin has never seen it" evidence for them.
+- name: "Which layers live in their own repository"
+  ansible.builtin.include_tasks: read-layer-checkouts.yml
+
+- name: "Is each layer's checkout there"
+  ansible.builtin.stat:
+    path: "{{ lab_repo_path }}/{{ item.value.path }}/.git"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: lab_layer_git
+
+- name: "A layer's checkout must be there, and the core's tree does not stand in for it"
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: >-
+      layer {{ item.item.key }} is declared at {{ item.item.value.path }}, and
+      {{ lab_repo_path }}/{{ item.item.value.path }} is not a git checkout. Nothing falls back to the core's
+      tree: run bootstrap-control-plane.sh on this host, or correct the path in packages/control/layers.json.
+  loop: "{{ lab_layer_git.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+- name: "What is dirty in each layer"
+  ansible.builtin.command:
+    argv: [git, status, --porcelain, --untracked-files=no]
+    chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  register: lab_layer_status
+
+- name: "The layers with tracked changes"
+  ansible.builtin.set_fact:
+    lab_layer_dirty: "{{ lab_layer_status.results | selectattr('stdout', 'search', '\\S') | map(attribute='item') | list }}"
+
+- name: "A dirty layer needs a ref to compare against, and the ref must look like a ref"
+  ansible.builtin.assert:
+    that:
+      - item.key in (layer_refs | default({}))
+      - layer_refs[item.key] is match('^[A-Za-z0-9._/-]{1,100}$')
+      - "'..' not in layer_refs[item.key]"
+    fail_msg: >-
+      layer {{ item.key }} has tracked changes and no usable ref to compare them with. Pass
+      -e '{"layer_refs": {"{{ item.key }}": "<branch>"}}'. There is no default for a layer.
+  loop: "{{ lab_layer_dirty }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: "Fetch origin in each dirty layer, so the comparison is against what is really there"
+  ansible.builtin.command:
+    argv: [git, fetch, --quiet, origin]
+    chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
+  loop: "{{ lab_layer_dirty }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+
+- name: "Which dirty layer files differ from what origin holds"
+  ansible.builtin.shell:
+    cmd: >-
+      git status --porcelain --untracked-files=no | awk '{print $NF}' |
+      xargs -r git diff --name-only origin/{{ layer_refs[item.key] }} --
+    chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
+  loop: "{{ lab_layer_dirty }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  failed_when: false
+  register: lab_layer_unpushed
+
+- name: "Refuse to discard layer work origin does not have"
+  when: (item.stdout | default('') | trim) != ''
+  ansible.builtin.fail:
+    msg: >-
+      layer {{ item.item.key }} ({{ lab_repo_path }}/{{ item.item.value.path }}) has modified file(s) whose content
+      is NOT on origin/{{ layer_refs[item.item.key] }}: {{ item.stdout | trim | replace('\n', ', ') }}.
+      Nothing has been discarded. Commit and push them from the lab, or look at them first.
+  loop: "{{ lab_layer_unpushed.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+- name: "Report only, unless asked to apply, and FAIL so a caller can use this as a precondition"
+  when: not (apply | default(false) | bool)
+  ansible.builtin.fail:
+    msg: >-
+      layer {{ item.key }} ({{ lab_repo_path }}/{{ item.value.path }}) is DIRTY and nothing was discarded: this
+      was a report. Re-run with `-e apply=true` to discard what origin already carries, or commit it from the lab.
+  loop: "{{ lab_layer_dirty }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: "Discard the tracked changes in each dirty layer"
+  when: apply | default(false) | bool
+  ansible.builtin.command:
+    argv: [git, checkout, "--", "."]
+    chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
+  loop: "{{ lab_layer_dirty }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: true

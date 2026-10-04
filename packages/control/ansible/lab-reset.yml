@@ -347,3 +347,8 @@
         msg: >-
           {{ 'CLEAN — the checkout can pull again.' if (after.stdout | trim) == ''
              else 'STILL DIRTY (untracked files are not discarded): ' ~ (after.stdout | trim) }}
+
+    # THE LAYERS' CHECKOUTS, cleaned the way the core's was (ADR 0039 item 6, row 6c, #3396): a layer in its own
+    # repository is a second working tree, and the core's `git status` never sees it. A no-op while none is.
+    - name: Each layer's checkout, beside the core's
+      ansible.builtin.include_tasks: tasks/lab-layer-reset.yml

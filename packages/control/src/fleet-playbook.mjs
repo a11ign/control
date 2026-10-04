@@ -65,7 +65,7 @@ import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
-import { layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.mjs";
+import { layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.mjs";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
@@ -894,13 +894,19 @@ try {
  * second way to say this one" must never look alike. `CHECKOUT` is `CONTROL_PLANE_CHECKOUT`, aliased once,
  * at the top of this file. There is only one control plane checkout, so there is nothing to pass.
  *
+ * THE PAIR REACHES THE CONTROL PLANE TOO (ADR 0039 item 6, row 6c, #3396). A layer that lives in its own
+ * repository is a second checkout beside this one, and `layerCommits` is its half of the pair: each is put on
+ * its pinned commit and compared with `rev-parse HEAD` in the same command, or the command fails. A checkout
+ * that is absent refuses, naming the layer and the path, instead of the core's tree answering for it.
+ *
  * @param {string} ref the branch name to be ON -- `HEAD` on a detached checkout, which is a no-op checkout
  * @param {string} expected the commit resolved ONCE, here, and the only thing the read-back compares
+ * @param {Record<string, string>} [layerCommits] the layers' half of the pair, `{ layer: sha }`; empty while none has its own repository
  * @returns {string} the shell command to run on the control plane
  */
-export function controlPlaneCheckout(ref, expected) {
+export function controlPlaneCheckout(ref, expected, layerCommits = {}) {
   return `cd ${CHECKOUT} && git fetch --quiet --all && git checkout --quiet ${ref} `
-    + `&& git merge --ff-only --quiet ${expected}`;
+    + `&& git merge --ff-only --quiet ${expected}${layerCheckoutMove(layerCommits)}`;
 }
 
 /**
@@ -1782,7 +1788,7 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
-  ssh(controlPlaneCheckout(ref, expected));
+  ssh(controlPlaneCheckout(ref, expected, layerCommits));
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report
   // success — this project's most expensive recurring shape, and the reason `deploy.yml` verifies each

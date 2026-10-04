@@ -22,12 +22,20 @@
  * short sha and a layer that has no repository of its own. The guest plays read the SAME manifest themselves
  * (`ansible/tasks/read-layer-checkouts.yml`), so the two cannot name different layers.
  *
+ * THE CONTROL PLANE AND THE LAB MOVE THE LAYER'S CHECKOUT BESIDE THE CORE'S (row 6c, #3396). `layerCheckoutMove`
+ * is the control plane's half: the shell that puts each separate layer's checkout on its pinned commit and reads
+ * the commit back, REFUSING (exit 4) where the checkout is not there rather than leaving the core's tree to
+ * answer for it. The lab's half is `ansible/tasks/run-job.yml` and `lab-reset.yml`, which read the same
+ * manifest and validate a layer's ref with `LAYER_REF`, which is `lab_ref`'s own pattern. With no layer that
+ * declares a `remote`, every one of them is a no-op, which is the state today.
+ *
  * `worker-fleet` does NOT use this: it is published and `control` never is
  * (`worker-fleet-does-not-read-control.test.ts`), so its readers ask the worker package by name instead.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const MANIFEST = JSON.parse(readFileSync(new URL("../layers.json", import.meta.url), "utf8"));
@@ -99,7 +107,40 @@ export function layersFrom({ manifest, root }) {
     return { pins, refusal: null };
   }
 
-  return { layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins };
+  /** @param {Record<string, string>} pins a value that has passed `layerPins` */
+  const layerCheckoutMove = (pins) => checkoutMoveFor(manifest, pins);
+
+  return { layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove };
+}
+
+/**
+ * The shell that moves each pinned layer's checkout on the control plane, beside the core's, to its commit,
+ * and compares `rev-parse HEAD` with the pin. Appended after the core's own move, so the pair lands or the
+ * command fails: a layer left where its branch was is the silent half of the pair (#3395's guest failure).
+ *
+ * A checkout that is NOT THERE refuses, naming the layer and the path, and never `git`s the core's tree in
+ * its place: the monorepo layout answering for a layer that moved is the substitution this exists to stop.
+ * A path is restricted to `[A-Za-z0-9._/-]` with no `..` and a pin was restricted by `layerPins` to 40 hex
+ * digits, so nothing that reaches the string can close its quotes.
+ *
+ * @param {{ layers: Record<string, { path: string, remote?: string, branch?: string }> }} manifest
+ * @param {Record<string, string>} pins a value that has passed `layerPins`
+ * @returns {string} the argv fragment, leading space included, or "" when nothing is pinned
+ */
+function checkoutMoveFor(manifest, pins) {
+  return Object.entries(pins).map(([name, sha]) => {
+    const layer = Object.hasOwn(manifest.layers, name) ? manifest.layers[name] : undefined;
+    if (!layer?.remote) throw new Error(`layer "${name}" has no repository of its own to move`);
+    if (!LAYER_REF.test(layer.path) || layer.path.includes("..")) {
+      throw new Error(`layer "${name}" is declared at "${layer.path}", which is not a plain relative path`);
+    }
+    // `cd` names the checkout's own export, which is the form `control-plane-checkout-is-one-fact.test.ts` reads.
+    const where = `${CONTROL_PLANE_CHECKOUT_PATH}/${layer.path}`;
+    return ` && ( [ -d ${where}/.git ] || { echo "REFUSING: layer ${name} is declared at ${layer.path} and ${where} `
+      + "is not a git checkout; the core's tree does not stand in for it. Run bootstrap-control-plane.sh.\" >&2; exit 4; } ) "
+      + `&& ( cd ${CONTROL_PLANE_CHECKOUT_PATH}/${layer.path} && git fetch --quiet origin && git checkout --quiet --detach ${sha} `
+      + `&& test "$(git rev-parse HEAD)" = ${sha} )`;
+  }).join("");
 }
 
 /** @param {string} refusal @returns {{ pins: Record<string, string>, refusal: string }} */
@@ -107,12 +148,19 @@ function refused(refusal) {
   return { pins: {}, refusal: `refusing ${refusal}` };
 }
 
+/**
+ * What a layer's ref may look like on the lab and on the control plane: `run-job.yml`'s `lab_ref` pattern, as a
+ * value, so a test can hold the two spellings equal. A ref is a plain name or a commit, never a path out.
+ */
+export const LAYER_REF = /^[A-Za-z0-9._/-]{1,100}$/;
+
 const declared = layersFrom({ manifest: MANIFEST, root: REPO_ROOT });
 export const layerRoot = declared.layerRoot;
 export const layerSourceDir = declared.layerSourceDir;
 export const layerCodeVersion = declared.layerCodeVersion;
 export const separateLayers = declared.separateLayers;
 export const layerPins = declared.layerPins;
+export const layerCheckoutMove = declared.layerCheckoutMove;
 
 /**
  * Every `--layer-ref=<name>=<sha>`, in order. REPEATABLE, which `flagValue` (first match only) is not: one
