@@ -14,12 +14,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 import { declaredLayerPath, declaredReach, reachFile, stampEnvironmentFiles } from "../../../scripts/test-support/stamp-files.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -139,30 +140,49 @@ test("moving a path in the declaration moves it in the stamp's list, and nowhere
 });
 
 /**
- * Read off `origin/main` at ab8753d91, before #3397, and equal to what `stamp-provision-revision.ps1` printed
- * for that tree under PowerShell 7 (a Linux-adapted copy, both before and after the change). First 16 hex of
- * each file's normalised SHA-256, keyed by file name; the stamp itself is the 16 hex of the joined hashes.
+ * WHAT THIS ROW DID TO THE FIVE HASHED FILES IS READ FROM ITS OWN DIFF, NOT FROM main'S CONTENT (#3397, ceo 2026-10-04).
+ *
+ * This test used to pin the first 16 hex of each file's hash as read off `origin/main` at ab8753d91. That is a
+ * snapshot of ANOTHER row's territory: #3406 changed `main.yml` ahead of this pull request, the pin went red on
+ * the merge ref, and the merge queue ejected the same head four times (14:20, 14:27, 14:36, 14:48Z). The claim
+ * this row makes is "no file the stamp hashes was edited HERE", so the thing to compare is this pull request's
+ * own change set against its merge base, which main moving cannot change.
+ *
+ * Applies only to the pull request that carries this row's changeset: on any other change, or on main itself,
+ * the diff does not contain it and the files may move for their own reasons (the day `run-server.cmd` joins
+ * the declaration is one). The refusal's positive control is `hashedFilesTouched` handed a diff that DOES
+ * include one, below.
  */
-const PRE_CHANGE_HASHES = {
-  "provision-nvda-worker.ps1": "30430BBD4903824A",
-  "run-server.cmd": "D7643CD1DFD1DA63",
-  "apply-foreground-lock-timeout.ps1": "1907969A83B52402",
-  "main.yml": "A17283D96FC2BDA8",
-  "a11y_speech_viewer.ps1": "870648FD2B1CC1EC",
-};
-const PRE_CHANGE_PROVISION_REVISION = "9ed0c82508499854";
+const ROW_CHANGESET = ".changeset/launcher-reach-3397.md";
+const STAMPED_FILES = 5;
+const GIT_OUTPUT_LIMIT = 64 * 1024 * 1024;
 
-/** The stamp's own algorithm, restated: CRLF to LF, UTF-8 without a BOM, SHA-256 each, then over the joined hex. */
-const fileHash = (rel: string) => createHash("sha256")
-  .update(read(rel).replace(/^\uFEFF/, "").replaceAll("\r\n", "\n")).digest("hex").toUpperCase();
-const provisionRevision = (files: string[]) =>
-  createHash("sha256").update(files.map(fileHash).join("")).digest("hex").slice(0, 16);
+const hashedFilesTouched = (changed: string[], hashed: string[]) => changed.filter((f) => hashed.includes(f));
 
-test("provisionRevision is UNCHANGED by this row: the five hashed files and the stamp they make", () => {
-  // Pinned from the tree BEFORE #3397, where none of the five was edited. A move of any one is a recapture
-  // of the whole corpus, so it must be a deliberate act and never a side effect of tidying a launcher.
-  const files = stampEnvironmentFiles(STAMP);
-  assert.deepEqual(Object.fromEntries(files.map((f) => [f.split("/").pop(), fileHash(f).slice(0, 16)])), PRE_CHANGE_HASHES,
-    "a hashed file changed: provisionRevision moves on every worker, and the fleet recaptures");
-  assert.equal(provisionRevision(files), PRE_CHANGE_PROVISION_REVISION);
+test("provisionRevision is UNCHANGED by this row: none of the five hashed files is in its own diff", (t) => {
+  const git = (...args: string[]) => execFileSync("git", args,
+    { cwd: REPO, env: sandboxGitEnv(), encoding: "utf8", maxBuffer: GIT_OUTPUT_LIMIT });
+  let base: string;
+  try {
+    base = git("merge-base", "origin/main", "HEAD").trim();
+  } catch {
+    // A merge base needs history, and the `acceptance` job's clone is shallow; the `ts` job runs this with
+    // fetch-depth: 0. Said, not counted as a pass.
+    t.skip("no merge-base with origin/main in this checkout (a shallow clone). Not run, and not counted as a pass.");
+    return;
+  }
+  const hashed = stampEnvironmentFiles(STAMP);
+  assert.equal(hashed.length, STAMPED_FILES, "the stamp hashes five files; a sixth or a missing one changes what this test guards");
+  const changed = git("diff", "--name-only", base).split("\n").filter(Boolean);
+  if (!changed.includes(ROW_CHANGESET)) return;
+  assert.deepEqual(hashedFilesTouched(changed, hashed), [],
+    "a hashed file is in this row's diff: provisionRevision moves on every worker, and the fleet recaptures");
+});
+
+test("positive control: a diff that edits a hashed file is the one the check above refuses", () => {
+  const hashed = stampEnvironmentFiles(STAMP);
+  const runServer = hashed.find((f) => f.endsWith("run-server.cmd"));
+  assert.ok(runServer, "the stamp lists run-server.cmd; without it this control proves nothing");
+  assert.deepEqual(hashedFilesTouched([ROW_CHANGESET, "README.md", runServer], hashed), [runServer]);
+  assert.deepEqual(hashedFilesTouched([ROW_CHANGESET, "packages/nvda-worker/src/launcher-reach.cmd"], hashed), []);
 });
