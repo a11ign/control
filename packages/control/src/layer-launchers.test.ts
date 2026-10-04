@@ -64,7 +64,7 @@ test("the declaration names the reach, and every file it names exists", () => {
   const declaration = read(`${LAYER_SRC}/launcher-reach.cmd`);
   for (const name of REACHED) assert.ok(declaredReach(declaration, name), `${name} is not declared`);
   assert.equal(declaredReach(declaration, "CHECKOUT_ROOT"), "%~dp0../../..",
-    "the checkout root is no longer three levels above the declaration, so the launchers' cd moved");
+    "the checkout root is no longer three levels above the declaration, so the launchers' directory change is wrong");
   assert.deepEqual(absentReach(REPO), [], "a declared reach is absent from the real checkout");
 });
 
@@ -91,7 +91,7 @@ test("run-capture-check.cmd reads the declaration and STOPS on an absent file, n
   assert.ok(code.some((l) => /^call "%~dp0launcher-reach\.cmd" \|\| exit \/b 1$/.test(l.trim())),
     "the launcher does not `call` the declaration and stop when it is missing");
   assert.ok(code.some((l) => /^cd \/d "%CHECKOUT_ROOT%" \|\| exit \/b 1$/.test(l.trim())),
-    "the launcher does not cd to the declared root");
+    "the launcher does not change into the declared root");
   assert.deepEqual(code.filter((l) => /packages[\\/]/.test(l)), [],
     "the launcher names a repo path in code again, a second copy of what the declaration says");
   for (const name of REACHED) {
