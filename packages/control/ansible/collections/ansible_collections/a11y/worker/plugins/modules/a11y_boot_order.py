@@ -14,8 +14,9 @@ description:
 - Reads the firmware boot order by NAME from the box (Lenovo_BiosSetting on a Lenovo, HP_BIOSOrderedList in
   root\HP\InstrumentedBIOS on an HP) and says what it found. No setting name or value is typed in this
   repository; a setting it cannot find is unreadable, with the item names it did see.
-- With enforce true, writes the box's own order with its network members removed, saves it, and reads the
-  stored value back. A read-back that is not the target is a failure naming the box. With enforce false
+- With enforce true, writes the box's own order with its network members taken out (removed on a Lenovo;
+  marked C((Disabled)) in place on an HP, whose ordered list ignores a value that omits members), saves it,
+  and reads the stored value back. A read-back that is not the target is a failure naming the box. With enforce false
   (the default) no setter is called.
 - Reads Wake on LAN beside the boot order and never rewrites it. Lenovo's Automatic wake sequence starts with
   Network, so a result whose wake sequence cannot be shown to omit Network is order-set, never ok.

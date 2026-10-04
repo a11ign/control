@@ -9,7 +9,8 @@
 BeforeAll {
     Import-Module "$PSScriptRoot/TestHelpers.psm1" -Force
     $ModulePath = "$PSScriptRoot/../../../../plugins/modules/a11y_boot_order.ps1"
-    foreach ($f in 'Get-BootVendor', 'Test-NetworkBootMember', 'Get-BootOrderTarget', 'Test-SameMembers',
+    foreach ($f in 'Get-BootVendor', 'Test-NetworkBootMember', 'Get-BootOrderTarget', 'Test-DisabledBootMember',
+        'Get-HpBootOrderTarget', 'Test-SameMembers',
         'ConvertFrom-LenovoBootSetting', 'Get-BootItemName', 'Get-LenovoBootState', 'Get-HpBootState',
         'Get-FirmwareBootEntryState', 'Get-WakeSequenceState', 'Get-BootOrderPlan', 'Get-BootOrderVerdict',
         'Get-RebuildPathState', 'Read-BootOrder', 'Set-LenovoBootOrder', 'Set-HpBootOrder',
@@ -342,7 +343,7 @@ Describe 'Invoke-BootOrderEnforcement -- the ONE place a setter is called' {
         $LENOVO_NET_FIRST = [pscustomobject]@{ Vendor = 'Lenovo'; Status = 'read'; Setting = 'Primary Boot Sequence'; Members = @('PCI LAN', 'Hard Drive') }
         $LENOVO_STORED = [pscustomobject]@{ Vendor = 'Lenovo'; Status = 'read'; Setting = 'Primary Boot Sequence'; Members = @('Hard Drive') }
         $HP_NET_FIRST = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @('NETWORK IPV4:EMBEDDED:1', 'HDD:M.2:1') }
-        $HP_STORED = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @('HDD:M.2:1') }
+        $HP_STORED = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @('NETWORK IPV4:EMBEDDED:1(Disabled)', 'HDD:M.2:1') }
     }
 
     It 'OFF: calls no setter, for either vendor, and the order it hands back is the one it read' {
@@ -366,7 +367,7 @@ Describe 'Invoke-BootOrderEnforcement -- the ONE place a setter is called' {
     It 'ON: the HP setter IS called for a box whose order starts with Network' {
         Use-Boxes $HP_NET_FIRST $HP_STORED
         Invoke-BootOrderEnforcement -Manufacturer 'HP' -Enforce $true -CheckMode $false | Out-Null
-        Should -Invoke Set-HpBootOrder -Times 1 -Exactly -ParameterFilter { $Setting -eq 'UEFI Boot Order' -and ($Members -join ',') -eq 'HDD:M.2:1' }
+        Should -Invoke Set-HpBootOrder -Times 1 -Exactly -ParameterFilter { $Setting -eq 'UEFI Boot Order' -and ($Members -join ',') -eq 'NETWORK IPV4:EMBEDDED:1(Disabled),HDD:M.2:1' }
         Should -Invoke Set-LenovoBootOrder -Times 0 -Exactly
     }
 
@@ -388,5 +389,71 @@ Describe 'Invoke-BootOrderEnforcement -- the ONE place a setter is called' {
         Use-Boxes $LENOVO_STORED $LENOVO_STORED
         Invoke-BootOrderEnforcement -Manufacturer 'LENOVO' -Enforce $true -CheckMode $false | Out-Null
         Should -Invoke Set-LenovoBootOrder -Times 0 -Exactly
+    }
+}
+
+# What worker 7 (HP ProDesk 600 G4 DM, BIOS Q22 02.33.00) answered on 2026-10-04 (#3404, #3388). The census read ten
+# HP workers with this list; the two writes below are the two the box was SENT.
+Describe 'The HP write -- what worker 7 answered (#3404)' {
+    BeforeAll {
+        # A stub that returns an instance, so the piped Invoke-CimMethod is actually reached.
+        function Get-CimInstance { param($Namespace, $ClassName) [pscustomobject]@{ Class = $ClassName } }
+        function Invoke-CimMethod { param([Parameter(ValueFromPipeline)] $InputObject, $MethodName, $Arguments) }
+        $CENSUS = 'HDD:M.2:1,HDD:USB:1,NETWORK IPV4:EMBEDDED:1,NETWORK IPV6:EMBEDDED:1'
+        $CENSUS_READ = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @($CENSUS -split ','); Reason = $null }
+        $MARKED = 'HDD:M.2:1,HDD:USB:1,NETWORK IPV4:EMBEDDED:1(Disabled),NETWORK IPV6:EMBEDDED:1(Disabled)'
+        $MARKED_READ = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @($MARKED -split ','); Reason = $null }
+        $SHOWN = [pscustomobject]@{ State = 'UNREAD'; Reason = 'HP' }
+        $LIVE = [pscustomobject]@{ Status = 'read'; NetworkInOrder = $false; Order = @('Windows Boot Manager'); Reason = $null }
+    }
+
+    It 'the census order and the marked order are different readings before the plan is run on them' {
+        $CENSUS | Should -Not -Be $MARKED
+    }
+
+    It 'plans a FULL-LENGTH value: every member kept, each network member marked (Disabled), none dropped' {
+        $p = Get-BootOrderPlan -Read $CENSUS_READ -Enforce $true
+        $p.Action | Should -Be 'write'
+        $p.Target -join ',' | Should -Be $MARKED
+        $p.Target.Count | Should -Be $CENSUS_READ.Members.Count -Because 'a value with fewer members answered Return 0 and changed nothing'
+    }
+
+    It 'plans nothing for a list whose network members are already marked, so a second run writes nothing' {
+        (Get-BootOrderPlan -Read $MARKED_READ -Enforce $true).Action | Should -Be 'none'
+    }
+
+    It 'still refuses to leave nothing enabled to boot from, with every disk marked or absent' {
+        $onlyNet = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @('NETWORK IPV4:EMBEDDED:1', 'NETWORK IPV6:EMBEDDED:1') }
+        (Get-BootOrderPlan -Read $onlyNet -Enforce $true).Action | Should -Be 'refuse'
+        $diskOff = [pscustomobject]@{ Vendor = 'HP'; Status = 'read'; Setting = 'UEFI Boot Order'; Members = @('HDD:M.2:1(Disabled)', 'NETWORK IPV4:EMBEDDED:1') }
+        (Get-BootOrderPlan -Read $diskOff -Enforce $true).Action | Should -Be 'refuse'
+    }
+
+    It 'SetBIOSSetting sends the value as the comma-joined members, and a non-zero code is a failure by name' {
+        Mock Invoke-CimMethod { [pscustomobject]@{ Return = 0 } }
+        Set-HpBootOrder -Setting 'UEFI Boot Order' -Members @($MARKED -split ',')
+        Should -Invoke Invoke-CimMethod -Times 1 -Exactly -ParameterFilter { $Arguments.Value -eq $MARKED -and $Arguments.Name -eq 'UEFI Boot Order' }
+        Mock Invoke-CimMethod { [pscustomobject]@{ Return = 5 } }
+        { Set-HpBootOrder -Setting 'UEFI Boot Order' -Members @('HDD:M.2:1') } | Should -Throw '*Invalid Parameter*'
+    }
+
+    It 'Return 0 with the list UNCHANGED (worker 7, 11:27:03Z) is failed, naming the read-back' {
+        Mock Read-BootOrder { $CENSUS_READ }
+        Mock Set-HpBootOrder { }
+        $run = Invoke-BootOrderEnforcement -Manufacturer 'HP' -Enforce $true -CheckMode $false
+        $run.WriteError | Should -BeNullOrEmpty -Because 'the setter answered 0, so nothing was thrown'
+        $v = Get-BootOrderVerdict -Before $run.Before -Plan $run.Plan -After $run.After -WriteError $run.WriteError -Wake $SHOWN -Live $LIVE -CheckMode $false
+        $v.Status | Should -Be 'failed'
+        $v.Reasons -join ' ' | Should -BeLike '*read-back*'
+    }
+
+    It 'a write whose read-back EQUALS the target is not failed (the control for the test above)' {
+        $script:reads = 0
+        Mock Read-BootOrder { @($CENSUS_READ, $MARKED_READ)[[Math]::Min($script:reads++, 1)] }
+        Mock Set-HpBootOrder { }
+        $run = Invoke-BootOrderEnforcement -Manufacturer 'HP' -Enforce $true -CheckMode $false
+        $v = Get-BootOrderVerdict -Before $run.Before -Plan $run.Plan -After $run.After -WriteError $run.WriteError -Wake $SHOWN -Live $LIVE -CheckMode $false
+        $v.Status | Should -Not -Be 'failed'
+        $run.After.Members -join ',' | Should -Be $MARKED
     }
 }

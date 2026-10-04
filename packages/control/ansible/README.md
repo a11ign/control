@@ -201,16 +201,21 @@ PXE server on the workers' LAN cannot take a boot. The exposure is in this repos
 `autounattend.xml` is served over PXE and its `WillWipeDisk` makes the install hands-off.
 
 **It ships OFF.** `worker_enforce_boot_order` (`roles/worker/defaults/main.yml`) defaults to false, and with it
-false the task READS and reports and calls no setter. A true value writes the box's own order minus its network
-members and reads the stored value back; applying it is a separate step, one worker first (#3388).
+false the task READS and reports and calls no setter. A true value writes the box's own order with its network
+members taken out (REMOVED on Lenovo, MARKED `(Disabled)` on HP) and reads the stored value back; applying it is
+a separate step, one worker first (#3388).
 
 - **Names and values come from the box.** Lenovo: `Lenovo_BiosSetting` to read, `Lenovo_SetBiosSetting` then
   `Lenovo_SaveBiosSettings` to write. HP: `HP_BIOSOrderedList` in `root\HP\InstrumentedBIOS` to read,
   `HP_BIOSSettingInterface.SetBIOSSetting(Name, Value, Password)` to write. A setting not found by name is
-  `unreadable`, and the result lists the boot-looking items the box did have. **The HP form is built from HP's
-  documented interface ([Understanding HP BIOS Settings](https://developers.hp.com/hp-client-management/doc/understanding-hp-bios-settings))
-  and no HP worker has been read yet**; #3388's first read replaces that sentence with the setting names found.
-  A BIOS password makes either write fail by name, and this repository holds none.
+  `unreadable`, and the result lists the boot-looking items the box did have. **The HP form was read on ten HP
+  ProDesk 600 G4 DM workers and tried on worker 7** (#3404; [Understanding HP BIOS Settings](https://developers.hp.com/hp-client-management/doc/understanding-hp-bios-settings)
+  is the interface): `UEFI Boot Order`, `IsReadOnly 0`, `Size 4`, stored `HDD:M.2:1,HDD:USB:1,NETWORK IPV4:EMBEDDED:1,NETWORK IPV6:EMBEDDED:1`.
+  **HP's ordered list applies a value only when it carries ALL its members:** a two-member value (the disks
+  only) answered `Return 0` and left the list unchanged, while a full-length value applied at once with no restart,
+  permuted or with the network members suffixed `(Disabled)`, the notation the box itself prints. So the HP
+  write sends every member and marks the network ones; it is never a removal, and `Return 0` alone is not
+  success (the read-back is). A BIOS password makes either write fail by name, and this repository holds none.
 - **The words:** `ok` / `changed` (the stored order omits Network and nothing is left unshown), `order-set`
   (it does, with a caveat the result names), `needs-change` (network is in the order and nothing was written),
   `not-read` (neither vendor), `unreadable`, and `failed` (a refused write, or a read-back that is not the
@@ -224,8 +229,8 @@ members and reads the stored value back; applying it is a separate step, one wor
   its own order at boot can make it disagree with the vendor setting, and a disagreement also keeps the status
   at `order-set`. The vendor setting may only reach this list at the next restart.
 - **The rebuild path after enforcement.** Network boot is also how a box is REBUILT (`autounattend.xml`, and
-  `os-rollback.yml`'s one-time firmware `BootNext` when the rollback window is closed). The module removes network
-  from the ORDER and never deletes an entry; `network_entry_addressable` says, from `bcdedit`, whether a network
+  `os-rollback.yml`'s one-time firmware `BootNext` when the rollback window is closed). The module takes network
+  out of the ORDER (removes it on Lenovo, marks it `(Disabled)` on HP) and never deletes an entry; `network_entry_addressable` says, from `bcdedit`, whether a network
   entry still exists for a `BootNext` to point at, per box and per run. **Per vendor, today, this is UNREAD:**
   whether Lenovo or HP firmware keeps the entry once it is out of the order is exactly what #3388's first read
   will show. Where it says `no`, a PXE rebuild of that model is a console visit, and `ceo` and the chairman rule
