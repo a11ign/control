@@ -17,11 +17,12 @@
 # list only applies a value that carries every member (below). Never a member the box did not list. It is
 # refused when it would leave nothing enabled to boot from.
 #
-# ## It ships OFF
+# ## The module's `enforce` defaults to false; the ROLE turns it on
 #
-# `enforce` defaults to false, and with it false the module READS and reports and calls no setter. The next
-# `fleet:provision` would otherwise write firmware on every box before any session had read a boot-order name
-# on one of them. Turning it on is the next row's act, one worker first.
+# `enforce` defaults to false, and with it false the module READS and reports and calls no setter. The role's
+# `worker_enforce_boot_order` was false while #3388 ran this on 13 workers by hand and #3400 and #3389 wrote the
+# other two; it is true since #3492, so `fleet:provision` passes `enforce: true`. `-e worker_enforce_boot_order=false`
+# is how to read without writing.
 #
 # ## Wake on LAN is READ beside the boot order, and NEVER rewritten
 #

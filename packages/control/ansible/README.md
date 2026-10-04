@@ -202,10 +202,12 @@ that ledger holds.
 PXE server on the workers' LAN cannot take a boot. The exposure is in this repository's own files:
 `autounattend.xml` is served over PXE and its `WillWipeDisk` makes the install hands-off.
 
-**It ships OFF.** `worker_enforce_boot_order` (`roles/worker/defaults/main.yml`) defaults to false, and with it
-false the task READS and reports and calls no setter. A true value writes the box's own order with its network
-members taken out (REMOVED on Lenovo, MARKED `(Disabled)` on HP) and reads the stored value back; applying it is
-a separate step, one worker first (#3388).
+**It is ON by default (#3492).** `worker_enforce_boot_order` (`roles/worker/defaults/main.yml`) is true, so a
+provision writes the box's own order with its network members taken out (REMOVED on Lenovo, MARKED `(Disabled)` on
+HP) and reads the stored value back; a read-back that is not the target fails the play for that worker by name. It
+shipped off (#3387) and was run by hand on 13 workers (#3388), then on workers 4 and 6 (#3400, #3389). **`false` is
+how to read without writing:** `-e worker_enforce_boot_order=false` reports the order and calls no setter. The claim
+stays "set and read back", never "a PXE hijack is impossible".
 
 - **Names and values come from the box.** Lenovo: `Lenovo_BiosSetting` to read, `Lenovo_SetBiosSetting` then
   `Lenovo_SaveBiosSettings` to write. HP: `HP_BIOSOrderedList` in `root\HP\InstrumentedBIOS` to read,

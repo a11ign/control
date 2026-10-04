@@ -290,8 +290,11 @@ worker_content_delivery_values:
   - SoftLandingEnabled
   - SystemPaneSuggestionsEnabled
 
-# #3387: TAKE NETWORK BOOT OUT OF THE FIRMWARE BOOT ORDER (Lenovo and HP). OFF, and it ships off on purpose: the
-# next `fleet:provision` is on fourteen boxes, and a module that wrote by default would write firmware on them
-# before any session had read a boot-order name on one. With this false `a11y_boot_order` READS and reports and
-# calls no setter. Turning it on is the next row's act (#3388), one worker first; worker 6 stays out until #3250.
-worker_enforce_boot_order: false
+# #3387: TAKE NETWORK BOOT OUT OF THE FIRMWARE BOOT ORDER (Lenovo and HP). ON (#3492). It shipped OFF so that no
+# provision wrote firmware before a session had read a boot-order name on one box; #3388 then ran it by hand on 13
+# workers (https://github.com/a11ign/a11ign/issues/3388, 13 of 13 read back as set, none `ok`), and workers 4 and 6
+# were written by #3400 and #3389. So a provisioned or re-provisioned worker now has Network taken out of its stored
+# order (REMOVED on Lenovo, MARKED `(Disabled)` on HP) and the order read back; a read-back that is not the target
+# FAILS THE PLAY for that worker by name. The claim is "set and read back", never "a PXE hijack is impossible".
+# `false` is how to READ without writing: `-e worker_enforce_boot_order=false` reports and calls no setter.
+worker_enforce_boot_order: true

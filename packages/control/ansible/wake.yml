@@ -40,8 +40,8 @@
 # Automatic sequence puts Network FIRST. With a PXE server running, a wake can therefore re-image the
 # machine. Prefer `Primary`.
 #
-# `a11y_boot_order` (#3387) is the other half: it can take Network out of the STORED boot order (ships OFF,
-# `worker_enforce_boot_order`), and it READS the Wake on LAN value beside it without rewriting it. `Primary` wakes
+# `a11y_boot_order` (#3387) is the other half: it can take Network out of the STORED boot order (ON by default,
+# `worker_enforce_boot_order`, #3492), and it READS the Wake on LAN value beside it without rewriting it. `Primary` wakes
 # through the stored order; `Automatic` does not, so an order without Network is reported `order-set`, never `ok`,
 # until the sequence a wake uses is shown to omit it.
 - name: Wake the capture workers
