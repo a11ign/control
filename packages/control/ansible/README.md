@@ -168,8 +168,10 @@ Four prerequisites, **all enforced and read back** (#3230), and each fails the p
 
 1. **Firmware Wake-on-LAN.** Not a console visit on a Lenovo: the installed OS reaches the BIOS through
    `root\wmi` (`Lenovo_BiosSetting`, `Lenovo_SetBiosSetting`, `Lenovo_SaveBiosSettings`), so
-   `a11y_wake_prereqs` reads the value and repairs `Disabled`. Any other value is left alone (`Automatic` is
-   not rewritten to `Primary`; that is a separate decision, see `wake.yml`). A box that is not a Lenovo, or
+   `a11y_wake_prereqs` reads the value and repairs any value other than `Primary` (`firmware_wol_value`'s
+   default) to `Primary`, `Disabled` and `Automatic` alike, then reads it back (#3457). `Automatic` selects the
+   network-first boot sequence (`wake.yml`), and #3250's cycle woke worker 6 under `Primary` where #3241's
+   failed under `Automatic`. A box that is not a Lenovo, or
    whose classes are absent, reports `not-read` / `unreadable` and is never called ok. The earlier sentence
    here, "nothing can automate it -- the box is off and has no OS to ask", was true of a box that is off and
    wrong of one being provisioned.
@@ -224,7 +226,7 @@ a separate step, one worker first (#3388).
   (`wake.yml`), so an order without Network may not hold on a woken box. `Primary` wakes through the stored
   order. Where the sequence a wake uses is not SHOWN to omit Network (a Lenovo `Automatic` with no
   `Automatic Boot Sequence` item to read, any HP box, a disabled or unread value) the status is `order-set`,
-  never `ok`. Changing `Automatic` to `Primary` is the lever #3250 is testing on worker 6.
+  never `ok`. `a11y_wake_prereqs` is what changes `Automatic` to `Primary` (#3457, after #3250's proof on worker 6).
 - **A second reading:** `bcdedit /enum firmware` lists the UEFI entries a box will try. A firmware that rebuilds
   its own order at boot can make it disagree with the vendor setting, and a disagreement also keeps the status
   at `order-set`. The vendor setting may only reach this list at the next restart.
