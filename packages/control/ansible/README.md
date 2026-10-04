@@ -194,6 +194,47 @@ box off mid-run, so that proof is `fleet-wake.mjs`'s `woken` outcome, not this r
 `runs/fleet-wake-proof.json` (#3227) through the reader auto-off uses and says `PROVEN` only for a worker
 that ledger holds.
 
+## Network boot and the firmware boot order (#3387)
+
+`a11y_boot_order` takes network/PXE boot out of a worker's firmware boot order, on a Lenovo and on an HP, so a
+PXE server on the workers' LAN cannot take a boot. The exposure is in this repository's own files:
+`autounattend.xml` is served over PXE and its `WillWipeDisk` makes the install hands-off.
+
+**It ships OFF.** `worker_enforce_boot_order` (`roles/worker/defaults/main.yml`) defaults to false, and with it
+false the task READS and reports and calls no setter. A true value writes the box's own order minus its network
+members and reads the stored value back; applying it is a separate step, one worker first (#3388).
+
+- **Names and values come from the box.** Lenovo: `Lenovo_BiosSetting` to read, `Lenovo_SetBiosSetting` then
+  `Lenovo_SaveBiosSettings` to write. HP: `HP_BIOSOrderedList` in `root\HP\InstrumentedBIOS` to read,
+  `HP_BIOSSettingInterface.SetBIOSSetting(Name, Value, Password)` to write. A setting not found by name is
+  `unreadable`, and the result lists the boot-looking items the box did have. **The HP form is built from HP's
+  documented interface ([Understanding HP BIOS Settings](https://developers.hp.com/hp-client-management/doc/understanding-hp-bios-settings))
+  and no HP worker has been read yet**; #3388's first read replaces that sentence with the setting names found.
+  A BIOS password makes either write fail by name, and this repository holds none.
+- **The words:** `ok` / `changed` (the stored order omits Network and nothing is left unshown), `order-set`
+  (it does, with a caveat the result names), `needs-change` (network is in the order and nothing was written),
+  `not-read` (neither vendor), `unreadable`, and `failed` (a refused write, or a read-back that is not the
+  target).
+- **Wake on LAN is read beside the order and never rewritten.** `Automatic` starts its sequence with Network
+  (`wake.yml`), so an order without Network may not hold on a woken box. `Primary` wakes through the stored
+  order. Where the sequence a wake uses is not SHOWN to omit Network (a Lenovo `Automatic` with no
+  `Automatic Boot Sequence` item to read, any HP box, a disabled or unread value) the status is `order-set`,
+  never `ok`. Changing `Automatic` to `Primary` is the lever #3250 is testing on worker 6.
+- **A second reading:** `bcdedit /enum firmware` lists the UEFI entries a box will try. A firmware that rebuilds
+  its own order at boot can make it disagree with the vendor setting, and a disagreement also keeps the status
+  at `order-set`. The vendor setting may only reach this list at the next restart.
+- **The rebuild path after enforcement.** Network boot is also how a box is REBUILT (`autounattend.xml`, and
+  `os-rollback.yml`'s one-time firmware `BootNext` when the rollback window is closed). The module removes network
+  from the ORDER and never deletes an entry; `network_entry_addressable` says, from `bcdedit`, whether a network
+  entry still exists for a `BootNext` to point at, per box and per run. **Per vendor, today, this is UNREAD:**
+  whether Lenovo or HP firmware keeps the entry once it is out of the order is exactly what #3388's first read
+  will show. Where it says `no`, a PXE rebuild of that model is a console visit, and `ceo` and the chairman rule
+  on that with the fact in hand.
+- **The claim is the SETTING, not the behaviour.** "Boot order set and read back", never "a hijack cannot
+  happen": no test boots a box with a PXE server answering, because that test would run the disk wipe.
+- **Merging it moves `provisionRevision`.** The module is a HASHED provisioning input, so the fleet reads
+  INCONSISTENT until the next `fleet:provision`. That is expected, not a regression.
+
 ## The leak check: one worker, a fake credential, and the box put back (#2399)
 
 ADR 0038, Constraint 4 asks a question only a real screen reader on a real desktop can answer: **does NVDA speak text

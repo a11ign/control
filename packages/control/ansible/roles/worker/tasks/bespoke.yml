@@ -273,6 +273,32 @@
       {{ inventory_hostname }} firmware Wake on LAN: {{ wake_prereqs.firmware_status }}
       {{ wake_prereqs.firmware_wake_on_lan | default('') }}{{ wake_prereqs.firmware_reason | default('') }}
 
+- name: Firmware boot order, and whether network boot is in it (#3387)
+  # SHIPS OFF: with `worker_enforce_boot_order` false (the default) this READS and reports and calls no setter.
+  # A true value writes the box's own order minus its network members and reads it back, and a read-back that
+  # is not the target fails the play for the worker by name. `not-read` / `unreadable` / `needs-change` do not
+  # fail it: a box this read cannot speak for is not a box with a fault.
+  become: true
+  a11y.worker.a11y_boot_order:
+    enforce: "{{ worker_enforce_boot_order }}"
+  register: boot_order
+  timeout: 180
+
+- name: Say what the boot order read found
+  # Wake on LAN is read here and never rewritten; `order-set` means the stored order omits Network and a caveat
+  # (usually the wake sequence) stands, so it is printed with its reason and never folded into "fine".
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} boot order: {{ boot_order.boot_status }}
+      (enforcement {{ 'ON' if boot_order.enforced else 'OFF' }}).
+      Setting '{{ boot_order.boot_setting | default('', true) }}' read
+      [{{ boot_order.boot_order_before | join(' > ') }}], stored now [{{ boot_order.boot_order_after | join(' > ') }}].
+      Wake on LAN {{ boot_order.wake_on_lan | default('UNREAD', true) }}, wake sequence {{ boot_order.wake_sequence }}.
+      {{ boot_order.boot_reasons | join('; ') }}
+      Rebuild path: {{ boot_order.rebuild_path }}.
+      {{ ('Boot-looking items the box lists: ' ~ (boot_order.boot_items_seen | join(', ')))
+      if boot_order.boot_status in ['unreadable'] else '' }}
+
 # The stamp keys the CAPTURE CACHE on what provisioning actually did, and until now only
 # `provision-nvda-worker.ps1` wrote it -- so a box provisioned by this role kept whatever revision its
 # first boot happened to produce. Four functionally identical machines therefore reported four different

@@ -286,3 +286,9 @@ worker_content_delivery_values:
   - SubscribedContent-310093Enabled
   - SoftLandingEnabled
   - SystemPaneSuggestionsEnabled
+
+# #3387: TAKE NETWORK BOOT OUT OF THE FIRMWARE BOOT ORDER (Lenovo and HP). OFF, and it ships off on purpose: the
+# next `fleet:provision` is on fourteen boxes, and a module that wrote by default would write firmware on them
+# before any session had read a boot-order name on one. With this false `a11y_boot_order` READS and reports and
+# calls no setter. Turning it on is the next row's act (#3388), one worker first; worker 6 stays out until #3250.
+worker_enforce_boot_order: false
