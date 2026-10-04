@@ -1,5 +1,5 @@
 {
-  "//": "WHERE EACH LAYER'S CODE LIVES, in ONE place and listed here by hand rather than discovered by glob (ADR 0039 item 6, #3394). `path` is relative to the repository root this checkout is. Today the only layer is inside the monorepo, so this changes nothing; when it moves, this is the line that says where it went, and every control-side reader of the worker's code version follows it. Read through `src/layer-checkouts.mjs`, never by hand.",
+  "//": "WHERE EACH LAYER'S CODE LIVES, in ONE place and listed here by hand rather than discovered by glob (ADR 0039 item 6, #3394). `path` is relative to the repository root this checkout is. Today the only layer is inside the monorepo, so this changes nothing; when it moves, this is the line that says where it went, and every control-side reader of the worker's code version follows it. A layer that lives in its OWN repository also declares `remote` (its clone URL, https, ending .git) and optionally `branch` (default main): that is what makes a guest hold a second checkout of it at `path`, pinned to its own commit beside the core's (`--layer-ref`, #3395). A layer with no `remote` is inside the core checkout and a guest needs nothing more. Read through `src/layer-checkouts.mjs`, never by hand.",
   "layers": {
     "nvda-worker": { "path": "packages/nvda-worker" }
   }

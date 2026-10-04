@@ -36,6 +36,7 @@ export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
  *
  *   npm run fleet:deploy                       # ship this checkout's worker code
  *   npm run fleet:deploy -- --ref=<commit>     # default: the commit this checkout is on
+ *   npm run fleet:deploy -- --layer-ref=<layer>=<sha>   # a layer in its OWN repository is pinned beside the core (#3395)
  *   npm run fleet:sleep                        # power the fleet down, REFUSING any box mid-capture
  *   npm run fleet:provision                    # the ROLE: NVDA, Edge pin, policies, and the stamp
  *   npm run fleet:provision -- --serial=0      # all boxes at once; 1 (default) is fail-fast on a role change
@@ -64,6 +65,7 @@ import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
+import { layerPins } from "./layer-checkouts.mjs";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
@@ -107,7 +109,7 @@ export { inventorySources, inventoryReadScript, parseInventoryReads };
  */
 refuseUnknownFlags(
   ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply",
-    "--allow-offline=", "--allow-hold=", "--display-mode="],
+    "--allow-offline=", "--allow-hold=", "--display-mode=", "--layer-ref="],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
 /** CT 120. Named here rather than parsed out of the inventory, which needs Ansible to read properly. */
@@ -570,7 +572,8 @@ const argOf = (/** @type {string} */ name) => flagValue(process.argv, name);
  * these refusals exists because the value reaches a shell on the box holding the fleet SSH key.
  *
  * @returns {{chosen: string, limitFlag: string|undefined, serialFlag: string|undefined, ref: string,
- *            allowEdgeDowngrade: boolean, apply: boolean, displayMode: string|undefined}}
+ *            allowEdgeDowngrade: boolean, apply: boolean, displayMode: string|undefined,
+ *            layerCommits: Record<string, string>}}
  */
 function parseArgs() {
   const refuse = (/** @type {string} */ message) => {
@@ -616,8 +619,9 @@ function parseArgs() {
   if (displayModeIssue) refuse(displayModeIssue);
   const ref = argOf("ref") ?? localBranch();
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
+  const layerCommits = layerCommitsOrRefuse({ chosen, refuse });
 
-  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits };
 }
 
 /**
@@ -763,12 +767,14 @@ function runBootstrapFromHere(chosen) {
  *
  * @param {{ chosen: string, ref: string, expected: string, limitFlag: string|undefined,
  *           serialFlag: string|undefined, allowEdgeDowngrade: boolean, apply: boolean,
- *           displayMode: string|undefined, aim: { addresses: Record<string, string>, workers: string[] } }} spec
+ *           displayMode: string|undefined, layerCommits: Record<string, string>,
+ *           aim: { addresses: Record<string, string>, workers: string[] } }} spec
+ *   `layerCommits` is the layers' half of the commit pair (#3395): `{ layer: sha }`, empty while none has its own repository.
  *   `aim` is where each MOVED worker is aimed this run, already identity-checked (#2832); empty for a healthy fleet.
  * @returns {string} the unit name
  */
 function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-  displayMode, aim }) {
+  displayMode, layerCommits, aim }) {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -819,6 +825,8 @@ try {
     // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
     // the guests fetch; this catches the fetch silently not taking.
     + ` -e a11y_expected_commit=${expected}`
+    // The pair's second half: each layer that lives in its own repository, pinned to ITS commit (#3395).
+    + layerCommitsExtraVars(layerCommits)
     // The control-plane address ALREADY resolved above (env var or its installed file, #285), so
     // `control-host-install.yml` never has to read the environment itself -- it just records what got
     // used to reach this machine. Harmless for every other playbook, which does not read this var.
@@ -1052,6 +1060,61 @@ const LINK_GATED = ["deploy.yml", "provision-role.yml"];
 export function allowOfflineNames(argv) {
   const prefix = "--allow-offline=";
   return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
+}
+
+/**
+ * Every `--layer-ref=<name>=<sha>`, in order. REPEATABLE, which `flagValue` (first match only) is not: one
+ * layer per flag, so the pair grows by a flag per layer rather than by a packed value.
+ *
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+export function layerRefValues(argv) {
+  const prefix = "--layer-ref=";
+  return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
+}
+
+/** The playbooks that move a guest's checkout and so hold a layer's second half of the pair (#3395). */
+const LAYER_PINNED = ["deploy.yml", "provision-role.yml"];
+
+/**
+ * The refusal for `--layer-ref` on a playbook that pins no layer, or for a layer left unpinned on one that does;
+ * else the pins. Silently dropping a pin the operator typed is the failure `refuseUnknownFlags` exists to end.
+ *
+ * @param {{ chosen: string, given: string[] }} args
+ * @returns {{ pins: Record<string, string>, refusal: string | null }}
+ */
+export function layerPinsFor({ chosen, given }) {
+  if (!LAYER_PINNED.includes(chosen)) {
+    return { pins: {}, refusal: given.length
+      ? `refusing --layer-ref with --playbook=${chosen}: only ${LAYER_PINNED.join(" and ")} pin a layer.` : null };
+  }
+  return layerPins(given);
+}
+
+/**
+ * `--layer-ref`, read off argv and refused or accepted, so `parseArgs` stays under its complexity budget.
+ *
+ * @param {{ chosen: string, refuse: (message: string) => void }} args
+ * @returns {Record<string, string>}
+ */
+function layerCommitsOrRefuse({ chosen, refuse }) {
+  const { pins, refusal } = layerPinsFor({ chosen, given: layerRefValues(process.argv) });
+  if (refusal) refuse(refusal);
+  return pins;
+}
+
+/**
+ * The one `-e` that carries the layers' half of the commit pair, or "" when no layer has its own repository.
+ * Single-quoted for the remote shell that parses this string; `layerPins` has already restricted every name to
+ * `[a-z0-9-]` and every sha to 40 hex digits, so nothing that reaches here can close the quote.
+ *
+ * @param {Record<string, string>} pins a value that has passed `layerPinsFor`
+ * @returns {string} the argv fragment, leading space included, or ""
+ */
+export function layerCommitsExtraVars(pins) {
+  if (!Object.keys(pins).length) return "";
+  return ` -e '${JSON.stringify({ a11y_layer_commits: pins })}'`;
 }
 
 /**
@@ -1734,7 +1797,7 @@ async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
-  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode } = parseArgs();
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits } = parseArgs();
   await guardProtocolChange(chosen);
   const { moved } = await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen, { limitFlag });
@@ -1787,7 +1850,7 @@ async function main() {
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
   const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-    displayMode, aim });
+    displayMode, layerCommits, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
     + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`

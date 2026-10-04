@@ -1,0 +1,95 @@
+---
+# EVERY LAYER THAT LIVES IN ITS OWN REPOSITORY IS A SECOND CHECKOUT ON THE GUEST, PINNED TO ITS OWN COMMIT
+# (ADR 0039 item 6, row 6b, #3395). Included by every play that moves the CORE checkout's commit
+# (`deploy.yml`, `provision.yml`, `provision-role.yml`), straight after the core's own merge.
+#
+# WHY A PAIR. The fleet used to be one sha: `a11y_expected_commit`. A layer in a second repository makes the
+# deployed code two commits, and a deploy that pinned only the core would leave the layer wherever its branch
+# happened to be that minute -- the worker would then serve a version nobody chose and `/health.code` (a content
+# hash over the LAYER directory) would be the only thing to notice. So each half is pinned, fetched and ASSERTED
+# separately: `a11y_layer_commits` is `{layer name: full sha}`, passed by `fleet:deploy --layer-ref=name=sha`.
+#
+# NO DEFAULT. A layer with no pin REFUSES, where the core falls back to `origin/<ref>` when run by hand: a
+# guessed layer commit is exactly the silent wrong answer this exists to remove, and it would be a wrong answer
+# about a repository the operator did not name.
+#
+# WHICH LAYERS: read from `layers.json` here, the one manifest the control-side readers use, never restated in
+# a play. A layer with no `remote` is INSIDE the core checkout, which the core's own merge already moved, so
+# today the list is empty and this file does nothing -- by design: the split's order is "guests know how to hold
+# a layer" BEFORE "a layer leaves" (#2701).
+#
+# EVERY GIT CALL RUNS IN THE LAYER'S OWN DIRECTORY (`item.value.path` under `a11y_repo_path`), never in the core
+# checkout's: `git merge` there would move the CORE to a commit of the OTHER repository's history and fail, or
+# worse, succeed on a coincidence. `-c core.hooksPath=a11y-no-hooks` for `deploy.yml`'s reason (a guest is an
+# appliance with no bash). `layer-guests.test.ts` pins all of it.
+- name: Read which layers live in their own repository
+  ansible.builtin.include_tasks: read-layer-checkouts.yml
+
+- name: REFUSE a layer with no pinned commit
+  ansible.builtin.assert:
+    that:
+      - (a11y_layer_commits | default({}))[item.key] is defined
+      - (a11y_layer_commits | default({}))[item.key] is match('^[0-9a-f]{40}$')
+    fail_msg: >-
+      Layer {{ item.key }} lives in its own repository ({{ item.value.remote }}) and no full commit was
+      named for it. Nothing has been changed on {{ inventory_hostname }}. Name it:
+      `--layer-ref={{ item.key }}=<40 hex>` on `fleet:deploy` / `fleet:provision`.
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Each such layer is on the box, at its own path
+  # Cloned when absent, never when present: a box that held the layer INSIDE the core checkout loses that
+  # tracked directory in the core's merge above, and the clone lands where it was. A directory that is there
+  # and is not a checkout (an old `node_modules` is what is left behind) is REFUSED by name, not cloned over.
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = "Stop"
+    $layer = '{{ a11y_repo_path }}/{{ item.value.path }}'
+    if (Test-Path "$layer/.git") { 'present' }
+    elseif ((Test-Path $layer) -and (Get-ChildItem -Force $layer | Select-Object -First 1)) {
+      throw "$layer exists and is not a clone of {{ item.key }}: remove what is left of the old layer there, then re-run"
+    } else {
+      & git -c core.hooksPath=a11y-no-hooks clone --quiet '{{ item.value.remote }}' $layer
+      if ($LASTEXITCODE -ne 0) { throw "git clone of {{ item.key }} failed with $LASTEXITCODE" }
+      'cloned'
+    }
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: layer_present
+  changed_when: "'cloned' in layer_present.stdout"
+
+- name: Fetch, check out and fast-forward each layer to its pinned commit
+  # The core's block, repeated per layer in the LAYER's directory: `$LASTEXITCODE` after every call because
+  # PowerShell's `$ErrorActionPreference` does not cover native executables (`deploy.yml` records the five
+  # boxes that reported `changed` while sitting on the wrong commit); a modified tracked file is dirt on an
+  # appliance and is reported before it is discarded.
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = "Stop"
+    function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
+    Run "fetch" fetch --quiet origin
+    $dirty = git -c core.hooksPath=a11y-no-hooks status --porcelain --untracked-files=no
+    if ($dirty) { Write-Output "discarding local modifications on this guest:"; Write-Output $dirty; Run "checkout" checkout -- . }
+    Run "checkout" -c advice.detachedHead=false checkout --quiet {{ item.value.branch | default('main') }}
+    Run "merge" merge --ff-only --quiet {{ a11y_layer_commits[item.key] }}
+    git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
+  args:
+    chdir: "{{ a11y_repo_path }}/{{ item.value.path }}"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: layer_heads
+  changed_when: true
+
+- name: Each layer is ON the commit it was told to be on
+  # ASSERTED, not assumed from the step above having exited 0, and per layer: the pair is two readings.
+  ansible.builtin.assert:
+    that: item.stdout_lines | last | trim == a11y_layer_commits[item.item.key]
+    fail_msg: >-
+      {{ inventory_hostname }}: layer {{ item.item.key }} is on {{ item.stdout_lines | last | trim }}, not
+      {{ a11y_layer_commits[item.item.key] }}. The fetch reported success, so this is the checkout or the
+      fast-forward being refused -- `git -C {{ a11y_repo_path }}/{{ item.item.value.path }} status` on the
+      box says which.
+  loop: "{{ layer_heads.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"

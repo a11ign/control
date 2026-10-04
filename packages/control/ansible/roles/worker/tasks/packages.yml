@@ -203,3 +203,26 @@
     } else { 'present' }
   register: repo_state
   changed_when: "'cloned' in repo_state.stdout"
+
+- name: Each layer that has its own repository exists on the box
+  # The same first clone, for a layer that lives in ITS OWN repository (ADR 0039 item 6, #3395): at the path the
+  # monorepo already used, so the launchers and scheduled tasks that reach it relatively are unchanged. Cloned
+  # when absent and never moved here -- the PIN is `deploy.yml`'s and `tasks/layer-checkouts.yml`'s job, which
+  # have the layer's commit; a role run has none. A directory that is there and is not a checkout is refused by
+  # name. Empty today: no layer has a `remote` yet.
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = "Stop"
+    $layer = '{{ worker_repo_path }}/{{ item.value.path }}'
+    if (Test-Path "$layer/.git") { 'present' }
+    elseif ((Test-Path $layer) -and (Get-ChildItem -Force $layer | Select-Object -First 1)) {
+      throw "$layer exists and is not a clone of {{ item.key }}: remove what is left of the old layer there, then re-run"
+    } else {
+      & 'C:\Program Files\MinGit\cmd\git.exe' clone --quiet '{{ item.value.remote }}' $layer
+      if ($LASTEXITCODE -ne 0) { throw "git clone of {{ item.key }} failed with $LASTEXITCODE" }
+      'cloned'
+    }
+  loop: "{{ worker_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: layer_state
+  changed_when: "'cloned' in layer_state.stdout"

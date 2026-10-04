@@ -1,0 +1,42 @@
+---
+# POINT THE NAMED LAYERS' ORIGIN AT THEIR NEW LOCATION, IN THE LAYER'S OWN CHECKOUT (ADR 0039 item 6, row 6b,
+# #3395). Included by the two plays that rewrite `origin` on a guest (`update-origin-remote.yml`,
+# `reset-checkout.yml`), after the core's own.
+#
+# BY NAME. Those plays were written for one `origin` per box: `remote set-url origin <new_repo_url>`. A layer
+# has its own origin, so it takes its own address, `new_layer_repo_urls[<layer>]` (preflighted by
+# `require-layer-origin-names.yml`), and a layer NOT named is left exactly as it is -- a core that moves says
+# nothing about where the layer lives. The core's `new_repo_url` appears nowhere in this file; every call here
+# runs in `a11y_repo_path/<layer path>`, never in `a11y_repo_path`, which is what keeps one from being written
+# over the other by accident. `layer-guests.test.ts` pins both.
+#
+# Moving a layer's COMMIT is not done here: a core history rewrite does not rewrite the layer, and the next
+# `fleet:deploy --layer-ref` pins the pair.
+- name: Read the layers that have their own repository
+  ansible.builtin.include_tasks: read-layer-checkouts.yml
+
+- name: Point each named layer's origin at its new location, and PROVE it resolves
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = "Stop"
+    function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
+    git -c core.hooksPath=a11y-no-hooks remote get-url origin
+    Run "remote set-url" remote set-url origin '{{ new_layer_repo_urls[item.key] }}'
+    Run "ls-remote" ls-remote --exit-code origin HEAD
+    git -c core.hooksPath=a11y-no-hooks remote get-url origin
+  args:
+    chdir: "{{ a11y_repo_path }}/{{ item.value.path }}"
+  loop: "{{ a11y_layer_checkouts | selectattr('key', 'in', (new_layer_repo_urls | default({})).keys() | list) | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: layer_origin_set
+  changed_when: (item.stdout_lines | first | trim) != new_layer_repo_urls[item.key]
+
+- name: Each named layer is on its new remote, verified live
+  ansible.builtin.assert:
+    that: (item.stdout_lines | last | trim) == new_layer_repo_urls[item.item.key]
+    fail_msg: >-
+      {{ inventory_hostname }}: layer {{ item.item.key }}'s origin was set but the readback does not match.
+      Do not trust this guest's layer; investigate by hand before deploying to it.
+  loop: "{{ layer_origin_set.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"

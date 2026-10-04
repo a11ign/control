@@ -16,6 +16,12 @@
  * imports the layer's own `code-version.mjs` DYNAMICALLY, from the resolved directory: still the one hasher,
  * and a static import would name the path this module exists to hide.
  *
+ * A layer that lives in its OWN repository declares a `remote`, and a guest then holds a second checkout of it
+ * pinned to its own commit (ADR 0039 item 6, row 6b, #3395): `separateLayers` names those, and `layerPins`
+ * turns the operator's `--layer-ref=<name>=<sha>` flags into the pair's second half, refusing a missing pin, a
+ * short sha and a layer that has no repository of its own. The guest plays read the SAME manifest themselves
+ * (`ansible/tasks/read-layer-checkouts.yml`), so the two cannot name different layers.
+ *
  * `worker-fleet` does NOT use this: it is published and `control` never is
  * (`worker-fleet-does-not-read-control.test.ts`), so its readers ask the worker package by name instead.
  */
@@ -30,7 +36,7 @@ const MANIFEST = JSON.parse(readFileSync(new URL("../layers.json", import.meta.u
  * The resolver over one manifest and one repository root. The exports below close over the real ones; a test
  * closes over a fixture, which is how "a declared layer whose path is absent" is reachable at all.
  *
- * @param {{ manifest: { layers: Record<string, { path: string }> }, root: string }} from
+ * @param {{ manifest: { layers: Record<string, { path: string, remote?: string, branch?: string }> }, root: string }} from
  */
 export function layersFrom({ manifest, root }) {
   /** The layer's directory: where its `package.json` and its `src/` are. @param {string} name */
@@ -57,10 +63,53 @@ export function layersFrom({ manifest, root }) {
     return hasher.codeVersion(layerSourceDir(name));
   }
 
-  return { layerRoot, layerSourceDir, layerCodeVersion };
+  /** The layers a guest holds as a second checkout: those that declare a `remote`. */
+  const separateLayers = () => Object.entries(manifest.layers).filter(([, layer]) => layer.remote).map(([name]) => name);
+
+  /**
+   * The operator's `--layer-ref=<name>=<full sha>` values as `{ name: sha }`, or the refusal to print.
+   * A layer is pinned by a FULL sha (the guest asserts `rev-parse HEAD` equals it, which an abbreviation never
+   * would), every separate layer must be pinned (no default: a guessed layer commit is a wrong answer about a
+   * repository nobody named), and a layer inside the core checkout is refused, because the core's pin already
+   * moved it and a second pin would say two things about one directory.
+   *
+   * @param {string[]} given
+   * @returns {{ pins: Record<string, string>, refusal: string | null }}
+   */
+  function layerPins(given) {
+    const separate = separateLayers();
+    /** @type {Record<string, string>} */
+    const pins = {};
+    for (const value of given) {
+      const match = /^([a-z0-9-]+)=([0-9a-f]{40})$/.exec(value);
+      if (!match) return refused(`--layer-ref=${value}: <layer name>=<40 lowercase hex>, a full commit.`);
+      const [, name, sha] = match;
+      if (!separate.includes(name)) {
+        return refused(`--layer-ref=${value}: "${name}" is not a layer with its own repository `
+          + `(those are: ${separate.join(", ") || "none"}). A layer inside the core checkout moves with the core's commit.`);
+      }
+      if (Object.hasOwn(pins, name)) return refused(`--layer-ref names "${name}" twice.`);
+      pins[name] = sha;
+    }
+    const unpinned = separate.filter((name) => !Object.hasOwn(pins, name));
+    if (unpinned.length) {
+      return refused(`${unpinned.join(", ")} lives in its own repository and needs a pin: `
+        + unpinned.map((name) => `--layer-ref=${name}=<40 hex>`).join(" "));
+    }
+    return { pins, refusal: null };
+  }
+
+  return { layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins };
+}
+
+/** @param {string} refusal @returns {{ pins: Record<string, string>, refusal: string }} */
+function refused(refusal) {
+  return { pins: {}, refusal: `refusing ${refusal}` };
 }
 
 const declared = layersFrom({ manifest: MANIFEST, root: REPO_ROOT });
 export const layerRoot = declared.layerRoot;
 export const layerSourceDir = declared.layerSourceDir;
 export const layerCodeVersion = declared.layerCodeVersion;
+export const separateLayers = declared.separateLayers;
+export const layerPins = declared.layerPins;

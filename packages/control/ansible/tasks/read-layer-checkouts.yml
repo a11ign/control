@@ -1,0 +1,8 @@
+---
+# WHICH LAYERS LIVE IN THEIR OWN REPOSITORY, read from `layers.json` and from nowhere else (ADR 0039 item 6,
+# #3395). A play that restated the list would be a second copy of the one fact `layers.json` exists to hold, and
+# would go on naming a layer that had moved. `lookup('file', ...)` runs on the CONTROL host, where the playbook
+# and the manifest are the same checkout; a layer with no `remote` is inside the core checkout and is not here.
+- name: Read the layers that have their own repository
+  ansible.builtin.set_fact:
+    a11y_layer_checkouts: "{{ (lookup('file', playbook_dir ~ '/../layers.json') | from_json).layers | dict2items | selectattr('value.remote', 'defined') | list }}"

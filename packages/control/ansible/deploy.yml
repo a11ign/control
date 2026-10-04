@@ -212,6 +212,11 @@
           fast-forward being refused — usually a guest committed on locally, or the branch does not
           exist there. `git -C {{ a11y_repo_path }} status` on the box says which.
 
+    - name: Put each layer that has its own repository on its pinned commit
+      # The expected commit is a PAIR (core, layer), and the layer's half is its own fetch, merge and assert in
+      # the layer's own directory (#3395). Empty today: no layer has a `remote` yet.
+      ansible.builtin.include_tasks: tasks/layer-checkouts.yml
+
     - name: Install dependencies
       # Unconditional and idempotent. Skipping it when the lockfile looks unchanged is the
       # optimisation that leaves one box on last week's guidepup — and guidepup's version is EVIDENCE,

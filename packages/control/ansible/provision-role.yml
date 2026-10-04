@@ -127,6 +127,11 @@
       register: role_head
       changed_when: true
 
+    - name: Put each layer that has its own repository on its pinned commit
+      # The expected commit is a PAIR (core, layer), and the layer's half is its own fetch, merge and assert in
+      # the layer's own directory (#3395). Empty today: no layer has a `remote` yet.
+      ansible.builtin.include_tasks: tasks/layer-checkouts.yml
+
     - name: Say which version
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} provisioning from {{ role_head.stdout | trim }}"
