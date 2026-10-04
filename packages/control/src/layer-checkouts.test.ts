@@ -108,10 +108,21 @@ test("POSITIVE CONTROL: a layer at a second path gives a different codeVersion f
 const specifiers = (source: string) =>
   [...codeLines(source).join("\n").matchAll(/(?:\bfrom\s+|\bimport\()"([^"]+)"/g)].map((m) => m[1]);
 
-test("layer-checkouts.mjs imports only node: modules (control has no node_modules)", () => {
+/** Every import reachable from `file`, as the offenders: anything that is neither `node:` nor a relative module that is itself clean. */
+const nonNodeImports = (file: string, seen = new Set<string>()): string[] => {
+  if (seen.has(file)) return [];
+  seen.add(file);
+  return specifiers(readFileSync(file, "utf8")).flatMap((s) =>
+    s.startsWith("node:") ? [] : s.startsWith(".") ? nonNodeImports(resolve(dirname(file), s), seen) : [`${file} imports "${s}"`]);
+};
+
+test("layer-checkouts.mjs reaches only node: modules and the control plane's own relative ones (control has no node_modules)", () => {
+  const file = resolve(REPO, "packages/control/src/layer-checkouts.mjs");
   const found = specifiers(read("packages/control/src/layer-checkouts.mjs"));
-  assert.ok(found.length >= 3, `expected the node: imports to be found, got ${found.length}`);
-  assert.deepEqual(found.filter((s) => !s.startsWith("node:")), []);
+  assert.ok(found.length >= 3, `expected the imports to be found, got ${found.length}`);
+  assert.deepEqual(nonNodeImports(file), []);
+  // The positive control: the relative import is followed, and a package name in it WOULD be named.
+  assert.ok(found.includes("./control-plane-checkout.mjs"), "the relative import this walk exists to follow");
 });
 
 test("the hasher the resolver reaches imports only node: and relative modules, as the static import used to prove", () => {
