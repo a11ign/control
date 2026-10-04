@@ -12,11 +12,16 @@
 # `Lenovo_SetBiosSetting` and `Lenovo_SaveBiosSettings` to write). So on a Lenovo the value is read, and a
 # `Disabled` is repaired or failed by name.
 #
-# What is deliberately NOT done: a value that is anything but `Disabled` is left alone. `Automatic` is not
-# rewritten to `Primary` -- wake.yml prefers `Primary` because the `Automatic` boot sequence puts Network
-# first and a woken box can re-image itself from a PXE server, but worker 4 woke on `Automatic` once the OS
-# side was right, and changing a working firmware value is a separate decision. When the repair IS needed,
-# `Automatic` is what it writes, for the same reason: it is the value proved to wake a box.
+# The value is `Primary`, and an `Automatic` is REPAIRED to it, not left alone. This module once left
+# `Automatic` alone because worker 4 had woken on it, and it wrote `Automatic` as the value "proved to wake a
+# box". #3250's proof cycle (2026-10-04, 12:18-12:19Z) reversed that: worker 6 woke onto its reserved address in
+# about 37 s with `Primary` and the PXE host running, where #3241's cycle under `Automatic` failed. `Automatic`
+# selects the network-first automatic boot sequence (wake.yml), so a woken box goes to the network rather than
+# through the stored order; `Primary` wakes through the stored order. The chairman ruled `Primary` on every
+# Lenovo (2026-10-04, #3457), so a provisioned or re-imaged worker no longer comes back to `Automatic`.
+#
+# The write is refused, by name, for a value the firmware does not list in its `[Optional:...]` set: a write the
+# BIOS would reject is not attempted, and a box whose firmware has no `Primary` is a fault to read, not a guess.
 #
 # A box that is not a Lenovo, or whose WMI classes are absent, reports `not-read` / `unreadable` with the
 # reason. It never reports `ok` for a setting this module did not read, and it does not fail: a Realtek box
@@ -37,7 +42,7 @@
 $spec = @{
     options = @{
         interface          = @{ type = 'str'; default = '*' }
-        firmware_wol_value = @{ type = 'str'; default = 'Automatic' }
+        firmware_wol_value = @{ type = 'str'; default = 'Primary' }
     }
     supports_check_mode = $true
 }
@@ -45,34 +50,42 @@ $module = [Ansible.Basic.AnsibleModule]::Create($args, $spec)
 
 $LENOVO_NAMESPACE = 'root\wmi'
 
-# "Wake on LAN,Automatic;[Optional:Disabled,Automatic,Primary]" -> the item and its CURRENT value. $null for a
-# line that is not of the shape, never an empty string that reads as a value.
+# "Wake on LAN,Automatic;[Optional:Disabled,Automatic,Primary]" -> the item, its CURRENT value and the values the
+# firmware ADVERTISES for it. $null for a line that is not of the shape, never an empty string that reads as a
+# value. Options is empty when the line advertises none, which is not the same as advertising the current one.
 function ConvertFrom-LenovoBiosSetting {
     param([string] $CurrentSetting)
     if ($CurrentSetting -notmatch '^(?<item>[^,;]+),(?<value>[^;]*)') { return $null }
-    return [pscustomobject]@{ Item = $Matches.item.Trim(); Value = $Matches.value.Trim() }
+    $item = $Matches.item.Trim()
+    $value = $Matches.value.Trim()
+    $options = @()
+    if ($CurrentSetting -match '\[Optional:(?<options>[^\]]*)\]') {
+        $options = @($Matches.options -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    return [pscustomobject]@{ Item = $item; Value = $value; Options = $options }
 }
 
 # The firmware reading, decided from what was read rather than from what was expected:
-#   read        a Lenovo whose Wake-on-LAN item was found and parsed; Value says what it holds
+#   read        a Lenovo whose Wake-on-LAN item was found and parsed; Value says what it holds and
+#               Options what the firmware advertises for it
 #   not-read    not a Lenovo, so its firmware cannot be read this way (not a fault)
 #   unreadable  a Lenovo whose class or item is absent, with the reason (said, never "ok")
 function Get-FirmwareWolState {
     param([string] $Manufacturer, [object[]] $Settings, [string] $ReadError)
     if ($Manufacturer -notmatch 'LENOVO') {
-        return [pscustomobject]@{ Status = 'not-read'; Value = $null; Reason = "manufacturer is '$Manufacturer', not Lenovo" }
+        return [pscustomobject]@{ Status = 'not-read'; Value = $null; Options = @(); Reason = "manufacturer is '$Manufacturer', not Lenovo" }
     }
     if ($ReadError) {
-        return [pscustomobject]@{ Status = 'unreadable'; Value = $null; Reason = "Lenovo_BiosSetting could not be read: $ReadError" }
+        return [pscustomobject]@{ Status = 'unreadable'; Value = $null; Options = @(); Reason = "Lenovo_BiosSetting could not be read: $ReadError" }
     }
     # `Wake on LAN` on ThinkCentre, `WakeOnLAN` on some ThinkPad firmware. Inside the function so a test that
     # loads only the function sees the same pattern the module runs.
     $item = @($Settings | ForEach-Object { ConvertFrom-LenovoBiosSetting $_.CurrentSetting } |
         Where-Object { $_ -and $_.Item -match '^(Wake on LAN|WakeOnLAN)$' }) | Select-Object -First 1
     if (-not $item) {
-        return [pscustomobject]@{ Status = 'unreadable'; Value = $null; Reason = 'Lenovo_BiosSetting has no Wake on LAN item' }
+        return [pscustomobject]@{ Status = 'unreadable'; Value = $null; Options = @(); Reason = 'Lenovo_BiosSetting has no Wake on LAN item' }
     }
-    return [pscustomobject]@{ Status = 'read'; Value = $item.Value; Reason = $null }
+    return [pscustomobject]@{ Status = 'read'; Value = $item.Value; Options = @($item.Options); Reason = $null }
 }
 
 function Read-FirmwareWol {
@@ -96,6 +109,35 @@ function Set-FirmwareWol {
     $save = Get-CimInstance -Namespace $LENOVO_NAMESPACE -ClassName Lenovo_SaveBiosSettings |
         Invoke-CimMethod -MethodName SaveBiosSettings -Arguments @{ parameter = '' }
     if ($save.return -ne 'Success') { throw "SaveBiosSettings answered '$($save.return)'" }
+}
+
+# Bring the firmware value to Target, and say what happened. Returns the sentence for `changed` (or $null), the
+# failures, and the firmware as last read. Three ways to leave it alone: not a Lenovo reading (nothing was read,
+# so nothing is repaired), already Target, or -CheckMode. A Target the firmware does not advertise is a failure
+# and is NOT written. The read-back after the write is what makes the repair a fact rather than an intention.
+function Repair-FirmwareWol {
+    param([object] $Firmware, [string] $Target, [switch] $CheckMode)
+    $result = [pscustomobject]@{ Changed = $null; Failures = @(); Firmware = $Firmware }
+    if ($Firmware.Status -ne 'read' -or $Firmware.Value -eq $Target) { return $result }
+    $from = $Firmware.Value
+    if ($Firmware.Options -notcontains $Target) {
+        $advertised = if ($Firmware.Options.Count -gt 0) { $Firmware.Options -join ', ' } else { 'no options' }
+        $result.Failures = @("$env:COMPUTERNAME firmware Wake on LAN is $from and '$Target' is not a value the firmware " +
+            "advertises ($advertised), so it was NOT written")
+        return $result
+    }
+    $result.Changed = "firmware Wake on LAN: $from -> $Target"
+    if ($CheckMode) { return $result }
+    try { Set-FirmwareWol -Value $Target }
+    catch {
+        $result.Failures = @("$env:COMPUTERNAME firmware Wake on LAN is $from and could NOT be repaired: $($_.Exception.Message)")
+        return $result
+    }
+    $result.Firmware = Read-FirmwareWol
+    if ($result.Firmware.Value -ne $Target) {
+        $result.Failures = @("$env:COMPUTERNAME firmware Wake on LAN reads '$($result.Firmware.Value)' after the repair, not $Target")
+    }
+    return $result
 }
 
 # Every address on this adapter that DHCP did not hand out, as objects the caller can name and remove.
@@ -132,20 +174,10 @@ $failures = [System.Collections.Generic.List[string]]::new()
 $changed = [System.Collections.Generic.List[string]]::new()
 
 $firmware = Read-FirmwareWol
-if ($firmware.Status -eq 'read' -and $firmware.Value -eq 'Disabled') {
-    $changed.Add("firmware Wake on LAN: Disabled -> $($module.Params.firmware_wol_value)")
-    if (-not $module.CheckMode) {
-        try {
-            Set-FirmwareWol -Value $module.Params.firmware_wol_value
-            $firmware = Read-FirmwareWol
-        } catch {
-            $failures.Add("$env:COMPUTERNAME firmware Wake on LAN is Disabled and could NOT be repaired: $($_.Exception.Message)")
-        }
-        if ($firmware.Value -eq 'Disabled') {
-            $failures.Add("$env:COMPUTERNAME firmware Wake on LAN still reads Disabled after the repair")
-        }
-    }
-}
+$wol = Repair-FirmwareWol -Firmware $firmware -Target $module.Params.firmware_wol_value -CheckMode:$module.CheckMode
+$firmware = $wol.Firmware
+if ($wol.Changed) { $changed.Add($wol.Changed) }
+$failures.AddRange([string[]]@($wol.Failures))
 
 foreach ($a in $adapters) {
     $problems = @(Get-IpConfigurationProblem -AdapterName $a.Name -InterfaceIndex $a.ifIndex)

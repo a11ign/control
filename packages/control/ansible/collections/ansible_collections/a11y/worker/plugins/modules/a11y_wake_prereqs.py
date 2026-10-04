@@ -11,9 +11,10 @@ DOCUMENTATION = r"""
 module: a11y_wake_prereqs
 short_description: Read, and where it can, repair the firmware and IP prerequisites of Wake-on-LAN
 description:
-- Reads the firmware Wake-on-LAN setting through Lenovo_BiosSetting where the machine is a Lenovo. A value of
-  Disabled is repaired (Lenovo_SetBiosSetting then Lenovo_SaveBiosSettings) or fails by name. Any other value
-  is left alone, so a working Automatic is never rewritten to Primary.
+- Reads the firmware Wake-on-LAN setting through Lenovo_BiosSetting where the machine is a Lenovo. A value
+  other than firmware_wol_value (Disabled, or Automatic) is repaired to it (Lenovo_SetBiosSetting then
+  Lenovo_SaveBiosSettings) and read back, or fails by name. A value the firmware does not advertise as optional
+  fails by name and is not written.
 - A machine that is not a Lenovo, or whose WMI classes are absent, says so in firmware_status and is never
   reported as ok for a setting that was not read.
 - Reads the adapter's IPv4 configuration. An address DHCP did not hand out (a static address, or the
@@ -28,9 +29,11 @@ options:
     default: '*'
   firmware_wol_value:
     description:
-    - The value written when firmware Wake-on-LAN reads Disabled. Automatic is the value proved to wake a box.
+    - The value firmware Wake-on-LAN is repaired to when it reads anything else. Primary wakes through the stored
+      boot order; Automatic selects the network-first sequence, which failed to wake a box in the #3250 proof
+      cycle (#3241 failed under it).
     type: str
-    default: Automatic
+    default: Primary
 author:
 - a11ign
 """

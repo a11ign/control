@@ -5,22 +5,31 @@
 BeforeAll {
     Import-Module "$PSScriptRoot/TestHelpers.psm1" -Force
     $ModulePath = "$PSScriptRoot/../../../../plugins/modules/a11y_wake_prereqs.ps1"
-    foreach ($f in 'ConvertFrom-LenovoBiosSetting', 'Get-FirmwareWolState', 'Get-NonDhcpAddress', 'Get-IpConfigurationProblem') {
+    foreach ($f in 'ConvertFrom-LenovoBiosSetting', 'Get-FirmwareWolState', 'Repair-FirmwareWol', 'Get-NonDhcpAddress', 'Get-IpConfigurationProblem') {
         . (Get-ModuleFunctionScriptBlock -Path $ModulePath -Name $f)
     }
     # Windows-only cmdlets, declared so Mock has something to intercept.
     function Get-NetIPAddress { param($InterfaceIndex, $AddressFamily) }
     function Get-NetIPInterface { param($InterfaceIndex, $AddressFamily) }
+    # The two firmware calls Repair-FirmwareWol makes, which reach CIM and so cannot run here.
+    function Set-FirmwareWol { param($Value) }
+    function Read-FirmwareWol { }
     $WOL_ON = [pscustomobject]@{ CurrentSetting = 'Wake on LAN,Automatic;[Optional:Disabled,Automatic,Primary]' }
     $WOL_OFF = [pscustomobject]@{ CurrentSetting = 'Wake on LAN,Disabled;[Optional:Disabled,Automatic,Primary]' }
+    $WOL_PRIMARY = [pscustomobject]@{ CurrentSetting = 'Wake on LAN,Primary;[Optional:Disabled,Automatic,Primary]' }
     $OTHER = [pscustomobject]@{ CurrentSetting = 'Fast Boot,Enabled;[Optional:Disabled,Enabled]' }
 }
 
 Describe 'ConvertFrom-LenovoBiosSetting' {
-    It 'splits an item from its CURRENT value and drops the option list' {
+    It 'splits an item from its CURRENT value and keeps the options the firmware advertises' {
         $r = ConvertFrom-LenovoBiosSetting $WOL_ON.CurrentSetting
         $r.Item | Should -Be 'Wake on LAN'
         $r.Value | Should -Be 'Automatic'
+        $r.Options | Should -Be @('Disabled', 'Automatic', 'Primary')
+    }
+
+    It 'advertises no options for a line that lists none, rather than the current value' {
+        (ConvertFrom-LenovoBiosSetting 'Wake on LAN,Automatic').Options | Should -HaveCount 0
     }
 
     It 'returns $null for a line that is not of the shape, never an empty value' {
@@ -69,6 +78,87 @@ Describe 'Get-FirmwareWolState -- firmware Wake-on-LAN, read where it can be and
     It 'matches the ThinkPad spelling of the item as well' {
         $tp = [pscustomobject]@{ CurrentSetting = 'WakeOnLAN,Disabled;[Optional:Disabled,Enabled]' }
         (Get-FirmwareWolState -Manufacturer 'LENOVO' -Settings @($tp)).Value | Should -Be 'Disabled'
+    }
+}
+
+Describe 'Repair-FirmwareWol -- a Lenovo is brought to Primary, and the write is proved by reading it back' {
+    BeforeAll {
+        # A firmware reading as Get-FirmwareWolState gives it, differing from its neighbours in ONE field.
+        function New-Reading($Line) { Get-FirmwareWolState -Manufacturer 'LENOVO' -Settings @([pscustomobject]@{ CurrentSetting = $Line }) }
+        $AUTOMATIC = New-Reading $WOL_ON.CurrentSetting
+        $PRIMARY = New-Reading $WOL_PRIMARY.CurrentSetting
+        $DISABLED = New-Reading $WOL_OFF.CurrentSetting
+        $NO_PRIMARY = New-Reading 'Wake on LAN,Automatic;[Optional:Disabled,Automatic]'
+    }
+    BeforeEach {
+        Mock Set-FirmwareWol { }
+        Mock Read-FirmwareWol { $PRIMARY }
+    }
+
+    It 'the readings differ in the Value alone, so the cases below are told apart by it' {
+        $AUTOMATIC.Value | Should -Not -Be $PRIMARY.Value
+        $AUTOMATIC.Options | Should -Be $PRIMARY.Options
+        $AUTOMATIC.Status | Should -Be $PRIMARY.Status
+    }
+
+    It 'repairs Automatic to Primary, says so in changed, and reads the value back' {
+        $r = Repair-FirmwareWol -Firmware $AUTOMATIC -Target 'Primary'
+        $r.Changed | Should -Be 'firmware Wake on LAN: Automatic -> Primary'
+        $r.Failures | Should -BeNullOrEmpty
+        $r.Firmware.Value | Should -Be 'Primary'
+        Should -Invoke Set-FirmwareWol -Times 1 -Exactly -ParameterFilter { $Value -eq 'Primary' }
+        Should -Invoke Read-FirmwareWol -Times 1 -Exactly
+    }
+
+    It 'leaves Primary alone: nothing changed, nothing written, nothing read back' {
+        $r = Repair-FirmwareWol -Firmware $PRIMARY -Target 'Primary'
+        $r.Changed | Should -BeNullOrEmpty
+        $r.Failures | Should -BeNullOrEmpty
+        Should -Invoke Set-FirmwareWol -Times 0 -Exactly
+        Should -Invoke Read-FirmwareWol -Times 0 -Exactly
+    }
+
+    It 'still repairs Disabled to Primary' {
+        $r = Repair-FirmwareWol -Firmware $DISABLED -Target 'Primary'
+        $r.Changed | Should -Be 'firmware Wake on LAN: Disabled -> Primary'
+        $r.Failures | Should -BeNullOrEmpty
+    }
+
+    It 'fails by name when the read-back after the write is still Automatic' {
+        Mock Read-FirmwareWol { $AUTOMATIC }
+        $r = Repair-FirmwareWol -Firmware $AUTOMATIC -Target 'Primary'
+        $r.Failures | Should -HaveCount 1
+        $r.Failures[0] | Should -BeLike "*reads 'Automatic' after the repair, not Primary*"
+    }
+
+    It 'fails by name, and reads nothing back, when the write itself is refused' {
+        Mock Set-FirmwareWol { throw "SetBiosSetting answered 'Access Denied'" }
+        $r = Repair-FirmwareWol -Firmware $AUTOMATIC -Target 'Primary'
+        $r.Failures[0] | Should -BeLike '*could NOT be repaired*Access Denied*'
+        Should -Invoke Read-FirmwareWol -Times 0 -Exactly
+    }
+
+    It 'does not write a value the firmware does not advertise, and names what it does' {
+        $r = Repair-FirmwareWol -Firmware $NO_PRIMARY -Target 'Primary'
+        $r.Failures | Should -HaveCount 1
+        $r.Failures[0] | Should -BeLike "*'Primary' is not a value the firmware advertises (Disabled, Automatic)*NOT written*"
+        $r.Changed | Should -BeNullOrEmpty
+        Should -Invoke Set-FirmwareWol -Times 0 -Exactly
+    }
+
+    It 'reports the repair without writing it in check mode' {
+        $r = Repair-FirmwareWol -Firmware $AUTOMATIC -Target 'Primary' -CheckMode
+        $r.Changed | Should -Be 'firmware Wake on LAN: Automatic -> Primary'
+        Should -Invoke Set-FirmwareWol -Times 0 -Exactly
+    }
+
+    It 'leaves a box that is not a Lenovo untouched, whatever the target' {
+        $hp = Get-FirmwareWolState -Manufacturer 'HP' -Settings $null
+        $r = Repair-FirmwareWol -Firmware $hp -Target 'Primary'
+        $r.Changed | Should -BeNullOrEmpty
+        $r.Failures | Should -BeNullOrEmpty
+        $r.Firmware.Status | Should -Be 'not-read'
+        Should -Invoke Set-FirmwareWol -Times 0 -Exactly
     }
 }
 
