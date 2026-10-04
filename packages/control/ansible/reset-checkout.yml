@@ -90,6 +90,9 @@
               -e new_repo_url=<https url ending .git> is required. Refusing to default it -- this sets every
               box's origin, and a default is exactly the argument that silently falls back to a guess.
 
+        - name: Every layer named for a new origin is a declared layer, with a URL
+          ansible.builtin.include_tasks: tasks/require-layer-origin-names.yml
+
         - name: The control-plane key must be supplied
           ansible.builtin.import_tasks: tasks/require-control-plane-key.yml
 
@@ -199,6 +202,11 @@
         success_msg: >-
           {{ inventory_hostname }}: HEAD {{ sha }} on {{ reset_branch }} (was
           {{ reset_before.stdout_lines | last | trim }}), origin {{ new_repo_url }}
+
+    - name: Point each NAMED layer's origin at its own new location
+      # By name, in the layer's own checkout: `new_repo_url` is the CORE's address and is never applied to a
+      # layer (#3395). A layer not named in `new_layer_repo_urls` is left as it is.
+      ansible.builtin.include_tasks: tasks/layer-origins.yml
 
 - name: Move the control plane's checkout to the named commit, last
   hosts: localhost

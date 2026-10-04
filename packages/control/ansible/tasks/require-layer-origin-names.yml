@@ -1,0 +1,29 @@
+---
+# `-e new_layer_repo_urls='{"<layer>": "<https url>"}'` NAMES the layers whose origin moves, and a name that is
+# not a declared layer is a TYPO, refused before any box is touched (ADR 0039 item 6, #3395). The core's
+# `new_repo_url` is NEVER applied to a layer: it is another repository's address, and `remote set-url` with it
+# would point the layer's checkout at the core -- whose history shares no commit with it, so every later fetch
+# would "succeed" and every fast-forward would fail on a box in the middle of a fleet deploy.
+- name: Read the layers that have their own repository
+  ansible.builtin.include_tasks: read-layer-checkouts.yml
+
+- name: Every layer named in new_layer_repo_urls is a layer that has its own repository
+  ansible.builtin.assert:
+    that: item.key in (a11y_layer_checkouts | map(attribute='key') | list)
+    fail_msg: >-
+      new_layer_repo_urls names "{{ item.key }}", which is not a layer with a `remote` in
+      packages/control/layers.json (those are: {{ a11y_layer_checkouts | map(attribute='key') | join(', ') or 'none' }}).
+      Nothing has been changed on any box.
+  loop: "{{ (new_layer_repo_urls | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Every layer URL is an https GitHub clone URL
+  ansible.builtin.assert:
+    that: item.value is match('^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$')
+    fail_msg: >-
+      new_layer_repo_urls["{{ item.key }}"] is not <https url ending .git>. Refusing to default it: an origin
+      change is exactly the argument that must never silently fall back to a guess.
+  loop: "{{ (new_layer_repo_urls | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

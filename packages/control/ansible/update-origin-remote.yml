@@ -63,6 +63,9 @@
     # own header names the shape: `ansible-playbook` prints `skipping: no hosts matched` and exits 0, so a
     # play against an empty `a11y_lab` group would report success having reached nothing. Checked HERE, on
     # `localhost`, which runs regardless of what the real play would have skipped.
+    - name: Every layer named for a new origin is a declared layer, with a URL
+      ansible.builtin.include_tasks: tasks/require-layer-origin-names.yml
+
     - name: The lab must be in the inventory
       # ONE SPELLING, shared with every other playbook here -- see the include for what a
       # zero-host run costs and why the remedy names a machine (#1980).
@@ -139,6 +142,11 @@
         fail_msg: >-
           {{ inventory_hostname }}: origin was set but the readback does not match. Do not trust this
           guest's origin; investigate by hand before deploying to it.
+
+    - name: Point each NAMED layer's origin at its own new location
+      # By name, in the layer's own checkout: `new_repo_url` is the CORE's address and is never applied to a
+      # layer (#3395). A layer not named in `new_layer_repo_urls` is left as it is.
+      ansible.builtin.include_tasks: tasks/layer-origins.yml
 
 - name: Point the lab's origin at the new location
   hosts: a11y_lab

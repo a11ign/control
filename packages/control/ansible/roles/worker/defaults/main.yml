@@ -14,6 +14,9 @@
 # every other PRODUCT_REPO site, on the day the transfer happens.
 worker_repo_url: https://github.com/a11ign/a11ign.git
 worker_repo_path: 'C:\Users\witness\a11y-witness'
+# The layers that live in THEIR OWN repository, from the one manifest and not restated (ADR 0039 item 6, #3395). A
+# layer with no `remote` is inside the core checkout above and is not listed, so today this is empty.
+worker_layer_checkouts: "{{ (lookup('file', playbook_dir ~ '/../layers.json') | from_json).layers | dict2items | selectattr('value.remote', 'defined') | list }}"
 worker_task_name: a11ysrv
 worker_check_task_name: a11ycheck
 worker_port: 8765

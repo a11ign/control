@@ -73,6 +73,11 @@
       register: provision_head
       changed_when: true
 
+    - name: Put each layer that has its own repository on its pinned commit
+      # The expected commit is a PAIR (core, layer), and the layer's half is its own fetch, merge and assert in
+      # the layer's own directory (#3395). Empty today: no layer has a `remote` yet.
+      ansible.builtin.include_tasks: tasks/layer-checkouts.yml
+
     # In the INTERACTIVE session, not over `become`. This was `become: true` (SYSTEM) and that is wrong in
     # a way nothing reports: the script writes ~8 HKCU values (screensaver, notification suppression,
     # OneDrive's Run entries) which would land in SYSTEM's hive rather than the worker's, installs NVDA
