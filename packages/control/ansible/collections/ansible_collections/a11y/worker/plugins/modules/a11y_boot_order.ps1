@@ -12,8 +12,10 @@
 # read for a setting IT found by name, and reads the stored value back after the save. A setting it cannot
 # find is `unreadable` with the reason and the item names it DID see, never `ok`.
 #
-# The target is the box's own current order with its network members removed: a subset of what was read,
-# in the order it was read, never a member the box did not list. It is refused when it would leave nothing.
+# The target is the box's own current order with its network members taken out of play: on Lenovo REMOVED, a
+# subset of what was read in the order it was read; on HP MARKED `(Disabled)` in place, because HP's ordered
+# list only applies a value that carries every member (below). Never a member the box did not list. It is
+# refused when it would leave nothing enabled to boot from.
 #
 # ## It ships OFF
 #
@@ -38,8 +40,17 @@
 # ## What this does not claim
 #
 # The SETTING, not the behaviour: "boot order set and read back". No test here boots a box with a PXE server
-# answering, because that test would run `autounattend.xml`'s disk wipe. The HP form is built from HP's
-# documented BIOS WMI interface, and no HP worker has been read yet.
+# answering, because that test would run `autounattend.xml`'s disk wipe.
+#
+# ## What was read on an HP box (#3404, worker 7, HP ProDesk 600 G4 DM, BIOS Q22 02.33.00)
+#
+# The census read ten HP workers: `UEFI Boot Order`, `IsReadOnly 0`, `Size 4`, stored
+# `HDD:M.2:1,HDD:USB:1,NETWORK IPV4:EMBEDDED:1,NETWORK IPV6:EMBEDDED:1`. On worker 7, `SetBIOSSetting` answered 0 for
+# a two-member value (the disks only) and the list was UNCHANGED: an ordered list is applied only when the value
+# carries ALL its members, and a short one is accepted and ignored. A full-length value applies at once with no
+# restart, whether permuted or with the network members marked `(Disabled)`, the suffix the box itself prints on
+# `Legacy Boot Order` (`<no legacy boot options available>(Disabled)`). So the HP write sends every member and
+# marks the network ones; it is not a removal.
 
 #AnsibleRequires -CSharpUtil Ansible.Basic
 
@@ -73,6 +84,21 @@ function Test-NetworkBootMember {
 function Get-BootOrderTarget {
     param([string[]] $Members)
     return @($Members | Where-Object { -not (Test-NetworkBootMember $_) })
+}
+
+# HP marks a member off with a `(Disabled)` suffix and keeps it in the list (see the header).
+function Test-DisabledBootMember {
+    param([string] $Member)
+    return $Member -match '\(Disabled\)$'
+}
+
+# HP's target: every member the box listed, in the order it listed them, with each still-enabled network member
+# marked `(Disabled)`. The same length as the read, because a shorter value is accepted and ignored.
+function Get-HpBootOrderTarget {
+    param([string[]] $Members)
+    return @($Members | ForEach-Object {
+        if ((Test-NetworkBootMember $_) -and -not (Test-DisabledBootMember $_)) { "$_(Disabled)" } else { $_ }
+    })
 }
 
 function Test-SameMembers {
@@ -188,18 +214,20 @@ function Get-WakeSequenceState {
 }
 
 # What to do about a vendor reading. The write guard lives HERE, so it is one place to test and to break:
-#   none     the order holds no network member (or was not read): nothing to write
+#   none     the order holds no ENABLED network member (or was not read): nothing to write
 #   report   there is a network member and enforcement is off: say so and write nothing
-#   write    enforcement is on: Target is the read order minus its network members
-#   refuse   removing network would leave nothing to boot from
+#   write    enforcement is on: Target is the read order with its network members taken out (removed on Lenovo,
+#            marked `(Disabled)` on HP)
+#   refuse   taking network out would leave nothing enabled to boot from
 function Get-BootOrderPlan {
     param([object] $Read, [bool] $Enforce)
     $nothing = [pscustomobject]@{ Action = 'none'; Target = @(); Reason = $null }
     if ($Read.Status -ne 'read') { return $nothing }
-    $target = @(Get-BootOrderTarget $Read.Members)
-    if ($target.Count -eq $Read.Members.Count) { return $nothing }
-    if ($target.Count -eq 0) {
-        return [pscustomobject]@{ Action = 'refuse'; Target = @(); Reason = "every member of '$($Read.Setting)' is a network member ($($Read.Members -join ':')); removing them would leave nothing to boot from" }
+    $target = if ($Read.Vendor -eq 'HP') { @(Get-HpBootOrderTarget $Read.Members) } else { @(Get-BootOrderTarget $Read.Members) }
+    if (Test-SameMembers $target $Read.Members) { return $nothing }
+    $bootable = @($target | Where-Object { -not (Test-NetworkBootMember $_) -and -not (Test-DisabledBootMember $_) })
+    if ($bootable.Count -eq 0) {
+        return [pscustomobject]@{ Action = 'refuse'; Target = @(); Reason = "every enabled member of '$($Read.Setting)' is a network member ($($Read.Members -join ':')); taking them out would leave nothing to boot from" }
     }
     if (-not $Enforce) {
         return [pscustomobject]@{ Action = 'report'; Target = $target; Reason = "'$($Read.Setting)' lists network boot ($($Read.Members -join ':')) and enforcement is off, so nothing was written" }
@@ -247,7 +275,7 @@ function Get-RebuildPathState {
     return [pscustomobject]@{ Addressable = 'no'; Reason = 'NO network entry is listed by the firmware: a PXE rebuild of this box is now a console visit' }
 }
 
-# The HP reading, from HP's documented BIOS WMI interface and NOT from any worker: no HP worker has been read.
+# The HP reading, from HP's documented BIOS WMI interface and confirmed on worker 7 (#3404; see the header).
 # `HP_BIOSOrderedList` carries `Name`, `Value` (the CURRENT order, comma-separated) and `IsReadOnly`; the boot
 # lists are named "UEFI Boot Order" and "Legacy Boot Order", and a network member reads like
 # "NETWORK IPV4:EMBEDDED:1" (https://developers.hp.com/hp-client-management/doc/understanding-hp-bios-settings).
@@ -319,7 +347,8 @@ function Set-LenovoBootOrder {
 }
 
 # HP's write: HP_BIOSSettingInterface.SetBIOSSetting(Name, Value, Password), an ordered list set as the
-# comma-separated order. The return codes are HP's own (0 Success, 1 Not Supported, 2 Unspecified Error,
+# comma-separated order. `Return 0` does NOT mean the value applied: a value missing members answers 0 and
+# changes nothing (#3404), which is why the caller's read-back, not this return, decides success. The return codes are HP's own (0 Success, 1 Not Supported, 2 Unspecified Error,
 # 3 Timeout, 4 Failed, 5 Invalid Parameter, 6 Access Denied). No BIOS password is held by this repository, so
 # none is sent: a box with one answers 6 and that is a failure by name, which is the intended outcome.
 function Set-HpBootOrder {
