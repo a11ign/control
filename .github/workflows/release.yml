@@ -1,0 +1,201 @@
+name: release
+
+# A RELEASE IS A GIT TAG, AND NOTHING ELSE (a11ign/a11ign#2704 re-shaped item 2; the shape of a11ign/agent-org's release.yml, a11ign/a11ign#3134; chairman, a11ign/a11ign#928, 2026-10-03). control is
+# published to NO registry: it is the code that runs on the machine holding the fleet's SSH key and has no dependency (ADR 0012), so there is nothing to install it from but a checkout. What a
+# consumer pins is a TAG of this repository, and this file cuts `v<version>`. So this workflow creates the tag `v<version>` and a GitHub Release carrying the CHANGELOG entry, and has no
+# npm, no OIDC and no registry token. If a registry is ever wanted that is a later decision under a name the chairman owns, and it is a different workflow.
+#
+# THE VERSION LIVES IN `packages/control/package.json` and the entries in `packages/control/CHANGELOG.md`, because the repository is a pnpm workspace of ONE package whose layout is
+# the monorepo's (`packages/control/`): its tests and playbooks reach siblings by relative path, which `ci.yml` lays beside it. A release here changes what a consumer that pins a tag takes, so
+# whoever decides to cut one is deciding that. THE FIRST TAG (`v0.1.0`) IS CUT BY HAND, once, on the merge of the pull request that added this file (README.md): this file reads what the
+# last tag consumed, so it needs one. Until a tag exists a push to `main` is NOT a failure (it says so and releases nothing), so that merge does not leave a red run.
+#
+# THE MERGE THAT CARRIES A CHANGESET IS TAGGED, WITH NO VERSION PULL REQUEST (ceo, a11ign/a11ign#3175). The version pull request this file used to open was made with
+# GITHUB_TOKEN, and an event that token makes starts no workflow, so `gate` and `auto-arm` never ran on it and a person had to close and reopen it for every release. No token is
+# added to get past that (#3134), and `main` takes no push that skips a review (#2022), so nothing here writes to `main` or to any branch. On a push to `main`:
+#   1. Read what the last tag consumed. The last tag points at a RELEASE COMMIT whose parent is the merge it released, and which deleted every changeset that merge carried;
+#      the files it deleted from that parent are the changesets ALREADY RELEASED. `main` never loses them, so they are pending on every later merge, and this subtraction is
+#      the only thing that keeps the next tag from being the last one again (a version recomputed from every pending file finds `v0.2.0` on the remote for ever after).
+#   2. Build a release commit on top of the merge: the last tag's version and CHANGELOG.md (so entries accumulate), the released changesets removed, then `changeset version`
+#      over the rest. It is reachable from the tag and from no branch.
+#   3. Push that commit as the tag `v<version>` and create the Release. WHAT A PROJECT PINS IS THE TAG'S TREE, so `packages/control/package.json` and its CHANGELOG.md are right there.
+#
+# `main`'S OWN `package.json` VERSION AND CHANGELOG.md LAG THE LAST TAG, and are left to. Bringing them up needs a push to `main` (refused) or a pull request per release (the
+# defect this removes), and nothing reads them: a project reads the tag's tree, and the next release is computed from the tag, never from `main`'s version.
+#
+# WHAT MUST HOLD BEFORE A TAG EXISTS stays, because it is about WHAT is tagged and not about who asked. `release-safety.test.ts` pins each, and fails on a copy of this
+# file with it removed:
+#   1. `gate` -- ci.yml's required check -- must have SUCCEEDED on the exact sha, read and waited for, not re-run (the suite takes minutes, and a push starts this file
+#      and ci.yml together). A sha on which it did not succeed is not tagged; the next merge carries its changesets as well, since they are still unreleased.
+#   2. The tag must not already exist. A tag that moved changes what a pinned project gets, so a tag is NEVER moved or deleted once a project can have pinned it, and the
+#      push of the tag is never forced. An unreadable remote is a refusal: "could not look" is not "absent".
+#   3. The tag is `v` plus the version in the release commit, and its CHANGELOG.md must hold an entry for that version.
+#
+# A push that arrives while another run is waiting REPLACES the waiting run (GitHub keeps one). That is harmless: every run reads the unreleased changesets from its own
+# tree, which holds the replaced merge's, so the newer run releases both. A tag pushed with GITHUB_TOKEN starts no workflow, and `on` here names branches only.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # Not named `gate`: the check-run this job creates would otherwise answer the query it runs.
+    name: ci gate result on this sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Refuse unless this is main
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::run on $GITHUB_REF; a release is cut from main only"
+            exit 1
+          fi
+      - name: ci.yml's gate must have succeeded on this sha, and is waited for
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WAIT_SECONDS: '2700'
+          POLL_SECONDS: '20'
+        run: |
+          waited=0
+          while :; do
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=gate&filter=latest" \
+              --jq '.check_runs | map(select(.app.slug == "github-actions")) | first | if . == null then "none" else (.conclusion // "pending") end')
+            echo "gate on $GITHUB_SHA: $conclusion (waited ${waited}s)"
+            case "$conclusion" in
+              success) exit 0 ;;
+              none|pending) ;;
+              *)
+                echo "::error::ci.yml's gate on $GITHUB_SHA is '$conclusion', not 'success'"
+                exit 1 ;;
+            esac
+            if [ "$waited" -ge "$WAIT_SECONDS" ]; then
+              echo "::error::ci.yml's gate on $GITHUB_SHA was still '$conclusion' after ${WAIT_SECONDS}s"
+              exit 1
+            fi
+            sleep "$POLL_SECONDS"
+            waited=$((waited + POLL_SECONDS))
+          done
+
+  release:
+    needs: [gate]
+    runs-on: ubuntu-latest
+    permissions:
+      # The tag and the Release are the only writes. No `pull-requests`, no `id-token`, and no registry token anywhere.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The last tag, and the parent of the commit it points at, must both be here.
+          fetch-depth: 0
+      - name: Which changesets has no tag consumed yet?
+        id: pending
+        run: |
+          last=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
+          if [ -z "$last" ]; then
+            # The first tag is cut by hand (README.md). Failing here would make the merge that added this file red for the minutes before it is cut.
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            echo "last=" >> "$GITHUB_OUTPUT"
+            echo "::notice::no v<version> tag exists yet, so there is nothing to read the consumed changesets from; the first tag is cut by hand and releases nothing here"
+            exit 0
+          fi
+          # What the last release consumed is what its commit deleted from its first parent. The files are still on `main`, which is why this is a subtraction.
+          git diff --name-only --diff-filter=D "$last^1" "$last" -- .changeset | sort > "$RUNNER_TEMP/released.txt"
+          find .changeset -maxdepth 1 -name '*.md' ! -name README.md | sort > "$RUNNER_TEMP/present.txt"
+          comm -23 "$RUNNER_TEMP/present.txt" "$RUNNER_TEMP/released.txt" > "$RUNNER_TEMP/unreleased.txt"
+          count=$(awk 'END { print NR }' "$RUNNER_TEMP/unreleased.txt")
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+          echo "$count changeset(s) not yet released; the last tag is $last" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-node@v7
+        if: steps.pending.outputs.count != '0'
+        with:
+          node-version: 22.22.1
+      - name: pnpm, which runs the `changeset` script as the README says (a runner image carries npm, not pnpm), and the one dev dependency that script needs
+        if: steps.pending.outputs.count != '0'
+        run: |
+          npm install --global pnpm@10.34.5
+          pnpm install --frozen-lockfile
+      - name: The release commit, on top of this merge and on no branch
+        if: steps.pending.outputs.count != '0'
+        env:
+          LAST: ${{ steps.pending.outputs.last }}
+        run: |
+          # `main`'s version and changelog lag the last tag, so the base is the TAG's, and only the version is taken from it: the rest of packages/control/package.json is this merge's.
+          node -e "const fs = require('fs'); const p = JSON.parse(fs.readFileSync('packages/control/package.json', 'utf8')); p.version = process.argv[1]; fs.writeFileSync('packages/control/package.json', JSON.stringify(p, null, 2) + '\n')" "${LAST#v}"
+          git show "$LAST:packages/control/CHANGELOG.md" > packages/control/CHANGELOG.md
+          # Already-released changesets go before `changeset version` runs, so it consumes the unreleased ones alone; the commit then deletes every changeset, which is what the next run reads.
+          comm -13 "$RUNNER_TEMP/unreleased.txt" "$RUNNER_TEMP/present.txt" | xargs -r rm -f --
+          pnpm run changeset version
+          version=$(node -p "JSON.parse(require('fs').readFileSync('packages/control/package.json', 'utf8')).version")
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -q -m "Release control $version"
+          echo "release commit $(git rev-parse HEAD) on $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The version, and the tag it names
+        id: version
+        if: steps.pending.outputs.count != '0'
+        run: |
+          version=$(node -p "JSON.parse(require('fs').readFileSync('packages/control/package.json', 'utf8')).version")
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::packages/control/package.json version '$version' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+      - name: Does the tag exist? An existing one is left alone, an unreadable remote is a refusal
+        id: tag
+        if: steps.pending.outputs.count != '0'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null || status=$?
+          case "$status" in
+            0) exists=true ;;
+            2) exists=false ;;
+            *)
+              echo "::error::could not read the remote's tags (git ls-remote exited $status); not assuming $TAG is free"
+              exit 1 ;;
+          esac
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+          echo "tag $TAG on $GITHUB_SHA: exists=$exists" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The CHANGELOG entry for this version becomes the Release notes
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '/^## / { keep = ($2 == v); next } keep' packages/control/CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::packages/control/CHANGELOG.md has no entry for $VERSION; changeset version wrote none for it"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Cut the tag and the Release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Not forced: a tag that appeared since the check above makes this push fail, which is the refusal. A failure after it leaves a tag with no Release and a red run,
+          # and the tag is not moved to repair that; the Release is created by hand against the existing tag.
+          git push origin "HEAD:refs/tags/$TAG"
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
+          cut=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          release=$(git rev-parse HEAD)
+          if [ "$cut" != "$release" ]; then
+            echo "::error::$TAG resolves to '$cut', not the release commit $release"
+            exit 1
+          fi
+          echo "cut $TAG at $release, on top of $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"

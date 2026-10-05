@@ -1,0 +1,21 @@
+# Dependency updates come from the platform (a11ign/a11ign ADR 0041, decision 4): a new release of anything this repository consumes opens a pull request here, so nobody polls for one.
+# What it consumes by VERSION is the `github-actions` below and the root's two dev dependencies. `packages/control` has NO dependency and must keep none (ADR 0012), so there is nothing of
+# the package's own to update, and the checkout of a11ign/a11ign (which carries the fleet package) that `ci.yml` lays it over is a commit pin that Dependabot cannot read: bumping `CORE_REF` is a
+# pull request by hand (`ci.yml` says why).
+version: 2
+updates:
+  - package-ecosystem: npm
+    # ONE entry at the root covers the pnpm workspace.
+    directory: /
+    schedule:
+      interval: daily
+    # No `groups:` on purpose: each dependency is its own pull request, which is what keeps a bump small and mergeable alone.
+    commit-message:
+      # The handle the org's gate recognises a dependency pull request by: every title starts `deps:`.
+      prefix: deps
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    commit-message:
+      prefix: deps

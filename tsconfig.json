@@ -1,0 +1,16 @@
+{
+  // This repository's OWN program: its scripts and nothing else, `noEmit`. `packages/control` is type-checked by `tsconfig.control.json`, which `ci.yml` lays into a checkout of the core and
+  // which extends the CORE's tsconfig.json from there, so it does not type-check on its own: the package reaches siblings that are not in this repository.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["scripts/**/*.ts"]
+}
