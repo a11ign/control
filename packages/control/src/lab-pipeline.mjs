@@ -47,8 +47,8 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
-import { pnpmCliInvocation } from "../../../scripts/npm-cli-executable.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { pnpmCliInvocation } from "../../worker-fleet/src/npm-cli-executable.mjs";
 // RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a

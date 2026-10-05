@@ -115,7 +115,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../guards/src/git-env.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { inventoryHosts } from "./fleet-discover.mjs";
