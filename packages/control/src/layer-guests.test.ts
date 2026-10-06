@@ -198,12 +198,15 @@ test("--layer-ref pins every separate layer by a full sha, and refuses everythin
   }
 });
 
-test("the manifest's own state today: no layer has a remote, so the pair is a single sha and nothing is forwarded", () => {
-  assert.deepEqual(separateLayers(), []);
-  assert.deepEqual(layerPinsFor({ chosen: "deploy.yml", given: [] }), { pins: {}, refusal: null });
-  assert.equal(layerCommitsExtraVars({}), "");
-  // A pin for a layer that has no repository of its own is refused rather than dropped.
-  assert.match(layerPinsFor({ chosen: "deploy.yml", given: [`nvda-worker=${SHA_A}`] }).refusal ?? "", /not a layer with its own repository/);
+test("the manifest's own state: nvda-worker (#3447) and screenreader-fleet (#3504) live in their own repositories, so a deploy without BOTH pins is REFUSED and one with them is forwarded", () => {
+  assert.deepEqual(separateLayers(), ["nvda-worker", "screenreader-fleet"]);
+  assert.match(layerPinsFor({ chosen: "deploy.yml", given: [] }).refusal ?? "", /nvda-worker, screenreader-fleet lives in its own repository and needs a pin/);
+  assert.match(layerPinsFor({ chosen: "deploy.yml", given: [`nvda-worker=${SHA_A}`] }).refusal ?? "", /screenreader-fleet lives in its own repository and needs a pin/);
+  const both = { "nvda-worker": SHA_A, "screenreader-fleet": SHA_B };
+  assert.deepEqual(layerPinsFor({ chosen: "deploy.yml", given: [`nvda-worker=${SHA_A}`, `screenreader-fleet=${SHA_B}`] }), { pins: both, refusal: null });
+  assert.equal(layerCommitsExtraVars(both), ` -e '{"a11y_layer_commits":{"nvda-worker":"${SHA_A}","screenreader-fleet":"${SHA_B}"}}'`);
+  // A pin for a layer the manifest does not declare is refused rather than dropped.
+  assert.match(layerPinsFor({ chosen: "deploy.yml", given: [`ghost=${SHA_A}`] }).refusal ?? "", /not a layer with its own repository/);
 });
 
 test("--layer-ref is refused on a playbook that pins no layer, and forwarded as JSON the remote shell cannot unquote", () => {

@@ -6,19 +6,32 @@
  * repository each would read the wrong tree and print a hash anyway. This pins the resolver, and pins that
  * the six readers no longer name the path.
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { layersFrom, layerRoot, layerSourceDir, layerCodeVersion } from "./layer-checkouts.mjs";
+import { layersFrom } from "./layer-checkouts.mjs";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.mjs";
 import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
+
+/**
+ * THE LAYER IS NOT IN THIS TREE (#3447): it lives in `a11ign/screenreader-worker`, and a host holds a checkout of it. A copy of the
+ * PUBLISHED package stands in for that checkout, placed at the path `layers.json` declares in a root of its own, so these tests
+ * run the real resolver over the real manifest and the real worker files, and name no path into the tree they are in.
+ */
+const MANIFEST = JSON.parse(read("packages/control/layers.json"));
+const PUBLISHED = dirname(createRequire(import.meta.url).resolve("@a11ign/screenreader-worker/package.json"));
+const CHECKOUT = mkdtempSync(join(tmpdir(), "layer-checkout-"));
+cpSync(PUBLISHED, join(CHECKOUT, MANIFEST.layers["nvda-worker"].path), { recursive: true, filter: (src) => !/(^|\/)node_modules(\/|$)/.test(src.slice(PUBLISHED.length)) });
+after(() => rmSync(CHECKOUT, { recursive: true, force: true }));
+const { layerRoot, layerSourceDir, layerCodeVersion } = layersFrom({ manifest: MANIFEST, root: CHECKOUT });
 
 /**
  * The layer's own hasher and file list, reached THROUGH the resolver: this test names no path into the layer,
@@ -56,9 +69,9 @@ async function fixtureRepo(body: string): Promise<string> {
   return root;
 }
 
-test("layers.json declares nvda-worker and NOTHING else, listed by hand", () => {
+test("layers.json declares nvda-worker and screenreader-fleet and NOTHING else, listed by hand", () => {
   const manifest = JSON.parse(read("packages/control/layers.json"));
-  assert.deepEqual(Object.keys(manifest.layers), ["nvda-worker"]);
+  assert.deepEqual(Object.keys(manifest.layers), ["nvda-worker", "screenreader-fleet"]);
   assert.equal(typeof manifest.layers["nvda-worker"].path, "string");
 });
 
@@ -90,6 +103,17 @@ test("a declared layer whose path is ABSENT is refused, naming the layer and the
     assert.throws(() => from("thing"),
       (e: Error) => e.message.includes('layer "thing"') && e.message.includes("not/here")
         && e.message.includes(join(root, "not/here")) && !e.message.includes("nvda-worker"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#3761: layerDeclaration names a declared layer WITHOUT its directory existing -- what a missing-clone refusal needs", () => {
+  const root = mkdtempSync(join(tmpdir(), "layer-checkouts-"));
+  try {
+    const remote = "https://example.invalid/thing.git";
+    const { layerDeclaration, layerRoot: rootOf } = layersFrom({ manifest: { layers: { thing: { path: "not/here", remote } } }, root });
+    assert.deepEqual(layerDeclaration("thing"), { name: "thing", path: "not/here", remote, dir: join(root, "not/here") });
+    assert.throws(() => rootOf("thing"), /does not exist/, "layerRoot still refuses: only the declaration is lenient");
+    assert.throws(() => layerDeclaration("ghost"), /layer "ghost" is not declared/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

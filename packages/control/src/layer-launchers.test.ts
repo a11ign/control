@@ -1,34 +1,30 @@
 /**
- * WHAT A WORKER RUNS REACHES OUTSIDE THE LAYER, AND THAT REACH IS DECLARED ONCE (ADR 0039 item 6d, #3397).
+ * WHAT A WORKER RUNS REACHES OUTSIDE THE LAYER, AND THE STAMP READS THAT REACH (ADR 0039 item 6d, #3397; narrowed by #3447).
  *
- * The launchers reach the foreground-lock script and the capture-check harness, and the provision stamp
- * hashes the files a worker's environment is made of. Each used to carry its own copy of those paths, and a
- * move that changed one left the other naming a file that was not there: `run-server.cmd` warned and
- * started a worker that returned 0 phrases from every capture, and the stamp's `throw` was the only thing
- * that noticed. `layers.json` says where the layer is and the layer's `launcher-reach.cmd` says what its
- * launchers reach; `run-capture-check.cmd` `call`s the second and the stamp READS both.
+ * The launchers reach the foreground-lock script and the capture-check harness, and the provision stamp hashes the files a
+ * worker's environment is made of. The reach is declared once, in the layer's `launcher-reach.cmd`, and the stamp READS it.
  *
- * `run-server.cmd` is the exception, on purpose. The stamp HASHES it, so editing it moves
- * `provisionRevision` on every worker and costs a recapture. It keeps its two literals and this file pins
- * them equal to the declaration, so a path still cannot change in one place.
+ * THE LAYER LEFT THIS REPOSITORY (#3447), and the half of this file that asserted the layer's OWN launchers went with it:
+ * `run-capture-check.cmd` calls the declaration and stops on an absent file, `run-server.cmd`'s two literals equal it, and
+ * every `EXITCODE` line redirects first. They are the layer's to pin (the launcher port row), recoverable as
+ * `git show d8952882f:packages/control/src/layer-launchers.test.ts`. What stays is what CORE owns: the stamp (a core
+ * script) reads, never quotes, the paths; and the core files the declaration NAMES exist. The declaration is a stand-in
+ * (`scripts/test-support/launcher-reach.stand-in.cmd`) until the layer carries the file.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { declaredLayerPath, declaredReach, reachFile, stampEnvironmentFiles } from "../../../scripts/test-support/stamp-files.ts";
+import { declaredReach, reachFile, stampEnvironmentFiles } from "../../../scripts/test-support/stamp-files.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
-const LAYER_SRC = `${declaredLayerPath("nvda-worker")}/src`;
 const STAMP = read("packages/worker-fleet/src/provisioning/stamp-provision-revision.ps1");
 
-/** What each launcher declaration NAMES: the foreground-lock script and the capture harness. */
+/** What the declaration NAMES in core: the foreground-lock script and the capture harness. */
 const REACHED = ["FLT", "CAPTURE_CHECK"] as const;
 
 /** The declared reach that is NOT there under `root`: the question a launcher asks before it runs. */
@@ -41,28 +37,22 @@ function absentReach(root: string): string[] {
   });
 }
 
-/** A checkout holding only the declaration files, and whichever of the reached files `present` lists. */
+/** A checkout holding the stand-in declaration, and a placeholder for whichever of the reached files `present` lists. */
 function fixtureCheckout(present: readonly (typeof REACHED)[number][]): string {
   const root = mkdtempSync(join(tmpdir(), "layer-launchers-"));
-  const put = (rel: string, from: string) => {
+  const put = (rel: string, text: string) => {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
-    copyFileSync(resolve(REPO, from), join(root, rel));
+    writeFileSync(join(root, rel), text);
   };
-  put("packages/control/layers.json", "packages/control/layers.json");
-  put(`${LAYER_SRC}/launcher-reach.cmd`, `${LAYER_SRC}/launcher-reach.cmd`);
-  const declaration = read(`${LAYER_SRC}/launcher-reach.cmd`);
-  for (const name of present) {
-    const path = declaredReach(declaration, name) as string;
-    put(path, path);
-  }
+  const declaration = readFileSync(reachFile(), "utf8");
+  put("packages/control/layers.json", read("packages/control/layers.json"));
+  put("scripts/test-support/launcher-reach.stand-in.cmd", declaration);
+  for (const name of present) put(declaredReach(declaration, name) as string, "// present\n");
   return root;
 }
 
-/** Code lines only: a path named in a `rem` comment is not a path that is read. */
-const codeLines = (source: string) => source.split(/\r?\n/).filter((l) => !/^\s*rem\b/i.test(l));
-
-test("the declaration names the reach, and every file it names exists", () => {
-  const declaration = read(`${LAYER_SRC}/launcher-reach.cmd`);
+test("the declaration names the reach, and every core file it names exists", () => {
+  const declaration = readFileSync(reachFile(), "utf8");
   for (const name of REACHED) assert.ok(declaredReach(declaration, name), `${name} is not declared`);
   assert.equal(declaredReach(declaration, "CHECKOUT_ROOT"), "%~dp0../../..",
     "the checkout root is no longer three levels above the declaration, so the launchers' directory change is wrong");
@@ -86,37 +76,6 @@ test("POSITIVE CONTROL: a checkout with the foreground-lock script absent is REF
   }
 });
 
-test("run-capture-check.cmd reads the declaration and STOPS on an absent file, never warns and continues", () => {
-  const launcher = read(`${LAYER_SRC}/run-capture-check.cmd`);
-  const code = codeLines(launcher);
-  assert.ok(code.some((l) => /^call "%~dp0launcher-reach\.cmd" \|\| exit \/b 1$/.test(l.trim())),
-    "the launcher does not `call` the declaration and stop when it is missing");
-  assert.ok(code.some((l) => /^cd \/d "%CHECKOUT_ROOT%" \|\| exit \/b 1$/.test(l.trim())),
-    "the launcher does not change into the declared root");
-  assert.deepEqual(code.filter((l) => /packages[\\/]/.test(l)), [],
-    "the launcher names a repo path in code again, a second copy of what the declaration says");
-  for (const name of REACHED) {
-    const start = code.findIndex((l) => l.includes(`if not exist "%${name}%"`) && l.trim().endsWith("("));
-    assert.notEqual(start, -1, `no existence check for %${name}%`);
-    const block = code.slice(start, code.indexOf(")", start)).join("\n");
-    assert.match(block, /exit \/b 1/, `an absent %${name}% does not stop the check`);
-    assert.doesNotMatch(block, /WARNING/, `an absent %${name}% only warns`);
-  }
-  assert.match(launcher, /"%CAPTURE_CHECK%" > capture-check\.log/, "the harness is no longer run from the declared path");
-});
-
-test("run-server.cmd keeps its two literals, and they EQUAL the declaration", () => {
-  // Not a reader: the stamp hashes this file (see the header). The pin is what stops the copy drifting.
-  const server = codeLines(read(`${LAYER_SRC}/run-server.cmd`)).join("\n");
-  const declaration = read(`${LAYER_SRC}/launcher-reach.cmd`);
-  const flt = /set "FLT=([^"]+)"/.exec(server)?.[1].replaceAll("\\\\", "\\");
-  assert.equal(flt?.replaceAll("\\", "/"), declaredReach(declaration, "FLT"),
-    "run-server.cmd names a different foreground-lock script than the declaration");
-  const depth = /cd \/d "(%~dp0[^"]+)"/.exec(server)?.[1];
-  assert.equal(depth?.replaceAll("\\", "/"), declaredReach(declaration, "CHECKOUT_ROOT"),
-    "run-server.cmd changes directory to a different root than the declaration");
-});
-
 test("the stamp READS both paths, so none is quoted in its list", () => {
   const list = STAMP.slice(STAMP.indexOf("$ENVIRONMENT_FILES = @("), STAMP.indexOf("\n)", STAMP.indexOf("$ENVIRONMENT_FILES = @(")));
   const quoted = [...list.matchAll(/^\s*'([^']+)'\s*$/gm)].map((m) => m[1]);
@@ -137,87 +96,4 @@ test("moving a path in the declaration moves it in the stamp's list, and nowhere
   } finally {
     rmSync(moved, { recursive: true, force: true });
   }
-});
-
-/**
- * WHAT THIS ROW DID TO THE FIVE HASHED FILES IS READ FROM ITS OWN DIFF, NOT FROM main'S CONTENT (#3397, ceo 2026-10-04).
- *
- * This test used to pin the first 16 hex of each file's hash as read off `origin/main` at ab8753d91. That is a
- * snapshot of ANOTHER row's territory: #3406 changed `main.yml` ahead of this pull request, the pin went red on
- * the merge ref, and the merge queue ejected the same head four times (14:20, 14:27, 14:36, 14:48Z). The claim
- * this row makes is "no file the stamp hashes was edited HERE", so the thing to compare is this pull request's
- * own change set against its merge base, which main moving cannot change.
- *
- * Applies only to the pull request that carries this row's changeset: on any other change, or on main itself,
- * the diff does not contain it and the files may move for their own reasons (the day `run-server.cmd` joins
- * the declaration is one). The refusal's positive control is `hashedFilesTouched` handed a diff that DOES
- * include one, below.
- */
-const ROW_CHANGESET = ".changeset/launcher-reach-3397.md";
-const STAMPED_FILES = 5;
-const GIT_OUTPUT_LIMIT = 64 * 1024 * 1024;
-
-const hashedFilesTouched = (changed: string[], hashed: string[]) => changed.filter((f) => hashed.includes(f));
-
-test("provisionRevision is UNCHANGED by this row: none of the five hashed files is in its own diff", (t) => {
-  const git = (...args: string[]) => execFileSync("git", args,
-    { cwd: REPO, env: sandboxGitEnv(), encoding: "utf8", maxBuffer: GIT_OUTPUT_LIMIT });
-  let base: string;
-  try {
-    base = git("merge-base", "origin/main", "HEAD").trim();
-  } catch {
-    // A merge base needs history, and the `acceptance` job's clone is shallow; the `ts` job runs this with
-    // fetch-depth: 0. Said, not counted as a pass.
-    t.skip("no merge-base with origin/main in this checkout (a shallow clone). Not run, and not counted as a pass.");
-    return;
-  }
-  const hashed = stampEnvironmentFiles(STAMP);
-  assert.equal(hashed.length, STAMPED_FILES, "the stamp hashes five files; a sixth or a missing one changes what this test guards");
-  const changed = git("diff", "--name-only", base).split("\n").filter(Boolean);
-  if (!changed.includes(ROW_CHANGESET)) return;
-  assert.deepEqual(hashedFilesTouched(changed, hashed), [],
-    "a hashed file is in this row's diff: provisionRevision moves on every worker, and the fleet recaptures");
-});
-
-test("positive control: a diff that edits a hashed file is the one the check above refuses", () => {
-  const hashed = stampEnvironmentFiles(STAMP);
-  const runServer = hashed.find((f) => f.endsWith("run-server.cmd"));
-  assert.ok(runServer, "the stamp lists run-server.cmd; without it this control proves nothing");
-  assert.deepEqual(hashedFilesTouched([ROW_CHANGESET, "README.md", runServer], hashed), [runServer]);
-  assert.deepEqual(hashedFilesTouched([ROW_CHANGESET, "packages/nvda-worker/src/launcher-reach.cmd"], hashed), []);
-});
-
-/**
- * A LAUNCHER'S EXIT CODE MUST REACH ITS LOG (#3397, found on a real worker).
- *
- * In cmd a digit directly before `>>` is a HANDLE number, so `echo EXITCODE=0>> log` redirects handle 0 and
- * writes NOTHING to the file, and `echo EXITCODE=1>> log` writes `EXITCODE=` without its digit. Measured on
- * a11y-worker-4 with `cmd /c`; the launcher's header called the line "recorded the same way a verdict is" and
- * the first real run of `run-capture-check.cmd` had no such line. The redirect goes FIRST, where no digit can
- * touch it. Lines that record an exit code are found by the word, not by the old shape, so a new launcher that
- * copies the broken one is refused here too.
- */
-const REDIRECT_FIRST = /^\s*>> \S+ echo EXITCODE[= ]/;
-const EXITCODE_LINE = /EXITCODE/;
-
-function exitCodeLinesRefused(source: string): string[] {
-  return source.split("\n").filter((line) => EXITCODE_LINE.test(line) && !REDIRECT_FIRST.test(line));
-}
-
-test("every launcher line that records an exit code redirects FIRST, so no digit can be read as a handle", () => {
-  const dir = resolve(REPO, LAYER_SRC);
-  const launchers = readdirSync(dir).filter((f) => f.endsWith(".cmd"));
-  const lines = launchers.flatMap((f) => read(`${LAYER_SRC}/${f}`).split("\n").filter((l) => EXITCODE_LINE.test(l)));
-  // The population is the run-capture-check.cmd lines (two early exits and the verdict) plus run-capture.cmd's;
-  // the positive control below shows the filter refuses the shape, so this count is what keeps it from being vacuous.
-  assert.ok(lines.length >= 4, `expected the launchers' EXITCODE lines, found ${lines.length}`);
-  for (const f of launchers) assert.deepEqual(exitCodeLinesRefused(read(`${LAYER_SRC}/${f}`)), [], `${f} records an exit code the log never receives`);
-});
-
-test("positive control: the shapes that lost the digit are the ones refused", () => {
-  assert.deepEqual(exitCodeLinesRefused("echo EXITCODE=0>> capture-check.log"), ["echo EXITCODE=0>> capture-check.log"]);
-  assert.deepEqual(exitCodeLinesRefused("  echo EXITCODE=1>> capture-check.log"), ["  echo EXITCODE=1>> capture-check.log"]);
-  assert.deepEqual(exitCodeLinesRefused("echo EXITCODE %ERRORLEVEL%>> capture.log"), ["echo EXITCODE %ERRORLEVEL%>> capture.log"]);
-  assert.deepEqual(exitCodeLinesRefused(">> capture-check.log echo EXITCODE=%ERRORLEVEL%"), []);
-  assert.deepEqual(exitCodeLinesRefused("  >> capture-check.log echo EXITCODE=1"), []);
 });
