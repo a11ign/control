@@ -14,6 +14,9 @@
  */
 export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
 
+/** What `guardProtocolChange` exits with on every refusal it makes. */
+const PROTOCOL_REFUSAL_EXIT_CODE = 3;
+
 /**
  * Run a fleet playbook from the one machine allowed to run it.
  *
@@ -80,7 +83,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // `fleet-env.mjs` imports only node builtins and its own siblings. And the inventory is the RIGHT source
 // here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
 // that cannot exist there.
-import { layerSourceDir } from "./layer-checkouts.mjs";
+import { layerDeclaration } from "./layer-checkouts.mjs";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
 // #2832: WHAT PROVES A MOVED WORKER'S IDENTITY BEFORE A WRITE LANDS. A sibling and builtin-only, so ADR 0012's
 // no-`npm install` property is unchanged.
@@ -651,12 +654,49 @@ export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }) 
 }
 
 /**
+ * THE PROTOCOL VERSION THIS CHECKOUT WOULD DEPLOY, read from the operator's own clone of the worker layer, or
+ * the refusal to print when there is no clone to read (#3761).
+ *
+ * The layer left this repository in #3447, so a primary checkout holds at most a `node_modules` where
+ * `packages/nvda-worker/src` used to be, and the read died with an `ENOENT` stack that named neither the layer
+ * nor the remedy. A missing clone is the ONE absence refused here; any other failure (permissions, say) is
+ * rethrown, because "could not read" is not "there is no clone".
+ *
+ * READ AS TEXT, NEVER IMPORTED. `capture-core.mjs` imports guidepup, which throws
+ * `No available supported screen readers` at import on any host without one — and on a Mac VoiceOver
+ * makes that throw invisible, which is exactly why `deploy-worker.mjs` carries the same warning and why
+ * `no-win32-imports.test.ts` had to find it. A control-plane script must not depend on the operator's
+ * machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
+ *
+ * The clone is NOT checked against the pin (`--layer-ref`): this answers "what does my clone say", as the
+ * guard did when the layer lived in the core.
+ *
+ * @param {{ readFile?: (path: string, encoding: "utf8") => string,
+ *           declaration?: typeof layerDeclaration }} [deps] injectable, like `guardProtocolChange`'s `readFleet`
+ * @returns {{ local: string | null, refusal: string | null }}
+ */
+export function readLocalProtocol({ readFile = readFileSync, declaration = layerDeclaration } = {}) {
+  const { name, path, remote, dir } = declaration("nvda-worker");
+  try {
+    const text = readFile(resolve(dir, "src", PROTOCOL_VERSION_FILE), "utf8");
+    return { local: /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(text)?.[1] ?? null, refusal: null };
+  } catch (cause) {
+    if (/** @type {NodeJS.ErrnoException} */ (cause)?.code !== "ENOENT") throw cause;
+    return { local: null, refusal: `the worker layer "${name}" is not checked out at ${path}, so this checkout `
+      + `cannot say which protocol the deploy would put on the workers (${dir}/src/${PROTOCOL_VERSION_FILE} does `
+      + `not exist). Its repository is ${remote ?? "inside this checkout (layers.json declares no remote)"}; `
+      + "git refuses a non-empty destination, so move aside anything left at that path first (a primary checkout "
+      + `keeps a node_modules there); then create the clone with: git clone ${remote ?? "<its repository>"} ${dir}` };
+  }
+}
+
+/**
  * Would this deploy change the protocol the fleet is serving? — asked BEFORE anything is pushed.
  *
  * Only `deploy.yml` ships worker code. `sleep.yml` and `provision-role.yml` cannot move
  * `CAPTURE_PROTOCOL_VERSION`, so gating them would be a guard that fires where the risk is not.
  *
- * Imported from the worker package rather than restated here: the version lives beside the capture code,
+ * Read from the layer's clone rather than restated here: the version lives beside the capture code,
  * and a second copy of "what the current protocol is" is precisely the fact-stated-twice shape.
  *
  * #1356: `readFleet` is INJECTABLE, defaulting to the real `readControlPlaneFleet` -- called lazily,
@@ -665,19 +705,22 @@ export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }) 
  * either `{ workers, refusal: null }` or a refusal, the same shape `linkGateFor` already tests with
  * injected reads (#1343).
  *
+ * #3761: `readLocal` and `exit` are injectable for the same reason. A missing clone refuses (exit 3, the
+ * guard's own refusal code) BEFORE `readFleet`, so a checkout with nothing to compare never pays an ssh round trip.
+ *
  * @param {string} chosen the playbook about to run
- * @param {{ readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null } }} [deps]
+ * @param {{ readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null },
+ *           readLocal?: typeof readLocalProtocol, exit?: (code: number) => void }} [deps]
  * @returns {Promise<void>} resolves if the deploy may proceed; exits the process if not
  */
-async function guardProtocolChange(chosen, { readFleet = readControlPlaneFleet } = {}) {
+export async function guardProtocolChange(chosen,
+  { readFleet = readControlPlaneFleet, readLocal = readLocalProtocol, exit = process.exit } = {}) {
   if (chosen !== "deploy.yml") return;
-  // READ AS TEXT, NEVER IMPORTED. `capture-core.mjs` imports guidepup, which throws
-  // `No available supported screen readers` at import on any host without one — and on a Mac VoiceOver
-  // makes that throw invisible, which is exactly why `deploy-worker.mjs` carries the same warning and why
-  // `no-win32-imports.test.ts` had to find it. A control-plane script must not depend on the operator's
-  // machine having a screen reader. `code-version` is a safe subpath; the version itself is a regex.
-  const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(
-    readFileSync(resolve(layerSourceDir("nvda-worker"), PROTOCOL_VERSION_FILE), "utf8"))?.[1] ?? null;
+  const { local, refusal } = readLocal();
+  if (refusal) {
+    process.stdout.write(`REFUSING ${chosen}: ${refusal}\n`);
+    return exit(PROTOCOL_REFUSAL_EXIT_CODE);
+  }
   // THE CONTROL PLANE'S OWN INVENTORY, DIRECTLY — deliberately not `resolveWorkerPool`, and this is the
   // one place that is right. That resolver answers "which workers should I use", and honours
   // `A11Y_WORKER(S)` first because naming workers means you are managing them. This guard asks a different
@@ -693,7 +736,7 @@ async function guardProtocolChange(chosen, { readFleet = readControlPlaneFleet }
     chosen, local, fleet, served, allowed: process.argv.includes("--allow-protocol-change"),
   });
   if (verdict.message) process.stdout.write(`${verdict.message}\n`);
-  if (verdict.refuse) process.exit(3);
+  if (verdict.refuse) exit(PROTOCOL_REFUSAL_EXIT_CODE);
 }
 
 /**
@@ -948,7 +991,7 @@ export function staleRefRefusal({ ref, local, origin }) {
       "its own `git checkout` would fail in git's words, naming neither the flag nor the reason.",
       "",
       `  Push the branch:   git push -u origin ${ref}`,
-      "  Or name one origin already has:   --ref=main   (with `npm run primary:update` run first)",
+      "  Or name one origin already has:   --ref=main   (with `agent-org primary:update` run first)",
       "",
     ].join("\n");
   }
@@ -967,7 +1010,7 @@ export function staleRefRefusal({ ref, local, origin }) {
     "use the same stale SHA -- internally consistent and a merge behind. That is how 10 of 10 boxes went",
     "stale on 2026-09-11 with every check green.",
     "",
-    "  To deploy origin's tip:      npm run primary:update   (then re-run this)",
+    "  To deploy origin's tip:      agent-org primary:update   (then re-run this)",
     "  To deploy your own commit:   push it, and pass --ref=<that branch>",
     "",
   ].join("\n");
@@ -993,7 +1036,7 @@ function requireCommitIsOnOrigin(ref, expected) {
   process.stderr.write([
     `REFUSING: ${expected.slice(0, 12)} (${ref}) is on no remote-tracking branch, so the control plane`,
     "cannot fetch it and the deploy would fail on a git message naming neither the flag nor the reason.",
-    "  Push the commit first, or `npm run primary:update` if you meant to deploy origin/main.",
+    "  Push the commit first, or `agent-org primary:update` if you meant to deploy origin/main.",
     "",
   ].join("\n"));
   process.exit(2);

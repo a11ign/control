@@ -47,16 +47,26 @@ const MANIFEST = JSON.parse(readFileSync(new URL("../layers.json", import.meta.u
  * @param {{ manifest: { layers: Record<string, { path: string, remote?: string, branch?: string }> }, root: string }} from
  */
 export function layersFrom({ manifest, root }) {
-  /** The layer's directory: where its `package.json` and its `src/` are. @param {string} name */
-  function layerRoot(name) {
+  /**
+   * What `layers.json` declares for a layer, WITHOUT asking whether its directory is there: the refusal for a
+   * missing clone has to name where the clone goes, and `layerRoot` throws before it can.
+   * @param {string} name
+   * @returns {{ name: string, path: string, remote: string | undefined, dir: string }}
+   */
+  function layerDeclaration(name) {
     const layer = Object.hasOwn(manifest.layers, name) ? manifest.layers[name] : undefined;
     if (!layer) {
       throw new Error(`layer "${name}" is not declared in packages/control/layers.json `
         + `(declared: ${Object.keys(manifest.layers).join(", ") || "none"})`);
     }
-    const dir = resolve(root, layer.path);
+    return { name, path: layer.path, remote: layer.remote, dir: resolve(root, layer.path) };
+  }
+
+  /** The layer's directory: where its `package.json` and its `src/` are. @param {string} name */
+  function layerRoot(name) {
+    const { path, dir } = layerDeclaration(name);
     if (!existsSync(dir)) {
-      throw new Error(`layer "${name}" is declared at ${layer.path}, and ${dir} does not exist: `
+      throw new Error(`layer "${name}" is declared at ${path}, and ${dir} does not exist: `
         + "check it out there, or correct its path in packages/control/layers.json");
     }
     return dir;
@@ -110,7 +120,7 @@ export function layersFrom({ manifest, root }) {
   /** @param {Record<string, string>} pins a value that has passed `layerPins` */
   const layerCheckoutMove = (pins) => checkoutMoveFor(manifest, pins);
 
-  return { layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove };
+  return { layerDeclaration, layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove };
 }
 
 /**
@@ -155,6 +165,7 @@ function refused(refusal) {
 export const LAYER_REF = /^[A-Za-z0-9._/-]{1,100}$/;
 
 const declared = layersFrom({ manifest: MANIFEST, root: REPO_ROOT });
+export const layerDeclaration = declared.layerDeclaration;
 export const layerRoot = declared.layerRoot;
 export const layerSourceDir = declared.layerSourceDir;
 export const layerCodeVersion = declared.layerCodeVersion;

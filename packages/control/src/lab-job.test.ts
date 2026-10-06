@@ -23,6 +23,9 @@ import { parse as parseYaml } from "yaml";
 import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs } from "./lab-job.mjs";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
 
+/** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
+const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
+
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
 
 test("-e job=<name> is read regardless of what else is on the line", () => {
@@ -105,7 +108,7 @@ test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool i
   return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765", "http://203.0.113.59:8765"],
-    expected: "deadbeefdeadbeef",
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
     checkFleet: async (expected, workers, options) => {
       order.push("checked");
       seen.checked = [expected, workers, options];
@@ -155,7 +158,7 @@ test("#1356: with no `workers` given, a capture-bearing job's pool comes from th
   + "inventory, never a checkout's inventory.yml -- through run() itself", () => {
   const seen: { checked?: unknown[] } = {};
   return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
-    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef",
+    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
     readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
     checkFleet: async (expected, workers, options) => { seen.checked = [expected, workers, options]; },
     dispatch: () => {},
@@ -174,7 +177,7 @@ test("a refusing check stops the job from ever reaching dispatch", () => {
   return run(["-e", "job=capture"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
-    expected: "deadbeefdeadbeef",
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
     checkFleet: async () => { throw new Error("FLEET IS NOT RUNNING THIS CHECKOUT"); },
     dispatch: () => { dispatched = true; },
   }).then(
@@ -192,7 +195,7 @@ test("a non-capture-bearing job never checks the fleet at all, and dispatches un
   return run(["-e", "job=train", "-e", "out=varied"], {
     catalogueText: CATALOGUE,
     workers: [],
-    expected: "irrelevant",
+    expected: "irrelevant", sourceDir: LAYER_SRC,
     checkFleet: async () => { checked = true; },
     dispatch: (forwarded) => { dispatched = forwarded; },
   }).then(() => {
@@ -206,7 +209,7 @@ test("-e describe=1 skips the fleet check too — nothing is about to run", () =
   return run(["-e", "job=capture", "-e", "describe=1"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
-    expected: "deadbeefdeadbeef",
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
     checkFleet: async () => { checked = true; },
     dispatch: () => {},
   }).then(() => {
@@ -222,7 +225,7 @@ test("--allow-stale-workers reaches the check as `allow: true` and is stripped b
   return run(["-e", "job=capture", "--allow-stale-workers"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
-    expected: "deadbeefdeadbeef",
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
     checkFleet: async (_expected, _workers, options: { allow?: boolean }) => { allow = options.allow; },
     dispatch: (forwarded) => { dispatched = forwarded; },
   }).then(() => {
@@ -256,7 +259,7 @@ test("no -e job= at all runs straight to dispatch — the same as no job was eve
   return run([], {
     catalogueText: CATALOGUE,
     workers: [],
-    expected: "irrelevant",
+    expected: "irrelevant", sourceDir: LAYER_SRC,
     checkFleet: async () => { checked = true; },
     dispatch: (forwarded) => { dispatched = forwarded; },
   }).then(() => {
@@ -769,7 +772,7 @@ async function drive2803(argv: string[], { workers = FLEET_2803, macReads = same
   process.exit = ((code: number) => { seen.exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
   try {
     await run(argv, {
-      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef",
+      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
       readFleet: () => ({ refusal: null, workers }),
       resolvePool: (needed) => fixtureResolver(needed as typeof FLEET_2803, macReads)(),
       // A worker is up exactly where the fixture says something answers; `c` never is, so waking it fails.

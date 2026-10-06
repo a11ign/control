@@ -406,13 +406,13 @@ const withAddress = (url, address) => url.replace(new URL(url).hostname, address
  * is swapped for a fake in tests — one that returns normally to simulate a clean fleet, or throws to
  * simulate what an exit would have done — and `dispatch` is swapped for one that only records the call.
  *
- * `catalogueText`/`workers`/`expected` are left UNDEFINED by default rather than defaulted to a real read,
- * a real inventory and a real hash — those three cost a file read, a fleet-wide DNS-free lookup and a
- * directory hash respectively, and a job like `train` or `rules-gate` that will never reach `checkFleet`
+ * `catalogueText`/`workers`/`expected`/`sourceDir` are left UNDEFINED by default rather than defaulted to a real read,
+ * a real inventory, a real hash and a real layer checkout — those cost a file read, a fleet-wide DNS-free lookup, a
+ * directory hash and (the layer lives in its own repository, so a tree without the checkout REFUSES) a host that has it, and a job like `train` or `rules-gate` that will never reach `checkFleet`
  * should not pay any of them. Resolved lazily, inside the branch that actually needs them.
  *
  * @param {string[]} argv
- * @param {{ catalogueText?: string, workers?: string[], expected?: string,
+ * @param {{ catalogueText?: string, workers?: string[], expected?: string, sourceDir?: string,
  *           checkFleet?: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
  *           dispatch?: (forwarded: string[]) => void,
  *           readFleet?: () => { workers: Worker[], refusal: string | null },
@@ -421,7 +421,7 @@ const withAddress = (url, address) => url.replace(new URL(url).hostname, address
  *   `wake` and `resolvePool` have NO default: only the command-line entry passes the real ones (#2655, #2803).
  */
 export async function run(argv, {
-  catalogueText, workers, expected,
+  catalogueText, workers, expected, sourceDir,
   checkFleet = assertWorkersServe,
   dispatch = dispatchToAnsible,
   readFleet = readControlPlaneFleet,
@@ -452,7 +452,7 @@ export async function run(argv, {
         process.stderr.write(`${needs.refusal}\n`);
         return process.exit(3);
       }
-      const usable = await placeWakeAndCheck({ needs, catalogue, job }, { expected, checkFleet, allowStale, wake, resolvePool });
+      const usable = await placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool });
       dispatch([...forwarded, ...useTimeArgs(usable)]);
       return;
     }
@@ -465,12 +465,12 @@ export async function run(argv, {
  * Resolve, wake, then check staleness -- in that order, each for a reason the comments below give.
  *
  * @param {{ needs: { needed: Worker[], selected: boolean }, catalogue: string, job: string }} run
- * @param {{ expected?: string, checkFleet: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
+ * @param {{ expected?: string, sourceDir?: string, checkFleet: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
  *           allowStale: boolean, wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
  *           resolvePool?: typeof resolvePoolAtUseTime }} deps
  * @returns {Promise<{ moved: Record<string, string>, leftOut: string[] }>}
  */
-async function placeWakeAndCheck({ needs, catalogue, job }, { expected, checkFleet, allowStale, wake, resolvePool }) {
+async function placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool }) {
   // RESOLVE FIRST (#2803): the wake and the staleness check below both aim at an address, and a worker that
   // moved answers nothing at its pin -- which the wake would wait five minutes on and then call missing.
   const placed = resolvePool && needs.needed.length
@@ -484,7 +484,7 @@ async function placeWakeAndCheck({ needs, catalogue, job }, { expected, checkFle
     const hash = expected ?? await layerCodeVersion("nvda-worker");
     await checkFleet(hash, pool, {
       when: "before dispatching to the lab", allow: allowStale, bareMetalUrls: pool,
-      sourceDir: layerSourceDir("nvda-worker"),
+      sourceDir: sourceDir ?? layerSourceDir("nvda-worker"),
     });
     // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
   }

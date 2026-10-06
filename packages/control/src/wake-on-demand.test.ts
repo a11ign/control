@@ -22,6 +22,9 @@ import { fileURLToPath } from "node:url";
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 import { captureBearingJobs, neededWorkers, run, wakeNeeded, wakeRefusal, workerDemand } from "./lab-job.mjs";
 
+/** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
+const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
+
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
 const LAB_JOB_SOURCE = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
 
@@ -43,7 +46,7 @@ async function drive(argv: string[], wakeStates: (needed: { name: string }[]) =>
   process.exit = ((code: number) => { exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
   try {
     await run(argv, {
-      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef",
+      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
       readFleet: () => ({ refusal: null, workers: FLEET }),
       wake: async (needed) => { events.push("wake"); woken = needed.map((w) => w.name); return wakeStates(needed); },
       checkFleet: async (_expected, pool) => { events.push("check"); checkedPool = pool as string[]; },
@@ -155,7 +158,7 @@ test("wakeRefusal: a busy worker is fine, and the refusal names each worker that
 test("with no `wake` handed to run() nothing is woken -- only the command-line entry wires the real one", async () => {
   const events: string[] = [];
   await run(["-e", "job=capture", "-e", "only=x"], {
-    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef",
+    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
     readFleet: () => ({ refusal: null, workers: FLEET }),
     checkFleet: async () => { events.push("check"); }, dispatch: () => { events.push("dispatch"); },
   });

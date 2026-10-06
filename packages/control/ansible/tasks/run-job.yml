@@ -548,7 +548,7 @@
 # THE PUSH HALF OF #2729: NO GATE CAUSE FIRED WHEN A LAB JOB ENDED, so sessions polled `lab:status` and each
 # poll re-read a large context to learn nothing. This is the one moment the outcome is known exactly, by the
 # process that has been waiting for it, so it is written down HERE for `work-gate.mjs`'s `lab-job-finished`
-# cause (`.agent-org/plugins/causes.mjs`, `node_modules/agent-org/src/work-gate/lab-job-orders.mjs`) to find on
+# cause (`.agent-org/plugins/causes.mjs`, `agent-org/src/work-gate/lab-job-orders.mjs`) to find on
 # its next tick and hand to the row's holder.
 #
 # AFTER THE RELEASE, so a woken holder that dispatches the next job does not meet "a second one is running".
