@@ -24,8 +24,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # a11ign/a11ign at the commit `packages/control` was cut from (2026-10-05). A sha and never a branch: a branch moves under a pull request that did not touch it.
-  CORE_REF: 841debfbdbf59604e260f2c74bc29a862b9163f5
+  # a11ign/a11ign at the commit `packages/control` was last synced from (2026-10-06, v0.1.1). The pin that held (841debfbd) failed 4 tests in 3 files of the synced package, because that core still carried packages/nvda-worker and packages/worker-fleet, which the relocated tests (a11ign/a11ign#3504) expect gone. A sha and never a branch: a branch moves under a pull request that did not touch it.
+  CORE_REF: eae7806ca688c609c183565c0143d49d41e2f483
 
 jobs:
   gate:
