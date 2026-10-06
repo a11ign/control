@@ -61,6 +61,9 @@ import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.mjs";
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
+// #3289: `--qualify-sha` says the fleet part's verdict on a sha. The sequence lives beside the poster it calls.
+import { announcingDispatch, qualificationRequest, readRecordFrom, defaultRecordDir, runQualified } from "./qualification-run.mjs";
+import { postQualificationStatus } from "./post-qualification-status.mjs";
 // #2803: the SAME two-read-plus-`/health` rule `doctor` and `worker:code` use (#2790), imported rather than
 // restated -- a second copy of "when is a neighbour-table address to be trusted" is the one that drifts.
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
@@ -196,12 +199,15 @@ export function ansiblePlaybookArgs(forwarded) {
 
 /**
  * The SAME command a human would type — `ANSIBLE_CONFIG` matters, exactly as `lab-pipeline.mjs` states.
+ * RETURNS the status rather than exiting (#3289): a qualified run says what the gate found AFTER the
+ * dispatch, and the entry point below is what exits with it.
  * @param {string[]} forwarded
+ * @returns {number}
  */
 function dispatchToAnsible(forwarded) {
   const result = spawnSync("ansible-playbook", ansiblePlaybookArgs(forwarded),
     { cwd: REPO, stdio: "inherit", env: { ...process.env, ANSIBLE_CONFIG } });
-  process.exit(result.status ?? 1);
+  return result.status ?? 1;
 }
 
 /** @typedef {{ name: string, url: string, mac?: string }} Worker */
@@ -398,6 +404,32 @@ async function placeAtUseTime(needed, resolvePool) {
 const withAddress = (url, address) => url.replace(new URL(url).hostname, address);
 
 /**
+ * `lab:job`, with `--qualify-sha=<sha>` (#3289): the same run, announced as `pending` on the sha, its verdict
+ * posted when it ends, and ONE re-run if the first said `failure`. Everything else is `runOnce`, unchanged.
+ *
+ * @param {string[]} argv
+ * @param {Parameters<typeof runOnce>[1]} [deps] as `runOnce`
+ * @returns {Promise<number | void>}
+ */
+export async function run(argv, deps = {}) {
+  const vars = extraVars(argv);
+  const request = qualificationRequest(argv, {
+    job: vars.job, row: vars.row, ref: vars.ref, describeOnly: isDescribeOnly(argv) });
+  if (request === undefined) return runOnce(argv, deps);
+  if ("refusal" in request) {
+    process.stderr.write(`${request.refusal}\n`);
+    return process.exit(3);
+  }
+  const { qualify } = deps;
+  if (!qualify) throw new Error("--qualify-sha was given and run() was handed no poster: only the command-line entry passes one");
+  return runQualified({
+    attempt: (announce) => runOnce(request.argv, { ...deps, dispatch: announce(deps.dispatch ?? dispatchToAnsible) }),
+    announce: (dispatch, seen) => announcingDispatch({ sha: request.sha, row: request.row, dispatch }, qualify, seen),
+    say: qualify.say,
+  });
+}
+
+/**
  * Check the fleet, then dispatch — every dependency injectable, so a test can drive the DECISION without
  * a real fleet, a real ansible-playbook, or a real `process.exit`.
  *
@@ -414,13 +446,16 @@ const withAddress = (url, address) => url.replace(new URL(url).hostname, address
  * @param {string[]} argv
  * @param {{ catalogueText?: string, workers?: string[], expected?: string, sourceDir?: string,
  *           checkFleet?: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
- *           dispatch?: (forwarded: string[]) => void,
+ *           dispatch?: (forwarded: string[]) => number | void,
  *           readFleet?: () => { workers: Worker[], refusal: string | null },
  *           wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
- *           resolvePool?: typeof resolvePoolAtUseTime }} [deps]
- *   `wake` and `resolvePool` have NO default: only the command-line entry passes the real ones (#2655, #2803).
+ *           resolvePool?: typeof resolvePoolAtUseTime,
+ *           qualify?: import("./qualification-run.mjs").Poster }} [deps]
+ *   `wake`, `resolvePool` and `qualify` have NO default: only the command-line entry passes the real ones
+ *   (#2655, #2803, #3289), so a test that leaves one out cannot reach a socket or post a status.
+ * @returns {Promise<number | void>} the dispatch's status, which the entry point exits with
  */
-export async function run(argv, {
+async function runOnce(argv, {
   catalogueText, workers, expected, sourceDir,
   checkFleet = assertWorkersServe,
   dispatch = dispatchToAnsible,
@@ -453,12 +488,11 @@ export async function run(argv, {
         return process.exit(3);
       }
       const usable = await placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool });
-      dispatch([...forwarded, ...useTimeArgs(usable)]);
-      return;
+      return dispatch([...forwarded, ...useTimeArgs(usable)]);
     }
   }
 
-  dispatch(forwarded);
+  return dispatch(forwarded);
 }
 
 /**
@@ -533,4 +567,12 @@ async function wakeOrRefuse({ needed, selected }, wake, why) {
 
 // `wake` is passed HERE and defaults to nothing in `run`, so a test that drives `run` with fakes cannot
 // reach a real socket by leaving a dependency out. `lab-job.test.ts`-style tests read this line (#2655).
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime });
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  const recordDir = defaultRecordDir();
+  const qualify = {
+    post: postQualificationStatus,
+    readRecord: (/** @type {{ job: string, row: number, since: number }} */ query) =>
+      readRecordFrom(recordDir, query, (text) => process.stderr.write(text)),
+  };
+  process.exit(await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify }) ?? 0);
+}
