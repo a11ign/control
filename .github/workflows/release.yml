@@ -132,7 +132,10 @@ jobs:
           LAST: ${{ steps.pending.outputs.last }}
         run: |
           # `main`'s version and changelog lag the last tag, so the base is the TAG's, and only the version is taken from it: the rest of packages/control/package.json is this merge's.
-          node -e "const fs = require('fs'); const p = JSON.parse(fs.readFileSync('packages/control/package.json', 'utf8')); p.version = process.argv[1]; fs.writeFileSync('packages/control/package.json', JSON.stringify(p, null, 2) + '\n')" "${LAST#v}"
+          # A text substitution on the one line, never a parse and rewrite of the whole file: the round trip re-encodes the file, so the tag would differ from its source by every `\u2014` in it (v0.1.1, a11ign/a11ign#3808).
+          sed -i -E "s/^(  \"version\": \")[^\"]*/\1${LAST#v}/" packages/control/package.json
+          # A manifest whose version line is not in this form would be left at the old version and bumped from there, so say so instead.
+          grep -q "^  \"version\": \"${LAST#v}\"," packages/control/package.json
           git show "$LAST:packages/control/CHANGELOG.md" > packages/control/CHANGELOG.md
           # Already-released changesets go before `changeset version` runs, so it consumes the unreleased ones alone; the commit then deletes every changeset, which is what the next run reads.
           comm -13 "$RUNNER_TEMP/unreleased.txt" "$RUNNER_TEMP/present.txt" | xargs -r rm -f --
