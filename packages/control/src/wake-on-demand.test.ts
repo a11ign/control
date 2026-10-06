@@ -164,7 +164,7 @@ test("with no `wake` handed to run() nothing is woken -- only the command-line e
   });
   assert.deepEqual(events, ["check", "dispatch"]);
   // ...and the real entry DOES wire it. This pin is the positive control for the test above.
-  assert.match(LAB_JOB_SOURCE, /await run\(process\.argv\.slice\(2\), \{ wake: wakeNeeded, resolvePool: resolvePoolAtUseTime \}\)/);
+  assert.match(LAB_JOB_SOURCE, /await run\(process\.argv\.slice\(2\), \{ wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify \}\)/);
 });
 
 test("wakeNeeded hands the wake the mac each worker CARRIES, and null for one whose inventory entry declares none", async () => {

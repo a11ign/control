@@ -11,10 +11,11 @@
  * for the identical reason: a function built to be asserted on cannot let the test runner die with it.
  * `checkFleet` and `dispatch` are swapped for fakes throughout.
  */
+// no-token: gh -- the #3289 tests hand the poster a RECORDING `gh` and the rest drive pure argv/text; run with `gh` off PATH and no token env, the 15 `#3289` tests pass and the `(rendered)` ones skip with no `ansible-playbook`
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,8 @@ import { parse as parseYaml } from "yaml";
 
 import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs } from "./lab-job.mjs";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
+import { postQualificationStatus } from "./post-qualification-status.mjs";
+import { outcomeOf, qualificationRequest, readRecordFrom } from "./qualification-run.mjs";
 
 /** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
 const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
@@ -866,7 +869,7 @@ test("#2803: useTimeArgs renders nothing for an undisturbed fleet, and JSON for 
 
 test("#2803: the real entry hands run() the real resolver, and run() has no default for it (a test cannot reach a socket)", () => {
   const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
-  assert.match(source, /resolvePool: resolvePoolAtUseTime \}\)/);
+  assert.match(source, /resolvePool: resolvePoolAtUseTime, qualify \}\)/);
   assert.doesNotMatch(source, /resolvePool = /, "a default would let a test that leaves it out reach the real neighbour table");
 });
 
@@ -918,3 +921,234 @@ test("#2803 (rendered): an address that is not a bare IPv4, and a name that is n
       assert.match(run.output, /resolved_addresses must map|left_out_workers must list/, `refused by its own assert, not by a later one: ${run.output}`);
     }
   });
+
+// ---- #3289: `--qualify-sha` -- the caller of the qualification poster -----------------------------------
+//
+// The poster is the REAL `postQualificationStatus` with an injected `gh`, so the payloads under test are the
+// shipped function's and nothing is posted. The dispatch, the poster and the record are recorders: the
+// sequence is what is under test (pending BEFORE dispatch, the verdict AFTER, one re-run), not GitHub.
+
+const QSHA = "308b2de5bbd8a1f0c4e7d9b3a6f2e1d0c9b8a7f6";
+const INVOCATION = "0123456789abcdef0123456789abcdef";
+const QARGV = ["-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "-e", "row=3289", `--qualify-sha=${QSHA}`];
+const QFLEET = [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }];
+
+type QRecord = Record<string, unknown> | undefined;
+const record = (over: Record<string, unknown> = {}): QRecord => ({
+  schema: 1, job: "gate-stability", row: 3289, invocation: INVOCATION, outcome: "success", exit: 0,
+  commit: QSHA.slice(0, 12), ...over });
+/** What the lab job exiting `code` leaves behind: the playbook's assert fails (2) for any code not in job_ok. */
+const ended = (exit: number): { status: number; record: QRecord } => ({
+  status: exit === 0 ? 0 : 2, record: record({ exit, outcome: exit === 0 ? "success" : "exit-code" }) });
+
+type GhReply = { status: number | null; stdout: string; stderr: string; missing: boolean };
+const GH_OK: GhReply = { status: 0, stdout: "{}", stderr: "", missing: false };
+const GH_NO_CREDENTIAL: GhReply = { status: 4, stdout: "", stderr: "gh auth login", missing: false };
+
+function qualifiedHarness(runs: { status: number; record: QRecord }[], ghReplies: GhReply[] = []) {
+  const events: string[] = [];
+  const posts: { state: string; description: string }[] = [];
+  const dispatched: string[][] = [];
+  const said: string[] = [];
+  let ended: { status: number; record: QRecord } | undefined;
+  const gh = (args: string[]) => {
+    const field = (name: string) => args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1) ?? "";
+    posts.push({ state: field("state"), description: field("description") });
+    events.push(`post:${field("state")}`);
+    return ghReplies.shift() ?? GH_OK;
+  };
+  const dispatch = (forwarded: string[]) => {
+    events.push("dispatch");
+    dispatched.push(forwarded);
+    ended = runs.shift();
+    return ended?.status ?? 1;
+  };
+  const qualify = {
+    post: (input: Parameters<typeof postQualificationStatus>[0]) => postQualificationStatus({ ...input, gh }),
+    readRecord: () => ended?.record as never,
+    now: () => 0,
+    say: (text: string) => { said.push(text); },
+  };
+  return { qualify, dispatch, events, posts, dispatched, said };
+}
+
+async function driveQualified(argv: string[], h: ReturnType<typeof qualifiedHarness>) {
+  return run(argv, {
+    catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }),
+    dispatch: h.dispatch, qualify: h.qualify,
+  });
+}
+
+test("#3289: a passing run says pending BEFORE the dispatch and success AFTER it, once", async () => {
+  const h = qualifiedHarness([ended(0)]);
+  const status = await driveQualified(QARGV, h);
+  assert.deepEqual(h.events, ["post:pending", "dispatch", "post:success"]);
+  assert.equal(status, 0);
+  assert.match(h.posts[1].description, /^PASS gate:stability \(fleet part only\)/);
+  assert.match(h.posts[1].description, new RegExp(`\\[gate-stability-${INVOCATION}\\]$`), "the lab run it names");
+});
+
+test("#3289: the lab is pinned to the sha, and the dispatch argv carries no flag of ours", async () => {
+  const h = qualifiedHarness([ended(0)]);
+  await driveQualified(QARGV, h);
+  assert.equal(h.dispatched.length, 1);
+  assert.ok(!h.dispatched[0].some((a) => a.startsWith("--qualify-sha")), "ansible-playbook would refuse an unknown flag");
+  assert.equal(extraVars(h.dispatched[0]).ref, QSHA);
+  assert.equal(extraVars(h.dispatched[0]).job, "gate-stability");
+});
+
+test("#3289: a first failure is re-run ONCE, and a pass on the re-run follows it (failure, pending, success)", async () => {
+  const h = qualifiedHarness([ended(1), ended(0)]);
+  const status = await driveQualified(QARGV, h);
+  assert.deepEqual(h.events, ["post:pending", "dispatch", "post:failure", "post:pending", "dispatch", "post:success"]);
+  assert.equal(status, 0, "the command exits with the LAST run's status");
+  assert.deepEqual(h.dispatched[0], h.dispatched[1], "the re-run is the same argv: nothing is softened");
+});
+
+test("#3289: a second failure STANDS, and there is never a third run", async () => {
+  const h = qualifiedHarness([ended(1), ended(1), ended(0)]);
+  const status = await driveQualified(QARGV, h);
+  assert.deepEqual(h.posts.map((p) => p.state), ["pending", "failure", "pending", "failure"]);
+  assert.equal(h.dispatched.length, 2, "ONE re-run; the third queued `ended(0)` must be unreachable");
+  assert.equal(status, 2);
+});
+
+test("#3289: INCONCLUSIVE (exit 2) is a failure that says so, never a success and never a pending", async () => {
+  const h = qualifiedHarness([ended(2), ended(2)]);
+  await driveQualified(QARGV, h);
+  assert.deepEqual(h.posts.map((p) => p.state), ["pending", "failure", "pending", "failure"]);
+  assert.match(h.posts[1].description, /^INCONCLUSIVE gate:stability/);
+});
+
+test("#3289: the JOB's exit is read from the record, not from ansible-playbook's status (a FAIL is not INCONCLUSIVE)", async () => {
+  // ansible-playbook exits 2 for ANY failed assert, so job exit 1 and job exit 2 look identical in `status`.
+  const h = qualifiedHarness([{ status: 2, record: record({ exit: 1, outcome: "exit-code" }) }, { status: 2, record: record({ exit: 1, outcome: "exit-code" }) }]);
+  await driveQualified(QARGV, h);
+  assert.match(h.posts[1].description, /^FAIL gate:stability/);
+  assert.doesNotMatch(h.posts[1].description, /INCONCLUSIVE/);
+});
+
+test("#3289: success needs the record, the commit, the exit AND the dispatch to agree -- each alone is a failure", () => {
+  // POSITIVE CONTROL for the four refusals below: the same inputs with everything agreeing ARE a pass.
+  assert.deepEqual(outcomeOf({ status: 0, record: record(), sha: QSHA }), { exitCode: 0 });
+  const refused: [string, Parameters<typeof outcomeOf>[0]][] = [
+    ["no record", { status: 0, record: undefined, sha: QSHA }],
+    ["the lab ran another commit", { status: 0, record: record({ commit: "ffffffffffff" }), sha: QSHA }],
+    ["no commit in the record", { status: 0, record: record({ commit: undefined }), sha: QSHA }],
+    ["an EMPTY commit in the record", { status: 0, record: record({ commit: "" }), sha: QSHA }],
+    ["record says 0 but the dispatch failed", { status: 2, record: record(), sha: QSHA }],
+    ["record exit 0 with an outcome that is not success", { status: 0, record: record({ outcome: "timeout" }), sha: QSHA }],
+    ["a non-integer exit", { status: 0, record: record({ exit: "0" }), sha: QSHA }],
+  ];
+  for (const [name, seen] of refused) assert.deepEqual(outcomeOf(seen), {}, name);
+});
+
+test("#3289: a run that leaves NO readable record is posted as a failure, never a success", async () => {
+  const h = qualifiedHarness([{ status: 0, record: undefined }, { status: 0, record: undefined }]);
+  await driveQualified(QARGV, h);
+  assert.deepEqual(h.posts.map((p) => p.state), ["pending", "failure", "pending", "failure"]);
+  assert.match(h.posts[1].description, /NO VERDICT/);
+});
+
+test("#3289: with NO usable credential it dispatches NOTHING (a 45-minute run whose start cannot be said is waste), and exits 3", async () => {
+  const h = qualifiedHarness([ended(0)], [GH_NO_CREDENTIAL]);
+  const status = await driveQualified(QARGV, h);
+  assert.deepEqual(h.events, ["post:pending"]);
+  assert.equal(status, 3, "exit 3 is the poster's `not yet`");
+  assert.match(h.said.join(""), /no usable GitHub credential/);
+  assert.match(h.said.join(""), /NOT dispatched/);
+});
+
+test("#3289: a verdict that cannot be posted is reported, the dispatch's own status is kept, and there is no re-run on it", async () => {
+  const h = qualifiedHarness([ended(1), ended(0)], [GH_OK, GH_NO_CREDENTIAL]);
+  const status = await driveQualified(QARGV, h);
+  assert.deepEqual(h.events, ["post:pending", "dispatch", "post:failure"]);
+  assert.equal(h.dispatched.length, 1);
+  assert.equal(status, 2);
+  assert.match(h.said.join(""), /NOT POSTED/);
+});
+
+test("#3289: a refusal BEFORE the dispatch leaves nothing standing on the sha (pending waits for the dispatch)", async () => {
+  const h = qualifiedHarness([ended(0)]);
+  const realExit = process.exit;
+  const realErr = process.stderr.write.bind(process.stderr);
+  let exited: number | undefined;
+  process.exit = ((code: number) => { exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    await run(QARGV, {
+      catalogueText: CATALOGUE, dispatch: h.dispatch, qualify: h.qualify,
+      readFleet: () => ({ refusal: "no inventory on this host", workers: [] }),
+    });
+  } catch (error) {
+    if (!/^exit \d$/.test((error as Error).message)) throw error;
+  } finally {
+    process.exit = realExit;
+    process.stderr.write = realErr;
+  }
+  assert.equal(exited, 3);
+  assert.deepEqual(h.events, [], "no post and no dispatch");
+});
+
+test("#3289: what cannot be a qualified run is refused with its reason, and an absent flag is no request at all", () => {
+  const named = (job: string | undefined, row: string | undefined = "3289", ref?: string, describeOnly = false) =>
+    ({ job, row, ref, describeOnly });
+  const flag = `--qualify-sha=${QSHA}`;
+  assert.equal(qualificationRequest(["-e", "job=gate-stability"], named("gate-stability")), undefined);
+  const refusal = (argv: string[], n: ReturnType<typeof named>) =>
+    (qualificationRequest(argv, n) as { refusal?: string }).refusal ?? "";
+  assert.match(refusal(["--qualify-sha=abc"], named("gate-stability")), /40-character/);
+  assert.match(refusal([flag], named("stability")), /gate-stability alone/);
+  assert.match(refusal([flag], named(undefined)), /gate-stability alone/);
+  assert.match(refusal([flag], named("gate-stability", "3289", undefined, true)), /describe-only/);
+  assert.match(refusal([flag], named("gate-stability", "")), /needs -e row=<n>/);
+  assert.match(refusal([flag], named("gate-stability", "abc")), /needs -e row=<n>/);
+  assert.match(refusal([flag], named("gate-stability", "3289", "main")), /different commit/);
+  // POSITIVE CONTROL: the same request, accepted, with the flag stripped and the ref set from the sha.
+  assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag], named("gate-stability")),
+    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`] });
+  assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag, "-e", `ref=${QSHA}`], named("gate-stability", "3289", QSHA)),
+    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`] }, "a ref equal to the sha is not duplicated");
+});
+
+test("#3289: `--qualify-sha` with no poster handed to run() throws; only the real entry passes one", async () => {
+  await assert.rejects(run(QARGV, { catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }), dispatch: () => 0 }), /no poster/);
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+  assert.match(source, /post: postQualificationStatus,/);
+});
+
+test("#3289: readRecordFrom reads THIS run's record: right job, right row, written after the dispatch began", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lab-jobs-"));
+  const SINCE_S = 1_000;
+  const write = (name: string, body: unknown, mtimeS: number) => {
+    const path = join(dir, name);
+    writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+    utimesSync(path, mtimeS, mtimeS);
+  };
+  try {
+    write("gate-stability-old.json", record({ invocation: "old" }), SINCE_S - 10);
+    write("gate-stability-other-row.json", record({ invocation: "other", row: 1 }), SINCE_S + 10);
+    write("stability-wrong-job.json", record({ invocation: "wrong", job: "stability" }), SINCE_S + 10);
+    write("gate-stability-garbage.json", "{not json", SINCE_S + 20);
+    write("gate-stability-mine.json", record({ invocation: "mine" }), SINCE_S + 30);
+    const said: string[] = [];
+    const query = { job: "gate-stability", row: 3289, since: SINCE_S * 1000 };
+    assert.equal(readRecordFrom(dir, query, (t) => said.push(t))?.invocation, "mine");
+    assert.match(said.join(""), /gate-stability-garbage\.json does not parse/, "an unreadable record is named, not skipped silently");
+    // Remove the one record that qualifies: the others must NOT stand in for it.
+    rmSync(join(dir, "gate-stability-mine.json"));
+    assert.equal(readRecordFrom(dir, query), undefined);
+    assert.equal(readRecordFrom(join(dir, "absent"), query), undefined, "no directory yet is no record, not a throw");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#3289: there is no token file and no second credential: the poster never names one, and passes `gh` the environment untouched", () => {
+  // The host's AMBIENT `gh`: it must not pick an account (`GH_CONFIG_DIR`, `GH_TOKEN`, `gh-api-budget.md`) or read a token file.
+  const poster = readFileSync(fileURLToPath(new URL("./post-qualification-status.mjs", import.meta.url)), "utf8");
+  assert.doesNotMatch(poster, /GH_CONFIG_DIR\s*[:=]|GH_TOKEN\s*[:=]|process\.env\.GH_|qualification-status-token/);
+  assert.doesNotMatch(poster, /spawnSync\("gh", args, \{[^}]*\benv\b/, "the default runner must pass the environment through untouched");
+  // POSITIVE CONTROL: the patterns above are looking at the right file -- it does spawn `gh`.
+  assert.match(poster, /spawnSync\("gh", args,/);
+});
