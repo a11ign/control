@@ -34,6 +34,11 @@ test("the version and the changelog are the ROOT's, because `kind: tag` tags onl
   assert.doesNotMatch(read("package.json"), /\\u[0-9a-f]{4}|[^\x00-\x7f]/i, "the root manifest is ASCII");
 });
 
+test("the root is a workspace project, or changesets refuses a changeset naming it (`not in the workspace`, measured on #3960)", () => {
+  assert.match(read("pnpm-workspace.yaml"), /^ {2}- "packages\/\*"$/m, "positive control: the workspace globs are found");
+  assert.match(read("pnpm-workspace.yaml"), /^ {2}- "\."$/m);
+});
+
 test("codeOf drops a comment that mentions the trigger", () => {
   assert.doesNotMatch(codeOf("# workflow_dispatch\non:\n  push:\n"), /workflow_dispatch/);
 });
