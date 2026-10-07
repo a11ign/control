@@ -198,6 +198,28 @@ function readOptionalFile(path) {
 }
 
 /**
+ * The chat id in the chairman's file. The file the chairman places is the agents host's own
+ * `telegram-chairman`, which is `{"chatId":<n>,"userId":<n>,"pairedAt":"<iso>"}` (agent-org reads `.chatId` from it),
+ * not a bare number: the first install sent that whole object as `chat_id` and Telegram answered HTTP 400 (#3851).
+ * A bare number still reads, so a hand-placed file works; JSON that carries no usable `chatId` is a refusal that
+ * names the file, never a guess at what the chairman meant.
+ *
+ * @param {string} raw the file's text
+ * @returns {{ ok: true, chatId: string | number } | { ok: false, reason: string }}
+ */
+export function chatIdFrom(raw) {
+  const text = raw.trim();
+  if (!text.startsWith("{")) return { ok: true, chatId: text };
+  try {
+    const { chatId } = JSON.parse(text);
+    return typeof chatId === "number" && Number.isSafeInteger(chatId)
+      ? { ok: true, chatId } : { ok: false, reason: "the chairman file is JSON with no numeric `chatId`" };
+  } catch {
+    return { ok: false, reason: "the chairman file starts with `{` and is not JSON" };
+  }
+}
+
+/**
  * Telegram's `sendMessage`, under a hard timeout. The token is in the URL Telegram requires, so NO error text
  * here is built from the URL: a failure names the status or the error class and nothing else.
  *
@@ -209,8 +231,10 @@ export function telegramSender({ fetchImpl = fetch, readFile = readOptionalFile,
   const chatFile = env.A11Y_HEARTBEAT_TELEGRAM_CHAT_FILE || TELEGRAM_CHAT_FILE;
   return async (text) => {
     const token = readFile(tokenFile).trim();
-    const chatId = readFile(chatFile).trim();
-    if (!token || !chatId) return { ok: false, reason: `no route: ${!token ? tokenFile : chatFile} is absent or empty (the chairman places it, #3851)` };
+    const chat = chatIdFrom(readFile(chatFile));
+    if (!token || (chat.ok && !chat.chatId)) return { ok: false, reason: `no route: ${!token ? tokenFile : chatFile} is absent or empty (the chairman places it, #3851)` };
+    if (!chat.ok) return { ok: false, reason: `no route: ${chatFile}: ${chat.reason}` };
+    const chatId = chat.chatId;
     try {
       const response = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST", headers: { "content-type": "application/json" },
