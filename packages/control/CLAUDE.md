@@ -65,8 +65,8 @@ real-page captures are named jobs, dispatched with fixed argv and supervised by 
 pnpm run lab:job -- -e job=train                 # the catalogue is in ansible/lab-job.yml
 pnpm run lab:job -- -e job=capture-real-pages -e worker=a11y-worker-2 -e role=training -e shard=0/4
 pnpm run lab:status                              # every a11y-job-* unit and its state
-pnpm run lab:status -- -e job=train              # systemd's view + the journal + the run's own progress file
-pnpm run lab:stop -- -e job=capture              # end one deliberately; reports what it discards first
+pnpm run lab:status -e job=train                 # systemd's view + the journal + the run's own progress file
+pnpm run lab:stop -e job=capture                 # end one deliberately; reports what it discards first
 ```
 
 `lab:stop` exists because the unit name is the lock, so `lab:job` REFUSES a second job of that name — and
