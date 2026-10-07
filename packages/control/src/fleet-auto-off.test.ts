@@ -789,8 +789,9 @@ test("#3852: behind `main`, the checkout fast-forwards and THEN lays the layer a
     assert.equal(sandbox.head(), sandbox.originHead(), "the tree stands on origin/main");
     assert.notEqual(sandbox.head(), before);
     const laid = sandbox.calls().filter((c) => c.startsWith("node "));
-    assert.deepEqual(laid, [`node scripts/lay-layer.mjs screenreader-fleet: ${sandbox.head().slice(0, 7)}`],
-      "laid once, and the tree already held the merged commit when it was (the lockfile it reads is the new one)");
+    const head = sandbox.head().slice(0, 7);
+    assert.deepEqual(laid, [`node scripts/lay-layer.mjs screenreader-fleet: ${head}`, `node scripts/lay-layer.mjs control: ${head}`],
+      "each layer laid once, and the tree already held the merged commit when it was (the pin it reads is the new one, #3976)");
   } finally {
     sandbox.dispose();
   }
