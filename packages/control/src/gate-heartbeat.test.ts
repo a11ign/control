@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  STALE_AFTER_MS, READ_TIMEOUT_MS, HEARTBEAT_COMMENT_ID, TELEGRAM_TOKEN_FILE, GH_TOKEN_FILE, judgeTick, messageFor, run, readGateLastTick, telegramSender,
+  STALE_AFTER_MS, READ_TIMEOUT_MS, HEARTBEAT_COMMENT_ID, TELEGRAM_TOKEN_FILE, GH_TOKEN_FILE, judgeTick, messageFor, run, readGateLastTick, telegramSender, chatIdFrom,
 } from "./gate-heartbeat.mjs";
 import { shippedControlUnits } from "./control-unit-drift.mjs";
 
@@ -255,6 +255,41 @@ test("telegramSender: posts to sendMessage with the chat id and the text", async
   assert.deepEqual(result, { ok: true });
   assert.equal(call!.url, `https://api.telegram.org/bot${SECRET}/sendMessage`);
   assert.deepEqual(call!.body, { chat_id: "424242", text: "hello" });
+});
+
+// The file the chairman placed is the agents host's own `telegram-chairman`, and its REAL shape is this one (#3851:
+// the first install sent the whole object as chat_id and Telegram answered HTTP 400). Numbers here are made up.
+const REAL_SHAPE = '{"chatId":424242,"userId":424242,"pairedAt":"2026-10-03T08:15:00.000Z"}';
+
+test("telegramSender: the chairman file in its real JSON shape sends its chatId, not the object", async () => {
+  let call: { body: Record<string, unknown> } | null = null;
+  const fetchImpl = (async (_url: string, init: { body: string }) => { call = { body: JSON.parse(init.body) }; return { ok: true, status: 200 }; }) as never;
+  const readFile = (p: string) => (p === "/chat" ? `${REAL_SHAPE}\n` : files[p] ?? "");
+  assert.deepEqual(await telegramSender({ fetchImpl, readFile, env })("hello"), { ok: true });
+  assert.deepEqual(call!.body, { chat_id: 424242, text: "hello" });
+});
+
+test("telegramSender: JSON with no numeric chatId is `no route` naming the file, and nothing is fetched", async () => {
+  const fetchImpl = (async () => { throw new Error("must not fetch"); }) as never;
+  for (const bad of ['{"userId":1}', '{"chatId":"424242"}', "{not json", "[1]", "null", '"424242"', "424242abc", "true"]) {
+    const readFile = (p: string) => (p === "/chat" ? bad : files[p] ?? "");
+    const result = await telegramSender({ fetchImpl, readFile, env })("hello");
+    assert.ok(!result.ok && /no route/.test(result.reason) && /\/chat/.test(result.reason), `${bad}: ${JSON.stringify(result)}`);
+  }
+});
+
+test("chatIdFrom: a bare number still reads, and the real shape reads its chatId", () => {
+  assert.deepEqual(chatIdFrom("424242\n"), { ok: true, chatId: "424242" });
+  assert.deepEqual(chatIdFrom("-1001234567890"), { ok: true, chatId: "-1001234567890" });
+  assert.deepEqual(chatIdFrom(REAL_SHAPE), { ok: true, chatId: 424242 });
+  assert.deepEqual(chatIdFrom("  \n"), { ok: true, chatId: "" });
+});
+
+test("chatIdFrom: valid JSON that is not an object with a numeric chatId is refused, whatever its first character", () => {
+  for (const bad of ["[1]", "null", '"424242"', "true", "42.5e0", '[{"chatId":1}]', "junk", "@channel"]) {
+    const result = chatIdFrom(bad);
+    assert.ok(!result.ok, `${bad}: ${JSON.stringify(result)}`);
+  }
 });
 
 test("telegramSender: an absent credential is `no route` naming the file, and nothing is fetched", async () => {
