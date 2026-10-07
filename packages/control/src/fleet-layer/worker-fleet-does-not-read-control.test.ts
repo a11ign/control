@@ -94,17 +94,15 @@ function relativeLiterals(source: string): string[] {
  * A REASON, never a bare acknowledgement, matching every other EXEMPT table added this session.
  */
 const EXEMPT: Record<string, string> = {
-  "fleet-env.mjs:95":
-    "GAP, recorded 2026-09-06 (architecture audit §3.2), not fully closed: INVENTORY's own default path. "
+  "fleet-env.mjs:98":
+    "GAP, recorded 2026-09-06 (architecture audit §3.2), not fully closed: the monorepo's own default for INVENTORY and GROUP_VARS. "
     + "doctor.mjs and check-worker-code.mjs are published bins that must keep resolving THIS monorepo's "
-    + "bare-metal fleet when run as `npm run doctor`, so the path is now an injected PARAMETER rather than "
-    + "an unconditional read -- but the default still names this path, and an installed tarball inherits "
-    + "it. inventoryWorkerUrls()/namedInventoryWorkers() already catch the resulting ENOENT and return "
-    + "`[]`, which is this project's own supported \"no bare-metal fleet declared here\" answer, so the "
-    + "gap is honesty (a private path visible in a published artefact) rather than breakage -- confirmed "
-    + "by reading both functions' `catch` blocks, not assumed.",
-  "fleet-env.mjs:96":
-    "The GROUP_VARS twin of the entry above. Same reason, same file, same deliberate default.",
+    + "bare-metal fleet when run as `npm run doctor`, so the path is an injected PARAMETER rather than "
+    + "an unconditional read. Since screenreader-fleet 0.4.1 (#3803) ONE helper, `monorepoAnsibleFile`, builds both defaults, "
+    + "each is used only when that path EXISTS, and otherwise the bin exits 2 naming the path and the flag that supplies it "
+    + "(`--inventory`, `--group-vars`), so an installed tarball no longer inherits a path it can never find. What is left is the "
+    + "NAME of the monorepo's path in a published file: honesty, not breakage. It is built from `resolve(..., \"control\", ...)` "
+    + "segments, not a relative import literal, so the scan above does not see it and this entry is read back by the test below alone.",
 };
 
 /** Which real file a relative import specifier resolves to — `.mjs` and TS's `.js`-means-`.ts` both apply. */

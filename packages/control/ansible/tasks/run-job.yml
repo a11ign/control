@@ -261,6 +261,11 @@
   # THE LAYERS' HALF OF THE MOVE (ADR 0039 item 6, row 6c, #3396), after the core's so the pair is settled
   # together. A no-op while no layer lives in its own repository; the file's header says what it refuses.
   ansible.builtin.include_tasks: lab-layer-checkouts.yml
+  vars:
+    # Handed down, not read through `lab_pull`: the register is this file's, and `playbook-variables.test.ts` holds a
+    # task file to the variables its own text or its include site provides. A pull that changed the checkout is
+    # followed by the install that re-lays a LAID layer at the new lockfile's tag (#3819).
+    lab_core_moved: "{{ lab_pull is defined and lab_pull is changed }}"
 
 - name: "Say why the checkout was left alone"
   when: not lab_should_pull
@@ -333,6 +338,58 @@
   environment:
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
   changed_when: true
+
+- name: "Read each layer's commit AFTER the install"
+  # THE INSTALL IS WHAT LAYS A LAYER (#3819, #3826), and `lab-layer-checkouts.yml` does not judge a laid tag when the
+  # pull moved the core, because this install replaces the tree at the NEW lockfile's tag. Nothing judged what the
+  # install laid, so a tag the lockfile pins that is not the commit the job named would have run unremarked. Same gate
+  # as the install: when it did not run, `lab-layer-checkouts.yml` has already judged the tree that will run.
+  #
+  # A clone is read at `HEAD`. A laid tree has no `.git`, so it is read as `lab-layer-checkouts.yml` reads it: the
+  # commit its `.layer-ref` tag names on the layer's own remote, the LAST `ls-remote` line for an annotated or a
+  # lightweight tag. Anything else at the layer's path (the core's `src/` with no `.layer-ref`) has no pin to read and
+  # REFUSES: `git` run there would walk up into the core and answer for it. The paths go in as arguments, not text.
+  when: lab_pull is defined and lab_pull is changed
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -ceu
+      - |
+        layer="$1"; remote="$2"
+        if [ -e "$layer/.git" ]; then
+          git -C "$layer" rev-parse HEAD
+        elif [ -f "$layer/.layer-ref" ] && [ -d "$layer/src" ]; then
+          tag=$(cat "$layer/.layer-ref")
+          printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,99}$' && case "$tag" in *..*) false;; esac \
+            || { echo "$layer/.layer-ref does not hold a tag: $tag" >&2; exit 1; }
+          refs=$(git ls-remote --tags "$remote" "refs/tags/$tag" "refs/tags/$tag^{}")
+          printf '%s\n' "$refs" | tail -n 1 | cut -f 1
+        else
+          echo "$layer is neither a clone nor a laid tree (.layer-ref beside src/): nothing here stands in for the layer" >&2
+          exit 1
+        fi
+      - sh
+      - "{{ lab_repo_path }}/{{ item.value.path }}"
+      - "{{ item.value.remote }}"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  register: lab_layer_after_install
+
+- name: "Each layer is ON its pin after the install, laid or cloned"
+  # `lab_layer_commits` is the commit a clone was moved to; a layer that was laid when the job began has none, so its
+  # pin is what the job named (`layer_refs`), which a branch name can never equal: a laid tree cannot be compared to one.
+  when: lab_pull is defined and lab_pull is changed
+  ansible.builtin.assert:
+    that: (item.stdout | default('') | trim) == (lab_layer_commits[item.item.key] | default(layer_refs[item.item.key]))
+    fail_msg: >-
+      layer {{ item.item.key }} is at '{{ item.stdout | default('') | trim }}' after the install, not
+      {{ lab_layer_commits[item.item.key] | default(layer_refs[item.item.key]) }}, which the job named. The
+      install lays a layer at the tag the lockfile pins, and that tag is not this commit: nothing has run.
+  loop: "{{ lab_layer_after_install.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key }}"
 
 - name: "Rebuild the compiled packages"
   # THE GATE SCORED CODE THAT WAS NOT THE CODE. `@a11ign/judge/rules` resolves to `dist/rules.js`,

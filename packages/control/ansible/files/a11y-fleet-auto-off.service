@@ -37,3 +37,40 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/r
 # green unit suite could not see it. Same literal checkout as ExecStart, for the same reason.
 WorkingDirectory=/root/a11y-witness
 ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs --apply
+# THE CHECKOUT FOLLOWS `main` BEFORE EVERY TICK, OR A MERGE THAT TOUCHES THE CLOSURE STRANDS THE FLEET POWERED ON (#3852, #3846).
+# Nothing else moves `/root/a11y-witness` between deploys, and `fleet-auto-off.mjs` refuses `stale-checkout` on any difference
+# from `origin/main` (#3275): from about 04:21Z on 2026-10-06 it refused 2,569 times and 15 boxes sat on and idle all day. The
+# guard was right and the checkout drifted, so the remedy is to stop it drifting, not to loosen the guard. The agents host's
+# `a11ign-fleet-watch.service` does this with `agent-org primary:update`; that is not copyable here (no pnpm, no node_modules,
+# ADR 0012), so the steps are git and the layer's own laying script, which needs only node and git.
+#
+# IN ORDER, each only if the one before it succeeded:
+#   1. No play is running. Ansible loads task files lazily, so moving the tree under `fleet:provision` changes the play
+#      mid-run; the tick's own `readPlaysInFlight` keeps every box for the same reason, over the same units
+#      (`fleet-auto-off.test.ts` holds the two lists equal). Unreadable reads as running, as it does there.
+#   2. Fetch `main`, unless the tick's own fetch (the guard's, throttled to a minute) did it within the minute.
+#   3. `git merge --ff-only origin/main`. Never `checkout`: a checkout a deploy put on another ref is left standing, and the
+#      guard refuses it by name. Where `main` has moved on and this tree cannot fast-forward, it is refused, not forced.
+#   4. `node scripts/lay-layer.mjs screenreader-fleet`, AFTER the merge because it reads the pin from the lockfile this merge
+#      brought. The layer is untracked (#3504), so the merge never touches it and the order cannot strand it; only a checkout
+#      that still tracks the old `packages/worker-fleet` (the one-time move off it) needs the layer laid BEFORE any merge,
+#      which `orchestrator` does by hand once. `controlPlaneCheckout()` is not used: it wants the layer as a clone with a
+#      `.git` (exit 4 without one), and the control plane holds it LAID, which is the only shape the guard judges (#3845).
+#
+# NOT `controlPlaneCheckout()`'s lock-free sibling by accident: no lock is taken. `fleet:deploy`'s move is the same
+# `--ff-only` to a commit on `main`, so two movers land on the same line or one is refused, and git's own `index.lock`
+# serialises them; a deploy has already moved the tree BEFORE its play starts, which step 1 then protects.
+#
+# THE `-` IS THE POINT. A failed step must not stop the tick: the verdict is the one that reads the fetch and the files, so a
+# fetch that fails here fails there too and the tick still says `refuse fetch-failed`, and a tree left old says
+# `refuse stale-checkout`. This step can only make the checkout newer, never make an old one read as current.
+# IT RUNS IN `WorkingDirectory=` above, so it names no checkout of its own (one literal, not a second).
+# `$$` is systemd's escape for a literal `$`; the script holds no quote of its own and no `%`, which systemd would expand.
+ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
+    a11y-fleet-deploy.service a11y-fleet-sleep.service a11y-fleet-provision-role.service a11y-fleet-recover.service \
+    a11y-fleet-inventory-install.service a11y-fleet-control-host-install.service a11y-fleet-os-rollback.service \
+    a11y-fleet-collect-logs.service) && \
+  { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
+  { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
+  git merge --ff-only --quiet origin/main && \
+  node scripts/lay-layer.mjs screenreader-fleet'

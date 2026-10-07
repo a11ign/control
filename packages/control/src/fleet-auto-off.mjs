@@ -65,6 +65,17 @@
  * against `origin/main`, and `staleCheckoutVerdict` refuses on any difference. NOT all of `packages/control/`: 192
  * first-parent merges touched that in 30 days, the closure 7, and a refusal on the former would idle the timer most days.
  *
+ * THE CLOSURE REACHES INTO A LAYER THIS REPOSITORY DOES NOT TRACK (#3845). The files of `packages/worker-fleet` (the wake
+ * proof's and the busy check's readers) are laid from `a11ign/screenreader-fleet` (#3504), so `git` has no opinion of them
+ * and the comparison above refused on `main` itself for hours. Those files are held to the layer's PIN instead: the tag
+ * `origin/main`'s lockfile names, which the laid tree's `.layer-ref` must equal (`judgeLaidLayer`). Same tag or refusal, naming
+ * the layer; a layer that cannot be read is `cannot-tell`.
+ *
+ * THE CLOSURE'S OWN FILES ARE A LAYER TOO, once `layers.json` declares `pinned.control` (#3506, #3914): `packages/control` is then a laid,
+ * untracked copy of `a11ign/control`, and every file of the closure would read as differing from `origin/main`, which no longer holds it.
+ * Those files are judged by the same rule, against the tag `origin/main`'s `layers.json` pins for `control`. With no `pinned.control`
+ * declared, which is every checkout until #3506 lands, nothing changes.
+ *
  * It fails CLOSED, the only direction auto-off may err in: a failed fetch, an unresolvable `origin/main`, an errored
  * diff or an empty closure each refuse (`CANNOT_TELL` is never `identical`). The fetch moves only the remote-tracking
  * ref, never the working tree, so it cannot race a running play; it is throttled to once a minute by a stamp in the
@@ -112,11 +123,12 @@
  * directly, positive and negative) so that the day a producer exists, only `main()` changes.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, realpathSync } from "node:fs";
-import { posix } from "node:path";
+import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
+import { CONTROL_LAYER, laidControl, layerDeclaration, layerOwning, layerPinTag, pinnedLayerTag } from "./layer-checkouts.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
 import { inventoryHosts } from "./fleet-discover.mjs";
 import { inventoryPathFor } from "./control-plane-fleet.mjs";
@@ -232,13 +244,29 @@ export async function probeIdle(url, { timeoutMs = PROBE_TIMEOUT_MS, request = r
 /** @typedef {Record<string, number>} SinceState */
 
 /**
- * @typedef {{ reason: string, detail: string, at: number }} Refusal why a shutdown was held back, and when
+ * @typedef {{ reason: string, detail: string, at: number, since?: number }} Refusal why a shutdown was held back, `at` the
+ *   tick that last said so (seconds old for as long as it stands) and `since` the FIRST tick of the unbroken run, which is
+ *   the only one of the two that can date a standing refusal (#3859). Absent on a record written before the field existed.
  * @typedef {{ idleSince: SinceState, shutdownRequestedAt: SinceState, fetchedAt: number | null,
  *   refusal: Refusal | null }} AutoOffState
  */
 
 /** @param {unknown} value @returns {Record<string, number>} */
 const recordOf = (value) => (value && typeof value === "object" && !Array.isArray(value) ? /** @type {any} */ (value) : {});
+
+/**
+ * A recorded refusal, with `since` kept only when it is a time: a string there would otherwise be carried forward and
+ * read as a date by whoever ages the refusal.
+ *
+ * @param {any} refusal
+ * @returns {Refusal | null}
+ */
+function readRefusal(refusal) {
+  if (!refusal || typeof refusal.reason !== "string") return null;
+  const { since, ...rest } = refusal;
+  const time = finiteNumber(since);
+  return time === undefined ? rest : { ...rest, since: time };
+}
 
 /**
  * The persisted state: idle-since, shutdown-requested-at, when `origin/main` was last fetched, and the refusal the
@@ -252,12 +280,11 @@ const recordOf = (value) => (value && typeof value === "object" && !Array.isArra
 export function readState(path, read = readFileSync) {
   try {
     const parsed = JSON.parse(read(path, "utf8"));
-    const refusal = parsed?.refusal;
     return {
       idleSince: recordOf(parsed?.idleSince),
       shutdownRequestedAt: recordOf(parsed?.shutdownRequestedAt),
       fetchedAt: finiteNumber(parsed?.fetchedAt) ?? null,
-      refusal: refusal && typeof refusal.reason === "string" ? refusal : null,
+      refusal: readRefusal(parsed?.refusal),
     };
   } catch {
     return { idleSince: {}, shutdownRequestedAt: {}, fetchedAt: null, refusal: null };
@@ -526,18 +553,19 @@ const FETCH_TIMEOUT_MS = 20_000;
 
 /**
  * THE DECISION, PURE. `differing` is the repo-relative files whose content differs from `origin/main`, or `null`
- * when that could not be established (unresolvable `origin/main`, errored diff, empty closure): "could not tell" and
- * "identical" never share a value. `fetchOk` is whether `origin/main` is known to be at most `FETCH_THROTTLE_MS`
- * old. Only a fresh ref and an empty difference proceed.
+ * when that could not be established (unresolvable `origin/main`, errored diff, empty closure, a layer that cannot be
+ * read): "could not tell" and "identical" never share a value. `why` names what could not be read, when the caller
+ * knows. `fetchOk` is whether `origin/main` is known to be at most `FETCH_THROTTLE_MS` old. Only a fresh ref and an
+ * empty difference proceed.
  *
- * @param {{ differing: string[] | null, fetchOk: boolean }} input
+ * @param {{ differing: string[] | null, fetchOk: boolean, why?: string }} input
  * @returns {{ action: "proceed" } | { action: "refuse", reason: "fetch-failed" | "cannot-tell" | "stale-checkout",
  *   detail: string }}
  */
-export function staleCheckoutVerdict({ differing, fetchOk }) {
+export function staleCheckoutVerdict({ differing, fetchOk, why }) {
   if (!fetchOk) return { action: "refuse", reason: "fetch-failed", detail: "`git fetch origin main` did not succeed" };
   if (differing === null) {
-    return { action: "refuse", reason: "cannot-tell", detail: "origin/main could not be compared with the files that run" };
+    return { action: "refuse", reason: "cannot-tell", detail: why ?? "origin/main could not be compared with the files that run" };
   }
   if (differing.length) {
     return { action: "refuse", reason: "stale-checkout",
@@ -555,6 +583,9 @@ export function staleCheckoutVerdict({ differing, fetchOk }) {
  * @returns {string[] | null} `null` when `git` could not say
  */
 function filesDifferingFromMain(paths, git) {
+  // No pathspec makes `git diff` read the WHOLE tree: once control is laid (#3914) the closure holds no core file at all, and an
+  // unrelated difference anywhere in the repository would refuse a timer whose own files all match their pins.
+  if (paths.length === 0) return [];
   const diff = git(["diff", "--name-only", "origin/main", "--", ...paths]);
   const tracked = git(["ls-files", "--", ...paths]);
   if (diff.status !== 0 || tracked.status !== 0) return null;
@@ -564,27 +595,111 @@ function filesDifferingFromMain(paths, git) {
 }
 
 /**
+ * @typedef {{ name: string, dir: string, path: string, tag: string }} LayerAtItsPin a separate layer, where this host holds it, and the
+ *   tag `origin/main`'s lockfile pins it at
+ * @typedef {(layer: LayerAtItsPin) => { differing: string[] } | { cannotTell: string }} JudgeLayer
+ * @typedef {{ layerOwning: typeof layerOwning, layerDeclaration: typeof layerDeclaration, laidControl: typeof laidControl }} Layers where
+ *   a layer lives: injectable, because the real `layers.json` declares no `pinned.control` until #3506
+ */
+
+/**
+ * A LAYER'S FILES ARE JUDGED AGAINST ITS PIN, NOT AGAINST `origin/main` (#3845). `packages/worker-fleet` is laid from
+ * `a11ign/screenreader-fleet` and tracked by no ref here (#3504), so `git ls-files` lists none of it and every checkout, `main`
+ * itself included, read as six files differing: the timer refused every tick for hours. Dropping those files from the
+ * comparison would blind it to the wake proof and the busy check, which live in them (#3275). What `main` says about a layer is the
+ * release its lockfile pins, so that is what the laid tree is held to: same tag or refusal, and a layer that cannot be read
+ * is CANNOT_TELL, never "same". The laid copy is the tag's `src/` and nothing else (`scripts/lay-layer.mjs`), so equal tags
+ * are equal files.
+ *
+ * Only the laid shape (`.layer-ref` beside `src/`) is judged: a clone at the layer's path holds the layer repository's own
+ * layout (`packages/worker-fleet/src` under it), which `../../worker-fleet/src/` cannot import from, so it is not a tree that runs.
+ *
+ * @type {JudgeLayer}
+ */
+export function judgeLaidLayer({ name, dir, path, tag }) {
+  const refFile = join(dir, ".layer-ref");
+  if (existsSync(join(dir, ".git")) || !existsSync(refFile) || !existsSync(join(dir, "src"))) {
+    return { cannotTell: `layer ${name} at ${path} is not a laid tree (\`.layer-ref\` beside \`src/\`, no \`.git\`): run \`node scripts/lay-layer.mjs ${name}\`` };
+  }
+  const laid = readFileSync(refFile, "utf8").trim();
+  return { differing: laid === tag ? [] : [`${path} (layer ${name} is laid at ${laid}, main pins ${tag})`] };
+}
+
+/**
+ * The `layers.json` `origin/main` holds. At the repository root, where #3506 moves it: `packages/control`, which holds it today, is
+ * the layer it will no longer track.
+ */
+const MANIFEST_ON_MAIN = "layers.json";
+
+/**
+ * The tag `origin/main` pins a layer at: a separate layer by its lockfile entry, the laid control by its declaration in `layers.json`.
+ *
+ * @param {{ name: string, git: Git }} input
+ * @returns {{ tag: string } | { why: string }}
+ */
+function pinOnMain({ name, git }) {
+  const control = name === CONTROL_LAYER;
+  const file = control ? MANIFEST_ON_MAIN : "pnpm-lock.yaml";
+  const shown = git(["show", `origin/main:${file}`]);
+  if (shown.status !== 0) return { why: `origin/main's ${file}, which pins ${control ? name : "the layers"}, could not be read` };
+  const pin = control ? pinnedLayerTag(shown.stdout, name) : layerPinTag(shown.stdout, name);
+  return "refusal" in pin ? { why: `layer ${name} has no pin on main: ${pin.refusal}` } : pin;
+}
+
+/**
+ * The comparison with `origin/main`: the core's files by content, each layer's files (a separate layer's, and the control plane's own
+ * once it is laid) by its pin.
+ *
+ * @param {{ paths: string[], git: Git, judgeLayer: JudgeLayer, layers: Layers }} input
+ * @returns {{ differing: string[] | null, why?: string }}
+ */
+function compareWithMain({ paths, git, judgeLayer, layers }) {
+  /** @type {Map<string, string[]>} */
+  const ofLayer = new Map();
+  const ofCore = paths.filter((path) => {
+    const layer = layers.layerOwning(path);
+    if (layer !== null) ofLayer.set(layer, [...(ofLayer.get(layer) ?? []), path]);
+    return layer === null;
+  });
+  const differing = filesDifferingFromMain(ofCore, git);
+  if (differing === null) return { differing };
+  for (const name of ofLayer.keys()) {
+    const pin = pinOnMain({ name, git });
+    if ("why" in pin) return { differing: null, why: pin.why };
+    const { path, dir } = (name === CONTROL_LAYER ? layers.laidControl() : null) ?? layers.layerDeclaration(name);
+    const judged = judgeLayer({ name, dir, path, tag: pin.tag });
+    if ("cannotTell" in judged) return { differing: null, why: judged.cannotTell };
+    differing.push(...judged.differing);
+  }
+  return { differing: differing.sort() };
+}
+
+/** @type {Layers} */
+const REAL_LAYERS = { layerOwning, layerDeclaration, laidControl };
+
+/**
  * Is the checkout this program runs from the same, where it matters, as `origin/main`?
  *
- * @param {{ now: number, fetchedAt: number | null, git: Git, readSource: (path: string) => string }} where
+ * @param {{ now: number, fetchedAt: number | null, git: Git, readSource: (path: string) => string, judgeLayer?: JudgeLayer, layers?: Layers }} where
  * @returns {{ verdict: ReturnType<typeof staleCheckoutVerdict>, fetchedAt: number | null }}
  */
-export function checkAgainstMain({ now, fetchedAt, git, readSource }) {
+export function checkAgainstMain({ now, fetchedAt, git, readSource, judgeLayer = judgeLaidLayer, layers = REAL_LAYERS }) {
   // A stamp from the future is a clock fault, not a fresh fetch.
   const fresh = fetchedAt !== null && fetchedAt <= now && now - fetchedAt < FETCH_THROTTLE_MS;
   const fetchOk = fresh || git(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"]).status === 0;
   const stamp = fetchOk && !fresh ? now : fetchedAt;
-  let differing = null;
+  /** @type {{ differing: string[] | null, why?: string }} */
+  let compared = { differing: null };
   if (fetchOk) {
     try {
       const closure = importClosure(THIS_FILE, readSource);
       // This file imports plenty; a closure of just itself means the walk found nothing, which is not "no differences".
-      differing = closure.length > 1 ? filesDifferingFromMain([...closure, ...RUN_BESIDE_THE_CODE], git) : null;
+      if (closure.length > 1) compared = compareWithMain({ paths: [...closure, ...RUN_BESIDE_THE_CODE], git, judgeLayer, layers });
     } catch {
-      differing = null;
+      compared = { differing: null };
     }
   }
-  return { verdict: staleCheckoutVerdict({ differing, fetchOk }), fetchedAt: stamp };
+  return { verdict: staleCheckoutVerdict({ ...compared, fetchOk }), fetchedAt: stamp };
 }
 
 /** @type {Git} */
@@ -737,12 +852,16 @@ function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
  * powered off, so an idle fleet costs no fetch; the held workers read `keep <reason>` in the report, which is where an
  * operator looks.
  *
+ * `since` is when the refusal BEGAN (#3859): the previous tick's refusal's `since`, or its `at` for a record from before
+ * the field, else `now`. Every path that does not refuse returns `refusal: null`, and that ends the run, so a tick that
+ * proceeds in between restarts the age with no further code.
+ *
  * @template {{ decision: Decision }} T
  * @param {T[]} decisions
- * @param {{ now: number, fetchedAt: number | null,
+ * @param {{ now: number, fetchedAt: number | null, previousRefusal: Refusal | null,
  *   checkout: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain> }} where
  */
-function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
+function holdBackIfStale(decisions, { now, fetchedAt, previousRefusal, checkout }) {
   if (!decisions.some(({ decision }) => decision.action === "off")) return { decisions, refusal: null, fetchedAt };
   const checked = checkout({ now, fetchedAt });
   if (checked.verdict.action === "proceed") return { decisions, refusal: null, fetchedAt: checked.fetchedAt };
@@ -751,7 +870,7 @@ function holdBackIfStale(decisions, { now, fetchedAt, checkout }) {
     decisions: decisions.map(({ decision, ...rest }) => ({
       ...rest, decision: decision.action === "off" ? { action: /** @type {const} */ ("keep"), reason } : decision,
     })),
-    refusal: { reason, detail, at: now },
+    refusal: { reason, detail, at: now, since: previousRefusal?.since ?? previousRefusal?.at ?? now },
     fetchedAt: checked.fetchedAt,
   };
 }
@@ -824,7 +943,7 @@ export async function tick(deps = {}) {
     };
   });
   const { decisions, refusal, fetchedAt } = apply
-    ? holdBackIfStale(decided, { now, fetchedAt: previous.fetchedAt, checkout })
+    ? holdBackIfStale(decided, { now, fetchedAt: previous.fetchedAt, previousRefusal: previous.refusal, checkout })
     : { decisions: decided, refusal: null, fetchedAt: previous.fetchedAt };
 
   if (apply) dispatchOff(decisions, { dispatch, shutdownRequestedAt, now });

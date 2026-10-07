@@ -1,0 +1,29 @@
+[Unit]
+# AN EXTERNAL HEARTBEAT -- #3851, class fix 1c of the 2026-10-06 host-hang incident (#3846).
+#
+# THIS UNIT DOES NOT NEED THE AGENTS HOST TO RUN, AND THAT IS ITS WHOLE JOB. The agents host hung for
+# 2 h 15 min and nothing noticed, because every watcher this org has (`work:tick`, `org-health`,
+# `fleet-watch`, the chairman messaging) runs ON that host: a host that freezes cannot report its own freeze.
+# This one runs on the control plane, a separate machine, and reads the gate's last completed tick from GitHub
+# (the `GATE_LAST_TICK` Actions variable, a11ign/a11ign#3880) -- never by ssh to the box it watches, which
+# would block on a hung host. Its Telegram route is the control plane's own, not the agents host's.
+#
+# Messages the chairman ONCE per outage when that tick is older than ten minutes, once when it cannot read the
+# tick at all (CANNOT_TELL is not "alive"), and once on recovery. `gate-heartbeat.mjs` carries the reasoning.
+Description=a11y: message the chairman when the gate's last tick is older than 10 minutes
+
+[Service]
+Type=oneshot
+# `gh` is in /usr/bin, but the same PATH line as `a11y-fleet-auto-off.service` keeps the two units' environments
+# one fact: systemd's default PATH omits `/root/.local/bin`, where this host's tools live (#2725).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+# What the chairman was last told, kept in /var/lib/a11y-gate-heartbeat and handed to the script as
+# $STATE_DIRECTORY, so "one message per outage" survives a reboot of the control plane.
+StateDirectory=a11y-gate-heartbeat
+# Every read and the send carry their own 20 s timeout; this is the backstop, so a wedged run is killed and the
+# next minute's run is not blocked behind it.
+TimeoutStartSec=90
+# THE LITERAL PATH IS THE ONLY WAY A STATIC UNIT FILE CAN SAY THIS: the same `/root/a11y-witness` as
+# `a11y-fleet-auto-off.service`, which `control-plane-checkout-is-one-fact.test.ts` holds to one literal.
+# The script has no flags, takes no checkout argument, and imports nothing outside node's own modules.
+ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/gate-heartbeat.mjs

@@ -252,6 +252,45 @@
         chdir: "{{ a11y_repo_path }}"
       changed_when: true
 
+    - name: Read each layer's commit AFTER the install
+      # THE CHECK `tasks/layer-checkouts.yml` CANNOT MAKE (#3819, #3826). A laid tree is not judged against its pin before the
+      # install, because the install re-lays it at the tag the lockfile pins and judging the old one would refuse the very
+      # bump that fixes it. So THIS is where a laid layer meets its pin: the commit its `.layer-ref` tag names on the layer's
+      # own remote (`git ls-remote`, which peels an annotated tag to the commit: the LAST line is the commit either way), or
+      # HEAD for a layer still held as a clone. A path that is neither is refused by name, with the core's `src/` at it
+      # the case that must not pass. The tag is held to the lab's pattern (`lab-layer-checkouts.yml`) before it is asked for.
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = "Stop"
+        $layer = '{{ a11y_repo_path }}/{{ item.value.path }}'
+        if (Test-Path "$layer/.git") {
+          git -c core.hooksPath=a11y-no-hooks -C $layer rev-parse HEAD
+        } elseif ((Test-Path "$layer/.layer-ref") -and (Test-Path "$layer/src")) {
+          $tag = (Get-Content -Raw "$layer/.layer-ref").Trim()
+          if (($tag -notmatch '^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,99}$') -or $tag.Contains('..')) { throw "$layer/.layer-ref does not hold a tag: $tag" }
+          $refs = git -c core.hooksPath=a11y-no-hooks ls-remote --tags '{{ item.value.remote }}' "refs/tags/$tag" "refs/tags/$tag^{}"
+          if ($LASTEXITCODE -ne 0) { throw "git ls-remote of {{ item.key }} failed with $LASTEXITCODE" }
+          ($refs | Select-Object -Last 1) -split '\s+' | Select-Object -First 1
+        } else {
+          throw "$layer is neither a clone of {{ item.key }} nor a laid tree (.layer-ref beside src/): nothing here stands in for it"
+        }
+      loop: "{{ a11y_layer_checkouts }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: layer_after_install
+      changed_when: false
+
+    - name: Each layer is ON its pin after the install, laid or cloned
+      ansible.builtin.assert:
+        that: (item.stdout | default('') | trim) == a11y_layer_commits[item.item.key]
+        fail_msg: >-
+          {{ inventory_hostname }}: layer {{ item.item.key }} is at '{{ item.stdout | default('') | trim }}' after the
+          install, not {{ a11y_layer_commits[item.item.key] }}. Empty means its laid tag names no commit on
+          {{ item.item.value.remote }}. The lockfile's pin for the layer and `--layer-ref={{ item.item.key }}=` name two
+          builds: bump one to match the other, then deploy again.
+      loop: "{{ layer_after_install.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
     - name: Restart the worker task
       ansible.builtin.import_tasks: tasks/restart-worker.yml
 

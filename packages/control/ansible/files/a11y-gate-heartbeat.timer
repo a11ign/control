@@ -1,0 +1,15 @@
+[Unit]
+# Installed by `gate-heartbeat-schedule.yml`, which ensures this timer is `state: started, enabled: true` on every
+# run. Like its service, it needs nothing on the agents host (#3851).
+Description=a11y: read the gate's last tick every minute
+
+[Timer]
+# EVERY MINUTE: the row asks for 5 minutes or less. The cost of a run is one API call, and the period is added to
+# the detection lag: a freeze is reported between 10 and 11 minutes after the last tick, not 10 to 15.
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=1s
+Unit=a11y-gate-heartbeat.service
+
+[Install]
+WantedBy=timers.target

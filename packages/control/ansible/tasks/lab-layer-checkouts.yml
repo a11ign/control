@@ -12,6 +12,17 @@
 # held to the SAME pattern as `lab_ref`; and a layer whose checkout is not there, which stops the job naming the
 # layer and the path. The core's tree never stands in for a layer that is missing.
 #
+# A LAYER MAY ALSO BE HELD LAID, NOT CHECKED OUT (#3819). `pnpm install` runs `prepare`, which runs
+# `scripts/lay-layer.mjs`, and that REPLACES the layer's directory with its `src/` at the tag the lockfile pins, plus
+# `.layer-ref` naming the tag, and no `.git`. So a host that has installed holds the layer as a laid tree, and a check
+# that wanted a `.git` refused every job the day the second layer left the core (#3504). A laid tree is accepted ONLY
+# as `.layer-ref` beside `src/` with no `.git`: the core's own tree at that path (`src/` and no `.layer-ref`) is still
+# refused, because it is not the layer. It has no history to move, so the ref the job named must be a FULL COMMIT and
+# the commit the laid tag names on the layer's own `remote` (`git ls-remote`): a laid tree at another tag, or a branch
+# name that cannot be compared, refuses. WHEN THE CORE JUST MOVED (`lab_core_moved`, which `run-job.yml` hands down from its `lab_pull`) the install that follows
+# re-lays the tree at the NEW lockfile's tag, so the stale tag here is not what will run and is not judged: a bump of
+# the layer's version in the lockfile would otherwise be refused by the very install that would fix it.
+#
 # `layer_refs` is `{ <layer>: <ref> }`, passed `-e '{"layer_refs": {"nvda-worker": "<ref>"}}'` (lab:job forwards
 # every `-e` untouched). A ref resolves ONCE, to a commit, exactly as `lab_ref` does: a branch on origin, else a
 # tag or a commit the checkout already has. The checkout then moves only when the core's may (`lab_should_pull`):
@@ -19,6 +30,7 @@
 - name: "Start from no layer commits, so a second include in one play does not read the first's"
   ansible.builtin.set_fact:
     lab_layer_commits: {}
+    lab_layer_laid_commits: {}
 
 - name: "Which layers live in their own repository"
   ansible.builtin.include_tasks: read-layer-checkouts.yml
@@ -63,14 +75,110 @@
     label: "{{ item.key }}"
   register: lab_layer_git
 
-- name: "A layer's checkout must be there, and the core's tree does not stand in for it"
+- name: "Or is it laid: the tag it was laid at"
+  ansible.builtin.stat:
+    path: "{{ lab_repo_path }}/{{ item.value.path }}/.layer-ref"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: lab_layer_marker
+
+- name: "Or is it laid: the source beside it"
+  # The marker alone is not a laid tree: a rebase over the commit that deleted the tracked layer left `.layer-ref`
+  # and removed `src/` (`scripts/lay-layer.mjs` says so), and that is an empty directory, not the layer.
+  ansible.builtin.stat:
+    path: "{{ lab_repo_path }}/{{ item.value.path }}/src"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: lab_layer_source
+
+- name: "Which layers are laid trees, and which are checkouts"
+  ansible.builtin.set_fact:
+    lab_layer_laid: >-
+      {{ lab_layer_git.results | rejectattr('stat.exists') | map(attribute='item.key') | list
+         | intersect(lab_layer_marker.results | selectattr('stat.exists') | map(attribute='item.key') | list)
+         | intersect(lab_layer_source.results | selectattr('stat.isdir', 'defined') | selectattr('stat.isdir')
+                     | map(attribute='item.key') | list) }}
+
+- name: "The layers git moves: those that are not laid"
+  ansible.builtin.set_fact:
+    lab_layer_clones: "{{ a11y_layer_checkouts | rejectattr('key', 'in', lab_layer_laid) | list }}"
+
+- name: "A layer's checkout must be there, or laid, and the core's tree does not stand in for either"
   ansible.builtin.assert:
-    that: item.stat.exists
+    that: item.stat.exists or item.item.key in lab_layer_laid
     fail_msg: >-
       layer {{ item.item.key }} is declared at {{ item.item.value.path }}, and
-      {{ lab_repo_path }}/{{ item.item.value.path }} is not a git checkout. Nothing falls back to the core's
-      tree: run bootstrap-control-plane.sh on this host, or correct the path in packages/control/layers.json.
+      {{ lab_repo_path }}/{{ item.item.value.path }} is not a git checkout and not a laid tree (`.layer-ref` beside
+      `src/`). Nothing falls back to the core's tree: run bootstrap-control-plane.sh on this host, or correct the
+      path in packages/control/layers.json.
   loop: "{{ lab_layer_git.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+- name: "Read the tag each laid layer was laid at"
+  ansible.builtin.slurp:
+    src: "{{ lab_repo_path }}/{{ item.value.path }}/.layer-ref"
+  loop: "{{ a11y_layer_checkouts | selectattr('key', 'in', lab_layer_laid) | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: lab_layer_laid_tag
+
+- name: "A laid tag must look like a tag"
+  # `@scope/name@x.y.z` is what `lay-layer.mjs` writes: the `@` is why this is not `LAYER_REF`'s pattern, and the
+  # absence of `*?[` is why it can be a `git ls-remote` pattern below.
+  ansible.builtin.assert:
+    that:
+      - (item.content | b64decode | trim) is match('^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,99}$')
+      - "'..' not in (item.content | b64decode | trim)"
+    fail_msg: "layer {{ item.item.key }}: its .layer-ref does not hold a tag: {{ item.content | b64decode | trim }}"
+  loop: "{{ lab_layer_laid_tag.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+- name: "Which commit each laid tag names, asked of the layer's own repository"
+  # `ls-remote`, not a fetch: a laid tree has no `.git` to fetch into, and the answer is the layer's own, not this
+  # host's. An annotated tag prints its object and then the commit it peels to (`^{}`), a lightweight one only the
+  # commit, so the LAST line is the commit either way. No `chdir`: it needs no repository, and it must not borrow
+  # the core's.
+  ansible.builtin.command:
+    argv:
+      - git
+      - ls-remote
+      - --tags
+      - "{{ item.item.value.remote }}"
+      - "refs/tags/{{ item.content | b64decode | trim }}"
+      - "refs/tags/{{ item.content | b64decode | trim }}^{}"
+  loop: "{{ lab_layer_laid_tag.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  changed_when: false
+  register: lab_layer_laid_remote
+
+- name: "Settle the commit each laid layer is at"
+  ansible.builtin.set_fact:
+    lab_layer_laid_commits: >-
+      {{ lab_layer_laid_commits | combine({ item.item.item.key:
+         ((item.stdout_lines | last | default('')) | regex_search('^[0-9a-f]{40}') | default('', true)) }) }}
+  loop: "{{ lab_layer_laid_remote.results }}"
+  loop_control:
+    label: "{{ item.item.item.key }}"
+
+- name: "A laid layer is the commit the job named, or the job says it is not"
+  # Strict when nothing will re-lay it. When the core's checkout just moved the install that follows replaces the
+  # tree at the new lockfile's tag (the header says why), so what is laid now is not what will run.
+  when: not (lab_core_moved | default(false) | bool)
+  ansible.builtin.assert:
+    that:
+      - (lab_layer_laid_commits[item.item.key] | default('')) | length == 40
+      - layer_refs[item.item.key] == lab_layer_laid_commits[item.item.key]
+    fail_msg: >-
+      layer {{ item.item.key }} is laid at {{ item.content | b64decode | trim }}, which is
+      {{ lab_layer_laid_commits[item.item.key] | default('') | default('no tag on its remote', true) }}, and the job
+      named {{ layer_refs[item.item.key] }}. A laid layer has no history to move, so the job must name the full commit
+      of the tag it is laid at; the install of a pull that changes the lockfile lays the new one.
+  loop: "{{ lab_layer_laid_tag.results }}"
   loop_control:
     label: "{{ item.item.key }}"
 
@@ -80,7 +188,7 @@
   ansible.builtin.command:
     argv: [git, fetch, --quiet, origin]
     chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ lab_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
   changed_when: false
@@ -89,7 +197,7 @@
   ansible.builtin.command:
     argv: [git, rev-parse, --verify, --quiet, "refs/remotes/origin/{{ layer_refs[item.key] }}^{commit}"]
     chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ lab_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
   changed_when: false
@@ -125,7 +233,7 @@
     fail_msg: >-
       layer {{ item.key }}: ref '{{ layer_refs[item.key] }}' names no branch on its origin, no tag, and no
       commit this checkout has after fetching. Push it first, or name a branch.
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ lab_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
 
@@ -136,7 +244,7 @@
   ansible.builtin.command:
     argv: [git, checkout, --quiet, --detach, "{{ lab_layer_commits[item.key] }}"]
     chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ lab_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
   changed_when: true
@@ -145,7 +253,7 @@
   ansible.builtin.command:
     argv: [git, rev-parse, HEAD]
     chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ lab_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
   changed_when: false

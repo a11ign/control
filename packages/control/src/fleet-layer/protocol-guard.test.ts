@@ -59,13 +59,6 @@ test("THE COST A REFUSAL PRINTS IS ITS POPULATION TIMES TWO, DATED, AND CARRIES 
     "the stale figure and the re-guessed wall-clock are what this row removed");
 });
 
-test("deploy-worker.mjs prints the same derived cost in its own refusal, not a copy of it", () => {
-  const source = readFileSync(resolve(import.meta.dirname, "../../../worker-fleet/src/deploy-worker.mjs"), "utf8");
-  assert.match(source, /import \{ RECAPTURE_COST \} from "\.\/protocol-guard\.mjs"/);
-  assert.match(source, /`full recapture: \$\{RECAPTURE_COST\}\./,
-    "the UTM refusal must interpolate the shared cost; a retyped figure is how the two drifted apart");
-});
-
 test("--allow-protocol-change PROCEEDS AND SAYS WHAT IT DID, rather than passing quietly", () => {
   const v = protocolVerdict({ local: 7, served: fleet(6, 6), allowed: true });
   assert.equal(v.refuse, false);
@@ -148,7 +141,7 @@ function deployClients(): { file: string; guarded: boolean }[] {
     .filter((f) => !f.includes(".test.") && !f.includes("/dist/"))
     .map((file) => ({ file, source: strip(readFileSync(resolve(root, file), "utf8")) }))
     // Two real shapes, and both must be here: Ansible running deploy.yml (bare metal, the live path) and
-    // `utmctl file push` of WORKER_FILES (the UTM path, deprecated but still present).
+    // `utmctl file push` of WORKER_FILES (the UTM path, gone from the fleet package since 0.4.0 but kept as a shape, so one that returns is found).
     .filter(({ source }) => (source.includes("ansible-playbook") && source.includes("deploy.yml"))
       || (/"file",\s*"push"/.test(source) && source.includes("WORKER_FILES")))
         // THE CALL, not the name and not the import — and both refinements came from mutation, neither from
@@ -163,21 +156,20 @@ function deployClients(): { file: string; guarded: boolean }[] {
 
 test("DISCOVERY: every path that ships worker code guards CAPTURE_PROTOCOL_VERSION", () => {
   const clients = deployClients();
-  assert.ok(clients.length >= 2, "the discovery found fewer than the two known deploy clients, so its "
+  assert.ok(clients.length >= 1, "the discovery found fewer than the one known deploy client, so its "
     + `classifier has stopped matching and it is examining nothing: ${JSON.stringify(clients)}`);
   assert.deepEqual(clients.filter((c) => !c.guarded).map((c) => c.file), [],
     "a path that ships worker code must check CAPTURE_PROTOCOL_VERSION against what the fleet serves — "
     + "shipping a change to it invalidates every cached capture");
 });
 
-test("BOTH deploy paths are found, so neither can go unguarded unnoticed", () => {
-  // Named explicitly because the lesson was that ONE of them was guarded and it was the dead one. A
-  // classifier that silently stopped matching the live path would make this file pass having checked half.
+test("the deploy path is found, so it cannot go unguarded unnoticed", () => {
+  // Named explicitly because the lesson was that the UTM deploy path was guarded and the live one was not. The UTM path left
+  // with `a11ign-worker-deploy` (screenreader-fleet 0.4.0, #3803), so what is left to find is the bare-metal one, and a classifier
+  // that silently stopped matching it would make this file pass having checked nothing.
   const found = deployClients().map((c) => c.file);
   assert.ok(found.includes("packages/control/src/fleet-playbook.mjs"),
     `the bare-metal path (the only live one) must be discovered; found ${JSON.stringify(found)}`);
-  assert.ok(found.includes("packages/worker-fleet/src/deploy-worker.mjs"),
-    `the UTM path must be discovered; found ${JSON.stringify(found)}`);
 });
 
 /** Whether a fleet source names the protocol version at all -- see the two tests below for why that is the condition. */
@@ -194,9 +186,9 @@ const readsProtocolVersion = (source: string): boolean => source.includes("CAPTU
  * (14 -> 15). The git-HEAD half of each guard still has to scrape TEXT (`git show` returns historical
  * bytes, not a loadable module), so only the working-tree half is asserted here.
  */
-test("deploy-worker and check-worker-code IMPORT the working-tree protocol version", () => {
+test("check-worker-code IMPORTS the working-tree protocol version", () => {
   const root = resolve(import.meta.dirname, "../../../..");
-  for (const file of ["packages/worker-fleet/src/deploy-worker.mjs", "packages/worker-fleet/src/check-worker-code.mjs"]) {
+  for (const file of ["packages/worker-fleet/src/check-worker-code.mjs"]) {
     const source = readFileSync(resolve(root, file), "utf8");
     // The fleet repo's `check-worker-code.mjs` no longer carries `protocolBumpNote` (it was dropped there, after this
     // guard was written), so it reads no protocol version at all; a file that does not read one has nothing to import.
@@ -218,7 +210,7 @@ test("deploy-worker and check-worker-code IMPORT the working-tree protocol versi
  */
 test("the git-HEAD comparison targets protocol-version.mjs, not the file the constant moved OUT of", () => {
   const root = resolve(import.meta.dirname, "../../../..");
-  for (const file of ["packages/worker-fleet/src/deploy-worker.mjs", "packages/worker-fleet/src/check-worker-code.mjs"]) {
+  for (const file of ["packages/worker-fleet/src/check-worker-code.mjs"]) {
     const source = readFileSync(resolve(root, file), "utf8");
     // `git -C <the worker's source dir> show HEAD:./protocol-version.mjs` (#3394): the directory is asked of the
     // worker package rather than named here, so `./` is protocol-version.mjs's own directory.

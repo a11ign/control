@@ -9,6 +9,12 @@
 # not look like a ref, and a layer whose checkout is not there. The same two-step as the core: REPORT and fail,
 # then `-e apply=true` discards what origin already carries and refuses what it does not. UNTRACKED files in a
 # layer are reported and left: nothing here has the core's "origin has never seen it" evidence for them.
+#
+# A LAYER MAY BE HELD LAID, NOT CHECKED OUT (#3819, #3826). `pnpm install` replaces the clone with `src/` and
+# `.layer-ref` and no `.git`, and this file refused that as "not a git checkout" on every `lab:reset` of an installed
+# host. A laid tree is accepted by the shape `lab-layer-checkouts.yml` accepts and no other, and is SKIPPED: there is
+# nothing in it for git to call dirty and nothing to restore it from but the next install. The core's own tree at the
+# layer's path (`src/`, no `.layer-ref`) is still refused.
 - name: "Which layers live in their own repository"
   ansible.builtin.include_tasks: read-layer-checkouts.yml
 
@@ -20,13 +26,46 @@
     label: "{{ item.key }}"
   register: lab_layer_git
 
-- name: "A layer's checkout must be there, and the core's tree does not stand in for it"
+- name: "Or is it laid: the tag it was laid at"
+  ansible.builtin.stat:
+    path: "{{ lab_repo_path }}/{{ item.value.path }}/.layer-ref"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: lab_layer_marker
+
+- name: "Or is it laid: the source beside it"
+  # The marker alone is not a laid tree (`lab-layer-checkouts.yml` says why): a rebase can leave `.layer-ref` and no `src/`.
+  ansible.builtin.stat:
+    path: "{{ lab_repo_path }}/{{ item.value.path }}/src"
+  loop: "{{ a11y_layer_checkouts }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: lab_layer_source
+
+- name: "Which layers are laid trees, and which are checkouts"
+  # THE SAME SHAPE `lab-layer-checkouts.yml` accepts and no other (#3819, #3826): `.layer-ref` beside `src/`, no `.git`.
+  ansible.builtin.set_fact:
+    lab_layer_laid: >-
+      {{ lab_layer_git.results | rejectattr('stat.exists') | map(attribute='item.key') | list
+         | intersect(lab_layer_marker.results | selectattr('stat.exists') | map(attribute='item.key') | list)
+         | intersect(lab_layer_source.results | selectattr('stat.isdir', 'defined') | selectattr('stat.isdir')
+                     | map(attribute='item.key') | list) }}
+
+- name: "The layers git can read: those that are not laid"
+  # A laid tree has no `.git`, so it has no tracked changes to report, compare or discard, and a `git` run in it would
+  # walk up into the CORE's repository and answer for that. Every git call below loops over THESE.
+  ansible.builtin.set_fact:
+    lab_layer_clones: "{{ a11y_layer_checkouts | rejectattr('key', 'in', lab_layer_laid) | list }}"
+
+- name: "A layer's checkout must be there, or laid, and the core's tree does not stand in for either"
   ansible.builtin.assert:
-    that: item.stat.exists
+    that: item.stat.exists or item.item.key in lab_layer_laid
     fail_msg: >-
       layer {{ item.item.key }} is declared at {{ item.item.value.path }}, and
-      {{ lab_repo_path }}/{{ item.item.value.path }} is not a git checkout. Nothing falls back to the core's
-      tree: run bootstrap-control-plane.sh on this host, or correct the path in packages/control/layers.json.
+      {{ lab_repo_path }}/{{ item.item.value.path }} is not a git checkout and not a laid tree (`.layer-ref` beside
+      `src/`). Nothing falls back to the core's tree: run bootstrap-control-plane.sh on this host, or correct the
+      path in packages/control/layers.json.
   loop: "{{ lab_layer_git.results }}"
   loop_control:
     label: "{{ item.item.key }}"
@@ -35,7 +74,7 @@
   ansible.builtin.command:
     argv: [git, status, --porcelain, --untracked-files=no]
     chdir: "{{ lab_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ lab_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
   changed_when: false

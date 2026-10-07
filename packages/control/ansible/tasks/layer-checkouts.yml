@@ -42,10 +42,16 @@
   # Cloned when absent, never when present: a box that held the layer INSIDE the core checkout loses that
   # tracked directory in the core's merge above, and the clone lands where it was. A directory that is there
   # and is not a checkout (an old `node_modules` is what is left behind) is REFUSED by name, not cloned over.
+  #
+  # EXCEPT A LAID TREE (#3819): `.layer-ref` beside `src/` and no `.git`, which is what the clone becomes once
+  # `pnpm install` has run on this box (`prepare` runs `scripts/lay-layer.mjs`, which replaces the directory). It
+  # is reported `laid` and is left alone. `src/` is required too: the marker alone survived a rebase that removed
+  # the code. The core's own copy of the layer (`src/`, no marker) is neither, and is refused as before.
   ansible.windows.win_shell: |
     $ErrorActionPreference = "Stop"
     $layer = '{{ a11y_repo_path }}/{{ item.value.path }}'
     if (Test-Path "$layer/.git") { 'present' }
+    elseif ((Test-Path "$layer/.layer-ref") -and (Test-Path "$layer/src")) { 'laid' }
     elseif ((Test-Path $layer) -and (Get-ChildItem -Force $layer | Select-Object -First 1)) {
       throw "$layer exists and is not a clone of {{ item.key }}: remove what is left of the old layer there, then re-run"
     } else {
@@ -59,7 +65,15 @@
   register: layer_present
   changed_when: "'cloned' in layer_present.stdout"
 
+- name: Which layers are laid trees, and which are clones git moves
+  ansible.builtin.set_fact:
+    a11y_layer_clones: "{{ a11y_layer_checkouts | rejectattr('key', 'in', layer_present.results | selectattr('stdout', 'search', 'laid') | map(attribute='item.key') | list) | list }}"
+
 - name: Fetch, check out and fast-forward each layer to its pinned commit
+  # Over the CLONES: a laid tree has no history to move. NOTHING HERE CHECKS A LAID TREE AGAINST ITS PIN, and
+  # on purpose: the install that follows (`deploy.yml`) re-lays it at the tag the core's lockfile pins, so what is
+  # laid now is not what will run, and judging it would refuse a lockfile bump by the install that applies it. The
+  # lab's check (`lab-layer-checkouts.yml`) judges a laid tree where no install follows.
   # The core's block, repeated per layer in the LAYER's directory: `$LASTEXITCODE` after every call because
   # PowerShell's `$ErrorActionPreference` does not cover native executables (`deploy.yml` records the five
   # boxes that reported `changed` while sitting on the wrong commit); a modified tracked file is dirt on an
@@ -75,7 +89,7 @@
     git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
   args:
     chdir: "{{ a11y_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts }}"
+  loop: "{{ a11y_layer_clones }}"
   loop_control:
     label: "{{ item.key }}"
   register: layer_heads

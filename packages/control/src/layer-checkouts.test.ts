@@ -4,7 +4,7 @@
  * The control plane's readers of the worker's code version used to reach `nvda-worker`'s source by a
  * relative path, and `git status`/`git show` for it in whatever repository they ran in. In a second
  * repository each would read the wrong tree and print a hash anyway. This pins the resolver, and pins that
- * the six readers no longer name the path.
+ * the five readers no longer name the path.
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
@@ -39,14 +39,13 @@ const { layerRoot, layerSourceDir, layerCodeVersion } = layersFrom({ manifest: M
  */
 const fromLayer = (file: string) => import(pathToFileURL(join(layerSourceDir("nvda-worker"), file)).href);
 
-/** The operator-side readers of the worker's code version. A reader added later belongs here. */
-const SIX_READERS = [
+/** The operator-side readers of the worker's code version. A reader added later belongs here. `deploy-worker.mjs` was the sixth, until screenreader-fleet 0.4.0 removed it (#3803). */
+const FIVE_READERS = [
   "packages/control/src/fleet-playbook.mjs",
   "packages/control/src/lab-job.mjs",
   "packages/control/ansible/deploy.yml",
   "packages/worker-fleet/src/code-drift.mjs",
   "packages/worker-fleet/src/check-worker-code.mjs",
-  "packages/worker-fleet/src/deploy-worker.mjs",
 ];
 
 /** Comments out: a path named in PROSE is not a path that is read. `//`, block and `#` comments. */
@@ -163,9 +162,9 @@ test("the hasher the resolver reaches imports only node: and relative modules, a
   assert.ok(seen.size >= 2, "the walk reached code-version.mjs and its sibling worker-files.mjs");
 });
 
-test("none of the six readers still names nvda-worker/src on a line of code", () => {
-  assert.equal(SIX_READERS.length, 6);
-  for (const file of SIX_READERS) {
+test("none of the five readers still names nvda-worker/src on a line of code", () => {
+  assert.equal(FIVE_READERS.length, 5);
+  for (const file of FIVE_READERS) {
     assert.ok(existsSync(resolve(REPO, file)), `${file} is listed and is not there`);
     assert.deepEqual(namingTheWorkerPath(read(file)), [], `${file} reads the worker by a path it guessed`);
   }

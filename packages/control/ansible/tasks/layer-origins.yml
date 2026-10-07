@@ -10,10 +10,33 @@
 # runs in `a11y_repo_path/<layer path>`, never in `a11y_repo_path`, which is what keeps one from being written
 # over the other by accident. `layer-guests.test.ts` pins both.
 #
+# A LAID LAYER HAS NO ORIGIN TO MOVE (#3819, #3826). `pnpm install` replaces the clone with `src/` and `.layer-ref` and no
+# `.git`, and `git remote set-url` run there does not fail: it walks up and rewrites the CORE's origin to the layer's address.
+# So each named layer is first READ as a clone (`.git`) or a laid tree (`.layer-ref` beside `src/`), the laid ones are left
+# alone (the next install lays from the manifest's `remote`, which is what a move of the layer's address changes), and
+# anything else at that path is refused by name.
+#
 # Moving a layer's COMMIT is not done here: a core history rewrite does not rewrite the layer, and the next
 # `fleet:deploy --layer-ref` pins the pair.
 - name: Read the layers that have their own repository
   ansible.builtin.include_tasks: read-layer-checkouts.yml
+
+- name: Which named layers are clones, and which are laid trees
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = "Stop"
+    $layer = '{{ a11y_repo_path }}/{{ item.value.path }}'
+    if (Test-Path "$layer/.git") { 'clone' }
+    elseif ((Test-Path "$layer/.layer-ref") -and (Test-Path "$layer/src")) { 'laid' }
+    else { throw "$layer is neither a clone of {{ item.key }} nor a laid tree: any repository command there would act on the CORE's, so nothing was changed" }
+  loop: "{{ a11y_layer_checkouts | selectattr('key', 'in', (new_layer_repo_urls | default({})).keys() | list) | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: layer_origin_shape
+  changed_when: false
+
+- name: The named layers git can rewrite, which are the clones
+  ansible.builtin.set_fact:
+    a11y_layer_origin_clones: "{{ layer_origin_shape.results | selectattr('stdout', 'search', 'clone') | map(attribute='item') | list }}"
 
 - name: Point each named layer's origin at its new location, and PROVE it resolves
   ansible.windows.win_shell: |
@@ -25,11 +48,13 @@
     git -c core.hooksPath=a11y-no-hooks remote get-url origin
   args:
     chdir: "{{ a11y_repo_path }}/{{ item.value.path }}"
-  loop: "{{ a11y_layer_checkouts | selectattr('key', 'in', (new_layer_repo_urls | default({})).keys() | list) | list }}"
+  loop: "{{ a11y_layer_origin_clones }}"
   loop_control:
     label: "{{ item.key }}"
   register: layer_origin_set
-  changed_when: (item.stdout_lines | first | trim) != new_layer_repo_urls[item.key]
+  # The task's own `register`, not `item.stdout_lines`: in a looped task `item` is the LOOP item (the layer), not the result.
+  # It read `item.stdout_lines` and failed on its first real loop, which no run had reached.
+  changed_when: (layer_origin_set.stdout_lines | first | trim) != new_layer_repo_urls[item.key]
 
 - name: Each named layer is on its new remote, verified live
   ansible.builtin.assert:
