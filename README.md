@@ -32,6 +32,6 @@ Bumping `CORE_REF` is a pull request: the only way the core's changes reach this
 
 ## Releasing
 
-A change that should be released carries a changeset (`pnpm exec changeset`); **merging it is the release**. `.github/workflows/release.yml` cuts the tag
+A change that should be released carries a changeset (`pnpm exec changeset`); **merging it is the release**. The changeset names `control-workspace`, the root package, which carries the version and the `CHANGELOG.md`. `.github/workflows/release.yml` calls a11ign/toolchain's shared per-merge workflow (`kind: tag`), which cuts the tag
 `v<version>` and a GitHub Release carrying the CHANGELOG entry: no registry, no token. A consumer pins a tag. **The first tag, `v0.1.0`, is cut by hand**, once,
 on the merge of the pull request that added the workflow, because the workflow reads what the last tag consumed and so needs one.

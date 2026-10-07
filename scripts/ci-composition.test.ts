@@ -27,13 +27,6 @@ test("this repository's package replaces the core's own before anything runs", (
   assert.match(ci, /tsc --noEmit -p tsconfig\.control\.json/);
 });
 
-test("the first release has a CHANGELOG entry for the version the package declares", () => {
-  const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
-  const { version } = JSON.parse(read("packages/control/package.json")) as { version: string };
-  assert.match(version, /^\d+\.\d+\.\d+$/);
-  assert.match(read("packages/control/CHANGELOG.md"), new RegExp(`^## ${version.replaceAll(".", "\\.")}$`, "m"));
-});
-
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
 
 test("the tests run on rstest through @a11ign/toolchain's config, and no `tsx --test` is left (ADR 0043, a11ign/a11ign#3960)", () => {
