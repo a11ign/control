@@ -196,6 +196,6 @@ test("an operator-typed layer_refs is REFUSED, not merged: a second pin that cou
   assert.ok("refusal" in refused);
   assert.match(refused.refusal, /layer_refs is set from the lockfile/);
   assert.equal(asked, 0, "the lockfile was not even read");
-  const request = qualificationRequest(["-e", "job=gate-stability", `--qualify-sha=${SHA}`], { job: "gate-stability", row: "3289", ref: undefined, describeOnly: false });
+  const request = qualificationRequest(["-e", "job=gate-stability", `--qualify-sha=${SHA}`], { job: "gate-stability", row: "3289", ref: undefined, worker: "a11y-worker-2", describeOnly: false });
   assert.ok(request !== undefined && !("refusal" in request), "the control: the same request without the typed ref is accepted");
 });

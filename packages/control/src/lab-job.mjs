@@ -430,7 +430,7 @@ export async function run(rawArgv, deps = {}) {
   const argv = withoutLeadingSeparator(rawArgv);
   const vars = extraVars(argv);
   const request = qualificationRequest(argv, {
-    job: vars.job, row: vars.row, ref: vars.ref, describeOnly: isDescribeOnly(argv) });
+    job: vars.job, row: vars.row, ref: vars.ref, worker: vars.worker, describeOnly: isDescribeOnly(argv) });
   if (request === undefined) return runOnce(argv, deps);
   if ("refusal" in request) {
     process.stderr.write(`${request.refusal}\n`);
