@@ -1,6 +1,6 @@
 {
   "name": "@a11ign/control",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "private": true,
   "description": "The control plane: the machine that holds the fleet SSH key and dispatches work to it and to the lab. Deliberately dependency-free \u2014 see ADR 0012.",
   "license": "AGPL-3.0-or-later",
