@@ -1132,7 +1132,7 @@ test("#3289: a refusal BEFORE the dispatch leaves nothing standing on the sha (p
 
 test("#3289: what cannot be a qualified run is refused with its reason, and an absent flag is no request at all", () => {
   const named = (job: string | undefined, over: { row?: string; ref?: string; describeOnly?: boolean; worker?: string } = {}) =>
-    ({ job, row: "3289", worker: "a11y-worker-2", describeOnly: false, ...over });
+    ({ job, row: "3289", ref: undefined, worker: "a11y-worker-2", describeOnly: false, ...over });
   const flag = `--qualify-sha=${QSHA}`;
   assert.equal(qualificationRequest(["-e", "job=gate-stability"], named("gate-stability")), undefined);
   const refusal = (argv: string[], n: ReturnType<typeof named>) =>
