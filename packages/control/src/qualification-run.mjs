@@ -42,7 +42,7 @@
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { layerDeclaration, layerPinTag, separateLayers } from "./layer-checkouts.mjs";
@@ -196,16 +196,16 @@ export function withLayerRefs(request, layerRefsAt) {
 const RESOLVABLE_TAG = /^@a11ign\/[a-z0-9-]+@\d+\.\d+\.\d+[A-Za-z0-9.+-]*$/;
 
 /**
- * The package a layer's tags are named for. A layer's key in `layers.json` is not always its package (the layer `nvda-worker` is
- * `@a11ign/screenreader-worker`), and `layers.json` declares no package, so it is read from what IS declared: the layer's own
- * repository, whose name is its package's. A name that is wrong cannot resolve to a commit, so the guess FAILS CLOSED: the lockfile
- * has no such entry, or the remote holds no such tag, and either is a refusal.
+ * The package a layer's tags are named for: the `package` its declaration in `layers.json` carries, else the layer's KEY, the same
+ * rule `scripts/lay-layer.mjs` reads the pin by. A key is not always its package (the layer `nvda-worker` is
+ * `@a11ign/screenreader-worker`), and `layers.json` is the one place that says so; nothing is inferred from the repository's name.
+ * A declaration this copy of `layers.json` does not yet carry falls back to the key, which cannot resolve, and that is a refusal.
  *
- * @param {{ name: string, remote: string }} layer
+ * @param {{ name: string, package?: string }} layer
  * @returns {string} the package's name without its scope
  */
-export function packageOfLayer({ remote }) {
-  return basename(remote).replace(/\.git$/, "");
+export function packageOfLayer({ name, package: declared }) {
+  return declared ?? name;
 }
 
 /**
@@ -249,7 +249,7 @@ function lockfileAt({ sha, git }) {
  * one the sha's own lockfile pins. Every problem is collected, so one refusal names every layer that could not be pinned, each with its
  * tag and its remote.
  *
- * @param {{ sha: string, git: Git, layers: { name: string, remote: string }[] }} where `layers` are those with a repository of their own
+ * @param {{ sha: string, git: Git, layers: { name: string, remote: string, package?: string }[] }} where `layers` are those with a repository of their own
  * @returns {{ layer_refs: Record<string, string> } | { refusal: string }}
  */
 export function layerRefsFor({ sha, git, layers }) {
@@ -291,9 +291,9 @@ const gitInCheckout = (args) => {
  */
 export const layerRefsFromLockfile = (sha) =>
   layerRefsFor({ sha, git: gitInCheckout, layers: separateLayers().map((name) => {
-    const { remote } = layerDeclaration(name);
+    const { remote, package: declared } = layerDeclaration(name);
     if (remote === undefined) throw new Error(`layer "${name}" declares no remote, so it is not a separate layer`);
-    return { name, remote };
+    return { name, remote, package: declared };
   }) });
 
 /**

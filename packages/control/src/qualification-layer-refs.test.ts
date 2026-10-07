@@ -83,7 +83,7 @@ function fixtureLayers() {
   const fleet = layerRepository({ package: "screenreader-fleet", annotated: "0.5.0", lightweight: "0.5.1" });
   return {
     worker, fleet,
-    layers: [{ name: "nvda-worker", remote: worker.dir }, { name: "screenreader-fleet", remote: fleet.dir }],
+    layers: [{ name: "nvda-worker", remote: worker.dir, package: "screenreader-worker" }, { name: "screenreader-fleet", remote: fleet.dir }],
   };
 }
 
@@ -125,7 +125,7 @@ test("a pin the lockfile does not hold, and a remote that cannot be asked, are r
   assert.ok("refusal" in unpinned);
   assert.match(unpinned.refusal, /layer nvda-worker .*pnpm-lock\.yaml has no importer entry for @a11ign\/screenreader-worker/);
   const core = coreAt(lockfileWith({ "screenreader-worker": "0.2.0", "screenreader-fleet": "0.5.1" }));
-  const gone = layerRefsFor({ sha: core.sha, git: core.git, layers: [{ name: "nvda-worker", remote: join(newDir(), "screenreader-worker.git") }] });
+  const gone = layerRefsFor({ sha: core.sha, git: core.git, layers: [{ name: "nvda-worker", remote: join(newDir(), "screenreader-worker.git"), package: "screenreader-worker" }] });
   assert.ok("refusal" in gone);
   assert.match(gone.refusal, /could not be asked for @a11ign\/screenreader-worker@0\.2\.0/, "git not answering is not 'the remote holds no such tag'");
   assert.doesNotMatch(gone.refusal, /holds no such tag/);
@@ -150,17 +150,32 @@ test("a pinned version that is not a registry release, or that would be a glob, 
   assert.ok(!asked.some((args) => args.includes("ls-remote") && args.some((arg) => arg.includes("link:"))), "the unreleasable pin asked nothing of the remote");
 });
 
-test("the layer is named for its package by its repository, and the two real layers come out as the lockfile spells them", () => {
-  assert.equal(packageOfLayer({ name: "nvda-worker", remote: "https://github.com/a11ign/screenreader-worker.git" }), "screenreader-worker");
+test("the layer is named for the package its declaration carries, and for its KEY when it carries none; the repository's name is never read", () => {
+  const remote = "https://github.com/a11ign/screenreader-worker.git";
+  assert.equal(packageOfLayer({ name: "nvda-worker", remote, package: "screenreader-worker" } as { name: string, package: string }), "screenreader-worker");
+  assert.equal(packageOfLayer({ name: "nvda-worker", remote } as { name: string }), "nvda-worker", "no declaration: the key, though the remote names the package");
+  assert.equal(packageOfLayer({ name: "screenreader-fleet" }), "screenreader-fleet");
+});
+
+test("a copy of layers.json that does not yet declare the package refuses naming the key's tag, loudly and before any dispatch", () => {
+  const made = fixtureLayers();
+  const core = coreAt(lockfileWith({ "screenreader-worker": "0.2.0", "screenreader-fleet": "0.5.1" }));
+  const undeclared = made.layers.map(({ name, remote }) => ({ name, remote }));
+  const found = layerRefsFor({ sha: core.sha, git: core.git, layers: undeclared });
+  assert.ok("refusal" in found);
+  assert.match(found.refusal, /layer nvda-worker .*pnpm-lock\.yaml has no importer entry for @a11ign\/nvda-worker/);
+});
+
+test("every layer the real manifest declares with a repository resolves to the lockfile entry its package names", () => {
   const names = separateLayers();
   assert.ok(names.includes("nvda-worker") && names.includes("screenreader-fleet"), "both layers are declared with a repository of their own");
   const real = readFileSync(fileURLToPath(new URL("../layers.json", import.meta.url)), "utf8");
   assert.ok(real.includes("screenreader-worker.git"), "the manifest this reads is the one that declares them");
   for (const name of names) {
-    const { remote } = layerDeclaration(name);
+    const { remote, package: declared } = layerDeclaration(name);
     assert.ok(remote !== undefined);
-    const pin = layerPinTag(lockfileWith({ [packageOfLayer({ name, remote })]: "1.2.3" }), packageOfLayer({ name, remote }));
-    assert.deepEqual(pin, { tag: `@a11ign/${packageOfLayer({ name, remote })}@1.2.3` }, `${name}'s package is the one its lockfile entry names`);
+    const pin = layerPinTag(lockfileWith({ [packageOfLayer({ name, package: declared })]: "1.2.3" }), packageOfLayer({ name, package: declared }));
+    assert.deepEqual(pin, { tag: `@a11ign/${declared ?? name}@1.2.3` }, `${name}'s package is the one its lockfile entry names`);
   }
 });
 

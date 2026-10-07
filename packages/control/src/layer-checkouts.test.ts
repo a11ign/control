@@ -110,7 +110,9 @@ test("#3761: layerDeclaration names a declared layer WITHOUT its directory exist
   try {
     const remote = "https://example.invalid/thing.git";
     const { layerDeclaration, layerRoot: rootOf } = layersFrom({ manifest: { layers: { thing: { path: "not/here", remote } } }, root });
-    assert.deepEqual(layerDeclaration("thing"), { name: "thing", path: "not/here", remote, dir: join(root, "not/here") });
+    assert.deepEqual(layerDeclaration("thing"), { name: "thing", path: "not/here", remote, package: undefined, dir: join(root, "not/here") });
+    const named = layersFrom({ manifest: { layers: { thing: { path: "not/here", remote, package: "other" } } }, root });
+    assert.equal(named.layerDeclaration("thing").package, "other", "a declared package is carried, for the reader of a lockfile pin");
     assert.throws(() => rootOf("thing"), /does not exist/, "layerRoot still refuses: only the declaration is lenient");
     assert.throws(() => layerDeclaration("ghost"), /layer "ghost" is not declared/);
   } finally { rmSync(root, { recursive: true, force: true }); }
