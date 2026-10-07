@@ -1131,8 +1131,8 @@ test("#3289: a refusal BEFORE the dispatch leaves nothing standing on the sha (p
 });
 
 test("#3289: what cannot be a qualified run is refused with its reason, and an absent flag is no request at all", () => {
-  const named = (job: string | undefined, row: string | undefined = "3289", ref?: string, describeOnly = false) =>
-    ({ job, row, ref, describeOnly });
+  const named = (job: string | undefined, over: { row?: string; ref?: string; describeOnly?: boolean; worker?: string } = {}) =>
+    ({ job, row: "3289", worker: "a11y-worker-2", describeOnly: false, ...over });
   const flag = `--qualify-sha=${QSHA}`;
   assert.equal(qualificationRequest(["-e", "job=gate-stability"], named("gate-stability")), undefined);
   const refusal = (argv: string[], n: ReturnType<typeof named>) =>
@@ -1140,15 +1140,44 @@ test("#3289: what cannot be a qualified run is refused with its reason, and an a
   assert.match(refusal(["--qualify-sha=abc"], named("gate-stability")), /40-character/);
   assert.match(refusal([flag], named("stability")), /gate-stability alone/);
   assert.match(refusal([flag], named(undefined)), /gate-stability alone/);
-  assert.match(refusal([flag], named("gate-stability", "3289", undefined, true)), /describe-only/);
-  assert.match(refusal([flag], named("gate-stability", "")), /needs -e row=<n>/);
-  assert.match(refusal([flag], named("gate-stability", "abc")), /needs -e row=<n>/);
-  assert.match(refusal([flag], named("gate-stability", "3289", "main")), /different commit/);
+  assert.match(refusal([flag], named("gate-stability", { describeOnly: true })), /describe-only/);
+  assert.match(refusal([flag], named("gate-stability", { row: "" })), /needs -e row=<n>/);
+  assert.match(refusal([flag], named("gate-stability", { row: "abc" })), /needs -e row=<n>/);
+  assert.match(refusal([flag], named("gate-stability", { ref: "main" })), /different commit/);
+  // #3988: the playbook refuses a launch without -e worker= AFTER `pending`, so it is refused here, before anything is posted.
+  assert.match(refusal([flag], named("gate-stability", { worker: undefined })), /needs -e worker=<n>/);
+  assert.match(refusal([flag], named("gate-stability", { worker: "" })), /needs -e worker=<n>/);
   // POSITIVE CONTROL: the same request, accepted, with the flag stripped and the ref set from the sha.
   assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag], named("gate-stability")),
     { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`] });
-  assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag, "-e", `ref=${QSHA}`], named("gate-stability", "3289", QSHA)),
+  assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag, "-e", `ref=${QSHA}`], named("gate-stability", { ref: QSHA })),
     { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`] }, "a ref equal to the sha is not duplicated");
+});
+
+test("#3988: a launch with no -e worker= posts nothing and dispatches nothing; the same launch WITH one is announced", async () => {
+  const withoutWorker = QARGV.filter((arg, i, all) => arg !== "worker=a11y-worker-2" && !(arg === "-e" && all[i + 1] === "worker=a11y-worker-2"));
+  assert.ok(!withoutWorker.some((arg) => arg.startsWith("worker=")), "the control argv carries no worker");
+  const refused = qualifiedHarness([ended(0)]);
+  const realExit = process.exit;
+  const realErr = process.stderr.write.bind(process.stderr);
+  let exited: number | undefined;
+  let stderr = "";
+  process.exit = ((code: number) => { exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
+  process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as typeof process.stderr.write;
+  try {
+    await run(withoutWorker, { catalogueText: CATALOGUE, dispatch: refused.dispatch, qualify: refused.qualify, readFleet: () => ({ refusal: null, workers: QFLEET }) });
+  } catch (error) {
+    if (!/^exit \d$/.test((error as Error).message)) throw error;
+  } finally {
+    process.exit = realExit;
+    process.stderr.write = realErr;
+  }
+  assert.equal(exited, 3);
+  assert.match(stderr, /needs -e worker=<n>/);
+  assert.deepEqual(refused.events, [], "no post and no dispatch");
+  const started = qualifiedHarness([ended(0)]);
+  await driveQualified(QARGV, started);
+  assert.deepEqual(started.events.slice(0, 2), ["post:pending", "dispatch"], "POSITIVE CONTROL: with the worker, the run is announced");
 });
 
 test("#3289: `--qualify-sha` with no poster handed to run() throws; only the real entry passes one", async () => {

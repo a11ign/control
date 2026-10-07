@@ -141,10 +141,10 @@ function runLabel(record) {
  * ref pinned), or the reason this cannot be a qualified run. `undefined` when the flag is absent.
  *
  * @param {string[]} argv
- * @param {{ job: string | undefined, row: string | undefined, ref: string | undefined, describeOnly: boolean }} named
+ * @param {{ job: string | undefined, row: string | undefined, ref: string | undefined, worker?: string | undefined, describeOnly: boolean }} named
  * @returns {{ sha: string, row: number, argv: string[] } | { refusal: string } | undefined}
  */
-export function qualificationRequest(argv, { job, row, ref, describeOnly }) {
+export function qualificationRequest(argv, { job, row, ref, worker, describeOnly }) {
   const flag = argv.find((arg) => arg.startsWith(QUALIFY_FLAG));
   if (flag === undefined) return undefined;
   const sha = flag.slice(QUALIFY_FLAG.length);
@@ -160,6 +160,12 @@ export function qualificationRequest(argv, { job, row, ref, describeOnly }) {
   if (!/^\d+$/.test(row ?? "")) {
     return { refusal: `REFUSING ${QUALIFY_FLAG}: it needs -e row=<n>. The playbook records the job's exit code only for `
       + "a run bound to a row, and without that record there is no verdict to post." };
+  }
+  if (!worker) {
+    // The playbook's assert on the job's required parameters refuses this launch AFTER `pending` is posted, and a refused launch
+    // has no job record, so the caller would post `failure` on a sha no run touched (#3988). Only a launch that never posts is clean.
+    return { refusal: `REFUSING ${QUALIFY_FLAG}: ${QUALIFIED_JOB} needs -e worker=<n>; the playbook refuses a launch without it, `
+      + "and a refused launch has no verdict." };
   }
   if (ref !== undefined && ref !== sha) {
     return { refusal: `REFUSING ${QUALIFY_FLAG}: -e ref=${ref} would run the lab at a different commit from the sha `
