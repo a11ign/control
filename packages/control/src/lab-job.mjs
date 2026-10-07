@@ -62,7 +62,7 @@ import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.mjs";
 import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
 import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
 // #3289: `--qualify-sha` says the fleet part's verdict on a sha. The sequence lives beside the poster it calls.
-import { announcingDispatch, qualificationRequest, readRecordFrom, defaultRecordDir, runQualified } from "./qualification-run.mjs";
+import { announcingDispatch, layerRefsFromLockfile, qualificationRequest, readRecordFrom, defaultRecordDir, runQualified, withLayerRefs } from "./qualification-run.mjs";
 import { postQualificationStatus } from "./post-qualification-status.mjs";
 // #2803: the SAME two-read-plus-`/health` rule `doctor` and `worker:code` use (#2790), imported rather than
 // restated -- a second copy of "when is a neighbour-table address to be trusted" is the one that drifts.
@@ -438,9 +438,16 @@ export async function run(rawArgv, deps = {}) {
   }
   const { qualify } = deps;
   if (!qualify) throw new Error("--qualify-sha was given and run() was handed no poster: only the command-line entry passes one");
+  // The layers' pins are read from the sha's lockfile BEFORE `pending` is posted, so a tag the lockfile pins and the layer lacks
+  // refuses a run that never began and says nothing misleading on the sha (#3920).
+  const pinned = withLayerRefs(request, qualify.layerRefs);
+  if ("refusal" in pinned) {
+    process.stderr.write(`${pinned.refusal}\n`);
+    return process.exit(3);
+  }
   return runQualified({
-    attempt: (announce) => runOnce(request.argv, { ...deps, dispatch: announce(deps.dispatch ?? dispatchToAnsible) }),
-    announce: (dispatch, seen) => announcingDispatch({ sha: request.sha, row: request.row, dispatch }, qualify, seen),
+    attempt: (announce) => runOnce(pinned.argv, { ...deps, dispatch: announce(deps.dispatch ?? dispatchToAnsible) }),
+    announce: (dispatch, seen) => announcingDispatch({ sha: pinned.sha, row: pinned.row, dispatch }, qualify, seen),
     say: qualify.say,
   });
 }
@@ -587,6 +594,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const recordDir = defaultRecordDir();
   const qualify = {
     post: postQualificationStatus,
+    layerRefs: layerRefsFromLockfile,
     readRecord: (/** @type {{ job: string, row: number, since: number }} */ query) =>
       readRecordFrom(recordDir, query, (text) => process.stderr.write(text)),
   };

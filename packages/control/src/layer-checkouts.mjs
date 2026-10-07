@@ -73,14 +73,14 @@ function owningLayer(path, layers) {
  * The resolver over one manifest and one repository root. The exports below close over the real ones; a test
  * closes over a fixture, which is how "a declared layer whose path is absent" is reachable at all.
  *
- * @param {{ manifest: { layers: Record<string, { path: string, remote?: string, branch?: string }>, pinned?: Record<string, { path: string, tag?: string }> }, root: string }} from
+ * @param {{ manifest: { layers: Record<string, { path: string, remote?: string, branch?: string, package?: string }>, pinned?: Record<string, { path: string, tag?: string }> }, root: string }} from
  */
 export function layersFrom({ manifest, root }) {
   /**
    * What `layers.json` declares for a layer, WITHOUT asking whether its directory is there: the refusal for a
    * missing clone has to name where the clone goes, and `layerRoot` throws before it can.
    * @param {string} name
-   * @returns {{ name: string, path: string, remote: string | undefined, dir: string }}
+   * @returns {{ name: string, path: string, remote: string | undefined, package: string | undefined, dir: string }}
    */
   function layerDeclaration(name) {
     const layer = Object.hasOwn(manifest.layers, name) ? manifest.layers[name] : undefined;
@@ -88,7 +88,7 @@ export function layersFrom({ manifest, root }) {
       throw new Error(`layer "${name}" is not declared in packages/control/layers.json `
         + `(declared: ${Object.keys(manifest.layers).join(", ") || "none"})`);
     }
-    return { name, path: layer.path, remote: layer.remote, dir: resolve(root, layer.path) };
+    return { name, path: layer.path, remote: layer.remote, package: layer.package, dir: resolve(root, layer.path) };
   }
 
   /** The layer's directory: where its `package.json` and its `src/` are. @param {string} name */
