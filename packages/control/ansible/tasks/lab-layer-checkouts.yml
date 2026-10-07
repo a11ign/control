@@ -23,6 +23,16 @@
 # re-lays the tree at the NEW lockfile's tag, so the stale tag here is not what will run and is not judged: a bump of
 # the layer's version in the lockfile would otherwise be refused by the very install that would fix it.
 #
+# A LAYER THE INSTALL HAS NOT LAID YET IS NOT A MISSING ONE (#3920). `run-job.yml` includes this file BEFORE the install, and a pull that
+# crosses the commit that took a layer out of the core deletes the directory the core used to track at its path, so a lab that has not
+# installed since holds NOTHING there: no clone, no `.layer-ref`, no `src/`. Refusing that refused every `--qualify-sha` run at the first
+# post-split sha (measured on `layer-control-lab.test.ts`, which plays this file as `run-job.yml` does), before the install that would have
+# laid it. So when the core just moved (`lab_core_moved`) and the path holds no `src/`, the layer is left to the install and not judged here;
+# `run-job.yml`'s read AFTER the install judges what it laid against `layer_refs`, and refuses a tree that is not the layer. A directory with
+# `src/` and no `.layer-ref` is the core's own tree and still refuses, and so does an absent layer when the core did NOT move: nothing lays it.
+# NOT EVERY LAYER IS LAID BY THE INSTALL: the core's `prepare` lays `screenreader-fleet`, `lab` and `control`, and no `lay-layer.mjs` call names
+# `nvda-worker`, so an absent `nvda-worker` is deferred here and then REFUSED by that read after the install, naming the layer and the path.
+#
 # `layer_refs` is `{ <layer>: <ref> }`, passed `-e '{"layer_refs": {"nvda-worker": "<ref>"}}'` (lab:job forwards
 # every `-e` untouched). A ref resolves ONCE, to a commit, exactly as `lab_ref` does: a branch on origin, else a
 # tag or a commit the checkout already has. The checkout then moves only when the core's may (`lab_should_pull`):
@@ -101,13 +111,26 @@
          | intersect(lab_layer_source.results | selectattr('stat.isdir', 'defined') | selectattr('stat.isdir')
                      | map(attribute='item.key') | list) }}
 
-- name: "The layers git moves: those that are not laid"
+- name: "Which layers the install that follows will lay: the core just moved and nothing of the layer is at its path"
+  # The three stats above, read together, and only when the core moved: the install runs when, and only when, `lab_core_moved`.
+  # `src/` absent is the test, not the directory absent: a pre-split install leaves untracked `node_modules` where the layer was,
+  # and `scripts/lay-layer.mjs` replaces whatever is there that is not a git clone.
   ansible.builtin.set_fact:
-    lab_layer_clones: "{{ a11y_layer_checkouts | rejectattr('key', 'in', lab_layer_laid) | list }}"
+    lab_layer_awaiting_install: >-
+      {{ ((a11y_layer_checkouts | map(attribute='key') | list)
+          | difference(lab_layer_git.results | selectattr('stat.exists') | map(attribute='item.key') | list)
+          | difference(lab_layer_laid)
+          | difference(lab_layer_source.results | selectattr('stat.isdir', 'defined') | selectattr('stat.isdir')
+                       | map(attribute='item.key') | list))
+         if (lab_core_moved | default(false) | bool) else [] }}
 
-- name: "A layer's checkout must be there, or laid, and the core's tree does not stand in for either"
+- name: "The layers git moves: those that are neither laid nor waiting for the install to lay them"
+  ansible.builtin.set_fact:
+    lab_layer_clones: "{{ a11y_layer_checkouts | rejectattr('key', 'in', lab_layer_laid) | rejectattr('key', 'in', lab_layer_awaiting_install) | list }}"
+
+- name: "A layer's checkout must be there, laid, or about to be laid, and the core's tree does not stand in for any"
   ansible.builtin.assert:
-    that: item.stat.exists or item.item.key in lab_layer_laid
+    that: item.stat.exists or item.item.key in lab_layer_laid or item.item.key in lab_layer_awaiting_install
     fail_msg: >-
       layer {{ item.item.key }} is declared at {{ item.item.value.path }}, and
       {{ lab_repo_path }}/{{ item.item.value.path }} is not a git checkout and not a laid tree (`.layer-ref` beside

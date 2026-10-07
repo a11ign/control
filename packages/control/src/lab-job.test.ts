@@ -24,7 +24,7 @@ import { parse as parseYaml } from "yaml";
 import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.mjs";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
 import { postQualificationStatus } from "./post-qualification-status.mjs";
-import { outcomeOf, qualificationRequest, readRecordFrom } from "./qualification-run.mjs";
+import { outcomeOf, qualificationRequest, readRecordFrom, withLayerRefs } from "./qualification-run.mjs";
 
 /** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
 const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
@@ -945,7 +945,9 @@ type GhReply = { status: number | null; stdout: string; stderr: string; missing:
 const GH_OK: GhReply = { status: 0, stdout: "{}", stderr: "", missing: false };
 const GH_NO_CREDENTIAL: GhReply = { status: 4, stdout: "", stderr: "gh auth login", missing: false };
 
-function qualifiedHarness(runs: { status: number; record: QRecord }[], ghReplies: GhReply[] = []) {
+const QLAYER_REFS = { "nvda-worker": "a".repeat(40), "screenreader-fleet": "b".repeat(40) };
+
+function qualifiedHarness(runs: { status: number; record: QRecord }[], ghReplies: GhReply[] = [], layerRefs?: Parameters<typeof withLayerRefs>[1]) {
   const events: string[] = [];
   const posts: { state: string; description: string }[] = [];
   const dispatched: string[][] = [];
@@ -966,6 +968,7 @@ function qualifiedHarness(runs: { status: number; record: QRecord }[], ghReplies
   const qualify = {
     post: (input: Parameters<typeof postQualificationStatus>[0]) => postQualificationStatus({ ...input, gh }),
     readRecord: () => ended?.record as never,
+    layerRefs: layerRefs ?? (() => ({ layer_refs: QLAYER_REFS })),
     now: () => 0,
     say: (text: string) => { said.push(text); },
   };
@@ -995,6 +998,43 @@ test("#3289: the lab is pinned to the sha, and the dispatch argv carries no flag
   assert.ok(!h.dispatched[0].some((a) => a.startsWith("--qualify-sha")), "ansible-playbook would refuse an unknown flag");
   assert.equal(extraVars(h.dispatched[0]).ref, QSHA);
   assert.equal(extraVars(h.dispatched[0]).job, "gate-stability");
+});
+
+test("#3920: the dispatch names the layers the sha's lockfile pins, once, beside the ref, on the run and on the re-run", async () => {
+  const h = qualifiedHarness([ended(1), ended(0)]);
+  await driveQualified(QARGV, h);
+  assert.equal(h.dispatched.length, 2);
+  for (const argv of h.dispatched) {
+    assert.ok(argv.includes(JSON.stringify({ layer_refs: QLAYER_REFS })), "the layers' pins are an -e of their own");
+    assert.equal(argv.filter((a) => a.includes("layer_refs")).length, 1, "one -e, not one per attempt stacked");
+    assert.equal(extraVars(argv).ref, QSHA);
+  }
+});
+
+test("#3920: a pin with no tag refuses with exit 3 BEFORE `pending` is posted or anything is dispatched", async () => {
+  const h = qualifiedHarness([ended(0)], [], () => ({ refusal: "layer nvda-worker is pinned at @a11ign/screenreader-worker@0.1.0 by the lockfile, and https://example.test/w.git holds no such tag." }));
+  const realExit = process.exit;
+  const realErr = process.stderr.write;
+  let exited: number | undefined;
+  let stderr = "";
+  process.exit = ((code: number) => { exited = code; throw new Error(`exit ${code}`); }) as never;
+  process.stderr.write = ((text: string) => { stderr += text; return true; }) as never;
+  try {
+    await driveQualified(QARGV, h);
+  } catch (error) {
+    if (!/^exit \d$/.test((error as Error).message)) throw error;
+  } finally {
+    process.exit = realExit;
+    process.stderr.write = realErr;
+  }
+  assert.equal(exited, 3);
+  assert.match(stderr, /REFUSING --qualify-sha=: layer nvda-worker is pinned at @a11ign\/screenreader-worker@0\.1\.0/);
+  assert.deepEqual(h.events, [], "no post (so no pending left standing on the sha) and no dispatch");
+});
+
+test("#3920: only the real entry passes the lockfile reader, as it alone passes the poster", () => {
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+  assert.match(source, /layerRefs: layerRefsFromLockfile,/);
 });
 
 test("#3289: a first failure is re-run ONCE, and a pass on the re-run follows it (failure, pending, success)", async () => {

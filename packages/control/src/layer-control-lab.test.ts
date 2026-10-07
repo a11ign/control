@@ -314,6 +314,27 @@ test("when the core's pull just changed the checkout the install re-lays the lay
   assert.notEqual(notPulled.status, 0, "a pull that changed nothing re-lays nothing, so the laid tag is judged");
 });
 
+test("#3920: when the core just moved, a layer that is neither cloned nor laid is the install's to lay, not a refusal", (t) => {
+  if (!ansibleAvailable) return t.skip("ansible-playbook is not on PATH here. Not run, and not counted as a pass.");
+  const { first, play, lay, layerDir } = laidFixture();
+  const moved = JSON.stringify({ lab_core_moved: true });
+  // The lab at a post-split sha before its first install: the pull removed the directory the core used to track at the layer's
+  // path, and `run-job.yml` includes this file BEFORE the install that lays it (#3819), so there is nothing here to accept yet.
+  const absent = play([...layerRefs(first), "-e", moved]);
+  assert.equal(absent.status, 0, absent.output);
+  assert.equal(spawnSync("test", ["-e", layerDir]).status, 1, "nothing was created in its place: the install lays it, not this file");
+  // POSITIVE CONTROLS: the same layer, absent, with the core NOT moved still refuses (nothing will lay it), and the core's own
+  // tree at the layer's path is refused whether the core moved or not, because the install lays over a tree it did not make only
+  // when it is the layer's, and `run-job.yml`'s read after the install refuses what it laid wrongly.
+  const stays = play([...layerRefs(first), "-e", JSON.stringify({ lab_core_moved: false })]);
+  assert.notEqual(stays.status, 0, "a pull that changed nothing lays nothing");
+  assert.match(stays.output, /is not a git checkout and not a laid tree/);
+  lay({ "src/index.mjs": "the core's own copy\n" });
+  const coreTree = play([...layerRefs(first), "-e", moved]);
+  assert.notEqual(coreTree.status, 0, "`src/` with no `.layer-ref` is the core's tree, laid by nobody");
+  assert.match(coreTree.output, /Nothing falls back to the core's tree/);
+});
+
 // ---- the guest's half: `tasks/layer-checkouts.yml` runs PowerShell, and `pwsh` runs it here -------------------------------
 
 const pwshAvailable = spawnSync("pwsh", ["-NoProfile", "-Command", "1"], { encoding: "utf8" }).status === 0;
