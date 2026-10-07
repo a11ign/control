@@ -117,18 +117,21 @@ const MACS_INVENTORY = ["all:", "  children:", "    a11y_workers:", "      hosts
   "        a11y-worker-2:", "          ansible_host: 192.0.2.2", "          mac: AA-BB-CC-DD-EE-01",
   "        a11y-worker-3:", "          ansible_host: 192.0.2.3",
   "        a11y-worker-4:", "          ansible_host: 192.0.2.4", "          mac: \"aa:bb:cc:dd:ee:04\"",
+  // #3918: the shape `fleet:discover --enroll` writes for workers 12 to 16, a same-line comment after the value.
+  "        a11y-worker-6:", "          ansible_host: 192.0.2.6", "          mac: \"AA-BB-CC-DD-EE-06\"  # read off the box 2026-09-26 (#2654), Get-NetAdapter -Physical",
   "        a11y-worker-5:", "          ansible_host: 192.0.2.5", "          mac: not-a-mac",
   "    other_group:", "      hosts:", "        lab:", "          ansible_host: 192.0.2.9", "          mac: 00:11:22:33:44:55"]
   .join("\n") + "\n";
 
 test("#2655: macsByHost reads the declared macs, normalised, and leaves out hosts with none, a malformed one, or outside the worker group", () => {
-  assert.deepEqual([...macsByHost(MACS_INVENTORY)], [["192.0.2.2", "aa:bb:cc:dd:ee:01"], ["192.0.2.4", "aa:bb:cc:dd:ee:04"]]);
+  assert.deepEqual([...macsByHost(MACS_INVENTORY)], [["192.0.2.2", "aa:bb:cc:dd:ee:01"], ["192.0.2.4", "aa:bb:cc:dd:ee:04"], ["192.0.2.6", "aa:bb:cc:dd:ee:06"]]);
 });
 
 test("#2655: macsByHost agrees with fleet-discover's inventoryHosts on every host of the fixture (the copies are pinned equal)", () => {
   const viaDiscover = inventoryHosts(MACS_INVENTORY).filter((h) => h.mac).map((h) => [h.host, h.mac]);
   assert.deepEqual([...macsByHost(MACS_INVENTORY)], viaDiscover);
-  assert.ok(viaDiscover.length >= 2, "positive control: the fixture has hosts with a mac, so equality is not two empty lists");
+  assert.ok(viaDiscover.some(([host]) => host === "192.0.2.6"), "positive control: the comment-bearing mac line (#3918) is among the hosts compared, so the pin can see the one place the copies differed");
+  assert.ok(viaDiscover.length >= 3, "positive control: the fixture has hosts with a mac, so equality is not two empty lists");
 });
 
 // --- #3239: ONE source. The control plane's inventory names workers 2 to 16; the agents host's copy named

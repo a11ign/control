@@ -132,7 +132,10 @@ export function macsByHost(text) {
     if (/^\s{8}[A-Za-z0-9][\w-]*:\s*$/.test(line)) { flush(); current = {}; continue; }
     const host = line.match(/^\s*ansible_host\s*:\s*(\S+)\s*$/);
     if (host && current) current.host = host[1].replace(/^["']|["']$/g, "");
-    const mac = line.match(/^\s*mac\s*:\s*(\S*)\s*$/);
+    // #3918: a same-line `# ...` comment follows the value on workers 12 to 16 (`fleet:discover --enroll`
+    // writes it), exactly as `inventoryHosts` tolerates since #2700. Without `(?:#.*)?` the whole line
+    // failed to match and the worker read as MAC-less, so `lab:job` and `fleet:wake` refused to wake it.
+    const mac = line.match(/^\s*mac\s*:\s*(\S*)\s*(?:#.*)?$/);
     const hex = mac?.[1].replace(/^["']|["']$/g, "").replace(/[^0-9a-fA-F]/g, "").toLowerCase();
     if (hex?.length === 12 && current) current.mac = (hex.match(/.{2}/g) ?? []).join(":");
   }

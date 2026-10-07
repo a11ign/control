@@ -404,14 +404,30 @@ async function placeAtUseTime(needed, resolvePool) {
 const withAddress = (url, address) => url.replace(new URL(url).hostname, address);
 
 /**
+ * Under pnpm 10, `pnpm run lab:job -- -e job=...` (the form `packages/control/CLAUDE.md` documents) runs
+ * `node lab-job.mjs -- -e job=...`: the `--` is KEPT. Forwarded, `ansible-playbook` reads it as the end of
+ * options and takes `-e` for a playbook name, in ITS words (`the playbook: -e could not be found`), which
+ * reads as a broken lab (#3919). Only a LEADING `--` is the package manager's; one later in the argv is
+ * the caller's and is left alone. Dropped here, before `qualificationRequest` reads the argv, so no
+ * status is posted for a run that cannot begin.
+ *
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+export function withoutLeadingSeparator(argv) {
+  return argv[0] === "--" ? argv.slice(1) : argv;
+}
+
+/**
  * `lab:job`, with `--qualify-sha=<sha>` (#3289): the same run, announced as `pending` on the sha, its verdict
  * posted when it ends, and ONE re-run if the first said `failure`. Everything else is `runOnce`, unchanged.
  *
- * @param {string[]} argv
+ * @param {string[]} rawArgv
  * @param {Parameters<typeof runOnce>[1]} [deps] as `runOnce`
  * @returns {Promise<number | void>}
  */
-export async function run(argv, deps = {}) {
+export async function run(rawArgv, deps = {}) {
+  const argv = withoutLeadingSeparator(rawArgv);
   const vars = extraVars(argv);
   const request = qualificationRequest(argv, {
     job: vars.job, row: vars.row, ref: vars.ref, describeOnly: isDescribeOnly(argv) });

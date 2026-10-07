@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs } from "./lab-job.mjs";
+import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.mjs";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
 import { postQualificationStatus } from "./post-qualification-status.mjs";
 import { outcomeOf, qualificationRequest, readRecordFrom } from "./qualification-run.mjs";
@@ -1151,4 +1151,46 @@ test("#3289: there is no token file and no second credential: the poster never n
   assert.doesNotMatch(poster, /spawnSync\("gh", args, \{[^}]*\benv\b/, "the default runner must pass the environment through untouched");
   // POSITIVE CONTROL: the patterns above are looking at the right file -- it does spawn `gh`.
   assert.match(poster, /spawnSync\("gh", args,/);
+});
+
+// ---- #3919: `pnpm run lab:job -- -e ...` hands the script a LEADING `--` ------------------------------------
+//
+// pnpm 10 keeps the `--` it was given, so the documented form reached `ansible-playbook` as
+// `["--", "-e", ...]`, which reads `-e` as a playbook name. The strip is `run`'s first act, so
+// `qualificationRequest` sees the stripped argv and no status is posted for a run that cannot begin.
+
+const PNPM_FORM = ["--", "-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "-e", "row=3289"];
+
+async function dispatchedFor(argv: string[]): Promise<string[][]> {
+  const dispatched: string[][] = [];
+  await run(argv, {
+    catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }),
+    dispatch: (forwarded: string[]) => { dispatched.push(forwarded); return 0; },
+  });
+  return dispatched;
+}
+
+test("#3919: a leading `--` is dropped before the dispatch, so the documented pnpm form reaches ansible as `-e ...`", async () => {
+  const dispatched = await dispatchedFor(PNPM_FORM);
+  assert.deepEqual(dispatched, [PNPM_FORM.slice(1)]);
+});
+
+test("#3919: a leading `--` is dropped under `--qualify-sha` too, and the run is announced and dispatched as one that can begin", async () => {
+  const h = qualifiedHarness([ended(0)]);
+  const status = await driveQualified(["--", ...QARGV], h);
+  assert.equal(status, 0);
+  assert.deepEqual(h.events, ["post:pending", "dispatch", "post:success"]);
+  assert.equal(h.dispatched[0][0], "-e", "the first thing ansible-playbook reads is a flag, not `--`");
+  assert.ok(!h.dispatched[0].includes("--"));
+});
+
+test("#3919: a `--` NOT in first position is the caller's and is left alone", async () => {
+  const argv = ["-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "--", "extra"];
+  assert.deepEqual(await dispatchedFor(argv), [argv]);
+  assert.deepEqual(withoutLeadingSeparator(argv), argv);
+});
+
+test("#3919: only ONE leading `--` is the package manager's", () => {
+  assert.deepEqual(withoutLeadingSeparator(["--", "--", "-e"]), ["--", "-e"]);
+  assert.deepEqual(withoutLeadingSeparator([]), []);
 });
