@@ -56,6 +56,12 @@ ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.m
 #      that still tracks the old `packages/worker-fleet` (the one-time move off it) needs the layer laid BEFORE any merge,
 #      which `orchestrator` does by hand once. `controlPlaneCheckout()` is not used: it wants the layer as a clone with a
 #      `.git` (exit 4 without one), and the control plane holds it LAID, which is the only shape the guard judges (#3845).
+#   5. `node scripts/lay-layer.mjs control`, for the same reason and in the same place (#3976): the guard also judges
+#      `packages/control` against the tag `layers.json` pins for `control` (#3914), and `layers.json` is tracked, so a merge
+#      that moves that pin moves `main` while the laid copy stays at the old tag. From 08:31Z to 08:53Z on 2026-10-07 (#3940
+#      moved the pin to v0.1.5) every tick refused `stale-checkout -- layer control is laid at v0.1.4, main pins v0.1.5` and the
+#      idle workers stayed on, until `orchestrator` laid it by hand. This unit's own `ExecStart` runs AFTER this step, so the
+#      code that reads the verdict is the code the lay just put there. `lab` is not laid: the control plane holds no `packages/lab`.
 #
 # NOT `controlPlaneCheckout()`'s lock-free sibling by accident: no lock is taken. `fleet:deploy`'s move is the same
 # `--ff-only` to a commit on `main`, so two movers land on the same line or one is refused, and git's own `index.lock`
@@ -73,4 +79,5 @@ ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --
   { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
   { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
   git merge --ff-only --quiet origin/main && \
-  node scripts/lay-layer.mjs screenreader-fleet'
+  node scripts/lay-layer.mjs screenreader-fleet && \
+  node scripts/lay-layer.mjs control'
