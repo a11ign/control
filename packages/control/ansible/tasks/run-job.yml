@@ -462,6 +462,23 @@
          else (('(checkout unchanged, up to date with ' ~ lab_ref ~ ')') if lab_behind_count | int == 0
                else '(checkout unchanged and ' ~ lab_behind_count ~ ' COMMIT(S) BEHIND origin/' ~ lab_ref ~ ')') }}
 
+- name: "Does this host hold the lab's code? (laid by the install, never pulled)"
+  # A HOST THAT PULLS AND DOES NOT INSTALL HOLDS NO LAB CODE (#3833, follow-up of #3505). `packages/lab` is laid by `pnpm install`'s
+  # `prepare` at `layers.json`'s `pinned.lab` tag and tracked by nothing, and the install above runs only when THIS dispatch's pull
+  # changed the checkout. A checkout pulled by hand, or by a job that died before its install, reaches here with no `packages/lab`
+  # (or the previous tag's), and the unit then starts and dies with `Cannot find module` after the lock and the dispatch.
+  #
+  # Asked on EVERY dispatch, for the reason the corepack question below is, and for EVERY job: the catalogue's argvs name
+  # `packages/lab/...` directly or through a root script, so a check that fired for some of them would be the one a forgotten job slips past.
+  # It runs HERE and not in `lab-job.mjs`'s `run()`, which executes on the control plane, whose checkout never installs (ADR 0012).
+  #
+  # `lab_laid_copy_check` is read by this question ONLY and is overridden by ONE caller, `lab-job-lock-two-rows.test.ts`, whose fixture
+  # checkout holds no `packages/control`. The refusal itself is `lab-laid-copy.test.ts`'s to pin.
+  ansible.builtin.command:
+    argv: "{{ lab_laid_copy_check }}"
+    chdir: "{{ lab_repo_path }}"
+  changed_when: false
+
 - name: "Can this host run a package script at all? (the runner every catalogue entry names)"
   # EVERY job in `lab-job.yml` is `["/usr/bin/corepack", "pnpm", "run", ...]` (#2893: pnpm, where this was
   # the system npm). There is NO `/usr/bin/pnpm` shim to create: corepack ships with this Node, `packageManager`

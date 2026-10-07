@@ -73,6 +73,9 @@ lab_python: /opt/a11y/.venv/bin/python
 # ships with this Node, so the file exists because Node does. Read ONLY by the preflight in
 # `tasks/run-job.yml`, which `lab-job-lock-two-rows.test.ts` points at a fake; the job argvs stay literal.
 lab_corepack: /usr/bin/corepack
+# The question `tasks/run-job.yml` asks before a job starts: is `packages/lab` LAID at the pin (#3833)? Exits 4 naming what is
+# missing. Read by that one task, which `lab-job-lock-two-rows.test.ts` points at a fake; the job argvs stay literal.
+lab_laid_copy_check: ["/usr/bin/node", "packages/control/src/lab-laid-copy.mjs"]
 
 # `tsx`, for the jobs that apply the pipeline's own gates — those live in TypeScript
 # (@a11ign/evidence/verify), which is why `evidence-check.mjs` cannot run under plain node.

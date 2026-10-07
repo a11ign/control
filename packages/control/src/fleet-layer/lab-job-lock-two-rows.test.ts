@@ -212,6 +212,7 @@ function writeWrapperPlaybook(tmp: string, repoDir: string, bin: string) {
     lab_repo_path: "${repoDir}"
     lab_runs_path: "/tmp"
     lab_corepack: "${join(bin, "corepack")}"
+    lab_laid_copy_check: ["/bin/true"]
   tasks:
     - name: run it
       ansible.builtin.include_tasks: "${RUN_JOB_PATH}"
