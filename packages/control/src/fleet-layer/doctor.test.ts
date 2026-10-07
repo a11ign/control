@@ -9,25 +9,21 @@
  * specifier you import" -- not the package name, since a package can export subpaths from elsewhere and
  * resolving `@a11ign/judge` does not prove `@a11ign/judge/rules` came from the same tree.
  *
- * FRESHNESS IS `tsc --build --dry`, NEVER A RAW MTIME COMPARISON -- a wrong first version of this file
- * compared `newestMtimeMs(srcDir)` against `newestMtimeMs(distDir)`, and the row's own filer retracted
- * their initial "36 hours stale" claim once it was measured against a directory mtime (which does not
- * move on rewrite) rather than a real one. The corrected, LIVE measurement: `git checkout` resets file
- * mtimes on every file it touches with no content change at all, so switching branches alone makes
- * several source files read newer than an already-correct `dist` -- and `tsc --build --dry` still
- * correctly reports "is up to date" in exactly that case, because it is content-addressed, not mtime-
- * addressed. A raw mtime comparison would flag every worktree as stale the moment `git checkout` runs,
- * permanently -- the "readiness command that cries wolf" `advise`'s own doc warns against.
+ * FRESHNESS IS NOT READ, AND NEVER AS A RAW MTIME COMPARISON. The check once asked `tsc --build --dry`; Rslib builds `judge` now (#3580), so its
+ * tsconfig is `noEmit` and tsc has nothing to call up to date (#3810). What is read is what Rslib's output IS: the files `judge`'s `exports` promise
+ * (`missingExportTargets`). A present but out-of-date `dist` is not caught, and the check says "present". The mtime comparison stays rejected: `git
+ * checkout` moves source mtimes with no content change, so it would flag every worktree as stale the moment it switched branches (#256), the
+ * "readiness command that cries wolf" `advise`'s own doc warns against.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  resolvesToThisCheckout, checkoutRootFor, tscProjectUpToDate, fleetAgreementLine,
+  resolvesToThisCheckout, checkoutRootFor, missingExportTargets, fleetAgreementLine,
 } from "../../../worker-fleet/src/doctor.mjs";
 import { MUST_MATCH } from "../../../worker-fleet/src/fleet-consistency.mjs";
 
@@ -76,7 +72,7 @@ test("checkoutRootFor: null for a path that does not look like this repo's own l
   assert.equal(checkoutRootFor("/usr/local/lib/node_modules/something/index.js"), null);
 });
 
-// --- tscProjectUpToDate: the real authority, mocked at the run() boundary ---
+// --- missingExportTargets: what Rslib's output actually is ---
 
 function withTempDir(fn: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "doctor-dist-fixture-"));
@@ -87,72 +83,47 @@ function withTempDir(fn: (dir: string) => void): void {
   }
 }
 
-function tscOutput(tsconfigPath: string, verdict: "up to date" | "would build"): string {
-  const line = verdict === "up to date"
-    ? `08:00:00 - Project '${tsconfigPath}' is up to date`
-    : `08:00:00 - A non-dry build would build project '${tsconfigPath}'`;
-  return `${line}\n`;
+/** A package directory with `package.json` carrying `exports`, and only the `built` files under it. */
+function writePackage(dir: string, { exports, built }: { exports: unknown, built: string[] }): void {
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", exports }));
+  mkdirSync(join(dir, "dist"), { recursive: true });
+  for (const file of built) writeFileSync(join(dir, file), "");
 }
 
-test("tscProjectUpToDate: TRUE when tsc's own report says 'is up to date' for THIS project", () => {
-  const tsconfigPath = "/repo/packages/judge/tsconfig.json";
-  const run = () => tscOutput(tsconfigPath, "up to date");
-  assert.equal(tscProjectUpToDate(tsconfigPath, { run }), true);
+const FIXTURE_EXPORTS = { ".": { types: "./dist/index.d.ts", default: "./dist/index.mjs" } };
+
+test("missingExportTargets: nothing missing when every target is on disk", () => {
+  withTempDir((dir) => {
+    writePackage(dir, { exports: FIXTURE_EXPORTS, built: ["dist/index.d.ts", "dist/index.mjs"] });
+    assert.deepEqual(missingExportTargets(dir), []);
+  });
 });
 
-test("tscProjectUpToDate: FALSE when tsc reports this project would (re)build", () => {
-  const tsconfigPath = "/repo/packages/judge/tsconfig.json";
-  const run = () => tscOutput(tsconfigPath, "would build");
-  assert.equal(tscProjectUpToDate(tsconfigPath, { run }), false);
+test("POSITIVE CONTROL: a dist missing a target reads NOT built, naming it -- so the clean reading above is not vacuous", () => {
+  withTempDir((dir) => {
+    writePackage(dir, { exports: FIXTURE_EXPORTS, built: ["dist/index.d.ts"] });
+    assert.deepEqual(missingExportTargets(dir), ["./dist/index.mjs"]);
+  });
 });
 
-test("tscProjectUpToDate reads the line for THIS project, not a referenced dependency's", () => {
-  // `tsc --build --dry` reports on the whole reference chain in one run -- a dependency reading "up to
-  // date" must never be read as THIS project's own verdict.
-  const tsconfigPath = "/repo/packages/judge/tsconfig.json";
-  const run = () => [
-    tscOutput("/repo/packages/evidence/tsconfig.json", "up to date"),
-    tscOutput(tsconfigPath, "would build"),
-  ].join("");
-  assert.equal(tscProjectUpToDate(tsconfigPath, { run }), false);
+test("MUTATION target: missingExportTargets is NULL when the manifest is unreadable, never coerced to a clean or a missing reading", () => {
+  withTempDir((dir) => assert.equal(missingExportTargets(dir), null));
 });
 
-test("tscProjectUpToDate: NULL when tsc's report never mentions this project at all -- never guessed", () => {
-  const tsconfigPath = "/repo/packages/judge/tsconfig.json";
-  const run = () => tscOutput("/repo/packages/evidence/tsconfig.json", "up to date");
-  assert.equal(tscProjectUpToDate(tsconfigPath, { run }), null);
-});
-
-test("MUTATION target: tscProjectUpToDate is NULL when the run throws with no usable stdout, never coerced to true or false", () => {
-  const run = () => { throw new Error("npx: command not found"); };
-  assert.equal(tscProjectUpToDate("/repo/packages/judge/tsconfig.json", { run }), null);
-});
-
-test("tscProjectUpToDate reads stdout off a thrown error too -- --dry can exit non-zero on a real config problem and still report", () => {
-  const tsconfigPath = "/repo/packages/judge/tsconfig.json";
-  const run = () => {
-    const error = new Error("tsc exited 1") as Error & { stdout?: string };
-    error.stdout = tscOutput(tsconfigPath, "would build");
-    throw error;
-  };
-  assert.equal(tscProjectUpToDate(tsconfigPath, { run }), false);
-});
-
-test("LIVE: tscProjectUpToDate against this repo's own freshly built judge package reads TRUE", () => {
-  // Not a fixture -- the real package, the real tsconfig, right after this suite's own `pretest` build.
-  // If this ever reads anything but true on a clean build, the parsing itself has drifted from tsc's
-  // real output shape, which no fixture can catch on its own.
+test("LIVE: every exports target of this repo's own judge package is on disk after the build", () => {
+  // Not a fixture -- the real package and the real `dist`, right after this suite's own `pretest` build. It
+  // replaces the `tsc --build --dry` LIVE test #3580 removed (#3810). If Rslib renames an output without
+  // `exports` following, this is the test that says so, which no fixture can.
   const repoRoot = new URL("../../../../", import.meta.url).pathname;
-  const tsconfigPath = join(repoRoot, "packages/judge/tsconfig.json");
-  assert.equal(tscProjectUpToDate(tsconfigPath), true);
+  assert.deepEqual(missingExportTargets(join(repoRoot, "packages/judge")), []);
 });
 
 // --- END TO END: whose dist a resolution reaches is a SEPARATE fact from whether that dist is current ---
 
-test("THE #256 SHAPE: a foreign checkout's dist is detected as foreign, and its freshness is asked independently", () => {
+test("THE #256 SHAPE: a foreign checkout's dist is detected as foreign, and whether it is built is asked independently", () => {
   withTempDir((dir) => {
     const foreignRoot = join(dir, "a11ign");
-    mkdirSync(join(foreignRoot, "packages", "judge", "dist"), { recursive: true });
+    mkdirSync(join(foreignRoot, "packages", "judge"), { recursive: true });
     const resolvedRealPath = join(foreignRoot, "packages", "judge", "dist", "rules.js");
     const thisCheckoutRoot = join(dir, "wt-mine");
 
@@ -160,10 +131,9 @@ test("THE #256 SHAPE: a foreign checkout's dist is detected as foreign, and its 
       "the whole incident starts here -- a worktree reading a DIFFERENT checkout's compiled output");
     assert.equal(checkoutRootFor(resolvedRealPath), foreignRoot);
 
-    const tsconfigPath = join(foreignRoot, "packages", "judge", "tsconfig.json");
-    const run = () => tscOutput(tsconfigPath, "would build");
-    assert.equal(tscProjectUpToDate(tsconfigPath, { run }), false,
-      "the half a resolution check ALONE misses -- the foreign dist is also not up to date");
+    writePackage(join(foreignRoot, "packages", "judge"), { exports: FIXTURE_EXPORTS, built: [] });
+    assert.deepEqual(missingExportTargets(join(foreignRoot, "packages", "judge")), ["./dist/index.d.ts", "./dist/index.mjs"],
+      "the half a resolution check ALONE misses -- the foreign dist is also not built");
   });
 });
 

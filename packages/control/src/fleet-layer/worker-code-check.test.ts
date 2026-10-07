@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { codeDrift, describeCodeDrift, describeEmptyPool, expectedWorkerCode } from "../../../worker-fleet/src/worker-code-check.mjs";
+import { codeDrift, describeCodeDrift, describeEmptyPool, resolveExpectedWorkerCode } from "../../../worker-fleet/src/worker-code-check.mjs";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 const FLEET = ["http://203.0.113.107:8765", "http://203.0.113.59:8765", "http://203.0.113.175:8765"];
@@ -96,10 +96,14 @@ test("`when` is carried into the message, so a start-of-run and end-of-run refus
   assert.match(describeCodeDrift(drift, { when: "by the END of the run" })!, /by the END of the run/);
 });
 
-test("the expected hash is the SHARED hasher, not a second implementation", () => {
+test("the expected hash is the SHARED hasher, not a second implementation", async () => {
   // 16 hex characters, and it must agree with what the deploy path computes. `code-version.test.ts` owns
-  // the "one hasher" claim; this only checks that this module did not quietly grow its own.
-  assert.match(expectedWorkerCode(), /^[0-9a-f]{16}$/);
+  // the "one hasher" claim; this only checks that this module did not quietly grow its own. Which hasher
+  // answered (the layer clone's or the installed package's) depends on whether this tree holds a clone, so
+  // the reading is asked to name it rather than be assumed.
+  const expected = await resolveExpectedWorkerCode({ checkoutRoot: REPO });
+  assert.match(expected.code, /^[0-9a-f]{16}$/);
+  assert.ok(["clone", "installed"].includes(expected.source), `the reading must say where it came from, not "${expected.source}"`);
   const source = readFileSync(`${REPO}packages/worker-fleet/src/worker-code-check.mjs`, "utf8");
   assert.ok(!/createHash\s*\(/.test(source),
     "worker-code-check.mjs must call codeVersion() rather than hashing itself — a second implementation "

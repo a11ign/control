@@ -344,57 +344,6 @@ const KNOWN_PLAIN_ENTRY_GUARDS: readonly string[] = Object.freeze([
   "packages/control/src/fleet-wake.mjs",
   "packages/control/src/lab-job.mjs",
   "packages/control/src/lab-pipeline.mjs",
-  "packages/lab/scripts/audit-corpus-starvation.mjs",
-  "packages/lab/scripts/audit-corpus-urls.mjs",
-  "packages/lab/scripts/audit-observation-ambiguity.mjs",
-  "packages/lab/scripts/audit-rule-coverage.ts",
-  "packages/lab/scripts/audit-size-sensitivity.mjs",
-  "packages/lab/scripts/bench-capture.mjs",
-  "packages/lab/scripts/build-realism-tier.mjs",
-  "packages/lab/scripts/calibrate-abstention.mjs",
-  "packages/lab/scripts/check-dataset-distribution.mjs",
-  "packages/lab/scripts/check-real-page-findings.ts",
-  "packages/lab/scripts/check-rehearsal-currency.mjs",
-  "packages/lab/scripts/check-shipped-provenance.mjs",
-  "packages/lab/scripts/collect-promotion.mjs",
-  "packages/lab/scripts/compare-layers.mjs",
-  "packages/lab/scripts/corpus-backup.mjs",
-  "packages/lab/scripts/corpus-prune-orphans.mjs",
-  "packages/lab/scripts/corpus-release.mjs",
-  "packages/lab/scripts/corpus-snapshot.mjs",
-  "packages/lab/scripts/emit-grants-map.mjs",
-  "packages/lab/scripts/emit-unclosable-vetoes.mjs",
-  "packages/lab/scripts/everything-pipeline.mjs",
-  "packages/lab/scripts/evidence-check.mjs",
-  "packages/lab/scripts/explain-capture.mjs",
-  "packages/lab/scripts/explain-scorer.mjs",
-  "packages/lab/scripts/fleet-hours.mjs",
-  "packages/lab/scripts/gate-probe-order.mjs",
-  "packages/lab/scripts/generate-coverage-doc.ts",
-  "packages/lab/scripts/lab-inventory.mjs",
-  "packages/lab/scripts/promote-model.mjs",
-  "packages/lab/scripts/retrain-pipeline.mjs",
-  "packages/lab/scripts/score-rules.ts",
-  "packages/lab/scripts/stability-gate.mjs",
-  "packages/lab/scripts/verify-safetensors.mjs",
-  "packages/lab/src/eval/rules-check.ts",
-  "packages/lab/src/eval/run.ts",
-  "packages/lab/src/harnesses/assert-action-report.mjs",
-  "packages/lab/src/harnesses/capture-check.mjs",
-  "packages/lab/src/harnesses/capture-fixtures.mjs",
-  "packages/lab/src/harnesses/occurrence-verdict-stability.mjs",
-  "packages/lab/src/harnesses/page-identity-rate.mjs",
-  "packages/lab/src/harnesses/run-spike.ts",
-  "packages/lab/src/training/capture-real-pages.mjs",
-  "packages/lab/src/training/capture-screenreader-dataset.mjs",
-  "packages/lab/src/training/capture-status.mjs",
-  "packages/lab/src/training/check-signals.mjs",
-  "packages/lab/src/training/export-screenreader-dataset.mjs",
-  "packages/lab/src/training/generate-screenreader-acceptance.mjs",
-  "packages/lab/src/training/generate-screenreader-dataset.mjs",
-  "packages/lab/src/training/preflight-screenreader-dataset.mjs",
-  "packages/lab/src/training/repeat-capture.mjs",
-  "packages/lab/src/training/wait-for-capture.mjs",
   "packages/worker-fleet/src/fleet-env.mjs",
   "packages/worker-fleet/src/guest-run.mjs",
   "packages/worker-fleet/src/normalise-fleet.mjs",
@@ -509,8 +458,9 @@ test("every declared entry guard uses the exact comparison — no sources consul
 
   // A floor, not a pin: there were 93 when this was written, and it is the FORM population rather than
   // the discovery's 84. Fewer means the scan has stopped matching real files, which is the only way this
-  // test can go quietly green while the codebase is wrong.
-  assert.ok(declared.length >= 85,
+  // test can go quietly green while the codebase is wrong. It was 85 over a tree that held the lab's scripts; the lab left for its own repository
+  // (#3505) and this tree measures 76 by the same call, so the floor is 70, the same margin of about six below the reading.
+  assert.ok(declared.length >= 70,
     `only ${declared.length} files declare an entry guard; the scan is broken, not the codebase clean`);
 
   const suffixForm = declared.filter((p) => /process\.argv\[1\]\?\.endsWith\(/.test(executableSource(p)));
@@ -533,13 +483,13 @@ test("every declared entry guard uses the exact comparison — no sources consul
  * source directly. Discovered rather than named, for the reason every discovery test in this file exists:
  * a bin nobody remembered to list here is exactly the one that ships broken.
  */
-/** `dist/cli.js` is built from `src/cli.ts` or `src/cli.mjs`; anything not under `dist/` is its own source. */
+/** `dist/cli.mjs` (`.js` before row 4c-a11ign, #3580) is built from `src/cli.ts` or `src/cli.mjs`; anything not under `dist/` is its own source. */
 function sourceFor(targetPath: string): string {
   const dir = dirname(targetPath);
   if (basename(dir) !== "dist") return targetPath;
   const base = basename(targetPath);
-  const srcTs = join(dir, "..", "src", base.replace(/\.js$/, ".ts"));
-  const srcMjs = join(dir, "..", "src", base.replace(/\.js$/, ".mjs"));
+  const srcTs = join(dir, "..", "src", base.replace(/\.m?js$/, ".ts"));
+  const srcMjs = join(dir, "..", "src", base.replace(/\.m?js$/, ".mjs"));
   if (existsSync(srcTs)) return srcTs;
   if (existsSync(srcMjs)) return srcMjs;
   return targetPath;

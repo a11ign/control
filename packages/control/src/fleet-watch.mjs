@@ -62,6 +62,14 @@ export const DEFAULT_STATE_PATH = "runs/fleet-watch-state.json";
 /** Written by `fleet-auto-off.mjs`; here so the path is one fact and the import points only one way. */
 export const AUTO_OFF_STATE_PATH = "runs/fleet-auto-off-state.json";
 
+/**
+ * Where this watch mirrors what it read of `AUTO_OFF_STATE_PATH` on the control plane, for `org-health` on the agents
+ * host (a11ign/agent-org#311 reads this same string). The agents host's own copy of the state path is a leftover that
+ * reads CLEAR through a standing refusal, and the tick may not ssh (#3566), so the one reader that reaches the record
+ * leaves it where the tick can read it (#3860, incident #3846).
+ */
+export const AUTO_OFF_MIRROR_PATH = "runs/fleet-auto-off-mirror.json";
+
 export const DEFAULT_CAPTURES_STATE_PATH = "runs/fleet-captures-state.json";
 
 const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
@@ -476,18 +484,57 @@ export function parseAutoOffRefusal(text) {
 }
 
 /**
+ * @typedef {{ readAt: number, path?: string, write?: (path: string, data: string) => void }} AutoOffMirror
+ * Where and when a read of the record is mirrored; `path` and `write` are for a test.
+ */
+
+/**
+ * Write the record this watch just read, whole, beside the epoch ms it was read at. `readAt` is the reader's only
+ * clock: a run that could not read writes nothing, so the mirror ages, and an old `readAt` says "nobody looked"
+ * where `record.refusal === null` says "looked, and nothing is refused". The record is kept verbatim (not just the
+ * refusal `parseAutoOffRefusal` keeps) so a field the producer adds later reaches the reader without a change here.
+ *
+ * @param {string} text the control host's auto-off state file, or `{}` when it has none
+ * @param {AutoOffMirror} where
+ */
+export function mirrorAutoOffRecord(text, { readAt, path = AUTO_OFF_MIRROR_PATH, write = replaceFile }) {
+  write(path, `${JSON.stringify({ readAt, record: JSON.parse(text) }, null, 2)}\n`);
+}
+
+/**
+ * A mirror that cannot be written must not hide the refusal that WAS read: say so on stderr and carry on.
+ *
+ * @param {string} text
+ * @param {AutoOffMirror} mirror
+ */
+function mirrorOrSay(text, mirror) {
+  try {
+    mirrorAutoOffRecord(text, mirror);
+  } catch (cause) {
+    console.error(`CANNOT WRITE the auto-off mirror: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
+/**
  * The auto-off timer's refusal, read FROM the control host (this watch runs on the agents host, where the state file
  * is not): ssh, or local when this is the control plane. A host that cannot be read THROWS rather than answering
  * `null`: "no refusal" and "I did not look" are different states. A missing file is `{}`, a timer that never ticked.
  *
+ * Given a `mirror`, a read that succeeded is also written to the mirror file (#3860); a read that threw wrote nothing.
+ *
  * @param {() => string} [readState]
+ * @param {AutoOffMirror} [mirror]
  * @returns {AutoOffRefusal | null}
  */
 export function readAutoOffRefusal(
   readState = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${AUTO_OFF_STATE_PATH} 2>/dev/null || echo '{}'`,
     { capture: true }),
+  mirror = undefined,
 ) {
-  return parseAutoOffRefusal(readState());
+  const text = readState();
+  const refusal = parseAutoOffRefusal(text);
+  if (mirror) mirrorOrSay(text, mirror);
+  return refusal;
 }
 
 /**
@@ -543,10 +590,16 @@ export async function watch(deps = {}) {
   return overdue(status.rows, next, at, thresholdMs);
 }
 
-/** The auto-off refusal, or `null` — and when the host could not be read, SAYS so on stderr rather than reading as clean. */
-function readRefusalOrSay() {
+/**
+ * The auto-off refusal, or `null` — and when the host could not be read, SAYS so on stderr rather than reading as
+ * clean. A read that succeeded is mirrored for `org-health` (#3860); one that threw leaves the mirror to age.
+ *
+ * @param {{ readState?: () => string, path?: string, now?: () => number }} [deps] for a test
+ * @returns {AutoOffRefusal | null}
+ */
+export function readRefusalOrSay({ readState, path, now = Date.now } = {}) {
   try {
-    return readAutoOffRefusal();
+    return readAutoOffRefusal(readState, { readAt: now(), path });
   } catch (cause) {
     console.error(`CANNOT READ the auto-off refusal from the control host: ${cause instanceof Error ? cause.message : String(cause)}`);
     return null;

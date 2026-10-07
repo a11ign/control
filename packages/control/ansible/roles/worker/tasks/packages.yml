@@ -210,10 +210,15 @@
   # when absent and never moved here -- the PIN is `deploy.yml`'s and `tasks/layer-checkouts.yml`'s job, which
   # have the layer's commit; a role run has none. A directory that is there and is not a checkout is refused by
   # name. Empty today: no layer has a `remote` yet.
+  #
+  # EXCEPT A LAID TREE (#3819, #3826): `.layer-ref` beside `src/` and no `.git`, which is what a clone becomes once
+  # `pnpm install` has run on this box. It is reported `laid` and left alone, as `tasks/layer-checkouts.yml` does; a role
+  # run on an installed box threw "exists and is not a clone" here. The core's own copy (`src/`, no marker) still throws.
   ansible.windows.win_shell: |
     $ErrorActionPreference = "Stop"
     $layer = '{{ worker_repo_path }}/{{ item.value.path }}'
     if (Test-Path "$layer/.git") { 'present' }
+    elseif ((Test-Path "$layer/.layer-ref") -and (Test-Path "$layer/src")) { 'laid' }
     elseif ((Test-Path $layer) -and (Get-ChildItem -Force $layer | Select-Object -First 1)) {
       throw "$layer exists and is not a clone of {{ item.key }}: remove what is left of the old layer there, then re-run"
     } else {

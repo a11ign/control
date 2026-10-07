@@ -1,0 +1,94 @@
+---
+# Install the gate-heartbeat timer on the control plane. #3851, class fix 1c of the 2026-10-06 host-hang incident (#3846).
+#
+#     ansible-playbook gate-heartbeat-schedule.yml
+#
+# ## What this ships
+#
+# `gate-heartbeat.mjs` reads the gate's last completed tick from GitHub (the `GATE_LAST_TICK` Actions variable,
+# a11ign/a11ign#3880) and messages the chairman on Telegram when it is older than ten minutes, once per outage. This
+# playbook installs the systemd unit pair and enables and starts the timer, which fires it every minute. The unit does
+# not need the agents host: that is why it lives on the control plane (`files/a11y-gate-heartbeat.service`'s header).
+#
+# ## NOT RUN BY A MANIFEST SCRIPT, AND NOT YET RUN
+#
+# There is no `pnpm run` for it (the root manifest is another row's); run it with `ansible-playbook` directly. The
+# Telegram credential files it needs are the chairman's to place on the control plane (#3851 `needs:chairman`), so a
+# run before they exist installs a timer whose every firing says `no route` and FAILS the unit rather than going
+# quiet. The playbook does not place them: a credential is not a thing this playbook mints.
+#
+# ## The auto-off-schedule.yml shape, one unit over
+#
+# The require-inventory-group precondition on localhost (an empty inventory must not read as success -- `ansible-playbook`
+# prints `skipping: no hosts matched` and exits 0 on zero hosts, #1980), then install, reload only if changed, enable
+# and start, and read it back over systemd's own view.
+- name: The control plane must be in the inventory before anything claims to have run
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control plane
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Install and enable the gate-heartbeat timer on the control plane (#3851)
+  hosts: a11y_control
+  gather_facts: false
+  vars:
+    heartbeat_timer_units:
+      - a11y-gate-heartbeat.timer
+      - a11y-gate-heartbeat.service
+
+  tasks:
+    - name: Install the unit files
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ heartbeat_timer_units }}"
+      register: heartbeat_units_installed
+
+    - name: Pick up any unit that changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: heartbeat_units_installed.results | selectattr('changed') | list | length > 0
+
+    # ENABLED AND STARTED -- `corpus-schedule.yml`'s own shape, one unit over: the `.timer` is
+    # enabled and started, its paired `.service` is neither, because the intended way to fire one run by
+    # hand is `systemctl start` on the SAME unit the timer uses, not the timer itself -- see
+    # `files/a11y-gate-heartbeat.timer`'s own `Unit=` line, which already names which service it runs.
+    #
+    # `enabled: true, state: started` rather than a one-time `systemctl enable --now`: idempotent either
+    # way, and explicit about the state this playbook GUARANTEES rather than merely not disturbing -- a
+    # timer stopped by hand between two runs of this playbook is put back live, because "enabled" is a
+    # property of the fleet, not a one-time default nobody re-asserts.
+    - name: Enable and start the timer
+      ansible.builtin.systemd:
+        name: a11y-gate-heartbeat.timer
+        state: started
+        enabled: true
+
+    # Read back over systemd's own view, not the files just written -- `corpus-schedule.yml`'s own
+    # assertion shape: the record of correctness is "installed and enabled", never "listed with a next firing".
+    - name: Read the unit's own state back
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, a11y-gate-heartbeat.timer]
+      register: heartbeat_timer_enabled
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The timer must be installed and ENABLED (#3851)
+      ansible.builtin.assert:
+        that:
+          - "'enabled' in heartbeat_timer_enabled.stdout"
+        fail_msg: >-
+          `systemctl is-enabled a11y-gate-heartbeat.timer` on {{ inventory_hostname }} must say `enabled`
+          Got: {{ heartbeat_timer_enabled.stdout }}
+        success_msg: "a11y-gate-heartbeat.timer is installed and enabled, as #3851 requires"

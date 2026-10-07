@@ -21,7 +21,7 @@
  *
  * A THIRD sweep, tree-wide rather than scoped to `worker-fleet`, found one more:
  * `deploy-worker.mjs`'s `healthCode` -- the UTM VM deploy path's own `/health` probe, missed by both
- * earlier passes because neither was looking at that file. `fetch-wrapper-coverage.test.ts`
+ * earlier passes because neither was looking at that file (the file left with screenreader-fleet 0.4.0, #3803, so it is no longer listed below). `fetch-wrapper-coverage.test.ts`
  * (`packages/lab/src/packaging/`) is the discovery that now covers the WHOLE tree, not just this package,
  * and is what should be extended the next time a site is found -- this file stays for the per-function
  * precision the tree-wide sweep does not need (it checks presence/absence of `fetch(` inside the exact
@@ -55,7 +55,6 @@ const CONVERTED_FUNCTIONS: Record<string, string[]> = {
   "packages/worker-fleet/src/compare-workers.mjs": ["diagnostics", "vitals"],
   "packages/worker-fleet/src/check-worker-code.mjs": ["versionOf"],
   "packages/worker-fleet/src/code-drift.mjs": ["readWorkerCode"],
-  "packages/worker-fleet/src/deploy-worker.mjs": ["healthCode"],
 };
 
 function functionBody(source: string, name: string): string {
