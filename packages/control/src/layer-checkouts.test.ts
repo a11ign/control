@@ -8,14 +8,17 @@
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
 import { layersFrom } from "./layer-checkouts.mjs";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -194,4 +197,134 @@ test("workerSourceDirty reads the directory it is GIVEN, not a monorepo path", (
     assert.match(workerSourceDirty(src), /src\/a\.txt/);
   });
   assert.throws(() => (workerSourceDirty as (d?: string) => string)(), /needs the worker source directory/);
+});
+
+// ---- the control plane's move over a laid layer, and over a release that is only a tag (#4150) ---------------------------
+
+const MOVE_LAYER = "fixture-layer";
+const MOVE_PATH = "packages/fixture-layer-4150";
+const REFUSED = 4;
+const TAG = "v1.2.3";
+
+const gitIn = (cwd: string, ...args: string[]) => execFileSync("git",
+  ["-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", ...args],
+  { cwd, env: sandboxGitEnv(), encoding: "utf8" }).trim();
+
+/**
+ * A layer repository whose release commit is held by a tag ONLY: `branchTip` is on `main`, and `released` is a version commit made on
+ * a detached head, the shape `screenreader-worker` v0.4.0 has (one ahead of main, two behind). The control plane's core is a bare
+ * directory of its own, so no path in it is the real control plane's.
+ */
+function layerFixture({ annotated }: { annotated: boolean }) {
+  const root = mkdtempSync(join(tmpdir(), "layer-move-4150-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const origin = join(root, "origin");
+  mkdirSync(origin);
+  gitIn(origin, "init", "-q", "-b", "main");
+  writeFileSync(join(origin, "f"), "one\n");
+  gitIn(origin, "add", "f");
+  gitIn(origin, "commit", "-qm", "one");
+  gitIn(origin, "checkout", "-q", "--detach");
+  writeFileSync(join(origin, "f"), "release\n");
+  gitIn(origin, "commit", "-qam", "version commit");
+  const released = gitIn(origin, "rev-parse", "HEAD");
+  if (annotated) gitIn(origin, "tag", "-a", "-m", "release", TAG, released);
+  else gitIn(origin, "tag", TAG, released);
+  gitIn(origin, "checkout", "-q", "main");
+  writeFileSync(join(origin, "f"), "two\n");
+  gitIn(origin, "commit", "-qam", "two");
+  const branchTip = gitIn(origin, "rev-parse", "HEAD");
+  const core = join(root, "core");
+  mkdirSync(join(core, MOVE_PATH), { recursive: true });
+  const manifest = { layers: { [MOVE_LAYER]: { path: MOVE_PATH, remote: origin } } };
+  const move = layersFrom({ manifest, root: core }).layerCheckoutMove;
+  return { origin, core, layerDir: join(core, MOVE_PATH), released, branchTip, move };
+}
+
+/** A laid tree as `scripts/lay-layer.mjs` leaves it: `src/` and `.layer-ref`, and no `.git`. */
+function lay(layerDir: string, ref: string) {
+  mkdirSync(join(layerDir, "src"), { recursive: true });
+  writeFileSync(join(layerDir, ".layer-ref"), `${ref}\n`);
+}
+
+/** The control plane's shell run against a stand-in checkout: the absolute path it names is swapped for the fixture's. */
+function runMove(command: string, core: string) {
+  const local = command.replaceAll(CONTROL_PLANE_CHECKOUT_PATH, core);
+  assert.ok(!local.includes(CONTROL_PLANE_CHECKOUT_PATH), "the swap left the real control-plane path in the command");
+  return spawnSync("bash", ["-c", `true${local}`], { env: { ...sandboxGitEnv(), PATH: process.env.PATH }, encoding: "utf8" });
+}
+
+for (const annotated of [false, true]) {
+  test(`a LAID layer whose .layer-ref tag resolves to the pin is accepted, and does not exit ${REFUSED} (${annotated ? "annotated" : "lightweight"} tag)`, () => {
+    const { core, layerDir, released, move } = layerFixture({ annotated });
+    lay(layerDir, TAG);
+    const run = runMove(move({ [MOVE_LAYER]: released }), core);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(existsSync(join(layerDir, ".git")), false, "a laid tree is judged and never turned into a clone");
+  });
+}
+
+test("a LAID layer whose tag resolves to another commit REFUSES, naming the layer, the .layer-ref and the pin", () => {
+  const { core, layerDir, branchTip, released, move } = layerFixture({ annotated: false });
+  lay(layerDir, TAG);
+  const run = runMove(move({ [MOVE_LAYER]: branchTip }), core);
+  assert.equal(run.status, REFUSED, run.stderr);
+  assert.match(run.stderr, new RegExp(`layer ${MOVE_LAYER} is laid at \\S+${MOVE_PATH}`));
+  assert.match(run.stderr, new RegExp(`\\.layer-ref names the tag ${TAG}, which is ${released}`));
+  assert.match(run.stderr, new RegExp(`the pin is ${branchTip}`));
+});
+
+test("a LAID layer whose tag the remote does not have, or whose .layer-ref holds no tag, REFUSES", () => {
+  const { core, layerDir, released, move } = layerFixture({ annotated: false });
+  lay(layerDir, "v9.9.9");
+  const absent = runMove(move({ [MOVE_LAYER]: released }), core);
+  assert.equal(absent.status, REFUSED, absent.stderr);
+  assert.match(absent.stderr, /which is not on /);
+  lay(layerDir, "../escape");
+  const notATag = runMove(move({ [MOVE_LAYER]: released }), core);
+  assert.equal(notATag.status, REFUSED, notATag.stderr);
+  assert.match(notATag.stderr, /does not hold a tag/);
+});
+
+test("POSITIVE CONTROL: a layer path with neither a .git nor a .layer-ref beside src/ still REFUSES, however the pin reads", () => {
+  const { core, layerDir, released, move } = layerFixture({ annotated: false });
+  const refusesIn = (why: string) => {
+    const run = runMove(move({ [MOVE_LAYER]: released }), core);
+    assert.equal(run.status, REFUSED, `${why}: ${run.stderr}`);
+    assert.match(run.stderr, new RegExp(`layer ${MOVE_LAYER} is declared at ${MOVE_PATH}`));
+    assert.match(run.stderr, /does not stand in for it/);
+  };
+  refusesIn("an empty directory");
+  mkdirSync(join(layerDir, "src"));
+  refusesIn("the core's own src/ and no .layer-ref");
+  rmSync(join(layerDir, "src"), { recursive: true });
+  writeFileSync(join(layerDir, ".layer-ref"), `${TAG}\n`);
+  refusesIn("a .layer-ref and no src/");
+});
+
+test("a CLONED layer is moved to a release whose commit is only a tag, because the move fetches tags", () => {
+  const { core, layerDir, origin, released, branchTip, move } = layerFixture({ annotated: true });
+  rmSync(layerDir, { recursive: true });
+  gitIn(core, "clone", "-q", "--branch", "main", origin, layerDir);
+  assert.equal(gitIn(layerDir, "rev-parse", "HEAD"), branchTip);
+  // `clone` fetches every tag; a clone made BEFORE the release was tagged is what the control plane's `nvda-worker` was (it sat at 629ff79).
+  gitIn(layerDir, "tag", "-d", TAG);
+  gitIn(layerDir, "gc", "-q", "--prune=now");
+  assert.throws(() => gitIn(layerDir, "cat-file", "-e", `${released}^{commit}`), "the clone starts without the release commit");
+  const command = move({ [MOVE_LAYER]: released });
+  assert.match(command, /git fetch --quiet --tags origin/);
+  const run = runMove(command, core);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(gitIn(layerDir, "rev-parse", "HEAD"), released);
+});
+
+test("the move's refusal no longer points at a script that does not exist", () => {
+  const { move } = layerFixture({ annotated: false });
+  assert.doesNotMatch(move({ [MOVE_LAYER]: "a".repeat(40) }), /bootstrap-control-plane\.sh/);
+});
+
+test("a remote that could close the quotes it is placed in is refused before any command is built", () => {
+  const manifest = { layers: { [MOVE_LAYER]: { path: MOVE_PATH, remote: "https://example.test/x.git' ; rm -rf / ; '" } } };
+  const { layerCheckoutMove } = layersFrom({ manifest, root: tmpdir() });
+  assert.throws(() => layerCheckoutMove({ [MOVE_LAYER]: "a".repeat(40) }), /not a plain https URL or path/);
 });

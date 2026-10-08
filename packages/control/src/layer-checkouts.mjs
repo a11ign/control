@@ -30,8 +30,11 @@
  * declares a `remote`, every one of them is a no-op, which is the state today.
  *
  * A HOST THAT HAS INSTALLED HOLDS A SEPARATE LAYER LAID, NOT CLONED (#3819): `scripts/lay-layer.mjs` replaces the clone with `src/`
- * and `.layer-ref`. The lab's and the guests' tasks accept that shape; `layerCheckoutMove` does not need to, because the control
- * plane's checkout never installs (ADR 0012), so nothing lays there and a missing `.git` still means a missing checkout.
+ * and `.layer-ref`. The lab's and the guests' tasks accept that shape, and so does `layerCheckoutMove` (#4150): the control plane's
+ * checkout DOES install now (it holds `packages/worker-fleet` laid), and the comment that said it never would stopped the first
+ * `fleet:deploy --layer-ref` at the pre-flight, before the playbook. A laid layer has no history to move, so it is not moved: it is
+ * ACCEPTED when the commit its `.layer-ref` tag names on the layer's remote is the pin, and refused, naming both, when it is not.
+ * A directory with neither a `.git` nor a `.layer-ref` beside `src/` is the core's own tree at that path and still refuses.
  *
  * `worker-fleet` does NOT use this: it is published and `control` never is
  * (`worker-fleet-does-not-read-control.test.ts`), so its readers ask the worker package by name instead.
@@ -238,13 +241,64 @@ function checkoutMoveFor(manifest, pins) {
     if (!LAYER_REF.test(layer.path) || layer.path.includes("..")) {
       throw new Error(`layer "${name}" is declared at "${layer.path}", which is not a plain relative path`);
     }
-    // `cd` names the checkout's own export, which is the form `control-plane-checkout-is-one-fact.test.ts` reads.
-    const where = `${CONTROL_PLANE_CHECKOUT_PATH}/${layer.path}`;
-    return ` && ( [ -d ${where}/.git ] || { echo "REFUSING: layer ${name} is declared at ${layer.path} and ${where} `
-      + "is not a git checkout; the core's tree does not stand in for it. Run bootstrap-control-plane.sh.\" >&2; exit 4; } ) "
-      + `&& ( cd ${CONTROL_PLANE_CHECKOUT_PATH}/${layer.path} && git fetch --quiet origin && git checkout --quiet --detach ${sha} `
-      + `&& test "$(git rev-parse HEAD)" = ${sha} )`;
+    if (!REMOTE_URL.test(layer.remote)) throw new Error(`layer "${name}" declares the remote "${layer.remote}", which is not a plain https URL or path`);
+    return layerMoveShell({ name, sha, path: layer.path, remote: layer.remote });
   }).join("");
+}
+
+/**
+ * What a layer's `remote` may look like once it is inside the single quotes of `git ls-remote`: no quote, space, `$` or backtick, and
+ * not an option. `layers.json` declares an https URL; a path is let through so a test can stand a local repository in for it.
+ */
+const REMOTE_URL = /^[A-Za-z0-9/][A-Za-z0-9._:/@-]*$/;
+
+/**
+ * One layer's move, for whichever shape it is held in: a clone is fetched (tags too) and put on the pin, a laid tree is judged against
+ * it, anything else refuses. The three are one `if` so exactly one of them speaks.
+ *
+ * @param {{ name: string, sha: string, path: string, remote: string }} layer
+ * @returns {string}
+ */
+function layerMoveShell({ name, sha, path, remote }) {
+  const where = `${CONTROL_PLANE_CHECKOUT_PATH}/${path}`;
+  const refusal = `echo "REFUSING: layer ${name} is declared at ${path} and ${where} is neither a git checkout nor a laid tree `
+    + "(.layer-ref beside src/); the core's tree does not stand in for it.\" >&2; exit 4";
+  return ` && ( if [ -d ${where}/.git ]; then ${clonedMove({ path, sha })}; `
+    + `elif [ -f ${where}/.layer-ref ] && [ -d ${where}/src ]; then ${laidJudgement({ name, sha, where, remote })}; `
+    + `else ${refusal}; fi ) `;
+}
+
+/**
+ * A clone is moved to the pin. TAGS ARE FETCHED, because a release's commit can be only a tag: `screenreader-worker` v0.4.0 is a version
+ * commit that no branch holds, and `git fetch origin` (heads only) left `git checkout` to die with "reference is not a tree" (#4150).
+ *
+ * @param {{ path: string, sha: string }} clone
+ * @returns {string}
+ */
+function clonedMove({ path, sha }) {
+  // `cd` names the checkout's own export, which is the form `control-plane-checkout-is-one-fact.test.ts` reads.
+  return `cd ${CONTROL_PLANE_CHECKOUT_PATH}/${path} && git fetch --quiet --tags origin && git checkout --quiet --detach ${sha} `
+    + `&& test "$(git rev-parse HEAD)" = ${sha}`;
+}
+
+/**
+ * A laid tree has no `.git`, so the commit it holds is the one its `.layer-ref` tag names on the layer's remote (the LAST `ls-remote` line, which
+ * peels an annotated tag to its commit; `tasks/lab-layer-checkouts.yml` reads it the same way). It is accepted when that is the pin and refused
+ * when it is not, naming the layer, the `.layer-ref` and the pin. The tag is held to the lab's pattern before it is asked for.
+ *
+ * @param {{ name: string, sha: string, where: string, remote: string }} laid
+ * @returns {string}
+ */
+function laidJudgement({ name, sha, where, remote }) {
+  const refuse = (/** @type {string} */ text) => `{ echo "REFUSING: layer ${name} ${text}" >&2; exit 4; }`;
+  return `tag=$(cat ${where}/.layer-ref); `
+    + `{ printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,99}$' && case "$tag" in *..*) false;; esac; } `
+    + `|| ${refuse(`is laid at ${where} and its .layer-ref does not hold a tag: $tag`)}; `
+    + `refs=$(git ls-remote --tags '${remote}' "refs/tags/$tag" "refs/tags/$tag^{}") `
+    + `|| ${refuse(`is laid at ${where} and git ls-remote of ${remote} failed`)}; `
+    + `have=$(printf '%s\\n' "$refs" | tail -n 1 | cut -f 1); `
+    + `[ "$have" = ${sha} ] || ${refuse(`is laid at ${where}: its .layer-ref names the tag $tag, which is `
+      + `\${have:-not on ${remote}}, and the pin is ${sha}. Pin the commit that tag names, or lay the layer at the pin's tag.`)}`;
 }
 
 /** @param {string} refusal @returns {{ pins: Record<string, string>, refusal: string }} */
