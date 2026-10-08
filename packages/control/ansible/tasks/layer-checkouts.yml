@@ -69,7 +69,7 @@
   ansible.builtin.set_fact:
     a11y_layer_clones: "{{ a11y_layer_checkouts | rejectattr('key', 'in', layer_present.results | selectattr('stdout', 'search', 'laid') | map(attribute='item.key') | list) | list }}"
 
-- name: Fetch, check out and fast-forward each layer to its pinned commit
+- name: Fetch (tags too) and check out each layer, detached, at its pinned commit
   # Over the CLONES: a laid tree has no history to move. NOTHING HERE CHECKS A LAID TREE AGAINST ITS PIN, and
   # on purpose: the install that follows (`deploy.yml`) re-lays it at the tag the core's lockfile pins, so what is
   # laid now is not what will run, and judging it would refuse a lockfile bump by the install that applies it. The
@@ -78,14 +78,20 @@
   # PowerShell's `$ErrorActionPreference` does not cover native executables (`deploy.yml` records the five
   # boxes that reported `changed` while sitting on the wrong commit); a modified tracked file is dirt on an
   # appliance and is reported before it is discarded.
+  #
+  # A CHECKOUT, NOT A MERGE (#4158), the move the core's and the lab's tasks make: `--detach <pin>`. A release
+  # commit can be only a TAG (`v0.4.0` of the worker and the fleet's `0.5.1` are children of an older `main`
+  # commit and are on no branch), and `checkout main` then `merge --ff-only <pin>` refuses it as "not something we
+  # can merge" -- while the control plane's own check (#4150) refuses the branch tip in its place, so no pin passed
+  # both. `--tags` is what makes such a commit one this clone HAS; nothing here requires the pin to descend from a
+  # branch. The HEAD assertion below is the check that the move happened.
   ansible.windows.win_shell: |
     $ErrorActionPreference = "Stop"
     function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
-    Run "fetch" fetch --quiet origin
+    Run "fetch" fetch --quiet --tags origin
     $dirty = git -c core.hooksPath=a11y-no-hooks status --porcelain --untracked-files=no
     if ($dirty) { Write-Output "discarding local modifications on this guest:"; Write-Output $dirty; Run "checkout" checkout -- . }
-    Run "checkout" -c advice.detachedHead=false checkout --quiet {{ item.value.branch | default('main') }}
-    Run "merge" merge --ff-only --quiet {{ a11y_layer_commits[item.key] }}
+    Run "checkout" -c advice.detachedHead=false checkout --quiet --detach {{ a11y_layer_commits[item.key] }}
     git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
   args:
     chdir: "{{ a11y_repo_path }}/{{ item.value.path }}"
@@ -101,8 +107,8 @@
     that: item.stdout_lines | last | trim == a11y_layer_commits[item.item.key]
     fail_msg: >-
       {{ inventory_hostname }}: layer {{ item.item.key }} is on {{ item.stdout_lines | last | trim }}, not
-      {{ a11y_layer_commits[item.item.key] }}. The fetch reported success, so this is the checkout or the
-      fast-forward being refused -- `git -C {{ a11y_repo_path }}/{{ item.item.value.path }} status` on the
+      {{ a11y_layer_commits[item.item.key] }}. The fetch reported success, so this is the checkout being
+      refused -- `git -C {{ a11y_repo_path }}/{{ item.item.value.path }} status` on the
       box says which.
   loop: "{{ layer_heads.results }}"
   loop_control:

@@ -116,12 +116,21 @@ test("the expected commit is a pair, and each half is asserted on its own", () =
 
   const layers = codeText(read("tasks/layer-checkouts.yml"));
   assert.match(layers, /item\.stdout_lines \| last \| trim == a11y_layer_commits\[item\.item\.key\]/, "the layer half");
-  assert.match(layers, /merge --ff-only --quiet \{\{ a11y_layer_commits\[item\.key\] \}\}/, "merged to ITS pin");
+  assert.match(layers, /checkout --quiet --detach \{\{ a11y_layer_commits\[item\.key\] \}\}/, "checked out, detached, at ITS pin");
   // No default: a guessed layer commit is a wrong answer about a repository nobody named. The core's own
   // `default('origin/...')` belongs to the core's line alone.
   assert.doesNotMatch(layers, /a11y_expected_commit|a11y_git_ref|origin\//, "the core's pin must not stand in for the layer's");
   assert.match(layers, /a11y_layer_commits \| default\(\{\}\)\)\[item\.key\] is match\('\^\[0-9a-f\]\{40\}\$'\)/,
     "an unpinned or abbreviated layer is refused before any box is touched");
+});
+
+test("a pin that is only a tag is a legal pin: the layer's move fetches tags and requires no branch", () => {
+  const move = codeText(read("tasks/layer-checkouts.yml")).split(/\n- name:/).find((task) => /--detach/.test(task));
+  assert.ok(move, "the task that moves a layer's clone is found (positive control for the assertions below)");
+  assert.match(move, /fetch --quiet --tags origin/, "a release commit no branch holds is a commit the clone has");
+  assert.doesNotMatch(move, /merge|checkout --quiet main|item\.value\.branch/, "nothing requires the pin to descend from a branch");
+  // The mutation this guards: a release shaped like v0.4.0, one commit off an older main, must not be refused.
+  assert.doesNotMatch(move, /--ff-only|merge-base|is-ancestor/);
 });
 
 test("the plays that rewrite origin take the layer's remote by name and never rewrite the core's by accident", () => {
