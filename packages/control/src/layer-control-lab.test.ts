@@ -629,7 +629,7 @@ test("the lab's post-install read sits AFTER the install and BEFORE the build, g
 
 test("the guest's git moves loop over the clones only, and the clones are the layers its script did not report `laid`", () => {
   const code = codeText(read("packages/control/ansible/tasks/layer-checkouts.yml"));
-  const moves = code.split("\n- name:").find((chunk) => chunk.includes("Fetch, check out and fast-forward"))!;
+  const moves = code.split("\n- name:").find((chunk) => chunk.includes("check out each layer, detached, at its pinned commit"))!;
   assert.match(moves, /loop: "\{\{ a11y_layer_clones \}\}"/, "a laid tree has no history: git on it fails, in the CORE's repository if it walks up");
   assert.match(code, /a11y_layer_clones: .*rejectattr\('key', 'in', layer_present\.results \| selectattr\('stdout', 'search', 'laid'\)/);
 });
