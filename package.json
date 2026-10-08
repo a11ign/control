@@ -1,19 +1,30 @@
 {
-  "name": "control-workspace",
+  "name": "@a11ign/control",
   "version": "0.1.8",
   "private": true,
+  "description": "The control plane: the machine that holds the fleet SSH key and dispatches work to it and to the lab. Deliberately dependency-free -- see ADR 0012.",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "engines": {
     "node": ">=22"
   },
+  "exports": {
+    "./fleet-playbook": "./src/fleet-playbook.mjs",
+    "./lab-pipeline": "./src/lab-pipeline.mjs",
+    "./fleet-wake": "./src/fleet-wake.mjs",
+    "./layer-checkouts": "./src/layer-checkouts.mjs"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "rstest run --config scripts/rstest/rstest.config.mjs",
+    "layout-check": "layout-check",
     "changeset": "changeset"
   },
+  "//": "NO `dependencies` KEY HAS ANY ENTRY, AND THAT IS THE POINT. ADR 0012 keeps the credential that can reconfigure twelve auto-logging-in Windows boxes away from npm's transitive surface, and this package is the code that runs on the machine holding it. `scripts/package-manifest.test.ts` asserts the emptiness rather than trusting this comment: the ADR made the same claim in prose and was violated on BOTH machines it described, for as long as nobody looked. The `devDependencies` are the repository's own tooling (the shared rstest config, the layout check, changesets, the typechecker): the control plane runs from a raw checkout and never installs them, and the same test names them, so a sixth is a reviewed change.",
+  "dependencies": {},
   "devDependencies": {
-    "@a11ign/toolchain": "^0.1.4",
+    "@a11ign/toolchain": "^0.1.5",
     "@changesets/cli": "3.0.3",
     "@rstest/core": "^0.12.3",
     "@types/node": "^26.6.4",

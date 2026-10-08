@@ -18,13 +18,24 @@ test("the core is laid at a full commit sha, never a branch", () => {
   assert.match(ci, /ref: "\$\{\{ env\.CORE_REF \}\}"/, "the checkout uses the pin");
 });
 
-test("this repository's package replaces the core's own before anything runs", () => {
+test("this repository's package replaces the core's own before anything runs, as the files the core knows it by", () => {
   const lay = ci.indexOf("rm -rf core/packages/control");
   assert.ok(lay > 0, "positive control: the laying step is found");
   assert.ok(lay < ci.indexOf("pnpm install --frozen-lockfile"), "laid before the install");
   assert.ok(lay < ci.indexOf("pnpm exec rstest run"), "laid before the tests");
   assert.match(ci, /pnpm exec eslint packages\/control/);
   assert.match(ci, /tsc --noEmit -p tsconfig\.control\.json/);
+  assert.match(ci, /cp -R control\/src control\/ansible control\/layers\.json control\/CLAUDE\.md control\/README\.md core\/packages\/control\//, "the package is the root's files, not a directory of it");
+  assert.match(ci, /control\/package\.json > core\/packages\/control\/package\.json/, "the laid manifest is cut from the root's");
+  assert.match(ci, /> core\/tsconfig\.control\.json/, "the laid typecheck config is written, not tracked: this repository holds one tsconfig");
+  assert.doesNotMatch(ci, /control\/packages\/control/, "nothing reads a `packages/control` of THIS repository");
+});
+
+test("the layout check is a step of the job `gate` waits for (ADR 0043, Decision 7; a11ign/a11ign#4217)", () => {
+  assert.equal(JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts["layout-check"], "layout-check", "positive control: the script is found");
+  const step = ci.indexOf("run: pnpm run layout-check");
+  assert.ok(step > ci.indexOf("  checks:"), "in the `checks` job");
+  assert.ok(step < ci.indexOf("run: pnpm test"), "before the tests, so a layout failure reads red without waiting for them");
 });
 
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
@@ -57,7 +68,7 @@ test("the changeset check is the shared workflow at a full sha, with this reposi
   const call = /^ {2}changeset:\n([\s\S]*?)\n\n/m.exec(ci)?.[1];
   assert.ok(call, "positive control: the changeset job is found");
   assert.match(call, /uses: a11ign\/toolchain\/\.github\/workflows\/changeset-required\.yml@[0-9a-f]{40}$/m);
-  assert.match(call, /releasable-paths: packages\/control\/$/m, "the dora entry's releasablePaths, character for character");
+  assert.match(call, /releasable-paths: src\/ ansible\/ layers\.json$/m, "this repository's releasable paths; the core's dora entry follows in the row after a11ign/a11ign#4217");
   assert.match(call, /pull-requests: read/, "without it the whole run is a startup_failure");
   assert.match(ci, /^ {4}types: \[opened, synchronize, reopened, edited\]$/m, "`edited`: the no-release line is added by editing the body");
 });

@@ -1,6 +1,6 @@
 {
-  // This repository's OWN program: its scripts and nothing else, `noEmit`. `packages/control` is type-checked by `tsconfig.control.json`, which `ci.yml` lays into a checkout of the core and
-  // which extends the CORE's tsconfig.json from there, so it does not type-check on its own: the package reaches siblings that are not in this repository.
+  // This repository's OWN program: its scripts and nothing else, `noEmit`. `src/` is type-checked in `ci.yml`, which lays it into a checkout of the core as `packages/control` with a
+  // `tsconfig.control.json` extending the CORE's tsconfig.json from there, so it does not type-check on its own: the package reaches siblings that are not in this repository.
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",

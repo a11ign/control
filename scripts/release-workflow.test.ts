@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { codeOf, workflowCode } from "./workflow-code.ts";
 
 const release = workflowCode("release.yml");
@@ -23,20 +23,21 @@ test("the check it waits for is the job ci.yml names `gate`, which the ruleset r
   assert.match(workflowCode("ci.yml"), /^ {2}gate:$/m);
 });
 
-test("the version and the changelog are the ROOT's, because `kind: tag` tags only the private package at the root", () => {
-  const root = JSON.parse(read("package.json")) as { version?: string; private?: boolean; description?: string };
-  const control = JSON.parse(read("packages/control/package.json")) as { version?: string };
+test("the version and the changelog are the ROOT's, which is the package itself: `kind: tag` tags the private package at the root", () => {
+  const root = JSON.parse(read("package.json")) as { name?: string; version?: string; private?: boolean; description?: string };
   assert.match(root.version ?? "", /^\d+\.\d+\.\d+$/, "positive control: the root declares a version");
   assert.equal(root.private, true);
-  assert.equal(control.version, undefined, "packages/control declares none: a second version is one the release never reads");
+  assert.equal(root.name, "@a11ign/control", "the root manifest is the package, not a `-workspace` shell over one (a11ign/a11ign#4217)");
   assert.match(read("CHANGELOG.md"), new RegExp(`^## ${(root.version ?? "").replaceAll(".", "\\.")}$`, "m"), "the root changelog holds an entry for the version it declares");
   // The release commit's `JSON.stringify` rewrite would turn an escape in the root manifest into the character, so the tag's tree would differ from its source (v0.1.1).
   assert.doesNotMatch(read("package.json"), /\\u[0-9a-f]{4}|[^\x00-\x7f]/i, "the root manifest is ASCII");
 });
 
-test("the root is a workspace project, or changesets refuses a changeset naming it (`not in the workspace`, measured on #3960)", () => {
-  assert.match(read("pnpm-workspace.yaml"), /^ {2}- "packages\/\*"$/m, "positive control: the workspace globs are found");
-  assert.match(read("pnpm-workspace.yaml"), /^ {2}- "\."$/m);
+test("a changeset names the root package, and none still names the shell it replaced (changesets refuses a name that is `not in the workspace`, measured on #3960)", () => {
+  const named = readdirSync(new URL("../.changeset/", import.meta.url)).filter((f) => f.endsWith(".md") && f !== "README.md")
+    .map((f) => ({ f, name: /^"([^"]+)": (?:patch|minor|major)$/m.exec(read(`.changeset/${f}`))?.[1] }));
+  assert.ok(named.length > 0, "positive control: there are changesets to read");
+  assert.deepEqual(named.filter(({ name }) => name !== "@a11ign/control"), [], "every changeset names @a11ign/control");
 });
 
 test("codeOf drops a comment that mentions the trigger", () => {
