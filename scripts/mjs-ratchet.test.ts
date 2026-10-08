@@ -2,7 +2,7 @@
  * THIS REPOSITORY COUNTS ITS `.js`/`.mjs`/`.cjs` SOURCE AGAINST A COMMITTED BASELINE (a11ign/a11ign#4265; the check is `@a11ign/toolchain/mjs-ratchet`, ADR 0043,
  * a11ign/a11ign#4243). The standard is TypeScript source, and the count may only go down: a new `.mjs` fails and is named.
  *
- * It is a test, not a workflow step, so `pnpm test` and the merge gate already run it and no workflow file is touched. The baseline is found by walking up from THIS
+ * It is a test, not a workflow step, and it lives in `scripts/` (this repository's own `include`, and its own `tsconfig.json`), so `pnpm test` and the merge gate run it against THIS repository's `@a11ign/toolchain` pin and no workflow file is touched. Under `packages/control/` it would resolve the core's pin at `CORE_REF` in CI (0.1.3, no `./mjs-ratchet`). The baseline is found by walking up from THIS
  * FILE to `mjs-ratchet.baseline.json`, so moving the test (the layout flatten, a11ign/a11ign#4217) edits nothing.
  *
  * The controls build small trees in a temp directory, with no `.git`, which the function reads by walking the directory: a copy of the real baseline with one name
