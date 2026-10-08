@@ -1,4 +1,4 @@
-# control-workspace
+# @a11ign/control
 
 ## 0.1.8
 

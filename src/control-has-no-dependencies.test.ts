@@ -32,12 +32,12 @@ const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const modules = () => readdirSync(HERE).filter((f) => f.endsWith(".mjs"));
 
 test("NO THIRD-PARTY DEPENDENCIES ARE DECLARED — the whole reason this package is separate", () => {
-  for (const field of ["dependencies", "devDependencies"] as const) {
-    assert.deepEqual(PKG[field] ?? {}, {},
-      `packages/control declares ${field}. Installing one puts npm's transitive surface beside the key `
-      + "that reconfigures twelve auto-logging-in Windows boxes — which is exactly what ADR 0012 forbids "
-      + "and exactly what was found on that machine.");
-  }
+  // `../package.json` is the manifest CI LAYS at `packages/control` (`ci.yml` cuts it from the repository root's, keeping `dependencies` verbatim and dropping `devDependencies`, which the core's frozen
+  // lockfile cannot hold). So the `devDependencies` half of this guard cannot run here and runs in `scripts/package-manifest.test.ts` against the real root manifest (a11ign/a11ign#4217).
+  assert.deepEqual(PKG.dependencies ?? {}, {},
+    "packages/control declares dependencies. Installing one puts npm's transitive surface beside the key "
+    + "that reconfigures twelve auto-logging-in Windows boxes — which is exactly what ADR 0012 forbids "
+    + "and exactly what was found on that machine.");
 });
 
 test("NOTHING IS IMPORTED BY PACKAGE NAME, TRANSITIVELY — one hop is not a boundary", () => {

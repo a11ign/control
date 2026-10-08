@@ -7,10 +7,11 @@ name: release
 # control is published to NO registry: it is the code that runs on the machine holding the fleet's SSH key and has no dependency (ADR 0012), so there is nothing to install it from but a
 # checkout. What a consumer pins is a TAG of this repository, `v<version>`, and `kind: tag` is the shared workflow's name for "a tag and a GitHub Release, and no registry".
 #
-# THE VERSION AND THE CHANGELOG ARE THE ROOT'S (`package.json`, `CHANGELOG.md`), NOT `packages/control`'s. `kind: tag` tags only the private package AT THE ROOT, as `v<version>`
-# (`releasable` in `release-per-merge.mjs`); a private package below it is never tagged, so with the version in `packages/control` the first call released nothing (`released=false`,
-# measured on #3960). A changeset therefore names `control-workspace`. `main`'s own version and changelog lag the last tag, by design: the shared workflow rebases the root on the last
-# tag, so the numbering runs on from `v0.1.8`.
+# THE ROOT IS THE PACKAGE (a11ign/a11ign#4217), SO THE VERSION AND THE CHANGELOG ARE ITS OWN (`package.json`, `CHANGELOG.md`) AND A CHANGESET NAMES `@a11ign/control`. Until then the root was a private
+# `control-workspace` shell over a package in `packages/control`, and this comment said why the version lived in the shell: `kind: tag` tags only the private package AT THE ROOT, as `v<version>`
+# (`releasable` in `release-per-merge.mjs`), and a private package below it is never tagged, so with the version in `packages/control` the first call released nothing (`released=false`, measured on
+# #3960). That special case is gone with the directory; nothing in this file's logic depended on it. `main`'s own version and changelog lag the last tag, by design: the shared workflow rebases the
+# root on the last tag, so the numbering runs on from `v0.1.8`.
 #
 # `id-token: write` IS HERE BECAUSE GITHUB CHECKS A CALLED WORKFLOW'S PERMISSIONS BEFORE ANY JOB RUNS: the shared file's `publish` job asks for it, and a caller that does not grant it is
 # refused as a whole. `kind: tag` SKIPS `publish` (its `if:` needs `kind == 'npm'`), so no job here ever holds a token, and `release-workflow.test.ts` pins `kind: tag`, which is what

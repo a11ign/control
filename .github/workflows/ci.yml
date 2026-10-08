@@ -3,8 +3,13 @@
 # a11ign/a11ign names it). `merge_group` is what lets the queue's temporary branches run it: a required check that never runs on one blocks the queue for ever.
 #
 # THIS REPOSITORY IS NOT SELF-CONTAINED, AND CI SAYS SO BY CONSTRUCTION (a11ign/a11ign#2704). `control` has no dependency of any kind (ADR 0012), so it reaches the code beside it by
-# relative path: the fleet's `packages/worker-fleet` (22 imports), the lab's `packages/lab`, and the core's `scripts/` and `guards`. The job therefore LAYS `packages/control` OVER a
+# relative path: the fleet's `packages/worker-fleet` (22 imports), the lab's `packages/lab`, and the core's `scripts/` and `guards`. The job therefore LAYS this package OVER a
 # checkout of a11ign/a11ign at the commit pinned in `CORE_REF`, and runs the core's own eslint, tsc and rstest config over it: the one toolchain, not a copy of it.
+#
+# THE PACKAGE IS THIS REPOSITORY'S ROOT (a11ign/a11ign#4217), AND THE CORE STILL KNOWS IT AS `packages/control`. Every `packages/control/...` the code and the tests name is that LAID path, in the
+# core's checkout and on the control plane (`/root/a11y-witness/packages/control/...`), and it does not move when this repository's layout does. What the lay step below decides is which of the
+# root's files make up the package there: `src/`, `ansible/`, `layers.json`, `CLAUDE.md` and `README.md`, with a `package.json` cut down to what the core's `pnpm install --frozen-lockfile` can
+# hold (its lockfile has `packages/control` with no dependencies, so the root's `devDependencies` must not arrive). The same list is the next row's, where the core lays the package on a host.
 # `packages/worker-fleet` is the one the pinned core carries. Laying screenreader-fleet's own repository over it was tried and does not work: its manifest pins `@a11ign/judge` and
 # `@a11ign/evidence` at 0.1.0, so the core's `pnpm install --frozen-lockfile` refuses ("2 dependencies are mismatched"), and its `dist` is not built.
 #
@@ -28,12 +33,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # a11ign/a11ign at the commit `packages/control` was last synced from (2026-10-07, v0.1.3). The pin before it (eae7806ca) still carried packages/worker-fleet and packages/lab as tracked trees, so the synced tests (doctor, worker-code-check) read exports of a fleet layer the core now LAYS at install (`scripts/lay-layer.mjs`). A sha and never a branch: a branch moves under a pull request that did not touch it.
+  # a11ign/a11ign at the commit the package was last synced from (2026-10-07, v0.1.3). The pin before it (eae7806ca) still carried packages/worker-fleet and packages/lab as tracked trees, so the synced tests (doctor, worker-code-check) read exports of a fleet layer the core now LAYS at install (`scripts/lay-layer.mjs`). A sha and never a branch: a branch moves under a pull request that did not touch it.
   CORE_REF: 50adf137b0aadc20c8f4b2ae48d4b5557e657bc3
 
 jobs:
   # A releasable change needs a changeset or a `no-release:` line (a11ign/a11ign#4127, adopted by #4135). `releasable-paths` is this repository's `dora` entry's `releasablePaths`
-  # in a11ign/a11ign `.agent-org/project.json`, character for character: a path that matches nothing passes every pull request. The pin is a full sha, as `release.yml`'s is, and
+  # in a11ign/a11ign `.agent-org/project.json`, character for character: a path that matches nothing passes every pull request. THE CORE'S ENTRY STILL READS `packages/control/` UNTIL ITS OWN
+  # ROW LANDS (the one after a11ign/a11ign#4217), and the two are not equal until then. The pin is a full sha, as `release.yml`'s is, and
   # Dependabot's `github-actions` entry moves it. On a merge-group entry the called job succeeds without evaluating (the pull request's own run decided).
   changeset:
     # A called workflow cannot hold more than its caller gives, and this file's `contents: read` alone makes GitHub refuse the whole run at startup (`startup_failure`: no job, no
@@ -43,7 +49,7 @@ jobs:
       pull-requests: read
     uses: a11ign/toolchain/.github/workflows/changeset-required.yml@745b552ed550f44cc15c9d797718d350730540ce
     with:
-      releasable-paths: packages/control/
+      releasable-paths: src/ ansible/ layers.json
 
   checks:
     runs-on: ubuntu-latest
@@ -52,11 +58,15 @@ jobs:
         with: { path: control }
       - uses: actions/checkout@v7
         with: { repository: a11ign/a11ign, ref: "${{ env.CORE_REF }}", path: core }
+      # The package is the root here and `packages/control` there. `jq` keeps what the core's workspace resolves by (`name`, `exports`) and what the dependency-free test reads (`dependencies`), and drops
+      # what only this repository's own tooling uses. `tsconfig.control.json` is written rather than tracked: this repository holds ONE tsconfig, and this one means nothing outside the lay.
       - name: Lay this repository's package over the core's own
         run: |
           rm -rf core/packages/control
-          cp -R control/packages/control core/packages/control
-          cp control/tsconfig.control.json core/tsconfig.control.json
+          mkdir core/packages/control
+          cp -R control/src control/ansible control/layers.json control/CLAUDE.md control/README.md core/packages/control/
+          jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
+          printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"] }\n' > core/tsconfig.control.json
       # pnpm/action-setup reads the version out of `packageManager`, and comes before setup-node because `cache: pnpm` shells out to it.
       - uses: pnpm/action-setup@v6
         with: { package_json_file: core/package.json }
@@ -71,10 +81,14 @@ jobs:
         working-directory: core
       - run: pnpm exec rstest run --config scripts/rstest/rstest.config.mjs --include "packages/control/**/*.test.ts"
         working-directory: core
-      # This repository's own checks: the workflows, the arming filter, the composition above. The typecheck (`tsc --noEmit`, `package.json`'s `typecheck`) is a step of the `gate` job
+      # This repository's own checks: the workflows, the arming filter, the composition above, the manifest. The typecheck (`tsc --noEmit`, `package.json`'s `typecheck`) is a step of the `gate` job
       # the ruleset requires, so a type error here blocks the merge; it runs before the tests so it reads red without waiting for them. The tests are rstest on `@a11ign/toolchain`'s config
       # (`scripts/rstest/rstest.config.mjs`, ADR 0043), the same runner the core's step above uses.
       - run: pnpm install --frozen-lockfile
+        working-directory: control
+      # THE LAYOUT CHECK (ADR 0043, Decision 7; `@a11ign/toolchain`'s `layout-check`, a11ign/a11ign#4210): the package is at the root, with one README, one manifest and no workspace file. It
+      # is a step of the job `gate` waits for, so a monorepo layout that comes back by habit blocks the merge. It reads the files, so it runs beside the typecheck and before the tests.
+      - run: pnpm run layout-check
         working-directory: control
       - run: pnpm run typecheck
         working-directory: control
