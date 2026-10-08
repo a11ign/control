@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@a11ign/toolchain':
-        specifier: ^0.1.3
-        version: 0.1.3(@rstest/core@0.12.3)
+        specifier: ^0.1.4
+        version: 0.1.4(@rstest/core@0.12.3)
       '@changesets/cli':
         specifier: 3.0.3
         version: 3.0.3
@@ -28,8 +28,8 @@ importers:
 
 packages:
 
-  '@a11ign/toolchain@0.1.3':
-    resolution: {integrity: sha512-TQBtzAJvm5aH10+umKulv1mSA96TmQrWFM/FHJh93ODFibxlvmlCzkCxFzFFKtff+9UqFI1f9O3+F4GfsApKLA==}
+  '@a11ign/toolchain@0.1.4':
+    resolution: {integrity: sha512-t5V4RU3kXf72LdyJLgCHJU+UuKvK1087FX66fOKgsjzUGi0egEF06l8aOve4wMhAzQ5USax03nw+qC3mFPL2EQ==}
     engines: {node: '>=22.15.0'}
     peerDependencies:
       '@rslib/core': ^1.0.3
@@ -484,7 +484,7 @@ packages:
 
 snapshots:
 
-  '@a11ign/toolchain@0.1.3(@rstest/core@0.12.3)':
+  '@a11ign/toolchain@0.1.4(@rstest/core@0.12.3)':
     dependencies:
       '@rstest/core': 0.12.3
 
