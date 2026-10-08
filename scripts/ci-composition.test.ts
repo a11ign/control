@@ -41,6 +41,23 @@ test("`tsc --noEmit` is a step of the job the ruleset requires, and runs before 
   const typecheck = ci.indexOf("run: pnpm run typecheck");
   assert.ok(typecheck > 0, "gate runs the typecheck");
   assert.ok(typecheck < ci.indexOf("run: pnpm test"), "typecheck first, so a type error reads red without waiting for the suite");
-  assert.ok(ci.indexOf("  gate:") < typecheck, "in the `gate` job: it is the only job this file has");
-  assert.equal(ci.match(/^ {2}[a-z-]+:$/gm)?.filter((line) => line.trim() !== "pull_request:" && line.trim() !== "merge_group:").length, 1, "gate is the only job");
+  assert.ok(ci.indexOf("  checks:") < typecheck, "in the `checks` job, which `gate` waits for");
+});
+
+test("`gate` waits for `changeset` and `checks` and accepts success only, so a red or skipped need cannot read as a pass (a11ign/a11ign#4127, #4135)", () => {
+  const gate = ci.slice(ci.indexOf("  gate:"));
+  assert.ok(gate.startsWith("  gate:"), "positive control: the gate job is found");
+  assert.match(gate, /needs: \[changeset, checks\]/);
+  assert.match(gate, /if: always\(\) && !cancelled\(\)/, "a skipped required check counts as passed, so gate must run when a need fails");
+  for (const need of ["changeset", "checks"]) assert.ok(gate.includes(`needs.${need}.result`), `${need}'s result is read`);
+  assert.doesNotMatch(gate, /skipped/, "no skipped allowance");
+});
+
+test("the changeset check is the shared workflow at a full sha, with this repository's releasable paths and the permission it needs (a11ign/a11ign#4127, #4135)", () => {
+  const call = /^ {2}changeset:\n([\s\S]*?)\n\n/m.exec(ci)?.[1];
+  assert.ok(call, "positive control: the changeset job is found");
+  assert.match(call, /uses: a11ign\/toolchain\/\.github\/workflows\/changeset-required\.yml@[0-9a-f]{40}$/m);
+  assert.match(call, /releasable-paths: packages\/control\/$/m, "the dora entry's releasablePaths, character for character");
+  assert.match(call, /pull-requests: read/, "without it the whole run is a startup_failure");
+  assert.match(ci, /^ {4}types: \[opened, synchronize, reopened, edited\]$/m, "`edited`: the no-release line is added by editing the body");
 });
