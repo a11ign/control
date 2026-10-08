@@ -1,4 +1,41 @@
-# @a11ign/control
+# control-workspace
+
+## 0.1.14
+
+### Patch Changes
+
+- eee448f: The package is the repository's root (a11ign/a11ign#4217): `src/`, `ansible/`, `layers.json` and `CLAUDE.md` moved up from `packages/control/`, the private `control-workspace` shell and `pnpm-workspace.yaml` are gone, the root manifest is `@a11ign/control`, and the two READMEs are one. `@a11ign/toolchain` is bumped to ^0.1.5, the release that carries `layout-check`, and `ci.yml` runs it in the job `gate` waits for. Nothing the control plane runs moves: every `packages/control/...` the code names is the path the package is LAID at in the core's checkout (`/root/a11y-witness/packages/control`), and the next row changes how the core lays it. This is the first tag cut from the flat layout.
+- 8269e08: `lab:fetch` can return `calibration-judgments` (`runs/abstention/calibration-judgments.json`), the calibration sweep's per-page findings with their quoted evidence (a11ign/a11ign#4293, #4241).
+
+## 0.1.13
+
+### Patch Changes
+
+- 389c657: Control counts its `.js`/`.mjs`/`.cjs` source against a committed baseline (a11ign/a11ign #4265, the adoption half of #4243). `@a11ign/toolchain` is bumped to ^0.1.4, the release that carries `./mjs-ratchet`, and `scripts/mjs-ratchet.test.ts` calls `checkMjsRatchet` against `mjs-ratchet.baseline.json` at the repository root: 23 files today (22 under `packages/control/src/`, plus `scripts/rstest/rstest.config.mjs`), no exceptions. A new `.mjs` fails and is named; a drop passes and says the baseline can be lowered. No workflow file is edited: the test is under `scripts/`, which `pnpm test` already runs (it cannot live under `packages/control/`: CI resolves the core's older toolchain pin there).
+
+## 0.1.12
+
+### Patch Changes
+
+- b550b9c: A guest's layer move accepts a pin that is only a tag (a11ign/a11ign #4158, #4107's chain). `layer-checkouts.yml` fetched heads, checked out `main` and ran `merge --ff-only <pin>`, so a release commit that no branch holds (`screenreader-worker` `v0.4.0`, `@a11ign/screenreader-fleet@0.5.1`) was "not something we can merge", while the control plane's check (#4150) refuses `main`'s tip in its place. The task now fetches tags (`git fetch --quiet --tags origin`) and checks the pin out detached (`checkout --detach <pin>`), as the core's and the lab's moves do. The dirt report and discard and the assertion that HEAD equals the pin are unchanged.
+
+## 0.1.11
+
+### Patch Changes
+
+- 36aa51b: `fleet:deploy --layer-ref` reaches the playbook on a control plane that holds a layer laid rather than cloned, and can pin a release whose commit is only a tag (a11ign/a11ign #4150, #4107's chain). A LAID layer (`.layer-ref` beside `src/`, no `.git`) is accepted when the commit its tag names on the layer's remote is the pin, and refused, naming the layer, the `.layer-ref` and the pin, when it is not; a path with neither shape still refuses. A CLONED layer's move now fetches tags (`git fetch --quiet --tags origin`), so a version commit that no branch holds is a commit the control plane has. The refusal no longer sends the operator to `bootstrap-control-plane.sh`, and the comment that said nothing lays on the control plane is corrected.
+
+## 0.1.10
+
+### Patch Changes
+
+- 8d07c65: `lab:job --qualify-sha` refuses a `gate-stability` launch with no `-e worker=<n>` BEFORE `pending` is posted, so a launch the playbook would refuse leaves no `qualification` status on the sha (a stray `failure` stays counted by the release's regression read, #3988).
+
+## 0.1.9
+
+### Patch Changes
+
+- 97f9906: control releases through `a11ign/toolchain`'s shared per-merge workflow (`kind: tag`), and the version and `CHANGELOG.md` now live at the repository root (`control-workspace`), which is the one private package that workflow tags. The tag is still `v<version>`, numbered on from `v0.1.8`; nothing a consumer lays (`src`, `ansible`, `CLAUDE.md`, `README.md`) changes. Row: a11ign/a11ign#3960.
 
 ## 0.1.8
 
