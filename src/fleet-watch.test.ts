@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
-  type Drift, type FleetRow as WatchRow,
+  type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
 
@@ -430,7 +430,7 @@ test("offFleetBody names the count, every line, and the live-reading command", (
 
 /** `watchFleet` over an in-memory store, one call per scheduled run. */
 function offFleetRun(store: ReturnType<typeof memoryStore>, extra: Partial<Parameters<typeof watchFleet>[0]> = {}) {
-  return (status: Awaited<ReturnType<NonNullable<Parameters<typeof watchFleet>[0]>["getStatus"] & (() => Promise<never>)>>, at: number) =>
+  return (status: Awaited<ReturnType<StatusReader>>, at: number) =>
     watchFleet({ getStatus: async () => status, now: () => at, ...store, ...extra });
 }
 
