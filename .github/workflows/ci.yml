@@ -68,7 +68,7 @@ jobs:
           mkdir core/packages/control
           cp -R control/src control/ansible control/layers.json control/CLAUDE.md control/README.md core/packages/control/
           jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
-          printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"] }\n' > core/tsconfig.control.json
+          printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"], "exclude": ["packages/guards/src/fixtures"] }\n' > core/tsconfig.control.json
           git -C core add -Af packages/control
       # pnpm/action-setup reads the version out of `packageManager`, and comes before setup-node because `cache: pnpm` shells out to it.
       - uses: pnpm/action-setup@v6
