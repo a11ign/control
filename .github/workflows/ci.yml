@@ -78,7 +78,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: core
       # Lint and typecheck run before the tests so a style or type failure reads red without waiting for the suite.
-      - run: pnpm exec eslint packages/control
+      # `--no-ignore`: a core that lays this package lints it nowhere (`packages/control/**` is in its `ignores`, a11ign/a11ign#3506), because the package is linted HERE. Without the flag eslint exits 2 on "all files ignored".
+      - run: pnpm exec eslint --no-ignore packages/control
         working-directory: core
       - run: pnpm exec tsc --noEmit -p tsconfig.control.json
         working-directory: core
