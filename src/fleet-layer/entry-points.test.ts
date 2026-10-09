@@ -347,11 +347,11 @@ const KNOWN_PLAIN_ENTRY_GUARDS: readonly string[] = Object.freeze([
   "packages/worker-fleet/src/fleet-env.ts",
   "packages/worker-fleet/src/guest-run.ts",
   "packages/worker-fleet/src/normalise-fleet.ts",
-  "scripts/check-retired-heads.mjs",
-  "scripts/check-schema-migration.mjs",
-  "scripts/ci-changed.mjs",
-  "scripts/known-gaps-index.mjs",
-  "scripts/stale-dist-diagnosis.mjs",
+  "scripts/check-retired-heads.ts",
+  "scripts/check-schema-migration.ts",
+  "scripts/ci-changed.ts",
+  "scripts/known-gaps-index.ts",
+  "scripts/stale-dist-diagnosis.ts",
 ]);
 
 /** Every tracked source whose entry guard is the plain form, comment-stripped. */

@@ -8,35 +8,51 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fleetConsistency, describeMismatches, describeReportedOnly, MUST_MATCH, POLICY_MUST_MATCH,
   REPORTED_ONLY } from "../../../worker-fleet/src/fleet-consistency.ts";
-import { layerFile } from "../../../guards/src/layer-file.ts";
+import { join } from "node:path";
+import { layerSourceDir } from "../layer-checkouts.ts";
 
-/** The worker's `server.mjs` as TEXT, found by package name (#2613): it is not importable (guidepup at module scope) and not an export. */
-const workerServerSource = () =>
-  readFileSync(layerFile("@a11ign/screenreader-worker", "src/server.mjs", { from: import.meta.dirname }), "utf8");
+/**
+ * One file of the worker as TEXT, from the layer's checkout through the resolver (#4516): the package ships `dist/` alone from v0.9.0, bundled and with its
+ * comments gone, and these guards read the comments and the source's own anchors.
+ */
+const workerSource = (file: string) => readFileSync(join(layerSourceDir("nvda-worker"), file), "utf8");
+
+/** The worker's `server.ts` as TEXT: it is not importable (guidepup at module scope) and not an export. */
+const workerServerSource = () => workerSource("server.ts");
 
 /**
  * Everything the worker's `/health` environment reports, as TEXT: `runtimeEnvironment`'s block, the display
  * sampler's reading (#2673) and the version sampler's reading (#2684) -- all three merged in on every call
  * because the display and version fields are sampled on a timer and carry their age. A field that moved out
  * of `runtimeEnvironment` is still reported, and a guard that read only the block would have called it
- * never sent.
+ * never sent. `currentEnvironment`'s own merge is the fourth place (#4516): `windowsBuild` (#4433) is returned from it, beside the
+ * samplers, and from no sampler's `current`, so a guard that read the three above called it never sent in screenreader-worker v0.9.0.
  */
 const workerReportedFieldsSource = () => {
   const server = workerServerSource();
   const start = server.indexOf("function runtimeEnvironment() {");
   const end = server.indexOf("function provisionRevision() {");
-  assert.ok(start !== -1 && end > start, "server.mjs no longer has a runtimeEnvironment block to read");
-  const displaySample = readFileSync(layerFile("@a11ign/screenreader-worker", "src/display-sample.mjs", { from: import.meta.dirname }), "utf8");
+  assert.ok(start !== -1 && end > start, "server.ts no longer has a runtimeEnvironment block to read");
+  const displaySample = workerSource("display-sample.ts");
   const displayCurrent = displaySample.indexOf("current: () => ({");
-  assert.ok(displayCurrent !== -1, "display-sample.mjs no longer has the reading `currentEnvironment` merges in");
+  assert.ok(displayCurrent !== -1, "display-sample.ts no longer has the reading `currentEnvironment` merges in");
   // `windowsVersion`/`screenReaderVersion`/`browserVersion` moved off `runtimeEnvironment` the same way and
-  // for the same reason (#2684): `createVersionSampler` lives in `file-version.mjs`, not `server.mjs`,
-  // because `server.mjs` needs guidepup and cannot be imported off Windows to test the move BEHAVIOURALLY.
-  const fileVersion = readFileSync(layerFile("@a11ign/screenreader-worker", "src/file-version.mjs", { from: import.meta.dirname }), "utf8");
+  // for the same reason (#2684): `createVersionSampler` lives in `file-version.ts`, not `server.ts`,
+  // because `server.ts` needs guidepup and cannot be imported off Windows to test the move BEHAVIOURALLY.
+  const fileVersion = workerSource("file-version.ts");
   const versionCurrent = fileVersion.indexOf("current: () => ({");
-  assert.ok(versionCurrent !== -1, "file-version.mjs no longer has the reading `currentEnvironment` merges in");
-  return server.slice(start, end) + displaySample.slice(displayCurrent) + fileVersion.slice(versionCurrent);
+  assert.ok(versionCurrent !== -1, "file-version.ts no longer has the reading `currentEnvironment` merges in");
+  const merge = server.indexOf("function currentEnvironment() {");
+  const mergeEnd = server.indexOf("\n}\n", merge);
+  assert.ok(merge !== -1 && mergeEnd > merge, "server.ts no longer has a currentEnvironment merge to read");
+  return server.slice(start, end) + displaySample.slice(displayCurrent) + fileVersion.slice(versionCurrent) + server.slice(merge, mergeEnd);
 };
+
+/**
+ * Whether the worker's text names `path` as a property of what it reports: `path: value`, or the SHORTHAND (`{ ..., path }`) that
+ * `currentEnvironment` returns `windowsBuild` in (#4516). The matcher must be able to MISS, and each test below plants a name it cannot find.
+ */
+const reportsField = (reported: string, path: string) => reported.includes(`${path}:`) || new RegExp(`[,{]\\s*${path}\\s*[,}]`).test(reported);
 
 /**
  * THE FIXTURE ADDRESSES, BUILT FROM OCTETS. #63's history purge replaced every RFC 1918 literal in the
@@ -62,6 +78,9 @@ const guest = (worker: string, over = {}) => ({
     browserVersion: "151.0.4129.59", screenReaderVersion: "2026.1.1",
     windowsVersion: "Microsoft Windows 11 Pro 10.0.22621", architecture: "arm64", captureProtocol: 2,
     guidepupVersion: "0.31.0",
+    // `windowsBuild` entered `REPORTED_ONLY` with screenreader-fleet 0.6.0 (#4433): a guest that reports it by default keeps the reported-only tests
+    // below about the one field each names, and a test that wants the field unreported overrides it.
+    windowsBuild: "22621.4317",
     ...over,
   },
   policy: { StartupBoostEnabled: 0, BackgroundModeEnabled: 0 },
@@ -188,12 +207,12 @@ test("EVERY MUST_MATCH FIELD IS ONE THE WORKER ACTUALLY REPORTS", () => {
   // with no screen reader, so this file cannot import it on any runner this repo has.
   const reported = workerReportedFieldsSource();
 
-  const missing = MUST_MATCH.map((f) => f.path).filter((path) => !reported.includes(`${path}:`));
+  const missing = MUST_MATCH.map((f) => f.path).filter((path) => !reportsField(reported, path));
   assert.deepEqual(missing, [], "MUST_MATCH compares fields the worker's /health environment never sends");
 
   // The positive control for the line above: `deepEqual(missing, [])` passes when the matcher matches
   // everything, and a matcher that cannot fail is the defect this whole file is about.
-  assert.ok(!reported.includes("displayModeThatIsNotReported:"),
+  assert.ok(!reportsField(reported, "displayModeThatIsNotReported"),
     "the source matcher matches names that are not there, so the assertion above proves nothing");
 });
 
@@ -597,12 +616,12 @@ test("#2063: EVERY REPORTED_ONLY FIELD IS ONE THE WORKER ACTUALLY REPORTS", () =
   // a field that reads `unreported` for ever and looks exactly like a fleet that has not been deployed.
   const reported = workerReportedFieldsSource();
 
-  const missing = REPORTED_ONLY.map((f) => f.path).filter((path) => !reported.includes(`${path}:`));
+  const missing = REPORTED_ONLY.map((f) => f.path).filter((path) => !reportsField(reported, path));
   assert.deepEqual(missing, [], "REPORTED_ONLY names fields the worker's /health environment never sends");
 
   // The positive control for the line above, the same one the MUST_MATCH test carries: the matcher has
   // to be able to MISS, or an empty list proves nothing.
-  assert.ok(!reported.includes("displayAdapterThatIsNotReported:"),
+  assert.ok(!reportsField(reported, "displayAdapterThatIsNotReported"),
     "the source matcher matches names that are not there, so the assertion above proves nothing");
 });
 
@@ -651,7 +670,7 @@ const workerDisplayAdapterComment = () => {
   // Since #2673 the comment is `displayAdapter`'s own docblock: the field left `runtimeEnvironment` for the sampler.
   const start = server.indexOf("WHICH GRAPHICS ADAPTER THIS GUEST IS RUNNING ON");
   const end = server.indexOf("async function displayAdapter() {");
-  assert.ok(start !== -1 && end > start, "server.mjs no longer carries displayAdapter's comment to read");
+  assert.ok(start !== -1 && end > start, "server.ts no longer carries displayAdapter's comment to read");
   const between = server.slice(start, end);
   assert.ok(/REPORTED, NEVER GATED/.test(between), "the anchors no longer bracket displayAdapter's comment");
   return between;

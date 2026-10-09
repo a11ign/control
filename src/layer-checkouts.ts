@@ -13,7 +13,7 @@
  * exists to remove.
  *
  * Imports only `node:` modules, so `control-has-no-dependencies.test.ts` holds. `layerCodeVersion` therefore
- * imports the layer's own `code-version.mjs` DYNAMICALLY, from the resolved directory: still the one hasher,
+ * imports the layer's own `code-version.ts` DYNAMICALLY (`.mjs` at an older tag, `LAYER_HASHER_FILES`), from the resolved directory: still the one hasher,
  * and a static import would name the path this module exists to hide.
  *
  * A layer that lives in its OWN repository declares a `remote`, and a guest then holds a second checkout of it
@@ -45,6 +45,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+
+/**
+ * The layer's hasher, in the order its spellings are tried: `.ts` since screenreader-worker v0.9.0, `.mjs` before it. THE `.mjs` IS A FALLBACK AND NOT A CONVENTION: a host
+ * may still hold a checkout at an `.mjs`-era tag, and refusing it would fail the code-version read of a fleet that is merely behind. It exists because of a11ign/a11ign#4516
+ * and goes with the row that removes it; do not copy it to another reader, whose layer files are named by the one extension.
+ */
+const LAYER_HASHER_FILES = ["code-version.ts", "code-version.mjs"];
+
+/** The first of `LAYER_HASHER_FILES` that `dir` holds, or the first when it holds none, so the import's own error names the file a current layer would have. */
+function layerHasherFile(dir: string): string {
+  const [current] = LAYER_HASHER_FILES;
+  return join(dir, LAYER_HASHER_FILES.find((file) => existsSync(join(dir, file))) ?? current);
+}
 const MANIFEST = JSON.parse(readFileSync(new URL("../layers.json", import.meta.url), "utf8"));
 
 /**
@@ -101,8 +114,9 @@ export function layersFrom({ manifest, root }: { manifest: { layers: Record<stri
 
   /** The layer's code hash, computed by the layer's own hasher. */
   async function layerCodeVersion(name: string) {
-    const hasher = await import(pathToFileURL(join(layerSourceDir(name), "code-version.mjs")).href);
-    return hasher.codeVersion(layerSourceDir(name));
+    const dir = layerSourceDir(name);
+    const hasher = await import(pathToFileURL(layerHasherFile(dir)).href);
+    return hasher.codeVersion(dir);
   }
 
   /** The layers a guest holds as a second checkout: those that declare a `remote`. */

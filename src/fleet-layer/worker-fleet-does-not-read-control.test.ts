@@ -94,7 +94,7 @@ function relativeLiterals(source: string): string[] {
  * A REASON, never a bare acknowledgement, matching every other EXEMPT table added this session.
  */
 const EXEMPT: Record<string, string> = {
-  "fleet-env.mjs:98":
+  "fleet-env.ts:98":
     "GAP, recorded 2026-09-06 (architecture audit §3.2), not fully closed: the monorepo's own default for INVENTORY and GROUP_VARS. "
     + "doctor.mjs and check-worker-code.mjs are published bins that must keep resolving THIS monorepo's "
     + "bare-metal fleet when run as `npm run doctor`, so the path is an injected PARAMETER rather than "
@@ -172,7 +172,7 @@ test("nothing reachable from the published surface reads a file under packages/c
   assert.deepEqual(offenders, [],
     "worker-fleet is PUBLISHED and packages/control NEVER IS -- a file reachable from the published "
     + "surface (exports + bin) must not resolve into it. Either remove the reference, or add it to EXEMPT "
-    + "with the reason it is a deliberate, documented default (see fleet-env.mjs's entries).");
+    + "with the reason it is a deliberate, documented default (see fleet-env.ts's entries).");
 });
 
 test("every EXEMPT entry names a line that still makes the reference it excuses", () => {

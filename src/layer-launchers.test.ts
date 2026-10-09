@@ -45,7 +45,7 @@ function fixtureCheckout(present: readonly (typeof REACHED)[number][]): string {
     writeFileSync(join(root, rel), text);
   };
   const declaration = readFileSync(reachFile(), "utf8");
-  put("packages/control/layers.json", read("packages/control/layers.json"));
+  put("layers.json", read("packages/control/layers.json"));
   put("scripts/test-support/launcher-reach.stand-in.cmd", declaration);
   for (const name of present) put(declaredReach(declaration, name) as string, "// present\n");
   return root;
