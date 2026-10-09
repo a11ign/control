@@ -235,8 +235,15 @@ worker_quiet_policy:
 # #921: a Windows FEATURE update reached a11y-worker-4 (2026-09-11) and a11y-worker-3 (2026-09-19)
 # although `NoAutoRebootWithLoggedOnUsers` above was already set on both. That key only holds the REBOOT;
 # it does nothing to stop the update from installing and then landing at the next reboot ANY box takes
-# for any reason. This is the separate lever that keeps a feature update from installing at all -- quality
-# and security updates are deliberately left unrestricted, so `DeferQualityUpdatesPeriodInDays` is not set.
+# for any reason. This is the separate lever that keeps a feature update from installing at all.
+#
+# #4438: QUALITY updates are deferred too, 30 days, the documented ceiling of Windows Update for Business
+# (a larger number would read back as set and do nothing, so `update-deferral-policy.test.ts` caps it).
+# Before this, each box installed the monthly cumulative update at whatever moment it happened to be
+# awake, and the Windows build drifted between boxes (#4405). Now only the patch window moves a build
+# inside a month. The window runs every 28 days, below this ceiling, so the deferral expires only after a
+# window has run: a skipped window is still followed by one that lifts the deferral before any box
+# installs on its own.
 #
 # NOT the same trap as `worker_edge_update_policy` (`diagnostics.mjs`'s `edgeUpdaterState` comment):
 # EdgeUpdate's ADMX policies are Microsoft-documented as effective only on an AD-domain-joined machine,
@@ -254,6 +261,12 @@ worker_update_deferral_policy:
   - path: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
     name: DeferFeatureUpdatesPeriodInDays
     value: 365
+  - path: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    name: DeferQualityUpdates
+    value: 1
+  - path: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    name: DeferQualityUpdatesPeriodInDays
+    value: 30
 
 # #1567: ONE DISPLAY MODE ON ALL TEN GUESTS. `ceo`'s #1561 ruling (b): the capture window is what a real
 # display holds, so the display is what gets pinned -- the same reasoning `worker_edge_version` already
