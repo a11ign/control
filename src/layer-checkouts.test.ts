@@ -347,11 +347,18 @@ test("#4363 layerPinTag names the tag the layer's repository made: v<semver> fro
   assert.deepEqual(pinnedAt("scorer", "0.5.0"), { tag: "@a11ign/scorer@0.5.0" }, "a package with no flat release keeps the scoped form");
 });
 
-/** The core's file, reachable only from inside a core checkout (`packages/control` laid beside `scripts/`). */
+/** The core's file, reachable only from inside a core checkout (`packages/control` laid beside `scripts/`), and exporting `releaseTag` only from the core's #4119 on. */
 const CORE_LAY_LAYER = join(REPO, "scripts/lay-layer.mjs");
 
+/** Why the agreement test cannot run here, or `false` when it can: a core older than `releaseTag` (what `ci.yml`'s `CORE_REF` may still pin) has no first copy to compare with. */
+function noFirstCopy(): string | false {
+  if (!existsSync(CORE_LAY_LAYER)) return `${CORE_LAY_LAYER} is not reachable from this checkout, so there is no first copy to compare the second with`;
+  if (!/export function releaseTag\(/.test(readFileSync(CORE_LAY_LAYER, "utf8"))) return `${CORE_LAY_LAYER} does not export releaseTag (a core older than a11ign/a11ign #4119), so there is no first copy to compare the second with`;
+  return false;
+}
+
 test("#4363 BARE_TAGS_FROM is a second copy of the core's, and releaseTag agrees with scripts/lay-layer.mjs's over every boundary", {
-  skip: existsSync(CORE_LAY_LAYER) ? false : `${CORE_LAY_LAYER} is not reachable from this checkout, so there is no first copy to compare the second with`,
+  skip: noFirstCopy(),
 }, async () => {
   const theirs = (await import(pathToFileURL(CORE_LAY_LAYER).href)) as { releaseTag: (name: string, version: string) => string; };
   const versions = ["0.0.1", "0.2.9", "0.2.0", "0.3.0", "0.3.1", "0.4.0", "0.5.0", "0.5.2", "0.5.3", "0.5.4", "0.6.0", "1.0.0", "2.0.0", "0.3.0-rc.1"];
