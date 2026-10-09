@@ -33,8 +33,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # a11ign/a11ign at the commit the package was last synced from (2026-10-07, v0.1.3). The pin before it (eae7806ca) still carried packages/worker-fleet and packages/lab as tracked trees, so the synced tests (doctor, worker-code-check) read exports of a fleet layer the core now LAYS at install (`scripts/lay-layer.mjs`). A sha and never a branch: a branch moves under a pull request that did not touch it.
-  CORE_REF: 50adf137b0aadc20c8f4b2ae48d4b5557e657bc3
+  # a11ign/a11ign at the commit the package was last synced from (2026-10-09, a11ign#4393: the core's scripts and the layers' modules are `.ts`, and `/packages/control` is gitignored, linted and typechecked here and not there). The pin before it (50adf137b) named the `.mjs` files. A sha and never a branch: a branch moves under a pull request that did not touch it.
+  CORE_REF: f3b5c5f595428bdfd970bd8ab6cf55edc770cf88
 
 jobs:
   # A releasable change needs a changeset or a `no-release:` line (a11ign/a11ign#4127, adopted by #4135). `releasable-paths` is this repository's `dora` entry's `releasablePaths`
@@ -58,18 +58,6 @@ jobs:
         with: { path: control }
       - uses: actions/checkout@v7
         with: { repository: a11ign/a11ign, ref: "${{ env.CORE_REF }}", path: core }
-      # The package is the root here and `packages/control` there. `jq` keeps what the core's workspace resolves by (`name`, `exports`) and what the dependency-free test reads (`dependencies`), and drops
-      # what only this repository's own tooling uses. `tsconfig.control.json` is written rather than tracked: this repository holds ONE tsconfig, and this one means nothing outside the lay.
-      # The core's tests list files with `git ls-files` (`walkTree`), and the core at `CORE_REF` still TRACKS `packages/control`, so a file this repository renames (a11ign/a11ign#4268) would be listed under its old
-      # name and read from a disk that no longer has it. `git add -A` makes the index say what the lay put on disk; nothing is committed.
-      - name: Lay this repository's package over the core's own
-        run: |
-          rm -rf core/packages/control
-          mkdir core/packages/control
-          cp -R control/src control/ansible control/layers.json control/CLAUDE.md control/README.md core/packages/control/
-          jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
-          printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"] }\n' > core/tsconfig.control.json
-          git -C core add -A packages/control
       # pnpm/action-setup reads the version out of `packageManager`, and comes before setup-node because `cache: pnpm` shells out to it.
       - uses: pnpm/action-setup@v6
         with: { package_json_file: core/package.json }
@@ -77,12 +65,26 @@ jobs:
         with: { node-version: 22, cache: pnpm, cache-dependency-path: core/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
         working-directory: core
+      # AFTER the install, not before: the core's `prepare` runs `scripts/lay-layer.ts control`, which replaces `packages/control` with the PINNED `control` tag, so a lay made first is overwritten by the release this change is not yet part of.
+      # The package is the root here and `packages/control` there. `jq` keeps what the core's workspace resolves by (`name`, `exports`) and what the dependency-free test reads (`dependencies`), and drops
+      # what only this repository's own tooling uses. `tsconfig.control.json` is written rather than tracked: this repository holds ONE tsconfig, and this one means nothing outside the lay.
+      # The core's tests list files with `git ls-files` (`walkTree`), and the core at `CORE_REF` still TRACKS `packages/control`, so a file this repository renames (a11ign/a11ign#4268) would be listed under its old
+      # name and read from a disk that no longer has it. `git add -A` makes the index say what the lay put on disk; nothing is committed. `-f` because the core at `CORE_REF` gitignores `/packages/control` (it is a LAID layer there, #3506), and a plain `add` of an ignored path exits 1.
+      - name: Lay this repository's package over the core's own
+        run: |
+          rm -rf core/packages/control
+          mkdir core/packages/control
+          cp -R control/src control/ansible control/layers.json control/CLAUDE.md control/README.md core/packages/control/
+          jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
+          printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"], "exclude": [] }\n' > core/tsconfig.control.json
+          git -C core add -f -A packages/control
       # Lint and typecheck run before the tests so a style or type failure reads red without waiting for the suite.
-      - run: pnpm exec eslint packages/control
+      # `--no-ignore`: the core's eslint config ignores `packages/control/**` (it is a laid layer there, #3506), and `"exclude": []` above because its tsconfig excludes it too; this job is where it is linted and typechecked.
+      - run: pnpm exec eslint --no-ignore packages/control
         working-directory: core
       - run: pnpm exec tsc --noEmit -p tsconfig.control.json
         working-directory: core
-      - run: pnpm exec rstest run --config scripts/rstest/rstest.config.mjs --include "packages/control/**/*.test.ts"
+      - run: pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include "packages/control/**/*.test.ts"
         working-directory: core
       # This repository's own checks: the workflows, the arming filter, the composition above, the manifest. The typecheck (`tsc --noEmit`, `package.json`'s `typecheck`) is a step of the `gate` job
       # the ruleset requires, so a type error here blocks the merge; it runs before the tests so it reads red without waiting for them. The tests are rstest on `@a11ign/toolchain`'s config

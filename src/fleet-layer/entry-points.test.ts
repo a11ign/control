@@ -25,9 +25,9 @@ import { stripComments } from "../../../evidence/src/source-text.ts";
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, basename } from "node:path";
-import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.mjs";
-import { filesUnder } from "../../../guards/src/files-under.mjs";
-import { installedPackageDir } from "../../../guards/src/layer-file.mjs";
+import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.ts";
+import { filesUnder } from "../../../guards/src/files-under.ts";
+import { installedPackageDir } from "../../../guards/src/layer-file.ts";
 
 // #716/#704: this file's own population is the whole tracked tree, not one file -- declared here
 // rather than inferred from its source, per ceo's ruling (2026-09-09) that the tree-wide-guard
@@ -201,7 +201,7 @@ test("every npm entry point refuses to run when imported", () => {
   const fromWorkflows = points.filter((p) => !npmScriptEntryPoints().includes(p));
   assert.ok(fromWorkflows.length >= 1,
     "no entry point was discovered from a workflow, so the widening has stopped matching. `ci.yml` "
-    + "invokes `scripts/ci-changed.mjs` with `node` directly; if that is still true this cannot be empty.");
+    + "invokes `scripts/ci-changed.ts` with `node` directly; if that is still true this cannot be empty.");
 
   const unguarded = points.filter((path) => {
     const src = readFileSync(`${REPO}${path}`, "utf8");
@@ -347,11 +347,11 @@ const KNOWN_PLAIN_ENTRY_GUARDS: readonly string[] = Object.freeze([
   "packages/worker-fleet/src/fleet-env.mjs",
   "packages/worker-fleet/src/guest-run.mjs",
   "packages/worker-fleet/src/normalise-fleet.mjs",
-  "scripts/check-retired-heads.mjs",
-  "scripts/check-schema-migration.mjs",
-  "scripts/ci-changed.mjs",
-  "scripts/known-gaps-index.mjs",
-  "scripts/stale-dist-diagnosis.mjs",
+  "scripts/check-retired-heads.ts",
+  "scripts/check-schema-migration.ts",
+  "scripts/ci-changed.ts",
+  "scripts/known-gaps-index.ts",
+  "scripts/stale-dist-diagnosis.ts",
 ]);
 
 /** Every tracked source whose entry guard is the plain form, comment-stripped. */

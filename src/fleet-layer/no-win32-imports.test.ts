@@ -43,7 +43,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // #2171: shared, because four private copies of this walk descended a directory symlink and threw ELOOP.
-import { filesUnder } from "../../../guards/src/files-under.mjs";
+import { filesUnder } from "../../../guards/src/files-under.ts";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -52,7 +52,7 @@ const POISON = "@guidepup/guidepup";
 
 /** Importing this by NAME reaches POISON, because the package index re-exports `capture-core.mjs`. */
 const WORKER_PACKAGE = "@a11ign/screenreader-worker";
-const WORKER_INDEX = "packages/nvda-worker/src/index.mjs";
+const WORKER_INDEX = "packages/nvda-worker/src/index.ts";
 /** The only file left that reaches guidepup statically ON PURPOSE -- named once, used by the allowlist
  *  below and by the anti-vacuity test that proves the walker still works (#1772). */
 const VOICEOVER_SPIKE = "packages/lab/src/harnesses/run-spike.ts";

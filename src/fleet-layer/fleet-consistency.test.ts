@@ -6,13 +6,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fleetConsistency, describeMismatches, describeReportedOnly, MUST_MATCH, POLICY_MUST_MATCH,
   REPORTED_ONLY } from "../../../worker-fleet/src/fleet-consistency.mjs";
-import { layerFile } from "../../../guards/src/layer-file.mjs";
 
-/** The worker's `server.mjs` as TEXT, found by package name (#2613): it is not importable (guidepup at module scope) and not an export. */
+/**
+ * A file of the worker's SOURCE, from the layer `pnpm install` lays at `packages/nvda-worker` (#4571). The installed package publishes `dist/` bundles only,
+ * which have no `display-sample` or `file-version` of their own, so `layerFile` (by package name, #2613) refuses `src/...` and the laid tree is what is read.
+ */
+const laidWorkerFile = (name: string) => join(import.meta.dirname, "../../../nvda-worker/src", name);
+
+/** The worker's `server.ts` as TEXT: it is not importable (guidepup at module scope) and not an export. */
 const workerServerSource = () =>
-  readFileSync(layerFile("@a11ign/screenreader-worker", "src/server.mjs", { from: import.meta.dirname }), "utf8");
+  readFileSync(laidWorkerFile("server.ts"), "utf8");
 
 /**
  * Everything the worker's `/health` environment reports, as TEXT: `runtimeEnvironment`'s block, the display
@@ -26,13 +32,13 @@ const workerReportedFieldsSource = () => {
   const start = server.indexOf("function runtimeEnvironment() {");
   const end = server.indexOf("function provisionRevision() {");
   assert.ok(start !== -1 && end > start, "server.mjs no longer has a runtimeEnvironment block to read");
-  const displaySample = readFileSync(layerFile("@a11ign/screenreader-worker", "src/display-sample.mjs", { from: import.meta.dirname }), "utf8");
+  const displaySample = readFileSync(laidWorkerFile("display-sample.ts"), "utf8");
   const displayCurrent = displaySample.indexOf("current: () => ({");
   assert.ok(displayCurrent !== -1, "display-sample.mjs no longer has the reading `currentEnvironment` merges in");
   // `windowsVersion`/`screenReaderVersion`/`browserVersion` moved off `runtimeEnvironment` the same way and
   // for the same reason (#2684): `createVersionSampler` lives in `file-version.mjs`, not `server.mjs`,
   // because `server.mjs` needs guidepup and cannot be imported off Windows to test the move BEHAVIOURALLY.
-  const fileVersion = readFileSync(layerFile("@a11ign/screenreader-worker", "src/file-version.mjs", { from: import.meta.dirname }), "utf8");
+  const fileVersion = readFileSync(laidWorkerFile("file-version.ts"), "utf8");
   const versionCurrent = fileVersion.indexOf("current: () => ({");
   assert.ok(versionCurrent !== -1, "file-version.mjs no longer has the reading `currentEnvironment` merges in");
   return server.slice(start, end) + displaySample.slice(displayCurrent) + fileVersion.slice(versionCurrent);

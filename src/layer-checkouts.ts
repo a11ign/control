@@ -13,7 +13,7 @@
  * exists to remove.
  *
  * Imports only `node:` modules, so `control-has-no-dependencies.test.ts` holds. `layerCodeVersion` therefore
- * imports the layer's own `code-version.mjs` DYNAMICALLY, from the resolved directory: still the one hasher,
+ * imports the layer's own `code-version.ts` DYNAMICALLY, from the resolved directory: still the one hasher,
  * and a static import would name the path this module exists to hide.
  *
  * A layer that lives in its OWN repository declares a `remote`, and a guest then holds a second checkout of it
@@ -101,7 +101,7 @@ export function layersFrom({ manifest, root }: { manifest: { layers: Record<stri
 
   /** The layer's code hash, computed by the layer's own hasher. */
   async function layerCodeVersion(name: string) {
-    const hasher = await import(pathToFileURL(join(layerSourceDir(name), "code-version.mjs")).href);
+    const hasher = await import(pathToFileURL(join(layerSourceDir(name), "code-version.ts")).href);
     return hasher.codeVersion(layerSourceDir(name));
   }
 

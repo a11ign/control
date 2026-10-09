@@ -47,8 +47,8 @@
  * `code-drift.mjs` is the part of that file with no opinion about what "expected" means — pure comparison
  * and message-building, importing nothing but `node:child_process` — and this file computes `expected`
  * itself, the same way `fleet-playbook.ts` already does, through `layer-checkouts.ts`, which says where
- * the layer lives and reaches the `code-version.mjs` that documents itself as safe: it imports nothing but
- * node stdlib and `worker-files.mjs`.
+ * the layer lives and reaches the `code-version.ts` that documents itself as safe: it imports nothing but
+ * node stdlib and `worker-files.ts`.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -117,7 +117,7 @@ function catalogueJobs(catalogueText: string): { name: string; block: string; }[
 
 /**
  * Every job name whose command reads `A11Y_WORKERS` from the whole fleet — DERIVED from the catalogue's
- * own text, never hand-written, for the reason `worker-files.mjs` and the signal-type scrape both taught
+ * own text, never hand-written, for the reason `worker-files.ts` and the signal-type scrape both taught
  * this repo: a hand-written list is a fact stated twice and this repo's record on those is that they drift.
  *
  * `lab-job.test.ts` parses this same file with a real YAML library, which `packages/control` may not

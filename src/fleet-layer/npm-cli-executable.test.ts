@@ -1,6 +1,6 @@
 // Relocated from packages/worker-fleet/src/npm-cli-executable.test.ts by #3504: it reads control/lab/guards/the root, so it stays in the core and reads the fleet through the layer checkout at packages/worker-fleet.
 /**
- * `npm-cli-executable.mjs` is a DELIBERATE duplicate of the repo-root `scripts/npm-cli-executable.mjs`,
+ * `npm-cli-executable.mjs` is a DELIBERATE duplicate of the repo-root `scripts/npm-cli-executable.ts`,
  * forced by the identical publish boundary `git-safe-env.test.ts` (beside this file) already explains:
  * `check-worker-code.mjs`/`deploy-worker.mjs` ship as `bin` entries, so nothing they import can reach
  * outside `@a11ign/screenreader-fleet`.
@@ -14,7 +14,7 @@
  * (Node auto-routes a bare `.cmd` through `cmd.exe`) stopped being true in April 2024 (CVE-2024-27980,
  * "BatBadBut"), and the win32 branch was verified only by overriding `process.platform` in a unit test —
  * never against a real Windows platform, which is exactly the gap that let the regression through (see
- * `scripts/npm-cli-executable.mjs`'s own header). The replacement API has NO platform branching: both
+ * `scripts/npm-cli-executable.ts`'s own header). The replacement API has NO platform branching: both
  * candidate layouts (Windows-shaped, POSIX-shaped) are tried unconditionally on every platform, so there
  * is nothing here for a `process.platform` override to exercise — `process.execPath` is the only input,
  * and it is overridden directly below instead.
@@ -29,7 +29,7 @@ import {
   resolveNpmCliScript as rootResolve,
   npmCliInvocation as rootInvocation,
   pnpmCliInvocation as rootPnpm,
-} from "../../../../scripts/npm-cli-executable.mjs";
+} from "../../../../scripts/npm-cli-executable.ts";
 import {
   npmCliScriptCandidates as localCandidates,
   resolveNpmCliScript as localResolve,
