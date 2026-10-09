@@ -25,9 +25,9 @@ import { stripComments } from "../../../evidence/src/source-text.ts";
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, basename } from "node:path";
-import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.mjs";
-import { filesUnder } from "../../../guards/src/files-under.mjs";
-import { installedPackageDir } from "../../../guards/src/layer-file.mjs";
+import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.ts";
+import { filesUnder } from "../../../guards/src/files-under.ts";
+import { installedPackageDir } from "../../../guards/src/layer-file.ts";
 
 // #716/#704: this file's own population is the whole tracked tree, not one file -- declared here
 // rather than inferred from its source, per ceo's ruling (2026-09-09) that the tree-wide-guard

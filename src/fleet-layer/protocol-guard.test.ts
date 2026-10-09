@@ -13,8 +13,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
 import { protocolVerdict, RECAPTURE_COST } from "../../../worker-fleet/src/protocol-guard.ts";
-import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.mjs";
-import { filesUnder } from "../../../guards/src/files-under.mjs";
+import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.ts";
+import { filesUnder } from "../../../guards/src/files-under.ts";
 
 // #716/#704: this file's own population is the whole tracked tree, not one file -- declared here
 // rather than inferred from its source, per ceo's ruling (2026-09-09) that the tree-wide-guard

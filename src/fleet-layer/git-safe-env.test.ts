@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { sandboxGitEnv as rootSandboxGitEnv, KNOWN_GIT_REDIRECT_VARS as rootKnown }
-  from "../../../guards/src/git-env.mjs";
+  from "../../../guards/src/git-env.ts";
 import { sandboxGitEnv as localSandboxGitEnv, KNOWN_GIT_REDIRECT_VARS as localKnown } from "../../../worker-fleet/src/git-safe-env.ts";
 
 test("KNOWN_GIT_REDIRECT_VARS matches the root copy, so the documentation cannot drift silently", () => {

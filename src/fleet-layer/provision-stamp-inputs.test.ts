@@ -45,7 +45,7 @@
  * invalidates the corpus, which is a decision for whoever owns the live recapture, not something a test
  * should decide unilaterally by asserting a bigger list into existence.
  */
-import { declareWalkScope } from "../../../guards/src/walk-scope.mjs";
+import { declareWalkScope } from "../../../guards/src/walk-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";

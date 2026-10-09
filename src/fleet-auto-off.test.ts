@@ -23,7 +23,7 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerDeclaration, layerOwning, layerPinTag, layersFrom, pinnedLayerTag } from "./layer-checkouts.ts";
-import { layingPlan } from "../../../scripts/lay-layer.mjs";
+import { layingPlan } from "../../../scripts/lay-layer.ts";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,

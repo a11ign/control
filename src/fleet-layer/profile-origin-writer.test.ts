@@ -24,7 +24,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { layerFile } from "../../../guards/src/layer-file.mjs";
+import { layerFile } from "../../../guards/src/layer-file.ts";
 import { parse } from "yaml";
 // BY PACKAGE NAME (#2613), through the resolver: `browsers.mjs` is not in the package's `exports` map, and adding an export
 // to the layer's public surface for a test is a decision for the layer. `layerFile` answers "where is this file of

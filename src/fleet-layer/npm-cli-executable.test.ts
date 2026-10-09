@@ -29,7 +29,7 @@ import {
   resolveNpmCliScript as rootResolve,
   npmCliInvocation as rootInvocation,
   pnpmCliInvocation as rootPnpm,
-} from "../../../../scripts/npm-cli-executable.mjs";
+} from "../../../../scripts/npm-cli-executable.ts";
 import {
   npmCliScriptCandidates as localCandidates,
   resolveNpmCliScript as localResolve,
