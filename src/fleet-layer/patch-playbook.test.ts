@@ -24,10 +24,13 @@ import { fileURLToPath } from "node:url";
 const ANSIBLE = fileURLToPath(new URL("../../ansible/", import.meta.url));
 const PATCH = join(ANSIBLE, "patch.yml");
 
-type Task = Record<string, any>;
-type Play = Record<string, any>;
+// Parsed YAML has no schema here (no npm dependency to give it one), so the one untyped alias is named once.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Yaml = any;
+type Task = Record<string, Yaml>;
+type Play = Record<string, Yaml>;
 
-function parseYamlFile(path: string): any {
+function parseYamlFile(path: string): Yaml {
   return JSON.parse(execFileSync("python3", ["-I", "-c",
     "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", path], { encoding: "utf8" }));
 }
