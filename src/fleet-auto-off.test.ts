@@ -734,6 +734,9 @@ function followStep(): { lines: string[]; script: string } {
   return { lines, script: (quoted?.[1] ?? "").replaceAll("$$", "$") };
 }
 
+/** What `ExecStart` and both lay lines pass `node`, so the recorded argv is the shipped one and not a second copy of the loader's path. */
+const LOADER_ARGS = "--import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs";
+
 const gitIn = (cwd: string, ...args: string[]) =>
   spawnSync("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv() });
 
@@ -794,7 +797,7 @@ test("#3852: behind `main`, the checkout fast-forwards and THEN lays the layer a
     assert.notEqual(sandbox.head(), before);
     const laid = sandbox.calls().filter((c) => c.startsWith("node "));
     const head = sandbox.head().slice(0, 7);
-    assert.deepEqual(laid, [`node scripts/lay-layer.mjs screenreader-fleet: ${head}`, `node scripts/lay-layer.mjs control: ${head}`],
+    assert.deepEqual(laid, [`node ${LOADER_ARGS} scripts/lay-layer.ts screenreader-fleet: ${head}`, `node ${LOADER_ARGS} scripts/lay-layer.ts control: ${head}`],
       "each layer laid once, and the tree already held the merged commit when it was (the pin it reads is the new one, #3976)");
   } finally {
     sandbox.dispose();
@@ -932,6 +935,37 @@ const BESIDE = [
   "packages/control/ansible/files/a11y-fleet-auto-off.service",
   "packages/control/ansible/files/a11y-fleet-auto-off.timer",
 ];
+
+/** Every core-relative script the unit's Exec lines run: the absolute ones under the checkout's literal path, and the bare `scripts/...` the follow step runs from `WorkingDirectory=`. */
+function scriptsRun(unit: string): string[] {
+  const exec = activeLines(unit.replace(/\\\n\s*/g, " ")).filter((l) => /^ExecStart(Pre)?=/.test(l)).join("\n");
+  return [...exec.matchAll(/(?<![\w./-])(?:\/root\/a11y-witness\/)?((?:scripts|packages)\/[\w./-]+\.(?:ts|mjs|js))/g)].map((m) => m[1]);
+}
+
+const absentFrom = (root: string, paths: string[]) => [...new Set(paths.filter((p) => !existsSync(join(root, p))))];
+
+test("#4571: every script the unit runs exists in the core it is laid into, and the old `.mjs` line is what this would have caught", () => {
+  // The follow step's `-` hides a missing script: from a11ign/a11ign#4268 to #4571 both lay lines logged `Cannot find module` on every firing.
+  const unit = shippedUnit("a11y-fleet-auto-off.service");
+  const named = scriptsRun(unit);
+  assert.ok(["scripts/lay-layer.ts", THIS].every((p) => named.includes(p)),
+    `the scan finds the scripts it exists for (positive control for the emptiness below), found ${JSON.stringify(named)}`);
+  assert.deepEqual(absentFrom(REPO, named), [], "a script the unit runs that the laid core does not hold");
+  // The marker is checked in both directions, against a core that holds exactly what the shipped unit names: it must say nothing there,
+  // and it must name the script on the unit as it stood, so it is not a scan that only ever finds the remedy present.
+  const core = mkdtempSync(join(tmpdir(), "unit-scripts-"));
+  try {
+    for (const path of named) {
+      mkdirSync(join(core, dirname(path)), { recursive: true });
+      writeFileSync(join(core, path), "");
+    }
+    assert.deepEqual(absentFrom(core, scriptsRun(unit)), []);
+    const asItStood = unit.replaceAll("lay-layer.ts", "lay-layer.mjs");
+    assert.deepEqual(absentFrom(core, scriptsRun(asItStood)), ["scripts/lay-layer.mjs"]);
+  } finally {
+    rmSync(core, { recursive: true, force: true });
+  }
+});
 
 test("#3275 the watch reads the file the timer writes: one path, stated in both files and pinned equal", () => {
   assert.equal(AUTO_OFF_STATE_PATH, DEFAULT_STATE_PATH);
