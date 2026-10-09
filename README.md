@@ -69,7 +69,7 @@ jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' packag
 printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"] }\n' > core/tsconfig.control.json
 cd core && pnpm install --frozen-lockfile
 pnpm exec eslint packages/control && pnpm exec tsc --noEmit -p tsconfig.control.json
-pnpm exec rstest run --config scripts/rstest/rstest.config.mjs --include "packages/control/**/*.test.ts"
+pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include "packages/control/**/*.test.ts"
 ```
 
 Bumping `CORE_REF` is a pull request: the only way the core's changes reach this repository. `pnpm test` here runs only this repository's own checks (`scripts/`), and `pnpm run layout-check` is

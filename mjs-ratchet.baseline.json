@@ -3,7 +3,6 @@
     "control-plane-checkout.mjs",
     "control-plane-fleet.mjs",
     "control-plane-host.mjs",
-    "control-unit-drift.mjs",
     "fleet-auto-off.mjs",
     "fleet-discover.mjs",
     "fleet-host-identity.mjs",
@@ -21,7 +20,6 @@
     "layer-checkouts.mjs",
     "post-qualification-status.mjs",
     "qualification-run.mjs",
-    "rstest.config.mjs",
     "with-control-plane-fleet.mjs"
   ],
   "exceptions": []

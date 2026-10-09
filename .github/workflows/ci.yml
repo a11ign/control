@@ -60,6 +60,8 @@ jobs:
         with: { repository: a11ign/a11ign, ref: "${{ env.CORE_REF }}", path: core }
       # The package is the root here and `packages/control` there. `jq` keeps what the core's workspace resolves by (`name`, `exports`) and what the dependency-free test reads (`dependencies`), and drops
       # what only this repository's own tooling uses. `tsconfig.control.json` is written rather than tracked: this repository holds ONE tsconfig, and this one means nothing outside the lay.
+      # The core's tests list files with `git ls-files` (`walkTree`), and the core at `CORE_REF` still TRACKS `packages/control`, so a file this repository renames (a11ign/a11ign#4268) would be listed under its old
+      # name and read from a disk that no longer has it. `git add -A` makes the index say what the lay put on disk; nothing is committed.
       - name: Lay this repository's package over the core's own
         run: |
           rm -rf core/packages/control
@@ -67,6 +69,7 @@ jobs:
           cp -R control/src control/ansible control/layers.json control/CLAUDE.md control/README.md core/packages/control/
           jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
           printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"] }\n' > core/tsconfig.control.json
+          git -C core add -A packages/control
       # pnpm/action-setup reads the version out of `packageManager`, and comes before setup-node because `cache: pnpm` shells out to it.
       - uses: pnpm/action-setup@v6
         with: { package_json_file: core/package.json }
@@ -83,7 +86,7 @@ jobs:
         working-directory: core
       # This repository's own checks: the workflows, the arming filter, the composition above, the manifest. The typecheck (`tsc --noEmit`, `package.json`'s `typecheck`) is a step of the `gate` job
       # the ruleset requires, so a type error here blocks the merge; it runs before the tests so it reads red without waiting for them. The tests are rstest on `@a11ign/toolchain`'s config
-      # (`scripts/rstest/rstest.config.mjs`, ADR 0043), the same runner the core's step above uses.
+      # (`scripts/rstest/rstest.config.ts`, ADR 0043), the same runner the core's step above uses.
       - run: pnpm install --frozen-lockfile
         working-directory: control
       # THE LAYOUT CHECK (ADR 0043, Decision 7; `@a11ign/toolchain`'s `layout-check`, a11ign/a11ign#4210): the package is at the root, with one README, one manifest and no workspace file. It
