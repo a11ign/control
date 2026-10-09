@@ -1,6 +1,6 @@
 // Relocated from packages/worker-fleet/src/git-safe-env.test.ts by #3504: it reads control/lab/guards/the root, so it stays in the core and reads the fleet through the layer checkout at packages/worker-fleet.
 /**
- * `git-safe-env.mjs` is a DELIBERATE duplicate of the repo-root `packages/guards/src/git-env.mjs`, forced by a
+ * `git-safe-env.mjs` is a DELIBERATE duplicate of the repo-root `packages/guards/src/git-env.ts`, forced by a
  * publish boundary this package's own header explains: `check-worker-code.mjs`/`deploy-worker.mjs` ship
  * as `bin` entries, so nothing they import can reach outside `@a11ign/screenreader-fleet`.
  *
@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { sandboxGitEnv as rootSandboxGitEnv, KNOWN_GIT_REDIRECT_VARS as rootKnown }
-  from "../../../guards/src/git-env.mjs";
+  from "../../../guards/src/git-env.ts";
 import { sandboxGitEnv as localSandboxGitEnv, KNOWN_GIT_REDIRECT_VARS as localKnown } from "../../../worker-fleet/src/git-safe-env.mjs";
 
 test("KNOWN_GIT_REDIRECT_VARS matches the root copy, so the documentation cannot drift silently", () => {

@@ -16,7 +16,7 @@ import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.mjs";
 const LAB_SCRIPTS = fileURLToPath(new URL("../../../lab/scripts/", import.meta.url));
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { stripComments } from "../../../guards/src/local-import-closure.mjs";
+import { stripComments } from "../../../guards/src/local-import-closure.ts";
 
 const read = (name: string) =>
   readFileSync(fileURLToPath(new URL(`../../ansible/${name}`, import.meta.url)), "utf8");

@@ -7,7 +7,7 @@
  * `tasks/run-job.yml` asks the question before it starts a unit, which a CI job can only read. What none of it shows is a real lab host
  * refusing: that is `orchestrator`'s fleet step, not this row's.
  *
- * POSITIVE CONTROL: a fixture laid the way `scripts/lay-layer.mjs` leaves `packages/lab` (`.layer-ref` at the pin, no `.git`, `src/`
+ * POSITIVE CONTROL: a fixture laid the way `scripts/lay-layer.ts` leaves `packages/lab` (`.layer-ref` at the pin, no `.git`, `src/`
  * and everything `lays` names) PASSES. Each refusal below is then that same fixture with one thing taken away, so a check that refuses
  * everything fails the control and a check that refuses nothing fails every other test.
  */
@@ -39,7 +39,7 @@ const newRoot = () => {
 };
 test.after(() => { for (const dir of scratch) rmSync(dir, { recursive: true, force: true }); });
 
-/** What `scripts/lay-layer.mjs` leaves: the declared `lays` and `.layer-ref`, no `.git`. */
+/** What `scripts/lay-layer.ts` leaves: the declared `lays` and `.layer-ref`, no `.git`. */
 function layLab(root: string, { ref = PINNED, leaving = [] as string[] } = {}) {
   const dir = join(root, LAB_PATH);
   for (const name of LAYS.filter((n) => !leaving.includes(n))) {

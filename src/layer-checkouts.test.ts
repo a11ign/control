@@ -241,7 +241,7 @@ function layerFixture({ annotated }: { annotated: boolean }) {
   return { origin, core, layerDir: join(core, MOVE_PATH), released, branchTip, move };
 }
 
-/** A laid tree as `scripts/lay-layer.mjs` leaves it: `src/` and `.layer-ref`, and no `.git`. */
+/** A laid tree as `scripts/lay-layer.ts` leaves it: `src/` and `.layer-ref`, and no `.git`. */
 function lay(layerDir: string, ref: string) {
   mkdirSync(join(layerDir, "src"), { recursive: true });
   writeFileSync(join(layerDir, ".layer-ref"), `${ref}\n`);
@@ -348,7 +348,7 @@ test("#4363 layerPinTag names the tag the layer's repository made: v<semver> fro
 });
 
 /** The core's file, reachable only from inside a core checkout (`packages/control` laid beside `scripts/`), and exporting `releaseTag` only from the core's #4119 on. */
-const CORE_LAY_LAYER = join(REPO, "scripts/lay-layer.mjs");
+const CORE_LAY_LAYER = join(REPO, "scripts/lay-layer.ts");
 
 /** Why the agreement test cannot run here, or `false` when it can: a core older than `releaseTag` (what `ci.yml`'s `CORE_REF` may still pin) has no first copy to compare with. */
 function noFirstCopy(): string | false {

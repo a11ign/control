@@ -14,7 +14,7 @@
  * The related rule — that nothing spawns a sibling by a cwd-relative path — is checked repo-wide in
  * `packages/lab/src/packaging/spawned-paths.test.ts`, because the split found three instances of it.
  */
-import { declareWalkScope } from "../../../guards/src/walk-scope.mjs";
+import { declareWalkScope } from "../../../guards/src/walk-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
