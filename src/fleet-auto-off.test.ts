@@ -1028,7 +1028,7 @@ test("#3845 layerPinTag reads the lockfile as scripts/lay-layer.mjs does, on the
   for (const [text, label] of [[real, "the real lockfile"], [real.replace(/\n/g, "\r\n"), "the same with CRLF"]]) {
     const ours = layerPinTag(text, LAYER) as { tag: string };
     const theirs = layingPlan(manifest, text, LAYER) as { tag: string };
-    assert.match(ours.tag, /^@a11ign\/screenreader-fleet@\d+\.\d+\.\d+$/, `${label}: positive control, a tag was found`);
+    assert.match(ours.tag, /^(?:v|@a11ign\/screenreader-fleet@)\d+\.\d+\.\d+$/, `${label}: positive control, a tag was found`);
     assert.equal(ours.tag, theirs.tag, `${label}: control and the script that lays the layer name one build`);
   }
   assert.deepEqual(layerPinTag(lockfileAt("0.5.1"), LAYER), { tag: TAG }, "a peer-suffixed version is cut at the parenthesis");
@@ -1058,6 +1058,26 @@ test("#3845 checkAgainstMain: the layer's files go to its pin and NEVER to git's
     assert.ok(call.includes("packages/control/src/other.mjs"), "and the core's files still are compared");
   }
   assert.ok(git.calls.some((c) => c[0] === "show" && c[1] === "origin/main:pnpm-lock.yaml"), "the pin is main's, not the working tree's");
+});
+
+test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.mjs IS at the pin the lockfile names, and the older tag form is not", () => {
+  const root = mkdtempSync(join(tmpdir(), "auto-off-4363-"));
+  const laidAs = (tag: string) => {
+    const dir = join(root, tag.replace(/\W/g, "_"));
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, ".layer-ref"), `${tag}\n`);
+    return dir;
+  };
+  const verdictFor = (laid: string, lockfile: string) => checkAgainstMain({ now: 1, fetchedAt: null, git: scriptedGit({ lockfile }).git, readSource: sourceWithLayer,
+    judgeLayer: (layer) => judgeLaidLayer({ ...layer, dir: laidAs(laid) }) }).verdict;
+  try {
+    assert.deepEqual(verdictFor("v0.5.3", lockfileAt("0.5.3")), { action: "proceed" }, "the flat release is laid as v0.5.3, and main pins that same build");
+    assert.deepEqual(verdictFor("@a11ign/screenreader-fleet@0.5.2", lockfileAt("0.5.2")), { action: "proceed" }, "before the flat release the older form is the tag");
+    const stale = verdictFor("@a11ign/screenreader-fleet@0.5.3", lockfileAt("0.5.3"));
+    assert.equal((stale as { reason: string }).reason, "stale-checkout", "a tree laid under a tag the repository never made is not at the pin");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("#3845 checkAgainstMain: a layer laid at another tag refuses, NAMING the layer; a core difference is still reported beside it", () => {

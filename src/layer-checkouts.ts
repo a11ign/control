@@ -186,9 +186,27 @@ export function pinnedLayerTag(manifestText: string, layer: string): { tag: stri
 }
 
 /**
+ * THE FIRST VERSION AT WHICH A LAYER'S REPOSITORY TAGS `v<semver>` rather than `<package>@<version>`: a SECOND COPY of `BARE_TAGS_FROM` in
+ * `scripts/lay-layer.mjs`, because `control` imports nothing outside its own directory (ADR 0012). `layer-checkouts.test.ts` fails when
+ * the two disagree, wherever the core's file is reachable. The table is the REPOSITORY's, not the version's: `screenreader-worker` moved
+ * to `v<semver>` at 0.3.0 and `screenreader-fleet` at 0.5.3, so a rule on the version alone would break one of them (#4363).
+ */
+const BARE_TAGS_FROM: Record<string, [number, number, number]> = { "@a11ign/screenreader-worker": [0, 3, 0], "@a11ign/screenreader-fleet": [0, 5, 3] };
+
+/** `scripts/lay-layer.mjs`'s `releaseTag` over again: `v<version>` once the package's repository tags that way, `<package>@<version>` before. */
+export function releaseTag(name: string, version: string): string {
+  const from = Object.hasOwn(BARE_TAGS_FROM, name) ? BARE_TAGS_FROM[name] : undefined;
+  if (from === undefined) return `${name}@${version}`;
+  const [major, minor, patch] = version.split(".").slice(0, 3).map(Number);
+  const atOrAfter = major !== from[0] ? major > from[0] : minor !== from[1] ? minor > from[1] : patch >= from[2];
+  return atOrAfter ? `v${version}` : `${name}@${version}`;
+}
+
+/**
  * The tag a layer is laid at, read from the text of the core's `pnpm-lock.yaml`: `scripts/lay-layer.mjs`'s `pinnedVersion` and
  * `layingPlan` over again, because `control` imports nothing outside its own directory (ADR 0012) and that script imports the guards.
  * `fleet-auto-off.test.ts` holds the two readings equal on the real lockfile, so they cannot name two builds (#3845).
+ * The tag is the one the layer's repository really made (`releaseTag`), not always `<package>@<version>` (#4363).
  * A lockfile with no registry entry for the layer is a refusal, never a default.
  *
  *
@@ -201,7 +219,7 @@ export function layerPinTag(lockfile: string, layer: string): { tag: string; } |
   if (!block) return { refusal: `pnpm-lock.yaml has no importer entry for ${name}` };
   const version = block[1].replace(/\(.*$/, "");
   if (!/^\d+\.\d+\.\d+/.test(version)) return { refusal: `${name} is "${version}" in pnpm-lock.yaml, not a registry release: there is no tag to lay` };
-  return { tag: `${name}@${version}` };
+  return { tag: releaseTag(name, version) };
 }
 
 /**
