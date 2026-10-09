@@ -1,0 +1,266 @@
+---
+# PATCH THE FLEET ON PURPOSE: every box, the same quality updates, now, then back to deferred -- #4445, under #4405.
+#
+#     ansible-playbook patch.yml                       # the window: each box in turn
+#     ansible-playbook patch.yml --limit a11y-worker-4 # one box (a re-run after a refusal)
+#
+# ## Why this exists
+#
+# #4438 defers quality updates 30 days (`worker_update_deferral_policy`), so no box moves its Windows build
+# on its own. That makes the build a thing the fleet DOES rather than a thing that happens, and this is the
+# doing: lift the deferral, install what is pending, reboot, put the deferral back, and read the build off
+# every box so the play ends by NAMING them. The OS build is a capture-cache key (`environmentKey()`), so
+# "the fleet is on one build" is the claim the whole play exists to prove, not to assume.
+#
+# ## ONE BOX AT A TIME, and a refusal HALTS the rest
+#
+# `serial: 1` keeps nine boxes capture-capable while one is down for its reboot. It is also what makes a
+# refusal stop the rollout: a batch of one that fails is a fully failed batch, so the play ends instead of
+# patching nine boxes around the one that refused (`busy-worker-guard.test.ts` pins the same reasoning for
+# `provision.yml`). `any_errors_fatal` says it outright too. Re-run with `--limit` for the boxes that are left.
+#
+# ## The deferral is restored in an `always`, and that is the safety property
+#
+# Between "lift" and "restore" the box can install ANY quality update Windows Update offers. A play that
+# died in the install and left the deferral at 0 would give every later reboot of that box a free choice of
+# build, which is the drift #4438 removed. So the restore sits in `always:` -- it runs when the install or
+# the reboot failed -- and is read back.
+#
+# ## It reboots only a box that INSTALLED something
+#
+# `reboot: false` on `win_updates`, always: the reboot is this play's own `win_reboot`, visible as a task, and
+# it fires only when updates were installed AND Windows asks for it. A pending reboot left by something else
+# is reported and left alone; rebooting a box that installed nothing is a restart nobody asked for, on a
+# machine that may be holding a capture.
+#
+# ## Not read here
+#
+# That `win_updates` works on this fleet's Windows edition has not been read: the first run is row E's, with
+# `--check --limit <one idle box>` first.
+
+- name: The workers must be in the inventory
+  # A run that matches no host prints "skipping: no hosts matched" and EXITS 0, so a patch window could "pass"
+  # having patched nothing and named no build. Settled on localhost, where the refusal can speak.
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The workers must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
+
+- name: Install the pending quality updates on every worker, one box at a time
+  hosts: a11y_workers
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  # The role's OWN list, never a copy: what this play restores is exactly what `provision.yml` applies, so
+  # the two cannot disagree about what "deferred" means. `vars_files` outranks `group_vars`, and nothing
+  # overrides this variable there; an override would have to be made in the role defaults.
+  vars_files:
+    - roles/worker/defaults/main.yml
+  vars:
+    # The ONE entry the window lifts. Feature-update deferral stays exactly as provisioned the whole time.
+    patch_lifted_values: >-
+      {{ worker_update_deferral_policy
+         | selectattr('name', 'equalto', 'DeferQualityUpdatesPeriodInDays')
+         | map('combine', {'value': 0}) | list }}
+    patch_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
+  tasks:
+    - name: The quality deferral is declared, or the window would lift nothing
+      # A lift that matches no entry "succeeds" and installs nothing -- a green result vouching for an inert
+      # remedy. Exactly one entry, by name.
+      ansible.builtin.assert:
+        that:
+          - patch_lifted_values | length == 1
+        fail_msg: >-
+          worker_update_deferral_policy has no DeferQualityUpdatesPeriodInDays entry (or more than one), so
+          there is no quality deferral for the patch window to lift.
+
+    - name: Refuse to patch a worker that is mid-capture
+      # Same shape and same reason as display.yml's and edge-version.yml's check: an install that ends in a
+      # reboot destroys 12-520 s of real screen-reader work. `busy` is the field; `ok` only ever meant "the
+      # HTTP server is answering". Unanswered counts as busy.
+      delegate_to: localhost
+      become: false
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        return_content: true
+      register: patch_worker_health
+      failed_when: patch_worker_health.json.busy | default(true)
+
+    - name: Lift the deferral, install, reboot if it installed something -- and always put the deferral back
+      block:
+        - name: Quality updates may install now
+          become: true
+          ansible.windows.win_regedit:
+            path: "{{ item.path }}"
+            name: "{{ item.name }}"
+            data: "{{ item.value }}"
+            type: dword
+          loop: "{{ patch_lifted_values }}"
+          loop_control:
+            label: "{{ item.name }} = {{ item.value }}"
+
+        - name: Refuse to install unless the lift landed
+          # Read back, because an install under a deferral that is still in force finds nothing and reports
+          # success. Not under `--check`: the write above did not happen there, so the read would fail on a
+          # dry run for the right reason and teach nobody anything.
+          when: not ansible_check_mode
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Wanted: "{{ patch_lifted_values }}"
+            script: &read_back_deferral |
+              param($Wanted)
+              $Ansible.Changed = $false
+              $wrong = @()
+              foreach ($v in $Wanted) {
+                $cur = $null
+                try { $cur = (Get-ItemProperty -LiteralPath $v.path -Name $v.name -ErrorAction Stop).($v.name) } catch { $cur = $null }
+                if ($null -eq $cur -or [int]$cur -ne [int]$v.value) { $wrong += "$($v.path)\$($v.name) is '$cur', wanted '$($v.value)'" }
+              }
+              if ($wrong.Count -gt 0) { $Ansible.Failed = $true; "deferral did not read back: " + ($wrong -join '; ') }
+              else { "$($Wanted.Count) deferral value(s) read back" }
+
+        - name: Install the pending quality updates, WITHOUT letting the module reboot
+          # `reboot: false` is load-bearing: the reboot below is this play's own, visible and conditional.
+          become: true
+          ansible.windows.win_updates:
+            category_names: "{{ patch_categories }}"
+            state: installed
+            reboot: false
+            log_path: 'C:\Windows\Temp\a11y-patch-updates.log'
+          register: patch_updates
+
+        - name: Say what was installed
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }}: found {{ patch_updates.found_update_count | default(0) }},
+              installed {{ patch_updates.installed_update_count | default(0) }},
+              failed {{ patch_updates.failed_update_count | default(0) }},
+              reboot {{ 'required' if patch_updates.reboot_required | default(false) else 'not required' }}
+
+        - name: Reboot, only because updates were installed and Windows asked
+          when:
+            - patch_updates.installed_update_count | default(0) | int > 0
+            - patch_updates.reboot_required | default(false)
+          become: true
+          ansible.windows.win_reboot:
+            reboot_timeout: 1800
+
+        - name: Wait for the worker to be READY again
+          # `ready`, not `ok` -- see the busy check above. Only after a reboot we made.
+          when:
+            - patch_updates.installed_update_count | default(0) | int > 0
+            - patch_updates.reboot_required | default(false)
+          delegate_to: localhost
+          become: false
+          ansible.builtin.uri:
+            url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+            return_content: true
+          register: patch_health_after
+          until: patch_health_after.status is defined and patch_health_after.status == 200 and (patch_health_after.json.ready | default(false))
+          retries: 90
+          delay: 10
+
+        - name: Say so when a pending reboot was left alone
+          when:
+            - patch_updates.installed_update_count | default(0) | int == 0
+            - patch_updates.reboot_required | default(false)
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} has a reboot pending that THIS run did not cause (nothing was
+              installed), so it was not rebooted. It restarts on its own schedule.
+
+      always:
+        - name: Defer quality updates again, from the role's own values
+          become: true
+          ansible.windows.win_regedit:
+            path: "{{ item.path }}"
+            name: "{{ item.name }}"
+            data: "{{ item.value }}"
+            type: dword
+          loop: "{{ worker_update_deferral_policy }}"
+          loop_control:
+            label: "{{ item.name }} = {{ item.value }}"
+
+        - name: Refuse to call the box patched unless the deferral is back
+          when: not ansible_check_mode
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Wanted: "{{ worker_update_deferral_policy }}"
+            script: *read_back_deferral
+
+    - name: Ask the box what Windows build it is on now
+      # `CurrentBuild.UBR` is the whole build; `CurrentBuild` alone is the same for every monthly update.
+      # A box that cannot be asked is `unreadable` below, which is a different fact from a build that differs.
+      become: true
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $v = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          "$($v.CurrentBuild).$($v.UBR)"
+      changed_when: false
+      failed_when: false
+      # A read, so it runs under `--check` too: a dry run that cannot see the build cannot name it.
+      check_mode: false
+      register: patch_build_read
+
+    - name: Record the build, or that it could not be read
+      ansible.builtin.set_fact:
+        patch_build_reading: >-
+          {{ (patch_build_read.output | default([]) | first | default('', true) | trim)
+             if (patch_build_read.failed is not defined or not patch_build_read.failed)
+                and (patch_build_read.output | default([]) | first | default('', true) | trim) is match('^[0-9]+\.[0-9]+$')
+             else 'unreadable' }}
+
+    - name: Name the build
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ patch_build_reading }}"
+
+# The proof (a) asks for: after the window, ONE build. A separate play so it sees every box's reading, and
+# tagged so a test can run it alone over a synthetic inventory (`patch-playbook.test.ts`).
+- name: The fleet is on one build, or the odd boxes are named
+  hosts: a11y_workers
+  gather_facts: false
+  run_once: true
+  tags: [patch_verdict]
+  vars:
+    patch_readings: >-
+      {%- set r = {} -%}
+      {%- for h in ansible_play_hosts_all -%}
+        {%- set _ = r.update({h: hostvars[h].patch_build_reading | default('unreadable', true)}) -%}
+      {%- endfor -%}
+      {{ r }}
+    patch_read_boxes: "{{ patch_readings | dict2items | rejectattr('value', 'equalto', 'unreadable') | list }}"
+    patch_unreadable_boxes: "{{ patch_readings | dict2items | selectattr('value', 'equalto', 'unreadable') | map(attribute='key') | list }}"
+    patch_builds: "{{ patch_read_boxes | map(attribute='value') | unique | sort | list }}"
+    # The build most boxes share, ties broken by sort order; the boxes NOT on it are the odd ones.
+    patch_majority: >-
+      {%- set ns = namespace(best='', n=0) -%}
+      {%- for b in patch_builds -%}
+        {%- set n = patch_read_boxes | selectattr('value', 'equalto', b) | list | length -%}
+        {%- if n > ns.n -%}{%- set ns.best = b -%}{%- set ns.n = n -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.best }}
+    patch_odd_boxes: "{{ patch_read_boxes | rejectattr('value', 'equalto', patch_majority) | map(attribute='key') | sort | list }}"
+  tasks:
+    - name: Say every box's build, and which could not be asked
+      ansible.builtin.debug:
+        msg: >-
+          {{ patch_read_boxes | length }} box(es) read, {{ patch_unreadable_boxes | length }} unreadable
+          {{ patch_unreadable_boxes }}; builds seen: {{ patch_builds }}.
+          {{ 'NO box could be read, so agreement is NOT established.' if patch_read_boxes | length == 0 else '' }}
+
+    - name: Fail when the readable boxes are not all on one build
+      # Unreadable boxes are not counted as a mismatch: absence of a reading is "could not determine", not
+      # "differs". Only two distinct READ builds fail.
+      ansible.builtin.fail:
+        msg: >-
+          The fleet is on {{ patch_builds | length }} Windows builds: {{ patch_builds }}.
+          Odd box(es) (not on {{ patch_majority }}): {{ patch_odd_boxes }}.
+          Readings: {{ patch_readings }}.
+      when: patch_builds | length > 1

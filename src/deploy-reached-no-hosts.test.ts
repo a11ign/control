@@ -91,6 +91,11 @@ const DISPATCHED_ELSEWHERE: Record<string, string> = {
     + "wrapper: it stops the worker and starts a credential-bearing process, so it must not be one typo from "
     + "`fleet:deploy`. A run that resolves no worker cannot exit 0 having done nothing: its first play includes "
     + "`require-inventory-group.yml` on localhost, and the play after it asserts exactly one host (#2399).",
+  "patch.yml":
+    "run BY HAND for the patch window (#4445, under #4405), never through the routine deploy wrapper: it lifts "
+    + "the quality-update deferral, installs and REBOOTS one box at a time, so it must not be one typo from "
+    + "`fleet:deploy`. A run that resolves no worker cannot exit 0 having done nothing: its first play includes "
+    + "`require-inventory-group.yml` on localhost.",
   "reset-checkout.yml":
     "one-time, run by hand at transfer step 8 (#1547, #63): it moves every worker and the control plane onto "
     + "a named commit of the REWRITTEN history, which `deploy.yml`'s `--ff-only` rightly refuses. Reachable "
