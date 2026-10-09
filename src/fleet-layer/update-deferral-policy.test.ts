@@ -66,3 +66,42 @@ test("the deferral policy declares BOTH expected values, independent of whatever
     + "exists because a feature update reached a worker twice; a shorter deferral reopens exactly that "
     + "window sooner, silently, with every other check here still green.");
 });
+
+/** The ceiling Windows Update for Business documents for `DeferQualityUpdatesPeriodInDays`; above it the value is ignored. */
+const QUALITY_DEFERRAL_CEILING_DAYS = 30;
+
+test("the deferral policy defers QUALITY updates by 30 days, the documented ceiling (#4438)", () => {
+  const byName = new Map(deferralEntries().map((e) => [e.name, e]));
+
+  const defer = byName.get("DeferQualityUpdates");
+  assert.ok(defer, "DeferQualityUpdates is missing from worker_update_deferral_policy -- without it the "
+    + "period below is not read, and each box installs the monthly cumulative update whenever it is awake");
+  assert.equal(defer.path, WINDOWS_UPDATE_PATH,
+    `DeferQualityUpdates is under '${defer.path}', not the WindowsUpdate policy path`);
+  assert.equal(defer.value, 1, `DeferQualityUpdates is ${defer.value}, not 1`);
+
+  const period = byName.get("DeferQualityUpdatesPeriodInDays");
+  assert.ok(period, "DeferQualityUpdatesPeriodInDays is missing from worker_update_deferral_policy");
+  assert.equal(period.path, WINDOWS_UPDATE_PATH,
+    `DeferQualityUpdatesPeriodInDays is under '${period.path}', not the WindowsUpdate policy path`);
+  assert.equal(period.value, QUALITY_DEFERRAL_CEILING_DAYS,
+    `DeferQualityUpdatesPeriodInDays is ${period.value}, not ${QUALITY_DEFERRAL_CEILING_DAYS}`);
+});
+
+test("the quality deferral never exceeds the ceiling Windows honours (#4438)", () => {
+  const period = deferralEntries().find((e) => e.name === "DeferQualityUpdatesPeriodInDays");
+  assert.ok(period, "DeferQualityUpdatesPeriodInDays is missing -- there is no period to bound");
+  assert.ok(period.value <= QUALITY_DEFERRAL_CEILING_DAYS,
+    `DeferQualityUpdatesPeriodInDays is ${period.value}, above ${QUALITY_DEFERRAL_CEILING_DAYS}: Windows `
+    + "ignores a larger value, so it would read back as set and defer nothing");
+});
+
+test("the comment above the policy no longer says quality updates are left unrestricted (#4438)", () => {
+  const start = DEFAULTS.indexOf("worker_update_deferral_policy:");
+  assert.ok(start !== -1, "worker_update_deferral_policy is gone -- this test examines nothing");
+  const comment = DEFAULTS.slice(DEFAULTS.lastIndexOf("\n\n", start), start);
+  assert.ok(comment.includes("DeferFeatureUpdates") || comment.includes("#921"),
+    "the comment block above worker_update_deferral_policy was not found -- the boundary search drifted");
+  assert.doesNotMatch(comment, /unrestricted/i,
+    "the comment still says quality updates are left unrestricted, the opposite of what the list now does");
+});
