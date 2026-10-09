@@ -33,6 +33,20 @@
  * control host, which this watch does not read. So an unreachable worker is never counted: 73 hourly posts
  * on #928 read a deliberately-off fleet as broken. A box that is genuinely dead is found when a capture
  * window wakes it and it does not return (`fleet:wake`, which tells `needs:chairman`).
+ *
+ * ## A box off the fleet's build or display mode, before capture day (#4447, under #4405)
+ *
+ * The first anyone heard that a box was on another Windows build or display mode was the capture that refused it.
+ * This reads the two fields off the drift `fleetStatus` already computes (`mismatches` for `displayMode`,
+ * `reportedOnly` for `windowsBuild`, each with the reporting guests' values keyed by URL) and names the odd box.
+ * "The fleet's value" is the MODAL one among reachable boxes: a tie (which is what fewer than three disagreeing boxes always
+ * are) has no fleet value to be off from, so it raises `fleet-split: <values>` rather than naming one nobody holds.
+ *
+ * Its first-seen ledger is a SIBLING file (`DEFAULT_OFF_FLEET_STATE_PATH`), not `fleet-watch-state.json`: agent-org's
+ * `readFleetRoster` reads every key of that file as a non-ready WORKER NAME, so a key like `a11y-worker-3: build ...`
+ * would read as a down worker. The shape and the clearing are the same: an entry for a box that returned to the fleet's
+ * value is DROPPED. An unreachable box is the resting state (#3023): never counted, and its entries are carried
+ * unchanged rather than dropped, so a box that sleeps odd and wakes odd is not announced a second time.
  */
 import { readFileSync, writeFileSync, renameSync, openSync, closeSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -72,15 +86,26 @@ export const AUTO_OFF_MIRROR_PATH = "runs/fleet-auto-off-mirror.json";
 
 export const DEFAULT_CAPTURES_STATE_PATH = "runs/fleet-captures-state.json";
 
+/** First-seen ledger of the off-fleet lines already posted. Not `DEFAULT_STATE_PATH`: see the header. */
+export const DEFAULT_OFF_FLEET_STATE_PATH = "runs/fleet-off-fleet-state.json";
+
+/**
+ * The file `fleet:patch`'s timer (#4446) writes on the CONTROL HOST when a patch run completes, `{"lastRunAt": <epoch ms>}`.
+ * That row owns the writer; this is the contract it must meet, and this watch reads it the way it reads the auto-off record.
+ */
+export const PATCH_RUN_PATH = "runs/fleet-patch-last-run.json";
+
 const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
 
 /** Exit codes are the contract: 0 nothing needs attention, 1 something does, 2 could not ask. */
 export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
 
-export type FleetRow = {name: string, state: string, captures?: number|null, uptimeMinutes?: number|null, readiness?: {reason?: string|null}|null};
+export type FleetRow = {name: string, url?: string, state: string, captures?: number|null, uptimeMinutes?: number|null, readiness?: {reason?: string|null}|null};
 export type SinceState = Record<string, number>;
 
-export type StatusReader = () => Promise<{rows: FleetRow[]}>;
+/** One field the guests disagree about, as `fleetConsistency` reports it: `values` is keyed by the guest's URL. */
+export type Drift = {field: string, values: Record<string, unknown>};
+export type StatusReader = () => Promise<{rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[]}>;
 /**
  * `watch` only ever reads `.rows` off whatever `fleetStatus` returns, so it is typed against exactly
  * that -- not `typeof fleetStatus` -- which is what lets a fixture return `{rows: [...]}` alone rather
@@ -386,6 +411,103 @@ export function watchBody(entries: OverdueEntry[]): string {
   ].join("\n");
 }
 
+/** What this watch has to say about the fleet itself: a line to post, and the box it names (`null` for a fleet-wide line). */
+export type Oddity = {line: string, box: string | null};
+type BoxValue = {box: string, value: string};
+
+const DAYS_PER_PATCH_WINDOW = 28;
+const PATCH_WINDOW_MS = DAYS_PER_PATCH_WINDOW * HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
+/** What a worker's `/health` says before its first sample lands: a placeholder, not a reading of the box. */
+const NOT_YET_SAMPLED = "unknown";
+const ISO_DATE_LENGTH = "2026-10-09".length;
+
+const OFF_FLEET_FIELDS = [
+  { field: "windowsBuild", label: "build" },
+  { field: "displayMode", label: "display" },
+];
+
+/** Reachable boxes only, by name: `values` is keyed by URL, and a placeholder or an unreachable box is no reading. */
+function boxValues(drift: Drift, rows: FleetRow[]): BoxValue[] {
+  const reachable = new Map(rows.flatMap((row) => (row.url && row.state !== "unreachable" ? [[row.url, workerKey(row.name)] as const] : [])));
+  return Object.entries(drift.values).flatMap(([url, value]) => {
+    const box = reachable.get(url);
+    const known = typeof value === "string" && value !== "" && value !== NOT_YET_SAMPLED;
+    return box !== undefined && known ? [{ box, value }] : [];
+  });
+}
+
+/**
+ * The value most boxes hold, or `null` when two values are level at the top. Fewer than three boxes holding a value
+ * (the row's "too few to have a fleet value") need no rule of their own: two that disagree are always level, so they
+ * land here, and `fleet-split` is what they raise.
+ */
+function fleetValue(readings: BoxValue[]): string | null {
+  const counts = new Map<string, number>();
+  for (const { value } of readings) counts.set(value, (counts.get(value) ?? 0) + 1);
+  const [first, second] = [...counts].sort((a, b) => b[1] - a[1]);
+  return second && first[1] === second[1] ? null : first[0];
+}
+
+function oddBoxes({ field, label }: { field: string, label: string }, status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }): Oddity[] {
+  const drift = [...(status.mismatches ?? []), ...(status.reportedOnly ?? [])].find((candidate) => candidate.field === field);
+  const readings = drift ? boxValues(drift, status.rows) : [];
+  const distinct = [...new Set(readings.map(({ value }) => value))].sort();
+  if (distinct.length < 2) return [];
+  const fleet = fleetValue(readings);
+  if (fleet === null) return [{ box: null, line: `fleet-split: ${label} ${distinct.join(", ")}` }];
+  return readings.filter(({ value }) => value !== fleet).sort((a, b) => a.box.localeCompare(b.box))
+    .map(({ box, value }) => ({ box, line: `${box}: ${label} ${value} (fleet ${fleet})` }));
+}
+
+/**
+ * Every box off the fleet's Windows build or display mode in this reading, one line per box. Pure: the drift it reads is
+ * what `fleetStatus` returns, so a fleet that agrees (or a field nobody reports) draws nothing.
+ */
+export function offFleetLines(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }): Oddity[] {
+  return OFF_FLEET_FIELDS.flatMap((spec) => oddBoxes(spec, status));
+}
+
+/**
+ * `patch-window-missed` when the newest completed patch run is OLDER than the 28-day window. `null` for no run on record is
+ * not a miss: a control host that has never patched has not missed a window it was never given, and the row that
+ * installs the timer raises its own line when the window closes. The line names the run's DATE and not its age, because
+ * the line is the dedup key and an age would make a new line every tick.
+ */
+export function patchWindowMissed(lastRunAt: number | null, now: number): Oddity | null {
+  if (lastRunAt === null || now - lastRunAt <= PATCH_WINDOW_MS) return null;
+  return { box: null, line: `patch-window-missed: last patch run ${new Date(lastRunAt).toISOString().slice(0, ISO_DATE_LENGTH)}, window ${DAYS_PER_PATCH_WINDOW} days` };
+}
+
+/** @returns the epoch ms of the last patch run, or `null` when none is recorded; a file that is not a record THROWS */
+export function parsePatchRun(text: string): number | null {
+  const lastRunAt = JSON.parse(text)?.lastRunAt;
+  if (lastRunAt === undefined) return null;
+  if (!Number.isFinite(lastRunAt)) throw new TypeError(`${PATCH_RUN_PATH}: lastRunAt must be an epoch-ms number, got ${JSON.stringify(lastRunAt)}`);
+  return lastRunAt;
+}
+
+/**
+ * One tick's worth of the off-fleet ledger, and which lines are NEW this tick. A line seen before keeps its first-seen
+ * time and is not new; a line no longer found is dropped, so a box that returned to the fleet's value clears itself.
+ * `keep` says which unfound entries are carried instead: those about a box that did not answer this tick, because no
+ * answer is not a return to the fleet's value.
+ */
+export function advanceOffFleet(found: Oddity[], previous: SinceState, { now, keep }: { now: number, keep: (line: string) => boolean }): { state: SinceState, fresh: string[] } {
+  const state: SinceState = {};
+  for (const [line, since] of Object.entries(previous)) if (keep(line)) state[line] = since;
+  for (const { line } of found) state[line] = previous[line] ?? now;
+  return { state, fresh: found.filter(({ line }) => previous[line] === undefined).map(({ line }) => line) };
+}
+
+/** The comment body for lines not posted before. */
+export function offFleetBody(lines: string[]): string {
+  return [
+    `**${lines.length} off the fleet's build or display mode, ahead of capture** (#4447).`,
+    ...lines.map((line) => `- ${line}`),
+    "`npm run fleet:status` for the live reading.",
+  ].join("\n");
+}
+
 /** The refusal `fleet-auto-off.ts` recorded on its last tick that held a shutdown back (#3275). */
 export type AutoOffRefusal = { reason: string, detail: string, at: number };
 
@@ -464,17 +586,23 @@ export function recordCaptures(rows: FleetRow[], { path, at, read, write, lock =
   lock(path, () => writeCapturesState(path, advanceCaptures(rows, readCapturesState(path, read), at), write));
 }
 
+export type WatchDeps = {
+    getStatus?: StatusReader; now?: () => number; statePath?: string; capturesPath?: string; offFleetPath?: string;
+    thresholdMs?: number; read?: typeof readFileSync; write?: typeof writeFileSync;
+    /** The newest completed patch run, epoch ms (see `readPatchRun`). Absent: the patch window is not read this tick. */
+    lastPatchRunAt?: () => number | null;
+    /** Where the off-fleet ledger is written when it is not `write`: a dry run must not use up the lines a posting run will say. */
+    writeOffFleet?: (path: string, data: string) => void;
+};
+
 /**
  * Read the live fleet, advance and persist the non-ready-since state and the capture times, and report who
- * is overdue.
+ * is overdue and which boxes are newly off the fleet's build or display mode (#4447).
  * Everything above this function is pure; this is the one place I/O and the clock meet, and every piece
  * of it is a parameter with a real default -- the shape `runLabStatus`'s `run` parameter already
  * established for the identical reason: a test drives this without a fleet, a fleet, or a clock.
  */
-export async function watch(deps: {
-    getStatus?: StatusReader; now?: () => number; statePath?: string; capturesPath?: string;
-    thresholdMs?: number; read?: typeof readFileSync; write?: typeof writeFileSync;
-} = {}): Promise<OverdueEntry[]> {
+export async function watchFleet(deps: WatchDeps = {}): Promise<{ overdue: OverdueEntry[], offFleet: string[] }> {
   const getStatus = deps.getStatus ?? fleetStatus;
   const now = deps.now ?? Date.now;
   const statePath = deps.statePath ?? DEFAULT_STATE_PATH;
@@ -485,7 +613,57 @@ export async function watch(deps: {
   const next = advance(status.rows, previous, at);
   writeState(statePath, next, deps.write);
   recordCaptures(status.rows, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at, read: deps.read, write: deps.write });
-  return overdue(status.rows, next, at, thresholdMs);
+  return { overdue: overdue(status.rows, next, at, thresholdMs), offFleet: recordOffFleet(status, at, deps) };
+}
+
+/** The off-fleet lines this tick that were not posted before; the ledger is read and rewritten here. */
+function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }, at: number, deps: WatchDeps): string[] {
+  const path = deps.offFleetPath ?? DEFAULT_OFF_FLEET_STATE_PATH;
+  const patch = patchReading(deps.lastPatchRunAt, at);
+  const { state, fresh } = advanceOffFleet([...offFleetLines(status), ...patch.found], readState(path, deps.read),
+    { now: at, keep: carriesEntry(status.rows, patch.carry) });
+  writeState(path, state, deps.writeOffFleet ?? deps.write);
+  return fresh;
+}
+
+/** `watchFleet`'s stuck workers alone. */
+export async function watch(deps: WatchDeps = {}): Promise<OverdueEntry[]> {
+  return (await watchFleet(deps)).overdue;
+}
+
+/**
+ * The last patch run, read FROM the control host (the timer runs there, this watch on the agents host): ssh, or local when
+ * this is the control plane. A host that cannot be read THROWS rather than answering `null`: "no run on record" and "I
+ * did not look" are different states. A missing file is `{}`, which is no run on record.
+ */
+export function readPatchRun(
+  read: () => string = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${PATCH_RUN_PATH} 2>/dev/null || echo '{}'`, { capture: true }),
+): number | null {
+  return parsePatchRun(read());
+}
+
+const PATCH_LINE_PREFIX = "patch-window-missed: ";
+
+/**
+ * The patch line to raise, and whether an unread host means the last one stands. A run that could not be read SAYS so on
+ * stderr and carries the previous line: an unreadable host is not a patch that happened, and not a miss that cleared.
+ * With no reader at all (a caller that did not ask) the line is carried the same way.
+ */
+function patchReading(readLastRun: (() => number | null) | undefined, now: number): { found: Oddity[], carry: boolean } {
+  if (!readLastRun) return { found: [], carry: true };
+  try {
+    const missed = patchWindowMissed(readLastRun(), now);
+    return { found: missed ? [missed] : [], carry: false };
+  } catch (cause) {
+    console.error(`CANNOT READ the last patch run from the control host: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return { found: [], carry: true };
+  }
+}
+
+/** Entries about a box that did not answer, or about a patch run that could not be read, are not cleared by silence. */
+function carriesEntry(rows: FleetRow[], carryPatch: boolean): (line: string) => boolean {
+  const asleep = new Set(rows.filter((row) => row.state === "unreachable").map((row) => workerKey(row.name)));
+  return (line) => asleep.has(line.split(": ")[0]) || (carryPatch && line.startsWith(PATCH_LINE_PREFIX));
 }
 
 /**
@@ -507,21 +685,22 @@ async function main() {
   const post = process.argv.includes("--post");
   const thresholdArg = process.argv.find((a) => a.startsWith("--threshold-ms="));
   const thresholdMs = thresholdArg ? Number(thresholdArg.slice("--threshold-ms=".length)) : undefined;
-  let entries;
+  let found;
   try {
-    entries = await watch(thresholdMs === undefined ? {} : { thresholdMs });
+    found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), lastPatchRunAt: readPatchRun,
+      ...(post ? {} : { writeOffFleet: () => undefined }) });
   } catch (cause) {
     console.error(`CANNOT ASK: ${cause instanceof Error ? cause.message : String(cause)}`);
     process.exitCode = EXIT.CANNOT_ASK;
     return;
   }
   const refusal = readRefusalOrSay();
-  if (!entries.length && !refusal) {
+  if (!found.overdue.length && !found.offFleet.length && !refusal) {
     process.exitCode = EXIT.QUIET;
     return;
   }
-  const body = [entries.length ? watchBody(entries) : null, refusal ? refusalBody(refusal, Date.now()) : null]
-    .filter(Boolean).join("\n\n");
+  const body = [found.overdue.length ? watchBody(found.overdue) : null, found.offFleet.length ? offFleetBody(found.offFleet) : null,
+    refusal ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
   console.log(body);
   if (post) {
     execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });
