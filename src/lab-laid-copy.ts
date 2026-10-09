@@ -2,7 +2,7 @@
 /**
  * DOES THIS HOST HOLD THE LAB'S CODE? Asked before a lab job plays a lab script (#3833, follow-up of #3505).
  *
- * `packages/lab` is not tracked here and not cloned by a guest: `pnpm install`'s `prepare` runs `scripts/lay-layer.mjs lab`,
+ * `packages/lab` is not tracked here and not cloned by a guest: `pnpm install`'s `prepare` runs `scripts/lay-layer.ts lab`,
  * which lays `src/` and what `lays` names at the tag `layers.json`'s `pinned.lab` declares, plus `.layer-ref` and no `.git`.
  * **A host that PULLS and does not INSTALL holds no lab code**, and a job that names `packages/lab/scripts/...` then dies in the
  * unit with `Cannot find module`, after the dispatch, the wake and the lock. The install step in `tasks/run-job.yml` runs only
@@ -35,9 +35,9 @@ export function labLaidCopyRefusal({ manifest, root }: { manifest: { pinned?: Re
   if (declared?.tag === undefined) return `layers.json declares no \`pinned.${LAYER}\` with a tag: there is no lab code to look for`;
   const { path, tag, lays = ["src"] } = declared;
   const dir = join(root, path);
-  const install = `run \`corepack pnpm install --frozen-lockfile\` (its \`prepare\` lays it) or \`node scripts/lay-layer.mjs ${LAYER}\` in ${root}`;
+  const install = `run \`corepack pnpm install --frozen-lockfile\` (its \`prepare\` lays it) or \`node scripts/lay-layer.ts ${LAYER}\` in ${root}`;
   if (!existsSync(dir)) return `this host holds NO lab code: ${path} does not exist (pulled and not installed?): ${install}`;
-  if (existsSync(join(dir, ".git"))) return `${path} is a clone, not the laid copy \`scripts/lay-layer.mjs\` leaves (no \`.git\`): ${install}`;
+  if (existsSync(join(dir, ".git"))) return `${path} is a clone, not the laid copy \`scripts/lay-layer.ts\` leaves (no \`.git\`): ${install}`;
   const refFile = join(dir, REF_FILE);
   if (!existsSync(refFile)) return `${path} has no ${REF_FILE}, so it is not laid at any tag: ${install}`;
   const missing = lays.filter((name) => !existsSync(join(dir, name)));

@@ -30,7 +30,7 @@
  *
  * A layer that lives in its own repository is part of what the sha claims, and `lab-layer-checkouts.yml` refuses a job whose
  * `layer_refs` does not name every one. They are read here, by the poster, from the sha's OWN `pnpm-lock.yaml`
- * (`git show <sha>:pnpm-lock.yaml`), the pin `scripts/lay-layer.mjs` lays from, so the release and the lab cannot name two builds.
+ * (`git show <sha>:pnpm-lock.yaml`), the pin `scripts/lay-layer.ts` lays from, so the release and the lab cannot name two builds.
  * Each pinned version becomes the tag `@a11ign/<package>@<version>`, which `git ls-remote` resolves on the layer's own `remote` to
  * a full commit (the peeled one for an annotated tag, as `run-job.yml` reads it). A tag the remote does not hold is a REFUSAL
  * naming the layer, the tag and the remote, BEFORE anything is posted or dispatched: never a guess, never `main`, and never an
@@ -185,7 +185,7 @@ const RESOLVABLE_TAG = /^(?:@a11ign\/[a-z0-9-]+@|v)\d+\.\d+\.\d+[A-Za-z0-9.+-]*$
 
 /**
  * The package a layer's tags are named for: the `package` its declaration in `layers.json` carries, else the layer's KEY, the same
- * rule `scripts/lay-layer.mjs` reads the pin by. A key is not always its package (the layer `nvda-worker` is
+ * rule `scripts/lay-layer.ts` reads the pin by. A key is not always its package (the layer `nvda-worker` is
  * `@a11ign/screenreader-worker`), and `layers.json` is the one place that says so; nothing is inferred from the repository's name.
  * A declaration this copy of `layers.json` does not yet carry falls back to the key, which cannot resolve, and that is a refusal.
  *

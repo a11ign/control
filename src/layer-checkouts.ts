@@ -29,7 +29,7 @@
  * manifest and validate a layer's ref with `LAYER_REF`, which is `lab_ref`'s own pattern. With no layer that
  * declares a `remote`, every one of them is a no-op, which is the state today.
  *
- * A HOST THAT HAS INSTALLED HOLDS A SEPARATE LAYER LAID, NOT CLONED (#3819): `scripts/lay-layer.mjs` replaces the clone with `src/`
+ * A HOST THAT HAS INSTALLED HOLDS A SEPARATE LAYER LAID, NOT CLONED (#3819): `scripts/lay-layer.ts` replaces the clone with `src/`
  * and `.layer-ref`. The lab's and the guests' tasks accept that shape, and so does `layerCheckoutMove` (#4150): the control plane's
  * checkout DOES install now (it holds `packages/worker-fleet` laid), and the comment that said it never would stopped the first
  * `fleet:deploy --layer-ref` at the pre-flight, before the playbook. A laid layer has no history to move, so it is not moved: it is
@@ -172,12 +172,12 @@ export function layersFrom({ manifest, root }: { manifest: { layers: Record<stri
 /** The key of the control plane's own code in `layers.json`'s `pinned` section: the one pinned layer the closure of `fleet:auto-off` runs from (#3914). */
 export const CONTROL_LAYER = "control";
 
-/** What a declared tag looks like: `scripts/lay-layer.mjs`'s `DECLARED_TAG`, which this directory cannot import (ADR 0012). A branch or a sha is not a pin. */
+/** What a declared tag looks like: `scripts/lay-layer.ts`'s `DECLARED_TAG`, which this directory cannot import (ADR 0012). A branch or a sha is not a pin. */
 const DECLARED_TAG = /^v\d+\.\d+\.\d+$/;
 
 /**
  * The tag a `pinned` layer is laid at, read from the text of a `layers.json` (`origin/main`'s, for the stale-checkout guard): the
- * declaration's own `tag`, which is what `scripts/lay-layer.mjs`'s `tagToLay` lays. A manifest that is not JSON, a layer it does
+ * declaration's own `tag`, which is what `scripts/lay-layer.ts`'s `tagToLay` lays. A manifest that is not JSON, a layer it does
  * not pin, or a tag that is not `v<semver>` is a refusal, never a default.
  *
  *
@@ -201,13 +201,13 @@ export function pinnedLayerTag(manifestText: string, layer: string): { tag: stri
 
 /**
  * THE FIRST VERSION AT WHICH A LAYER'S REPOSITORY TAGS `v<semver>` rather than `<package>@<version>`: a SECOND COPY of `BARE_TAGS_FROM` in
- * `scripts/lay-layer.mjs`, because `control` imports nothing outside its own directory (ADR 0012). `layer-checkouts.test.ts` fails when
+ * `scripts/lay-layer.ts`, because `control` imports nothing outside its own directory (ADR 0012). `layer-checkouts.test.ts` fails when
  * the two disagree, wherever the core's file is reachable. The table is the REPOSITORY's, not the version's: `screenreader-worker` moved
  * to `v<semver>` at 0.3.0 and `screenreader-fleet` at 0.5.3, so a rule on the version alone would break one of them (#4363).
  */
 const BARE_TAGS_FROM: Record<string, [number, number, number]> = { "@a11ign/screenreader-worker": [0, 3, 0], "@a11ign/screenreader-fleet": [0, 5, 3] };
 
-/** `scripts/lay-layer.mjs`'s `releaseTag` over again: `v<version>` once the package's repository tags that way, `<package>@<version>` before. */
+/** `scripts/lay-layer.ts`'s `releaseTag` over again: `v<version>` once the package's repository tags that way, `<package>@<version>` before. */
 export function releaseTag(name: string, version: string): string {
   const from = Object.hasOwn(BARE_TAGS_FROM, name) ? BARE_TAGS_FROM[name] : undefined;
   if (from === undefined) return `${name}@${version}`;
@@ -217,7 +217,7 @@ export function releaseTag(name: string, version: string): string {
 }
 
 /**
- * The tag a layer is laid at, read from the text of the core's `pnpm-lock.yaml`: `scripts/lay-layer.mjs`'s `pinnedVersion` and
+ * The tag a layer is laid at, read from the text of the core's `pnpm-lock.yaml`: `scripts/lay-layer.ts`'s `pinnedVersion` and
  * `layingPlan` over again, because `control` imports nothing outside its own directory (ADR 0012) and that script imports the guards.
  * `fleet-auto-off.test.ts` holds the two readings equal on the real lockfile, so they cannot name two builds (#3845).
  * The tag is the one the layer's repository really made (`releaseTag`), not always `<package>@<version>` (#4363).

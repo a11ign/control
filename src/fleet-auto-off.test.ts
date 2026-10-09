@@ -794,7 +794,7 @@ test("#3852: behind `main`, the checkout fast-forwards and THEN lays the layer a
     assert.notEqual(sandbox.head(), before);
     const laid = sandbox.calls().filter((c) => c.startsWith("node "));
     const head = sandbox.head().slice(0, 7);
-    assert.deepEqual(laid, [`node scripts/lay-layer.mjs screenreader-fleet: ${head}`, `node scripts/lay-layer.mjs control: ${head}`],
+    assert.deepEqual(laid, [`node scripts/lay-layer.ts screenreader-fleet: ${head}`, `node scripts/lay-layer.ts control: ${head}`],
       "each layer laid once, and the tree already held the merged commit when it was (the pin it reads is the new one, #3976)");
   } finally {
     sandbox.dispose();
@@ -1022,7 +1022,7 @@ const lockfileAt = (version: string) => `importers:\n\n  .:\n    dependencies:\n
 const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/worker-http.ts";\n` : "");
 const laidAt = (tag: string) => ({ differing: tag === TAG ? [] : [`${LAYER_PATH} (layer ${LAYER} is laid at ${tag}, main pins ${TAG})`] });
 
-test("#3845 layerPinTag reads the lockfile as scripts/lay-layer.mjs does, on the REAL lockfile, CRLF and the refusals", () => {
+test("#3845 layerPinTag reads the lockfile as scripts/lay-layer.ts does, on the REAL lockfile, CRLF and the refusals", () => {
   const real = readFileSync(join(REPO, "pnpm-lock.yaml"), "utf8");
   const manifest = JSON.parse(readFileSync(join(REPO, "packages/control/layers.json"), "utf8"));
   for (const [text, label] of [[real, "the real lockfile"], [real.replace(/\n/g, "\r\n"), "the same with CRLF"]]) {
@@ -1060,7 +1060,7 @@ test("#3845 checkAgainstMain: the layer's files go to its pin and NEVER to git's
   assert.ok(git.calls.some((c) => c[0] === "show" && c[1] === "origin/main:pnpm-lock.yaml"), "the pin is main's, not the working tree's");
 });
 
-test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.mjs IS at the pin the lockfile names, and the older tag form is not", () => {
+test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.ts IS at the pin the lockfile names, and the older tag form is not", () => {
   const root = mkdtempSync(join(tmpdir(), "auto-off-4363-"));
   const laidAs = (tag: string) => {
     const dir = join(root, tag.replace(/\W/g, "_"));
@@ -1126,7 +1126,7 @@ test("#3845 judgeLaidLayer on real directories: laid at the pin passes; another 
     ] as [string, (dir: string) => void][]) {
       const judged = layerAt(name, make);
       assert.ok("cannotTell" in judged, `${name}: could not be read, so it must not read as the pin`);
-      assert.match((judged as { cannotTell: string }).cannotTell, /node scripts\/lay-layer\.mjs screenreader-fleet/, `${name}: names the remedy`);
+      assert.match((judged as { cannotTell: string }).cannotTell, /node scripts\/lay-layer\.ts screenreader-fleet/, `${name}: names the remedy`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1184,7 +1184,7 @@ test("#3914 a laid control at another tag REFUSES naming both tags; one with no 
 
   const unmarked = checkLaidControl({ laidTag: null }).verdict as { action: string; reason: string; detail: string };
   assert.deepEqual([unmarked.action, unmarked.reason], ["refuse", "cannot-tell"]);
-  assert.match(unmarked.detail, /node scripts\/lay-layer\.mjs control/, "names the remedy");
+  assert.match(unmarked.detail, /node scripts\/lay-layer\.ts control/, "names the remedy");
 });
 
 test("#3914 a pin on main that cannot be read is CANNOT_TELL and says why, never the working tree's pin", () => {
