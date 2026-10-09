@@ -263,6 +263,8 @@
           (display_driver_state.output | first).split('|')[2] ~ ', ' ~
           (display_driver_state.output | first).split('|')[0]) }}
 
+# #4441: THIS PINS THE MODE ONCE, AT PROVISION. `tasks.yml`'s `a11y-display-mode-logon` task re-asserts it, and reads
+# it back, at every logon after that; it is added beside this task and does not replace it.
 - name: The display mode the fleet pins
   ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/run-interactive.yml"
   vars:

@@ -488,6 +488,105 @@ test("display.yml pins the display mode AFTER the driver install, never before i
 });
 
 /**
+ * #4441 (part b of #4405): THE MODE IS RE-ASSERTED AT EVERY LOGON, NOT ONLY AT PROVISION.
+ *
+ * Every predicate below takes the text it reads, so each test runs it on the real file (positive control)
+ * AND on a copy with exactly the one thing it asserts taken out (negative control). Text that merely
+ * MENTIONS the thing is not the thing: the task's own comments name `type: logon` and `interactive_token`,
+ * so a predicate over the raw block would be satisfied by prose. `registrationOf` drops comment lines first,
+ * and the controls prove that matters -- deleting the trigger leaves its comment behind.
+ */
+const TASKS = readFileSync(
+  fileURLToPath(new URL("../../ansible/roles/worker/tasks/tasks.yml", import.meta.url)), "utf8");
+const LOGON_TASK = "a11y-display-mode-logon";
+
+/** The named task's registration with its comment lines removed, so only what Ansible would read is left. */
+function registrationOf(file: string, name: string): string {
+  const at = file.indexOf(`- name: ${name}`);
+  assert.notEqual(at, -1, `the task '${name}' is gone -- this test examines nothing`);
+  const next = file.indexOf("\n- name: ", at + 1);
+  const block = next === -1 ? file.slice(at) : file.slice(at, next);
+  return block.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
+}
+
+const logonRegistration = (file: string): string => registrationOf(file, "Register the display-mode logon task");
+const hasLogonTrigger = (text: string): boolean => /triggers:\s*\n\s*- type: logon\b/.test(text);
+const invokesScript = (text: string): boolean => /set-display-mode\.ps1/.test(text);
+const takesModeFromDefaults = (text: string): boolean =>
+  /A11Y_DISPLAY_WIDTH = '\{\{\s*worker_display_mode\.width\s*\}\}'/.test(text)
+  && /A11Y_DISPLAY_HEIGHT = '\{\{\s*worker_display_mode\.height\s*\}\}'/.test(text);
+const isInteractiveToken = (text: string): boolean => /logon_type:\s*interactive_token\b/.test(text);
+const surfacesTheExitCode = (text: string): boolean => /set-display-mode\.ps1'?;?\s+exit \$LASTEXITCODE/.test(text);
+
+test("tasks.yml registers a LOGON-triggered task that invokes set-display-mode.ps1", () => {
+  const real = logonRegistration(TASKS);
+  assert.ok(real.includes(`name: ${LOGON_TASK}`), `the task must be named ${LOGON_TASK}`);
+  assert.ok(hasLogonTrigger(real), "the task must carry a `type: logon` trigger -- without one it is the "
+    + "provision-time one-shot over again, and a box that loses the mode stays off the pin");
+  assert.ok(invokesScript(real), "the task must invoke set-display-mode.ps1");
+  // Negative controls: each predicate must go red when its one thing is taken out.
+  assert.ok(!hasLogonTrigger(real.replace("- type: logon", "- type: boot")), "the trigger check is vacuous");
+  assert.ok(!hasLogonTrigger(real.replace(/triggers:[\s\S]*?(?=\n {4}\S)/, "")), "deleting the trigger block "
+    + "must fail the trigger check even though the comments still say 'logon'");
+  assert.ok(!invokesScript(real.replace(/set-display-mode\.ps1/g, "other.ps1")), "the script check is vacuous");
+});
+
+test("the logon task takes its width and height from worker_display_mode, never from literals", () => {
+  const real = logonRegistration(TASKS);
+  assert.ok(takesModeFromDefaults(real), "both A11Y_DISPLAY_WIDTH and A11Y_DISPLAY_HEIGHT must be templated "
+    + "from worker_display_mode -- a literal here would move the environment with nothing hashing it");
+  const { width, height } = displayMode();
+  assert.doesNotMatch(real, new RegExp(`\\b(${width}|${height})\\b`),
+    "the registration must not restate the pinned width or height");
+  const literal = real.replace(/\{\{\s*worker_display_mode\.width\s*\}\}/, width);
+  assert.ok(!takesModeFromDefaults(literal), "a literal width must fail the check -- it is vacuous");
+  assert.ok(!takesModeFromDefaults(real.replace(/worker_display_mode\.height/, "worker_display_height")),
+    "a height not read from worker_display_mode must fail the check -- it is vacuous");
+});
+
+test("the logon task is interactive_token, the logon type the display call needs", () => {
+  // The display call fails outside the interactive window station (see this file's tests above and
+  // display.yml's header), so any other logon type registers cleanly and fails at the first logon.
+  const real = logonRegistration(TASKS);
+  assert.ok(isInteractiveToken(real), "the logon task must be logon_type: interactive_token");
+  assert.ok(!isInteractiveToken(real.replace("interactive_token", "service_account")), "the check is vacuous");
+  assert.ok(!isInteractiveToken(real.replace(/ {4}logon_type:.*\n/, "")), "an absent logon_type must fail it");
+});
+
+test("the logon task SURFACES a failing read-back as a non-zero exit, never swallows it", () => {
+  // set-display-mode.ps1 reads the mode back after writing it and `exit 1`s on a disagreement (asserted
+  // above). `powershell.exe -Command` ends 0 unless told otherwise, so without `exit $LASTEXITCODE` the
+  // task would report success for a box still off the pin.
+  const real = logonRegistration(TASKS);
+  assert.ok(surfacesTheExitCode(real), "the action must end with `exit $LASTEXITCODE` straight after the script");
+  assert.ok(!surfacesTheExitCode(real.replace(/;\s+exit \$LASTEXITCODE/, "")), "the check is vacuous");
+  assert.ok(!surfacesTheExitCode(real.replace(/exit \$LASTEXITCODE/, "exit 0")),
+    "a hard-coded `exit 0` swallows the failure and must fail the check");
+  const { body } = scriptParts();
+  assert.match(body, /dmPelsWidth -ne \$Width -or [^\n]*dmPelsHeight -ne \$Height\)\s*\{[^}]*exit 1/,
+    "the script's read-back must exit 1 on a mismatch -- the task can only surface what the script signals");
+});
+
+test("display.yml's provision-time task is still present: the logon task is ADDED, not swapped", () => {
+  const oneShot = registrationOf(DISPLAY_TASK, "The display mode the fleet pins");
+  const pinsAtProvision = (text: string): boolean =>
+    /interactive_name:\s*a11y-display-mode\s*\n/.test(text) && invokesScript(text);
+  assert.ok(pinsAtProvision(oneShot), "display.yml must still run set-display-mode.ps1 as the a11y-display-mode "
+    + "one-shot -- the play needs the mode pinned before it moves on");
+  assert.ok(!pinsAtProvision(oneShot.replace("interactive_name: a11y-display-mode", "interactive_name: gone")),
+    "the one-shot check is vacuous");
+  assert.notEqual(LOGON_TASK, "a11y-display-mode", "the two tasks must be different registrations");
+  assert.ok(logonRegistration(TASKS).includes(LOGON_TASK), "and the logon task must be present beside it");
+});
+
+test("fleet:provision's report names the logon task, so its registration is printed", () => {
+  const report = registrationOf(TASKS, "Report what was registered");
+  const namesIt = (text: string): boolean => text.includes(`'${LOGON_TASK}'`);
+  assert.ok(namesIt(report), "'Report what was registered' must read the logon task back");
+  assert.ok(!namesIt(report.replace(LOGON_TASK, "other-task")), "the check is vacuous");
+});
+
+/**
  * EVERYTHING ABOVE THIS LINE READS THE SCRIPT AS TEXT, AND TEXT CANNOT ANSWER THE QUESTION BELOW.
  *
  * reviewer-2's blocker on #1968 at `a58c7e44`: the same-API positive control was in the file and did not
