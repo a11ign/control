@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { declaresBootstrap } from "./fleet-playbook.mjs";
+import { declaresBootstrap } from "./fleet-playbook.ts";
 
 const ANSIBLE = join(import.meta.dirname, "../ansible");
 const playbooks = () => readdirSync(ANSIBLE).filter((f) => f.endsWith(".yml"));
@@ -12,7 +12,7 @@ const read = (f: string) => readFileSync(join(ANSIBLE, f), "utf8");
  * A BOOTSTRAP PLAYBOOK MUST DEPEND ON NOTHING IT BOOTSTRAPS, and the rule is general rather than
  * "inventory-install is special".
  *
- * `fleet-playbook.mjs` normally starts a playbook as a systemd unit ON the control plane, for a measured
+ * `fleet-playbook.ts` normally starts a playbook as a systemd unit ON the control plane, for a measured
  * reason: 2026-09-05, a caller was killed 100 s into a ten-machine reboot and the unit survived. A playbook
  * that BOOTSTRAPS the control plane cannot use that path, and `inventory-install.yml` found both ways it
  * fails, in order:
@@ -57,7 +57,7 @@ test("a long-running playbook must never declare it — the unit path is what it
 
 test("the wrapper DISCOVERS the marker rather than listing the playbook", () => {
   // A hardcoded list would let the second exception in silently, which is the actual risk.
-  const wrapper = readFileSync(join(import.meta.dirname, "fleet-playbook.mjs"), "utf8");
+  const wrapper = readFileSync(join(import.meta.dirname, "fleet-playbook.ts"), "utf8");
   assert.match(wrapper, /declaresBootstrap\(chosen\)/,
     "the dispatch must ask the playbook, not consult a list");
   assert.doesNotMatch(wrapper, /LOCAL_PLAYBOOKS|new Set\(\["inventory-install/,

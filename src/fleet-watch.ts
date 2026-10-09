@@ -1,17 +1,17 @@
 // @ts-check
 /**
  * A worker stuck non-`ready` is invisible to every cause in this org -- #1815. `fleet:status` reports it
- * perfectly (`stateOf`, `fleet-status.mjs`); nothing reads it except a human typing the command. Three
+ * perfectly (`stateOf`, `fleet-status.ts`); nothing reads it except a human typing the command. Three
  * real workers sat WARMING for hours to days -- `a11y-worker-4` (4.9 days), `a11y-worker-10` (4.6 days),
  * `a11y-worker-3` (same day) -- with nine healthy workers idle behind each, cleared only when someone
  * happened to run `fleet:status` by hand and noticed.
  *
- * `lab-watch.mjs` already solved the identical shape one subsystem over: "nothing reads `lab-status.yml`
+ * `lab-watch.ts` already solved the identical shape one subsystem over: "nothing reads `lab-status.yml`
  * on a schedule" became a script the host schedules (`agent-practices.md`'s "no standing cron" rule,
  * already applied once to `work:tick`), never a session-held `CronCreate`. This follows the same shape --
  * `--post` is the only way this ever writes anywhere; run with no flag it only reports what it would say.
  *
- * ## The one thing `lab-watch.mjs` did not need: memory between runs
+ * ## The one thing `lab-watch.ts` did not need: memory between runs
  *
  * `lab-status.yml` reports a unit's OWN `activeEnterTimestamp` -- systemd remembers since-when for free.
  * `fleet:status` has no such field: `stateOf` answers `warming`/`ready`/`busy`/`unreachable` for RIGHT
@@ -38,9 +38,9 @@ import { readFileSync, writeFileSync, renameSync, openSync, closeSync, rmSync, s
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { fleetStatus } from "./fleet-status.mjs";
-import { sshToControlPlane } from "./control-plane-fleet.mjs";
-import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
+import { fleetStatus } from "./fleet-status.ts";
+import { sshToControlPlane } from "./control-plane-fleet.ts";
+import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
 
 export const ORG_READING_ISSUE = 928;
 
@@ -59,7 +59,7 @@ export const DEFAULT_THRESHOLD_MS = 10 * MS_PER_MINUTE;
 export const DEFAULT_STATE_PATH = "runs/fleet-watch-state.json";
 
 /** Beside the two state files it sits with (#2979): `fleet-watch-state.json` and `fleet-auto-off-state.json`. */
-/** Written by `fleet-auto-off.mjs`; here so the path is one fact and the import points only one way. */
+/** Written by `fleet-auto-off.ts`; here so the path is one fact and the import points only one way. */
 export const AUTO_OFF_STATE_PATH = "runs/fleet-auto-off-state.json";
 
 /**
@@ -77,14 +77,14 @@ const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
 /** Exit codes are the contract: 0 nothing needs attention, 1 something does, 2 could not ask. */
 export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
 
-/** @typedef {{name: string, state: string, captures?: number|null, uptimeMinutes?: number|null, readiness?: {reason?: string|null}|null}} FleetRow */
-/** @typedef {Record<string, number>} SinceState */
+export type FleetRow = {name: string, state: string, captures?: number|null, uptimeMinutes?: number|null, readiness?: {reason?: string|null}|null};
+export type SinceState = Record<string, number>;
 
+export type StatusReader = () => Promise<{rows: FleetRow[]}>;
 /**
  * `watch` only ever reads `.rows` off whatever `fleetStatus` returns, so it is typed against exactly
  * that -- not `typeof fleetStatus` -- which is what lets a fixture return `{rows: [...]}` alone rather
  * than every other field the real function happens to also produce.
- * @typedef {() => Promise<{rows: FleetRow[]}>} StatusReader
  */
 
 /**
@@ -92,12 +92,8 @@ export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
  * the first tick after this ships, and any tick after the file is hand-deleted, must not take the
  * watcher itself down over its own bookkeeping. The same "absent is not a failure" contract
  * `desktop-prepare.mjs`'s caches already carry, one layer over.
- *
- * @param {string} path
- * @param {(path: string, encoding: "utf8") => string} read
- * @returns {SinceState}
  */
-export function readState(path, read = readFileSync) {
+export function readState(path: string, read: (path: string, encoding: "utf8") => string = readFileSync): SinceState {
   try {
     const parsed = JSON.parse(read(path, "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
@@ -106,12 +102,7 @@ export function readState(path, read = readFileSync) {
   }
 }
 
-/**
- * @param {string} path
- * @param {SinceState} state
- * @param {(path: string, data: string) => void} write
- */
-export function writeState(path, state, write = writeFileSync) {
+export function writeState(path: string, state: SinceState, write: (path: string, data: string) => void = writeFileSync) {
   write(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
@@ -127,15 +118,9 @@ const RESTING_OR_OCCUPIED = new Set(["ready", "busy", "unreachable"]);
  * `unreachable` is absent too, and here rather than only in `overdue`: the ledger keeps `since` across state
  * changes, so a box that wakes `warming` after two days off would otherwise arrive already "warming for 2d"
  * and fire the fault #1815 exists for on a healthy cold start (#3023).
- *
- * @param {FleetRow[]} rows
- * @param {SinceState} previous
- * @param {number} now
- * @returns {SinceState}
  */
-export function advance(rows, previous, now) {
-  /** @type {SinceState} */
-  const next = {};
+export function advance(rows: FleetRow[], previous: SinceState, now: number): SinceState {
+  const next: SinceState = {};
   for (const row of rows) {
     if (RESTING_OR_OCCUPIED.has(row.state)) continue;
     next[row.name] = previous[row.name] ?? now;
@@ -143,6 +128,10 @@ export function advance(rows, previous, now) {
   return next;
 }
 
+export type Rise = {at: number, by: number};
+export type WorkerCaptures = {captures: number, seenAt: number, lastRoseAt: number|null, rises: Rise[]};
+export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>};
+export type CaptureTimes = {captures24h: number, lastCaptureAt: number|null, observedSince: number};
 /**
  * ## When did the fleet last capture? (#2979, found by #2937)
  *
@@ -150,39 +139,29 @@ export function advance(rows, previous, now) {
  * idle while work waits" cannot be read off one snapshot -- the same missing-memory problem the non-ready
  * ledger above solves, for a different question. This is that memory: per worker, the last count seen, when
  * it was seen, when it last ROSE, and each rise inside the window.
- *
- * @typedef {{at: number, by: number}} Rise
- * @typedef {{captures: number, seenAt: number, lastRoseAt: number|null, rises: Rise[]}} WorkerCaptures
- * @typedef {{since: number, workers: Record<string, WorkerCaptures>}} CapturesState
- * @typedef {{captures24h: number, lastCaptureAt: number|null, observedSince: number}} CaptureTimes
  */
 
-/** @param {unknown} value */
-const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+const isNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value);
 
-/** @param {any} worker */
-function isWorkerCaptures(worker) {
-  return Boolean(worker) && isNumber(worker.captures) && isNumber(worker.seenAt)
+function isWorkerCaptures(worker: Partial<WorkerCaptures> | null | undefined): worker is WorkerCaptures {
+  if (!worker) return false;
+  return isNumber(worker.captures) && isNumber(worker.seenAt)
     && (worker.lastRoseAt === null || isNumber(worker.lastRoseAt))
     && Array.isArray(worker.rises)
-    && worker.rises.every((/** @type {any} */ rise) => Boolean(rise) && isNumber(rise.at) && isNumber(rise.by));
+    && worker.rises.every((rise) => Boolean(rise) && isNumber(rise.at) && isNumber(rise.by));
 }
 
 /**
  * The persisted capture times. UNLIKE `readState`, a missing or corrupt file reads as `null`, not as empty:
  * an empty ledger answers "zero captures in 24 h", which is a claim about the fleet, and a file nobody could
  * read makes no such claim. One bad worker entry makes the whole file `null` for the same reason.
- *
- * @param {string} path
- * @param {(path: string, encoding: "utf8") => string} read
- * @returns {CapturesState|null}
  */
-export function readCapturesState(path, read = readFileSync) {
+export function readCapturesState(path: string, read: (path: string, encoding: "utf8") => string = readFileSync): CapturesState | null {
   try {
     const parsed = JSON.parse(read(path, "utf8"));
     const workers = parsed?.workers;
     const wellFormed = isNumber(parsed?.since) && Boolean(workers) && typeof workers === "object"
-      && !Array.isArray(workers) && Object.values(workers).every(isWorkerCaptures);
+      && !Array.isArray(workers) && Object.values(workers as Record<string, WorkerCaptures>).every(isWorkerCaptures);
     return wellFormed ? parsed : null;
   } catch {
     return null;
@@ -191,15 +170,12 @@ export function readCapturesState(path, read = readFileSync) {
 
 /**
  * Replace a file whole or not at all. Two processes write the capture ledger (this watch hourly,
- * `fleet-auto-off.mjs` every tick, #3208), and a reader landing inside `writeFileSync`'s truncate-then-write
+ * `fleet-auto-off.ts` every tick, #3208), and a reader landing inside `writeFileSync`'s truncate-then-write
  * sees a half file, which `readCapturesState` reads as `null` and the next write turns into a fresh ledger
  * whose `since` starts over. A rename within one directory is atomic, so no reader sees anything between.
  * The rename does not stop two read-modify-writes interleaving; `withFileLock` does.
- *
- * @param {string} path
- * @param {string} data
  */
-function replaceFile(path, data) {
+function replaceFile(path: string, data: string) {
   const staging = `${path}.${process.pid}.tmp`;
   writeFileSync(staging, data);
   renameSync(staging, path);
@@ -209,17 +185,12 @@ function replaceFile(path, data) {
 const LOCK_STALE_MS = 2000;
 const LOCK_RETRY_MS = 5;
 
-/** @param {number} ms */
-function sleep(ms) {
+function sleep(ms: number) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/**
- * A lock that vanished between the failed create and this look is not stale; the next create decides.
- *
- * @param {string} lock
- */
-function lockIsStale(lock) {
+/** A lock that vanished between the failed create and this look is not stale; the next create decides. */
+function lockIsStale(lock: string) {
   try {
     return Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS;
   } catch {
@@ -227,14 +198,13 @@ function lockIsStale(lock) {
   }
 }
 
-/** @param {string} lock */
-function acquire(lock) {
+function acquire(lock: string) {
   for (;;) {
     try {
       closeSync(openSync(lock, "wx"));
       return;
     } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code !== "EEXIST") throw err;
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
     if (lockIsStale(lock)) rmSync(lock, { force: true });
     else sleep(LOCK_RETRY_MS);
@@ -253,7 +223,7 @@ function acquire(lock) {
  * @param {() => T} fn
  * @returns {T}
  */
-export function withFileLock(path, fn) {
+export function withFileLock<T>(path: string, fn: () => T): T {
   const lock = `${path}.lock`;
   acquire(lock);
   try {
@@ -265,17 +235,10 @@ export function withFileLock(path, fn) {
 
 /**
  * A test double has no file to lock, so an injected writer runs `fn` bare.
- *
- * @type {typeof withFileLock}
  */
-const unlocked = (_path, fn) => fn();
+const unlocked: typeof withFileLock = (_path, fn) => fn();
 
-/**
- * @param {string} path
- * @param {CapturesState} state
- * @param {(path: string, data: string) => void} write
- */
-export function writeCapturesState(path, state, write = replaceFile) {
+export function writeCapturesState(path: string, state: CapturesState, write: (path: string, data: string) => void = replaceFile) {
   write(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
@@ -283,36 +246,27 @@ export function writeCapturesState(path, state, write = replaceFile) {
  * The worker's name without its address. `fleetStatus` names a row `<inventory name>  <address>`, and a
  * worker woken by `wake.yml` can come back at a new address -- keyed whole it was a NEW worker and started at
  * a baseline again, losing what it did first (#3205). A worker the inventory does not name is its address.
- *
- * @param {string} name
  */
-function workerKey(name) {
+function workerKey(name: string) {
   return name.split("  ")[0];
 }
 
-/** @param {number|null} a @param {number|null} b */
-function latest(a, b) {
+function latest(a: number | null, b: number | null) {
   return a === null || b === null ? (a ?? b) : Math.max(a, b);
 }
 
 /**
  * Two entries for one worker (a ledger written when the key still carried the address, or after it moved):
  * the later reading's count, every rise of both, so a rename loses nothing the ledger already knew.
- *
- * @param {WorkerCaptures} one
- * @param {WorkerCaptures} other
- * @returns {WorkerCaptures}
  */
-function mergeEntries(one, other) {
+function mergeEntries(one: WorkerCaptures, other: WorkerCaptures): WorkerCaptures {
   const [older, newer] = one.seenAt <= other.seenAt ? [one, other] : [other, one];
   const rises = [...older.rises, ...newer.rises].sort((a, b) => a.at - b.at);
   return { ...newer, lastRoseAt: latest(older.lastRoseAt, newer.lastRoseAt), rises };
 }
 
-/** @param {Record<string, WorkerCaptures>} workers @returns {Record<string, WorkerCaptures>} */
-function byWorkerKey(workers) {
-  /** @type {Record<string, WorkerCaptures>} */
-  const merged = {};
+function byWorkerKey(workers: Record<string, WorkerCaptures>): Record<string, WorkerCaptures> {
+  const merged: Record<string, WorkerCaptures> = {};
   for (const [name, entry] of Object.entries(workers)) {
     const key = workerKey(name);
     merged[key] = merged[key] ? mergeEntries(merged[key], entry) : entry;
@@ -332,13 +286,9 @@ function byWorkerKey(workers) {
  *   taken inside the ledger. A longer uptime (or none: a row without `uptimeMinutes`) predates the ledger
  *   and is a baseline, so the first poll of a new ledger over a fleet that has run for weeks cannot read as
  *   a day of captures -- `since` equals `now` there, and no uptime is shorter than zero.
- *
- * @param {WorkerCaptures|undefined} previous
- * @param {{captures: number, uptimeMs: number|null}} reading
- * @param {{now: number, since: number}} when
  */
-function newCaptures(previous, { captures, uptimeMs }, { now, since }) {
-  const bootedSince = (/** @type {number} */ at) => uptimeMs !== null && uptimeMs < now - at;
+function newCaptures(previous: WorkerCaptures | undefined, { captures, uptimeMs }: { captures: number; uptimeMs: number | null; }, { now, since }: { now: number; since: number; }) {
+  const bootedSince = (at: number) => uptimeMs !== null && uptimeMs < now - at;
   if (!previous) return bootedSince(since) ? captures : 0;
   const restarted = captures < previous.captures || bootedSince(previous.seenAt);
   return restarted ? captures : captures - previous.captures;
@@ -347,13 +297,8 @@ function newCaptures(previous, { captures, uptimeMs }, { now, since }) {
 /**
  * One worker's entry after one reading. New captures record the time they were seen (the poll's own clock:
  * they happened somewhere since the last reading).
- *
- * @param {WorkerCaptures|undefined} previous
- * @param {{captures: number, uptimeMs: number|null}} reading
- * @param {{now: number, since: number}} when
- * @returns {WorkerCaptures}
  */
-function advanceWorker(previous, reading, when) {
+function advanceWorker(previous: WorkerCaptures | undefined, reading: { captures: number; uptimeMs: number | null; }, when: { now: number; since: number; }): WorkerCaptures {
   const { now } = when;
   const rises = (previous?.rises ?? []).filter((rise) => now - rise.at < CAPTURE_WINDOW_MS);
   const by = newCaptures(previous, reading, when);
@@ -368,20 +313,15 @@ function advanceWorker(previous, reading, when) {
  * `since` is what lets a reader tell "no captures in 24 h" from "watched for a minute". A worker with no
  * count this tick (unreachable) is not a reading: its last entry stays exactly as it was, so a box that was
  * off and comes back with a higher count is a rise, and with a lower one a restart.
- *
- * @param {FleetRow[]} rows
- * @param {CapturesState|null} previous
- * @param {number} now
- * @returns {CapturesState}
  */
-export function advanceCaptures(rows, previous, now) {
+export function advanceCaptures(rows: FleetRow[], previous: CapturesState | null, now: number): CapturesState {
   const base = previous ?? { since: now, workers: {} };
   const known = byWorkerKey(base.workers);
   const workers = { ...known };
   for (const row of rows) {
     if (!isNumber(row.captures)) continue;
-    const captures = /** @type {number} */ (row.captures);
-    const uptimeMs = isNumber(row.uptimeMinutes) ? /** @type {number} */ (row.uptimeMinutes) * MS_PER_MINUTE : null;
+    const captures = (row.captures as number);
+    const uptimeMs = isNumber(row.uptimeMinutes) ? (row.uptimeMinutes as number) * MS_PER_MINUTE : null;
     const reading = { captures, uptimeMs };
     const key = workerKey(row.name);
     workers[key] = advanceWorker(known[key], reading, { now, since: base.since });
@@ -394,12 +334,8 @@ export function advanceCaptures(rows, previous, now) {
  * time any worker's count rose (however long ago -- it is what answers "idle since when"). `null` for an
  * unreadable ledger, never zero. `observedSince` rides along so a zero from a ledger started a minute ago
  * is not mistaken for a day of idleness.
- *
- * @param {CapturesState|null} state
- * @param {number} now
- * @returns {CaptureTimes|null}
  */
-export function captureTimes(state, now) {
+export function captureTimes(state: CapturesState | null, now: number): CaptureTimes | null {
   if (!state) return null;
   const workers = Object.values(state.workers);
   const captures24h = workers.flatMap((worker) => worker.rises)
@@ -409,30 +345,18 @@ export function captureTimes(state, now) {
   return { captures24h, lastCaptureAt: rose.length ? Math.max(...rose) : null, observedSince: state.since };
 }
 
-/**
- * @param {string} path
- * @param {number} now
- * @param {(path: string, encoding: "utf8") => string} read
- * @returns {CaptureTimes|null}
- */
-export function readCaptureTimes(path, now, read = readFileSync) {
+export function readCaptureTimes(path: string, now: number, read: (path: string, encoding: "utf8") => string = readFileSync): CaptureTimes | null {
   return captureTimes(readCapturesState(path, read), now);
 }
 
-/** @typedef {{name: string, state: string, ageMs: number, reason: string|null}} OverdueEntry */
+export type OverdueEntry = {name: string, state: string, ageMs: number, reason: string|null};
 
 /**
  * Workers non-ready for at least `thresholdMs`, oldest first -- the only ones a cause should ever fire
  * for. A worker warming for mere seconds has a `since` of `now` (or close to it) and never reaches this
  * list: the positive control this row exists to keep, proven in the fixtures below rather than argued.
- *
- * @param {FleetRow[]} rows
- * @param {SinceState} state
- * @param {number} now
- * @param {number} thresholdMs
- * @returns {OverdueEntry[]}
  */
-export function overdue(rows, state, now, thresholdMs) {
+export function overdue(rows: FleetRow[], state: SinceState, now: number, thresholdMs: number): OverdueEntry[] {
   return rows
     .filter((row) => state[row.name] !== undefined && now - state[row.name] >= thresholdMs)
     .map((row) => ({ name: row.name, state: row.state, ageMs: now - state[row.name],
@@ -440,8 +364,7 @@ export function overdue(rows, state, now, thresholdMs) {
     .sort((a, b) => b.ageMs - a.ageMs);
 }
 
-/** @param {number} ms */
-function describeAge(ms) {
+function describeAge(ms: number) {
   const minutesPerDay = MINUTES_PER_HOUR * HOURS_PER_DAY;
   const totalMinutes = Math.floor(ms / MS_PER_MINUTE);
   const days = Math.floor(totalMinutes / minutesPerDay);
@@ -452,12 +375,8 @@ function describeAge(ms) {
   return `${minutes}m`;
 }
 
-/**
- * The comment this posts when something needs attention.
- * @param {OverdueEntry[]} entries
- * @returns {string}
- */
-export function watchBody(entries) {
+/** The comment this posts when something needs attention. */
+export function watchBody(entries: OverdueEntry[]): string {
   return [
     `**${entries.length} worker(s) non-\`ready\` past the threshold** (#1815).`,
     ...entries.map((e) => `- \`${e.name}\` ${e.state} for ${describeAge(e.ageMs)}`
@@ -467,26 +386,22 @@ export function watchBody(entries) {
   ].join("\n");
 }
 
-/**
- * @typedef {{ reason: string, detail: string, at: number }} AutoOffRefusal
- * The refusal `fleet-auto-off.mjs` recorded on its last tick that held a shutdown back (#3275).
- */
+/** The refusal `fleet-auto-off.ts` recorded on its last tick that held a shutdown back (#3275). */
+export type AutoOffRefusal = { reason: string, detail: string, at: number };
 
 /**
  * @param {string} text the control host's auto-off state file, or `{}` when it has none
  * @returns {AutoOffRefusal | null} `null` when the last tick refused nothing
  */
-export function parseAutoOffRefusal(text) {
+export function parseAutoOffRefusal(text: string): AutoOffRefusal | null {
   const refusal = JSON.parse(text)?.refusal;
   const valid = refusal && typeof refusal.reason === "string" && typeof refusal.detail === "string"
     && Number.isFinite(refusal.at);
   return valid ? { reason: refusal.reason, detail: refusal.detail, at: refusal.at } : null;
 }
 
-/**
- * @typedef {{ readAt: number, path?: string, write?: (path: string, data: string) => void }} AutoOffMirror
- * Where and when a read of the record is mirrored; `path` and `write` are for a test.
- */
+/** Where and when a read of the record is mirrored; `path` and `write` are for a test. */
+export type AutoOffMirror = { readAt: number, path?: string, write?: (path: string, data: string) => void };
 
 /**
  * Write the record this watch just read, whole, beside the epoch ms it was read at. `readAt` is the reader's only
@@ -495,19 +410,13 @@ export function parseAutoOffRefusal(text) {
  * refusal `parseAutoOffRefusal` keeps) so a field the producer adds later reaches the reader without a change here.
  *
  * @param {string} text the control host's auto-off state file, or `{}` when it has none
- * @param {AutoOffMirror} where
  */
-export function mirrorAutoOffRecord(text, { readAt, path = AUTO_OFF_MIRROR_PATH, write = replaceFile }) {
+export function mirrorAutoOffRecord(text: string, { readAt, path = AUTO_OFF_MIRROR_PATH, write = replaceFile }: AutoOffMirror) {
   write(path, `${JSON.stringify({ readAt, record: JSON.parse(text) }, null, 2)}\n`);
 }
 
-/**
- * A mirror that cannot be written must not hide the refusal that WAS read: say so on stderr and carry on.
- *
- * @param {string} text
- * @param {AutoOffMirror} mirror
- */
-function mirrorOrSay(text, mirror) {
+/** A mirror that cannot be written must not hide the refusal that WAS read: say so on stderr and carry on. */
+function mirrorOrSay(text: string, mirror: AutoOffMirror) {
   try {
     mirrorAutoOffRecord(text, mirror);
   } catch (cause) {
@@ -521,28 +430,19 @@ function mirrorOrSay(text, mirror) {
  * `null`: "no refusal" and "I did not look" are different states. A missing file is `{}`, a timer that never ticked.
  *
  * Given a `mirror`, a read that succeeded is also written to the mirror file (#3860); a read that threw wrote nothing.
- *
- * @param {() => string} [readState]
- * @param {AutoOffMirror} [mirror]
- * @returns {AutoOffRefusal | null}
  */
 export function readAutoOffRefusal(
-  readState = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${AUTO_OFF_STATE_PATH} 2>/dev/null || echo '{}'`,
+  readState: () => string = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${AUTO_OFF_STATE_PATH} 2>/dev/null || echo '{}'`,
     { capture: true }),
-  mirror = undefined,
-) {
+  mirror?: AutoOffMirror,
+): AutoOffRefusal | null {
   const text = readState();
   const refusal = parseAutoOffRefusal(text);
   if (mirror) mirrorOrSay(text, mirror);
   return refusal;
 }
 
-/**
- * @param {AutoOffRefusal} refusal
- * @param {number} now
- * @returns {string}
- */
-export function refusalBody(refusal, now) {
+export function refusalBody(refusal: AutoOffRefusal, now: number): string {
   return [
     `**The auto-off timer is refusing to power workers off** (\`${refusal.reason}\`, ${describeAge(now - refusal.at)} ago, #3275).`,
     `- ${refusal.detail}`,
@@ -551,17 +451,16 @@ export function refusalBody(refusal, now) {
 }
 
 /**
- * Fold one reading of the fleet into the persisted ledger. Exported so `fleet-auto-off.mjs` can feed the
+ * Fold one reading of the fleet into the persisted ledger. Exported so `fleet-auto-off.ts` can feed the
  * same ledger from its own 10 s probe: the hourly poll alone never sees a worker that boots, works and is
  * powered off between two polls (#3208).
  *
  * The read, the advance and the write happen under `withFileLock`, so concurrent writers each see the other's rise.
- *
- * @param {FleetRow[]} rows
- * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync,
- *           lock?: typeof withFileLock }} where
  */
-export function recordCaptures(rows, { path, at, read, write, lock = write ? unlocked : withFileLock }) {
+export function recordCaptures(rows: FleetRow[], { path, at, read, write, lock = write ? unlocked : withFileLock }: {
+        path: string; at: number; read?: typeof readFileSync; write?: typeof writeFileSync;
+        lock?: typeof withFileLock;
+    }) {
   lock(path, () => writeCapturesState(path, advanceCaptures(rows, readCapturesState(path, read), at), write));
 }
 
@@ -571,12 +470,11 @@ export function recordCaptures(rows, { path, at, read, write, lock = write ? unl
  * Everything above this function is pure; this is the one place I/O and the clock meet, and every piece
  * of it is a parameter with a real default -- the shape `runLabStatus`'s `run` parameter already
  * established for the identical reason: a test drives this without a fleet, a fleet, or a clock.
- *
- * @param {{ getStatus?: StatusReader, now?: () => number, statePath?: string, capturesPath?: string,
- *           thresholdMs?: number, read?: typeof readFileSync, write?: typeof writeFileSync }} [deps]
- * @returns {Promise<OverdueEntry[]>}
  */
-export async function watch(deps = {}) {
+export async function watch(deps: {
+    getStatus?: StatusReader; now?: () => number; statePath?: string; capturesPath?: string;
+    thresholdMs?: number; read?: typeof readFileSync; write?: typeof writeFileSync;
+} = {}): Promise<OverdueEntry[]> {
   const getStatus = deps.getStatus ?? fleetStatus;
   const now = deps.now ?? Date.now;
   const statePath = deps.statePath ?? DEFAULT_STATE_PATH;
@@ -595,9 +493,8 @@ export async function watch(deps = {}) {
  * clean. A read that succeeded is mirrored for `org-health` (#3860); one that threw leaves the mirror to age.
  *
  * @param {{ readState?: () => string, path?: string, now?: () => number }} [deps] for a test
- * @returns {AutoOffRefusal | null}
  */
-export function readRefusalOrSay({ readState, path, now = Date.now } = {}) {
+export function readRefusalOrSay({ readState, path, now = Date.now }: { readState?: () => string; path?: string; now?: () => number; } = {}): AutoOffRefusal | null {
   try {
     return readAutoOffRefusal(readState, { readAt: now(), path });
   } catch (cause) {

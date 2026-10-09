@@ -9,7 +9,7 @@
 # would block on a hung host. Its Telegram route is the control plane's own, not the agents host's.
 #
 # Messages the chairman ONCE per outage when that tick is older than ten minutes, once when it cannot read the
-# tick at all (CANNOT_TELL is not "alive"), and once on recovery. `gate-heartbeat.mjs` carries the reasoning.
+# tick at all (CANNOT_TELL is not "alive"), and once on recovery. `gate-heartbeat.ts` carries the reasoning.
 Description=a11y: message the chairman when the gate's last tick is older than 10 minutes
 
 [Service]
@@ -26,4 +26,7 @@ TimeoutStartSec=90
 # THE LITERAL PATH IS THE ONLY WAY A STATIC UNIT FILE CAN SAY THIS: the same `/root/a11y-witness` as
 # `a11y-fleet-auto-off.service`, which `control-plane-checkout-is-one-fact.test.ts` holds to one literal.
 # The script has no flags, takes no checkout argument, and imports nothing outside node's own modules.
-ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/gate-heartbeat.mjs
+# THE LOADER IS A HOST FACT, NAMED BY ABSOLUTE PATH (#4292, #4341). The file is TypeScript and `/usr/bin/node` strips types only from 24, so the unit says what runs it.
+# A bare `--import tsx` does NOT resolve here (ESM ignores NODE_PATH, and a laid layer has no node_modules); `/opt/a11y-tsx` is one `tsx` installed beside the layer,
+# asserted by `control-host-install.yml`, so a rebuilt control plane that lacks it fails THERE and not as a timer that silently stops deciding.
+ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/a11y-witness/packages/control/src/gate-heartbeat.ts

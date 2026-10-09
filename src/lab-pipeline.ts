@@ -57,10 +57,10 @@ import { pnpmCliInvocation } from "../../worker-fleet/src/npm-cli-executable.mjs
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
-import { journalScope } from "./fleet-playbook.mjs";
-import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
-import { layerCheckoutMove, layerPins, layerRefValues } from "./layer-checkouts.mjs";
+import { journalScope } from "./fleet-playbook.ts";
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
+import { layerCheckoutMove, layerPins, layerRefValues } from "./layer-checkouts.ts";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -96,11 +96,15 @@ export { resolveOnOrigin };
  * so a renamed job fails here instead of at its STAGE, which for `corpus` is after a multi-hour capture.
  * A second spelling of this destructure is how such a test comes to examine `[object Object]` and pass.
  */
-/** @param {{jobs?: Array<string | {job: string, vars?: Record<string, string>}>}} pipeline
- *  @returns {string[]} */
-export function jobNames(pipeline) {
+export function jobNames(pipeline: Pick<Pipeline, "jobs">): string[] {
   return (pipeline?.jobs ?? []).map((entry) => (typeof entry === "string" ? entry : entry.job));
 }
+
+/** One entry of `PIPELINES`, as the runner reads it: a stage is a bare job name or `{ job, vars }`. */
+type Pipeline = { fleet?: boolean; what?: string; jobs: Array<string | { job: string; vars?: Record<string, string> }> };
+
+/** A pipeline stage: the label it prints and the thing that runs it, which answers its exit status. */
+type Stage = [label: string, run: () => number | null];
 
 export const PIPELINES = {
   // The chain that was run by hand all of 2026-08-25.
@@ -287,7 +291,7 @@ export const PIPELINES = {
 /**
  * A commit or a simple branch name, and nothing else.
  *
- * Same containment as `fleet-playbook.mjs`, and needed for the same reason: this value is interpolated
+ * Same containment as `fleet-playbook.ts`, and needed for the same reason: this value is interpolated
  * into a command a remote shell interprets on the box holding the fleet key, and it becomes `-e ref=` on
  * an Ansible command line here. `;rm -rf /` is inexpressible rather than rejected.
  */
@@ -299,13 +303,11 @@ const TAKES_ONLY = new Set(["capture-only"]);
  * becomes an `-e` on an Ansible command line. `lab-job.yml` validates it a second time at the far end,
  * deliberately, because a malformed id there means capturing the wrong cases rather than none.
  */
-/** @param {string} only */
-export function validOnly(only) {
+export function validOnly(only: string) {
   return /^[a-z0-9][a-z0-9.+-]{0,80}\+?(,[a-z0-9][a-z0-9.+-]{0,80}\+?)*$/.test(String(only));
 }
 
-/** @param {string} ref */
-export function validRef(ref) {
+export function validRef(ref: string) {
   return /^[0-9a-zA-Z._/-]{1,64}$/.test(String(ref)) && !String(ref).includes("..");
 }
 
@@ -326,8 +328,7 @@ const localBranch = () =>
  * remote already had — and `run-job.yml`'s commit refusal then fires at the far end, after the fleet has
  * been deployed and rebooted. Measured today: four boxes rebooted for a ref nobody had pushed.
  */
-/** @param {string} ref */
-function resolveOnOrigin(ref) {
+function resolveOnOrigin(ref: string) {
   const remote = execFileSync("git", ["ls-remote", "--heads", "--tags", "origin", ref],
     { encoding: "utf8", env: sandboxGitEnv() }).trim();
   if (!remote) {
@@ -361,13 +362,12 @@ function resolveOnOrigin(ref) {
  * The FLEET stage still takes the branch, and that asymmetry is forced rather than sloppy: `deploy.yml`
  * fast-forwards each guest with `git merge --ff-only origin/{{ ref }}`, and `origin/<sha>` resolves to
  * nothing. This repo has already spent a run on that exact mistake. It is safe because the deploy is
- * stage ONE, seconds after the pin, and `fleet-playbook.mjs` reads back the control plane's HEAD and
+ * stage ONE, seconds after the pin, and `fleet-playbook.ts` reads back the control plane's HEAD and
  * refuses a mismatch — so a race there fails loudly instead of silently splitting the run.
  */
 
 /** One stage, run to completion, with its exit status READ rather than piped away. */
-/** @param {string} label @param {string[]} pnpmArgs */
-function stage(label, pnpmArgs) {
+function stage(label: string, pnpmArgs: string[]) {
   process.stdout.write(`\n${"=".repeat(78)}\n  ${label}\n  pnpm ${pnpmArgs.join(" ")}\n${"=".repeat(78)}\n`);
   // Through the helper, never `spawnSync("pnpm")`: that is `pnpm.cmd` on Windows, which CVE-2024-27980 refuses.
   const { command, args } = pnpmCliInvocation(pnpmArgs);
@@ -387,20 +387,19 @@ function stage(label, pnpmArgs) {
  * without which the collections path and host-key settings differ. This repo's rule for a fact stated
  * twice is to delete a copy; going through the package script is how.
  */
-const labJob = (/** @type {string} */ job, /** @type {string} */ ref, /** @type {string[]} */ extra = []) =>
+const labJob = (job: string, ref: string, extra: string[] = []) =>
   stage(job, ["run", "lab:job", "--", "-e", `job=${job}`, "-e", `ref=${ref}`, ...extra]);
 
-const fleetDeploy = (/** @type {string} */ ref) =>
+const fleetDeploy = (ref: string) =>
   stage("fleet:deploy — ship this ref to the workers and PROVE it",
     ["run", "fleet:deploy", "--", `--ref=${ref}`]);
 
 /**
  * The `--only=` case ids, validated, or a refusal. Extracted because `main` grew past the complexity gate
- * as flags accumulated — the same signal `fleet-playbook.mjs` got, and the same answer: dispatching a
+ * as flags accumulated — the same signal `fleet-playbook.ts` got, and the same answer: dispatching a
  * pipeline and deciding whether its arguments are usable are two things.
  */
-/** @param {string} name @param {Record<string, any>} pipeline */
-function caseIds(name, pipeline) {
+function caseIds(name: string, pipeline: Pipeline) {
   const only = flagValue(process.argv, "only");
   if (only !== undefined && !validOnly(only)) {
     process.stderr.write(`refusing --only=${only}: case ids only, comma-separated.\n`);
@@ -427,13 +426,12 @@ function usage() {
     + "  from origin, and the fleet and the lab are given the SAME ref rather than defaulting apart.\n";
 }
 
-/** Where the sequencing runs. Same address `fleet-playbook.mjs` already uses; named once, not twice. */
-// No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
+/** Where the sequencing runs. Same address `fleet-playbook.ts` already uses; named once, not twice. */
+// No default: see control-plane-host.ts -- this used to fall back to a real, specific LAN address (#83).
 // Resolved by `requireControlPlaneHost()` below, not at import: env var first, then the durable file it
 // installs (#285, `fleet:control-host-install`), then a loud refusal. A bare env read here would miss the
 // file entirely, so this is reassigned once resolved rather than only validated.
-/** @type {string} */
-let CONTROL_PLANE;
+let CONTROL_PLANE: string;
 /**
  * The key CONTROL uses to reach the LAB. Not the same key this laptop uses, deliberately: it was generated
  * ON control so its private half has never been anywhere else, which is the property that makes moving the
@@ -443,7 +441,7 @@ const CONTROL_TO_LAB_KEY = "/root/.ssh/a11y-lab_ed25519";
 /**
  * Where the checkout lives on control. Absolute, so a nested `cd` cannot land somewhere else — and
  * DERIVED, because this was the second of two literals naming one directory and only this one got
- * restored when the rename moved both. See `control-plane-checkout.mjs`.
+ * restored when the rename moved both. See `control-plane-checkout.ts`.
  */
 const CONTROL_CHECKOUT = CONTROL_PLANE_CHECKOUT_PATH;
 
@@ -478,8 +476,8 @@ const CONTROL_CHECKOUT = CONTROL_PLANE_CHECKOUT_PATH;
  * so quoting them next to a running job reports success for work in flight -- and under
  * `--remain-after-exit` an exited unit reads `active` for ever, so `is-active` can never be the question.
  */
-/** Ask the control plane for one unit's state, as NAMED properties. @returns {Record<string,string>} */
-function unitProperties(/** @type {string} */ unit) {
+/** Ask the control plane for one unit's state, as NAMED properties. */
+function unitProperties(unit: string): Record<string, string> {
   // `Property=Value` lines, NEVER `--value`. `systemctl show` emits properties in ITS OWN alphabetical
   // order rather than the order asked for, so positional reading is wrong in a way that looks right:
   // measured 2026-08-30, the first version of this printed `SUCCESS -- Result=0` for a pipeline whose
@@ -518,8 +516,8 @@ function unitProperties(/** @type {string} */ unit) {
  * the default, and it says which one it gave you. "This run" and "everything this unit has ever done" are
  * different answers, and a reader must never have to guess which is on screen.
  */
-function printUnitLog(/** @type {string} */ unit) {
-  const ssh = (/** @type {string} */ command) => spawnSync("ssh",
+function printUnitLog(unit: string) {
+  const ssh = (command: string) => spawnSync("ssh",
     ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
       `root@${CONTROL_PLANE}`, command],
     { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
@@ -655,11 +653,8 @@ function dispatchToControlUnlessLocal() {
  * checkout on its `--layer-ref=<name>=<sha>`, or the refusal. A pin the operator typed is never dropped, and a
  * layer in its own repository with no pin is refused, because the pipeline would otherwise run the core at one
  * commit and the layer at whichever its branch last was. Empty while no layer has a repository of its own.
- *
- * @param {string[]} args
- * @returns {string}
  */
-function layerMoveOrRefuse(args) {
+function layerMoveOrRefuse(args: string[]): string {
   const { pins, refusal } = layerPins(layerRefValues(args));
   if (refusal) {
     process.stderr.write(`${refusal}\n`);
@@ -669,7 +664,7 @@ function layerMoveOrRefuse(args) {
 }
 
 /** The ref the remote should stand on. Defaults to this checkout's branch, as `fleet:deploy` does. */
-function branchArg(/** @type {string[]} */ args) {
+function branchArg(args: string[]) {
   const named = flagValue(args, "ref");
   if (named) return named;
   return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", env: sandboxGitEnv() }).trim();
@@ -697,7 +692,7 @@ async function main() {
   // Indexed by a name that came off the command line, which is the whole reason the refusal below
   // exists. The inferred type admits only the seven keys, so the lookup that CHECKS for an eighth is
   // itself the error -- a check must be able to express the case it is checking for.
-  const pipeline = /** @type {Record<string, any>} */ (PIPELINES)[name];
+  const pipeline = (PIPELINES as Record<string, Pipeline | undefined>)[name];
   if (!pipeline) {
     process.stderr.write(`refusing --pipeline=${name}: one of ${Object.keys(PIPELINES).join(", ")}.\n`);
     process.exit(2);
@@ -714,22 +709,22 @@ async function main() {
   try {
     pinned = resolveOnOrigin(ref);
   } catch (error) {
-    process.stderr.write(`${/** @type {Error} */ (error).message}\n`);
+    process.stderr.write(`${(error as Error).message}\n`);
     process.exit(2);
   }
 
-  const stages = [
-    ...(pipeline.fleet ? [["fleet:deploy", () => fleetDeploy(ref)]] : []),
+  const stages: Stage[] = [
+    ...(pipeline.fleet ? [["fleet:deploy", () => fleetDeploy(ref)] as Stage] : []),
     // PINNED, not `ref`. Every lab stage runs at the same commit no matter what lands on the branch while
     // the pipeline is going.
     // `-e only=` reaches the jobs that take it and nothing else. A pipeline that forwarded every extra
     // var to every stage would hand `only` to `check-signals`, which does not take it — and Ansible
     // ignores an unused extra var silently, so the operator would think it had been applied.
-    ...pipeline.jobs.map((/** @type {Record<string, any>} */ entry) => {
+    ...pipeline.jobs.map((entry): Stage => {
       // A stage is either a bare job name or `{ job, vars }` — the second form exists because one job can
       // need running more than once with different parameters, and a pipeline that cannot say so pushes
       // that knowledge back into the operator's head, which is what this file exists to stop.
-      const { job, vars } = typeof entry === "string" ? { job: entry, vars: {} } : entry;
+      const { job, vars = {} } = typeof entry === "string" ? { job: entry } : entry;
       const declared = Object.entries(vars ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
       const label = declared.length ? `${job} (${Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(" ")})` : job;
       // `-e only=` reaches the jobs that take it and nothing else, for the reason below.

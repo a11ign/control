@@ -68,9 +68,10 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
-import { layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.mjs";
+import { layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
-import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.mjs";
+import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
+import type { WorkerHealth } from "./fleet-status.ts";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
@@ -83,24 +84,24 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // `fleet-env.mjs` imports only node builtins and its own siblings. And the inventory is the RIGHT source
 // here regardless: the control plane deploys to the fleet in `inventory.yml`, never to a local UTM pool
 // that cannot exist there.
-import { layerDeclaration } from "./layer-checkouts.mjs";
-import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.mjs";
+import { layerDeclaration } from "./layer-checkouts.ts";
+import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
 // #2832: WHAT PROVES A MOVED WORKER'S IDENTITY BEFORE A WRITE LANDS. A sibling and builtin-only, so ADR 0012's
 // no-`npm install` property is unchanged.
 import { overrideInventory, overridePath, installOverrideCommand, inventoryEnvironment, knownHostsReadScript,
   parseKnownHostsRead, seedPlan, seedCommand, seedReport, identityProbeScript, parseIdentityProbe,
-  identityGate } from "./fleet-host-identity.mjs";
-import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
+  identityGate } from "./fleet-host-identity.ts";
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
 // #1356: THE SHARED SHAPE, moved out of this file so every other operator-host reader of "which boxes are
-// the fleet" (fleet-status.mjs, fleet-wake.mjs, fleet-discover.mjs, lab-job.mjs) can ask the control
+// the fleet" (fleet-status.ts, fleet-wake.ts, fleet-discover.ts, lab-job.ts) can ask the control
 // plane's own inventory the same way, instead of a checkout's `inventory.yml` -- gitignored, and absent
 // on the machine that actually drives the fleet. `onTheControlPlane`/`sshToControlPlane` are re-exported
 // below at their PRE-#1356 names (`onTheControlPlane`, and `ssh` via the local wrapper above) so nothing
 // that already imports them from this file changes.
 import { onTheControlPlane, sshToControlPlane, inventorySources, inventoryReadScript, parseInventoryReads,
-  controlPlaneFleet, readControlPlaneFleet } from "./control-plane-fleet.mjs";
+  controlPlaneFleet, readControlPlaneFleet } from "./control-plane-fleet.ts";
 // Re-exported at this file's own PRE-#1356 names -- every existing `import { inventorySources, ... } from
-// "./fleet-playbook.mjs"` (this file's own tests) keeps working unchanged.
+// "./fleet-playbook.ts"` (this file's own tests) keeps working unchanged.
 export { inventorySources, inventoryReadScript, parseInventoryReads };
 
 /**
@@ -119,17 +120,16 @@ refuseUnknownFlags(
 /** How often to ask the control plane how its unit is doing. A poll INTERVAL, never a sleep-and-hope. */
 const FOLLOW_POLL_MS = 5_000;
 
-// No default: see control-plane-host.mjs -- this used to fall back to a real, specific LAN address (#83).
+// No default: see control-plane-host.ts -- this used to fall back to a real, specific LAN address (#83).
 // Resolved by `requireControlPlaneHost()` at the top of `main()`, not at import: env var first, then the
 // durable file it installs (#285, `fleet:control-host-install`), then a loud refusal. A bare env read
 // here would miss the file entirely, so this is reassigned once resolved rather than only validated.
-/** @type {string} */
-let CONTROL_PLANE;
+let CONTROL_PLANE: string;
 /** The playbooks, in THIS checkout — where a bootstrap's source file actually is. */
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 // The control plane's checkout, from the ONE place that knows its name. This was a bare literal
 // and `e435ac17` moved it, which made every play `cd` into a directory that does not exist -- see
-// `control-plane-checkout.mjs` for why four sweeps missed it. Relative, because `ssh()` above lands
+// `control-plane-checkout.ts` for why four sweeps missed it. Relative, because `ssh()` above lands
 // in `/root` first.
 const CHECKOUT = CONTROL_PLANE_CHECKOUT;
 
@@ -176,9 +176,8 @@ const ONE_WORKER_REQUIRED = ["os-rollback.yml", "recover.yml"];
 
 /**
  * Why EACH entry in `ONE_WORKER_REQUIRED` needs it -- one playbook, one reason, never restated as one.
- * @type {Record<string, string>}
  */
-const ONE_WORKER_REASON = {
+const ONE_WORKER_REASON: Record<string, string> = {
   "os-rollback.yml": "it changes ONE box's operating system",
   "recover.yml": "it kills the worker process and reboots, exempt from the capturing-worker guard on "
     + "purpose -- an omitted or fleet-wide --limit could reboot a box a DIFFERENT session is mid-capture "
@@ -196,10 +195,10 @@ const ONE_WORKER_REASON = {
  * and ignored, which is the silently-discarded-flag shape `refuseUnknownFlags` exists for, so it is
  * refused there by name.
  *
- * @param {{ chosen: string, limitFlag: string | undefined, apply: boolean }} args
+ *
  * @returns {string | null} the refusal to print, or null when the combination is allowed
  */
-function osRollbackRefusal({ chosen, limitFlag, apply }) {
+function osRollbackRefusal({ chosen, limitFlag, apply }: { chosen: string; limitFlag: string | undefined; apply: boolean; }): string | null {
   if (apply && chosen !== "os-rollback.yml") {
     return `refusing --apply with --playbook=${chosen}: only os-rollback.yml has a change it holds back.`;
   }
@@ -243,10 +242,10 @@ const DISPLAY_MODE_PATTERN = /^([0-9]{3,4})x([0-9]{3,4})$/;
  * it for an evidential reason that is just as unrecoverable -- a wrong mode is not undone by setting the
  * mode back, because the captures taken meanwhile carry it.
  *
- * @param {{ chosen: string, limitFlag: string | undefined, displayMode: string | undefined }} args
+ *
  * @returns {string | null} the refusal to print, or null when there is nothing to refuse
  */
-function displayModeRefusal({ chosen, limitFlag, displayMode }) {
+function displayModeRefusal({ chosen, limitFlag, displayMode }: { chosen: string; limitFlag: string | undefined; displayMode: string | undefined; }): string | null {
   if (displayMode === undefined) return null;
   if (!DISPLAY_MODE_PATTERN.test(displayMode)) {
     return `refusing --display-mode=${displayMode}: <width>x<height>, digits only, e.g. 800x600.`;
@@ -275,7 +274,7 @@ function displayModeRefusal({ chosen, limitFlag, displayMode }) {
  * @param {string | undefined} displayMode a value that has passed `displayModeRefusal`
  * @returns {string} the argv fragment, leading space included, or ""
  */
-function displayModeExtraVars(displayMode) {
+function displayModeExtraVars(displayMode: string | undefined): string {
   const match = DISPLAY_MODE_PATTERN.exec(displayMode ?? "");
   if (!match) return "";
   return ` -e '{"worker_display_mode":{"width":${match[1]},"height":${match[2]}}}'`;
@@ -292,7 +291,7 @@ function displayModeExtraVars(displayMode) {
  * with its own name below rather than a falsy nothing: a guard that reads an absent key and concludes
  * "nothing to compare" is off, silently, in exactly the fleet it was written for.
  *
- * Read as TEXT rather than through a YAML parser, matching `inventoryHosts` in `fleet-discover.mjs` —
+ * Read as TEXT rather than through a YAML parser, matching `inventoryHosts` in `fleet-discover.ts` —
  * half the value of `inventory.yml` is its comments, and a round-trip loses them.
  *
  * A TRAILING COMMENT IS PART OF THE DECLARATION, NOT A DIFFERENT LINE — worker-judge reviewing #1091.
@@ -306,14 +305,14 @@ function displayModeExtraVars(displayMode) {
  *
  * SCOPED TO THE WORKER GROUP, because the message says it is. A `windows_build` under `a11y_lab`, or on
  * one host, read as the fleet pin; with `/m` and `exec` the tiebreak was FILE ORDER. `groupPerLine` is
- * imported rather than re-derived — `fleet-discover.mjs` made the same call for the same reason, and a
+ * imported rather than re-derived — `fleet-discover.ts` made the same call for the same reason, and a
  * second group parser there is what once reported the lab container as a fifth worker. `WORKER_GROUP` is
  * likewise not restated.
  *
- * @param {string} inventoryText
+ *
  * @returns {string | null} the declared build, or null when the WORKER GROUP declares none
  */
-export function pinnedBuild(inventoryText) {
+export function pinnedBuild(inventoryText: string): string | null {
   const groups = groupPerLine(inventoryText);
   for (const [index, line] of inventoryText.split(/\r?\n/).entries()) {
     if (groups[index] !== WORKER_GROUP) continue;
@@ -333,11 +332,8 @@ export function pinnedBuild(inventoryText) {
  *
  * Returns null rather than a guess when there is no build-shaped token: an unparseable reading is "could
  * not ask", not "a different build", and those are the two this row exists to keep apart.
- *
- * @param {string | null | undefined} windowsVersion
- * @returns {string | null}
  */
-export function buildOf(windowsVersion) {
+export function buildOf(windowsVersion: string | null | undefined): string | null {
   const found = /\b([0-9]+\.[0-9]+\.[0-9]+)\b/.exec(windowsVersion ?? "");
   return found ? found[1] : null;
 }
@@ -353,14 +349,9 @@ export function buildOf(windowsVersion) {
  *               this repo has paid for that distinction more than once; folding these into `drifted`
  *               would send somebody to rebuild a box that may be fine, and into `compliant` would hide
  *               the box that is not.
- *
- * @param {{ name: string, windowsVersion?: string | null }[]} guests
- * @param {string} pinned
- * @returns {{ compliant: string[], drifted: {name: string, build: string}[], unreadable: string[] }}
  */
-export function buildStates(guests, pinned) {
-  /** @type {{ compliant: string[], drifted: {name: string, build: string}[], unreadable: string[] }} */
-  const states = { compliant: [], drifted: [], unreadable: [] };
+export function buildStates(guests: { name: string; windowsVersion?: string | null; }[], pinned: string): { compliant: string[]; drifted: { name: string; build: string; }[]; unreadable: string[]; } {
+  const states: { compliant: string[]; drifted: { name: string; build: string; }[]; unreadable: string[]; } = { compliant: [], drifted: [], unreadable: [] };
   for (const guest of guests) {
     const build = buildOf(guest.windowsVersion);
     if (build === null) states.unreadable.push(guest.name);
@@ -383,15 +374,12 @@ export function buildStates(guests, pinned) {
  * add. #1084 carries the decision; the day the pin lands, this branch stops being reachable.
  *
  * **NOTHING CALLS THIS YET, AND SAYING SO IS THE POINT.** The comparison is pure and testable here; the
- * call site needs each guest's `/health` reading, which lives in `fleet-status.mjs` and not in the
+ * call site needs each guest's `/health` reading, which lives in `fleet-status.ts` and not in the
  * playbook runner. **That wiring is #921's half** — the row this was split out of, whose acceptance is a
  * run against the real fleet. A function that is perfect and never reached is the defect this repository
  * has hit three times in a week, so the unwired surface is named rather than left for a reviewer to find.
- *
- * @param {{ guests: {name: string, windowsVersion?: string | null}[], pinned: string | null }} input
- * @returns {{ refusal: string | null, notice: string | null }}
  */
-export function buildAssertion({ guests, pinned }) {
+export function buildAssertion({ guests, pinned }: { guests: { name: string; windowsVersion?: string | null; }[]; pinned: string | null; }): { refusal: string | null; notice: string | null; } {
   if (pinned === null) {
     return { refusal: null, notice: "NO PINNED IMAGE: `inventory.yml` declares no `windows_build` for "
       + "`a11y_workers`, so this run compared nothing. The OS is a capture-cache key and an unpinned "
@@ -427,14 +415,11 @@ export function buildAssertion({ guests, pinned }) {
  * UNREADABLE rather than as agreement. *"I could not ask"* and *"it matches"* must not collapse, and the
  * place they would collapse is here, in the mapping -- a missing field read as an empty string would land
  * in `compliant` and report a box nobody reached as on the pin.
- *
- * @param {{ name: string, health?: Record<string, any> }[]} probes
- * @returns {{ name: string, windowsVersion: string | null }[]}
  */
-export function guestBuilds(probes) {
+export function guestBuilds(probes: { name: string; health?: WorkerHealth; }[]): { name: string; windowsVersion: string | null; }[] {
   return probes.map((p) => ({
     name: p.name,
-    windowsVersion: p.health?.environment?.windowsVersion ?? null,
+    windowsVersion: (p.health?.environment?.windowsVersion as string | undefined) ?? null,
   }));
 }
 
@@ -450,12 +435,11 @@ export function guestBuilds(probes) {
  * mismatch would block the repair paths, which is the same trade `fleet:deploy`'s own busy-worker guard
  * makes in the other direction. The pin is about what a box PRODUCES, and provisioning is when a box
  * joins the fleet that produces it.
- *
- * @param {{ chosen: string, inventoryText: string,
- *           guests: {name: string, windowsVersion?: string | null}[] }} input
- * @returns {{ refusal: string | null, notice: string | null }}
  */
-export function buildGate({ chosen, inventoryText, guests }) {
+export function buildGate({ chosen, inventoryText, guests }: {
+        chosen: string; inventoryText: string;
+        guests: { name: string; windowsVersion?: string | null; }[];
+    }): { refusal: string | null; notice: string | null; } {
   if (chosen !== "provision-role.yml") return { refusal: null, notice: null };
   return buildAssertion({ guests, pinned: pinnedBuild(inventoryText) });
 }
@@ -485,8 +469,7 @@ const SERIAL_PATTERN = /^(0|[1-9][0-9]?)$/;
  * fleet key. Containment by SHAPE, the same rule `isValidCaptureId` follows: `;rm -rf /` is inexpressible
  * rather than rejected.
  */
-/** @param {string} ref */
-function validRef(ref) {
+function validRef(ref: string) {
   return /^[0-9a-zA-Z._/-]{1,64}$/.test(ref) && !ref.includes("..");
 }
 
@@ -508,25 +491,21 @@ function validRef(ref) {
  * `Record<string, number>` and not the inferred one-key object: a lookup keyed by the CHOSEN playbook is
  * the whole point, and the inferred type made every other playbook name a type error at the lookup while
  * the runtime happily returned undefined and fell through to the default.
- *
- * @type {Record<string, number>}
  */
 // `os-rollback.yml`: a Windows rollback runs inside a restart that can take the better part of an hour, and
 // the play waits for it (`win_reboot`'s own ceiling is 90 minutes), so the default would kill a working one.
-const PLAYBOOK_TIMEOUT_MS = { "provision-role.yml": 4 * 60 * 60 * 1000, "os-rollback.yml": 2 * 60 * 60 * 1000 };
+const PLAYBOOK_TIMEOUT_MS: Record<string, number> = { "provision-role.yml": 4 * 60 * 60 * 1000, "os-rollback.yml": 2 * 60 * 60 * 1000 };
 const DEFAULT_PLAYBOOK_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * ONE SSH TO THE CONTROL PLANE, at THIS file's own default timeout -- `sshToControlPlane`
- * (`control-plane-fleet.mjs`, #1356) is the shared transport every operator-host reader now uses, and
+ * (`control-plane-fleet.ts`, #1356) is the shared transport every operator-host reader now uses, and
  * this is the thin wrapper that keeps THIS file's own long-running calls (a provision, a checkout move)
  * at their existing 30-minute default rather than the shared module's short, read-a-file-sized one.
  * `onTheControlPlane`'s local-shortcut and the key/host resolution live in the shared module now; this
  * wrapper adds nothing but the default.
- * @param {string} command
- * @param {{ capture?: boolean, timeoutMs?: number }} [options]
  */
-function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS } = {}) {
+function ssh(command: string, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS }: { capture?: boolean; timeoutMs?: number; } = {}) {
   return sshToControlPlane(command, { capture, timeoutMs });
 }
 
@@ -544,10 +523,8 @@ function ssh(command, { capture = false, timeoutMs = DEFAULT_PLAYBOOK_TIMEOUT_MS
  * `null` rather than a throw, because a missing `origin/<ref>` is a state the caller decides about, not an
  * error to unwind on -- and rather than the empty string, because `""` compares falsy-equal to too many
  * things and this value is compared for EQUALITY with another SHA.
- * @param {string} rev
- * @returns {string | null}
  */
-function resolveOrNull(rev) {
+function resolveOrNull(rev: string): string | null {
   try {
     const sha = execFileSync("git", ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`],
       { encoding: "utf8", env: sandboxGitEnv() }).trim();
@@ -565,7 +542,7 @@ function localBranch() {
 }
 
 // audit §9 "argv parsing": was its own copy of the fifteen-file idiom, now the shared, tested extractor.
-const argOf = (/** @type {string} */ name) => flagValue(process.argv, name);
+const argOf = (name: string) => flagValue(process.argv, name);
 
 /**
  * Every argument, validated, or a refusal that names which one and what shape it wanted.
@@ -573,13 +550,13 @@ const argOf = (/** @type {string} */ name) => flagValue(process.argv, name);
  * Extracted from `main` because it grew past the complexity gate as flags were added — and the gate was
  * right: dispatching a playbook and deciding whether the arguments are safe are two things, and each of
  * these refusals exists because the value reaches a shell on the box holding the fleet SSH key.
- *
- * @returns {{chosen: string, limitFlag: string|undefined, serialFlag: string|undefined, ref: string,
- *            allowEdgeDowngrade: boolean, apply: boolean, displayMode: string|undefined,
- *            layerCommits: Record<string, string>}}
  */
-function parseArgs() {
-  const refuse = (/** @type {string} */ message) => {
+function parseArgs(): {
+    chosen: string; limitFlag: string | undefined; serialFlag: string | undefined; ref: string;
+    allowEdgeDowngrade: boolean; apply: boolean; displayMode: string | undefined;
+    layerCommits: Record<string, string>;
+} {
+  const refuse = (message: string) => {
     process.stderr.write(`${message}\n`);
     process.exit(2);
   };
@@ -636,13 +613,12 @@ function parseArgs() {
  * refuses BEFORE `protocolVerdict` ever runs, never falling through to "no worker answered /health": that
  * message implies the fleet went quiet, when a checkout with no control-plane inventory never had an
  * address to try in the first place. Could not ask is not may proceed.
- *
- * @param {{ chosen: string, local: string | null,
- *           fleet: { workers: { name: string, url: string }[], refusal: string | null },
- *           served: { worker: string, protocol: string | number | null }[], allowed: boolean }} input
- * @returns {{ refuse: boolean, message: string }}
  */
-export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }) {
+export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }: {
+        chosen: string; local: string | null;
+        fleet: { workers: { name: string; url: string; }[]; refusal: string | null; };
+        served: { worker: string; protocol: string | number | null; }[]; allowed: boolean;
+    }): { refuse: boolean; message: string; } {
   if (fleet.refusal) {
     return { refuse: true, message: `REFUSING ${chosen}: could not learn which boxes this deploy will `
       + `touch -- ${fleet.refusal}. Could not ask is not may proceed.` };
@@ -673,15 +649,17 @@ export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }) 
  *
  * @param {{ readFile?: (path: string, encoding: "utf8") => string,
  *           declaration?: typeof layerDeclaration }} [deps] injectable, like `guardProtocolChange`'s `readFleet`
- * @returns {{ local: string | null, refusal: string | null }}
  */
-export function readLocalProtocol({ readFile = readFileSync, declaration = layerDeclaration } = {}) {
+export function readLocalProtocol({ readFile = readFileSync, declaration = layerDeclaration }: {
+    readFile?: (path: string, encoding: "utf8") => string;
+    declaration?: typeof layerDeclaration;
+} = {}): { local: string | null; refusal: string | null; } {
   const { name, path, remote, dir } = declaration("nvda-worker");
   try {
     const text = readFile(resolve(dir, "src", PROTOCOL_VERSION_FILE), "utf8");
     return { local: /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(text)?.[1] ?? null, refusal: null };
   } catch (cause) {
-    if (/** @type {NodeJS.ErrnoException} */ (cause)?.code !== "ENOENT") throw cause;
+    if ((cause as NodeJS.ErrnoException)?.code !== "ENOENT") throw cause;
     return { local: null, refusal: `the worker layer "${name}" is not checked out at ${path}, so this checkout `
       + `cannot say which protocol the deploy would put on the workers (${dir}/src/${PROTOCOL_VERSION_FILE} does `
       + `not exist). Its repository is ${remote ?? "inside this checkout (layers.json declares no remote)"}; `
@@ -709,12 +687,14 @@ export function readLocalProtocol({ readFile = readFileSync, declaration = layer
  * guard's own refusal code) BEFORE `readFleet`, so a checkout with nothing to compare never pays an ssh round trip.
  *
  * @param {string} chosen the playbook about to run
- * @param {{ readFleet?: () => { workers: { name: string, url: string }[], refusal: string | null },
- *           readLocal?: typeof readLocalProtocol, exit?: (code: number) => void }} [deps]
+ *
  * @returns {Promise<void>} resolves if the deploy may proceed; exits the process if not
  */
-export async function guardProtocolChange(chosen,
-  { readFleet = readControlPlaneFleet, readLocal = readLocalProtocol, exit = process.exit } = {}) {
+export async function guardProtocolChange(chosen: string,
+  { readFleet = readControlPlaneFleet, readLocal = readLocalProtocol, exit = process.exit }: {
+      readFleet?: () => { workers: { name: string; url: string; }[]; refusal: string | null; };
+      readLocal?: typeof readLocalProtocol; exit?: (code: number) => void;
+  } = {}): Promise<void> {
   if (chosen !== "deploy.yml") return;
   const { local, refusal } = readLocal();
   if (refusal) {
@@ -746,10 +726,8 @@ export async function guardProtocolChange(chosen,
  * cannot acquire the exception by being added to an array nobody re-argues. `bootstrap-playbooks-are-
  * declared.test.ts` discovers every carrier and refuses one that also targets `a11y_workers` or
  * `control_plane` — groups that come from the very file a bootstrap installs.
- *
- * @param {string} chosen @returns {boolean}
  */
-export function declaresBootstrap(chosen, read = readFileSync) {
+export function declaresBootstrap(chosen: string, read = readFileSync): boolean {
   try {
     return /^#\s*a11y_bootstrap:\s*true\s*$/m.test(String(read(`${ANSIBLE_DIR}/${chosen}`, "utf8")));
   } catch {
@@ -764,10 +742,8 @@ export function declaresBootstrap(chosen, read = readFileSync) {
  * that can fail, in order: `hosts: control_plane` needs the inventory it installs to resolve its target,
  * and `hosts: localhost` under the unit-based path means the control plane — where the source file is
  * missing, which is the incident. `-i '<host>,'` takes the target from argv and the source from here.
- *
- * @param {string} chosen @returns {void}
  */
-function runBootstrapFromHere(chosen) {
+function runBootstrapFromHere(chosen: string): void {
   process.stdout.write(`  running ${chosen} FROM THIS MACHINE against ${CONTROL_PLANE}\n`
     + "  (it declares `a11y_bootstrap`, and a bootstrap cannot run on what it bootstraps)\n\n");
   // `root@`, and the bare host is not enough. Ansible defaults an unqualified `-i '<host>,'` to the LOCAL
@@ -808,16 +784,18 @@ function runBootstrapFromHere(chosen) {
  * ONE OBJECT, not seven positionals — `max-params` is 4 here and the repo's rule is to bundle cohesive
  * arguments rather than raise the ceiling. These seven are one thing: what to deploy and how.
  *
- * @param {{ chosen: string, ref: string, expected: string, limitFlag: string|undefined,
- *           serialFlag: string|undefined, allowEdgeDowngrade: boolean, apply: boolean,
- *           displayMode: string|undefined, layerCommits: Record<string, string>,
- *           aim: { addresses: Record<string, string>, workers: string[] } }} spec
+ *
  *   `layerCommits` is the layers' half of the commit pair (#3395): `{ layer: sha }`, empty while none has its own repository.
  *   `aim` is where each MOVED worker is aimed this run, already identity-checked (#2832); empty for a healthy fleet.
  * @returns {string} the unit name
  */
 function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-  displayMode, layerCommits, aim }) {
+  displayMode, layerCommits, aim }: {
+        chosen: string; ref: string; expected: string; limitFlag: string | undefined;
+        serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean;
+        displayMode: string | undefined; layerCommits: Record<string, string>;
+        aim: { addresses: Record<string, string>; workers: string[]; };
+    }): string {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -891,7 +869,7 @@ try {
 } catch (cause) {
   // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
   // The status is what this block exists to surface AND to exit with, so it is load-bearing.
-  const failure = /** @type {{ status?: number }} */ (cause);
+  const failure = (cause as { status?: number });
   process.stderr.write(`\n  ${chosen} FAILED TO START (exit ${failure.status ?? "?"}).\n`);
   process.exit(failure.status ?? 1);
 }
@@ -947,7 +925,7 @@ try {
  * @param {Record<string, string>} [layerCommits] the layers' half of the pair, `{ layer: sha }`; empty while none has its own repository
  * @returns {string} the shell command to run on the control plane
  */
-export function controlPlaneCheckout(ref, expected, layerCommits = {}) {
+export function controlPlaneCheckout(ref: string, expected: string, layerCommits: Record<string, string> = {}): string {
   return `cd ${CHECKOUT} && git fetch --quiet --all && git checkout --quiet ${ref} `
     + `&& git merge --ff-only --quiet ${expected}${layerCheckoutMove(layerCommits)}`;
 }
@@ -978,12 +956,12 @@ export function controlPlaneCheckout(ref, expected, layerCommits = {}) {
  * that cannot be followed, and this file's neighbours already treat that as the defect rather than a
  * wording preference.
  *
- * @param {{ ref: string, local: string, origin: string | null }} resolved
+ *
  * @returns {string | null} the refusal to print, or `null` when the two agree
  */
-export function staleRefRefusal({ ref, local, origin }) {
+export function staleRefRefusal({ ref, local, origin }: { ref: string; local: string; origin: string | null; }): string | null {
   if (origin === local) return null;
-  const short = (/** @type {string} */ sha) => sha.slice(0, 12);
+  const short = (sha: string) => sha.slice(0, 12);
   if (origin === null) {
     return [
       `REFUSING: --ref=${ref} resolves to ${short(local)} here, and \`origin/${ref}\` does not resolve.`,
@@ -1025,11 +1003,8 @@ export function staleRefRefusal({ ref, local, origin }) {
  * `git branch -r --contains` rather than a fetch of our own: the question is whether THIS checkout has
  * already seen the commit on a remote-tracking branch, which is the same thing the control plane's fetch
  * will find. An empty answer is the refusal; it is never read as a yes.
- *
- * @param {string} ref
- * @param {string} expected
  */
-function requireCommitIsOnOrigin(ref, expected) {
+function requireCommitIsOnOrigin(ref: string, expected: string) {
   const remotes = execFileSync("git", ["branch", "-r", "--contains", expected],
     { encoding: "utf8", env: sandboxGitEnv() }).trim();
   if (remotes) return;
@@ -1054,10 +1029,8 @@ function requireCommitIsOnOrigin(ref, expected) {
  * LOUD on every run and non-refusing, because provisioning is how a drifted fleet gets its role back and
  * a guard that blocks every run until somebody edits a control-plane file bricks the repair path. So the
  * absent-inventory case lands in a state that was already designed, rather than needing a new one.
- *
- * @returns {string}
  */
-function inventoryTextOrEmpty() {
+function inventoryTextOrEmpty(): string {
   try {
     return readFileSync(fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)), "utf8");
   } catch {
@@ -1084,7 +1057,7 @@ function inventoryTextOrEmpty() {
  *
  * @param {string} chosen the playbook this run will execute
  */
-async function enforceBuildPin(chosen) {
+async function enforceBuildPin(chosen: string) {
   const gate = buildGate({
     chosen,
     inventoryText: inventoryTextOrEmpty(),
@@ -1100,24 +1073,14 @@ async function enforceBuildPin(chosen) {
 /** #1313: the two playbooks that change what a box runs. Repair paths (`recover.yml`) and `sleep.yml` are not gated. */
 const LINK_GATED = ["deploy.yml", "provision-role.yml"];
 
-/**
- * Every `--allow-offline=<name>`, in order. REPEATABLE, which `flagValue` (first match only) is not.
- *
- * @param {string[]} argv
- * @returns {string[]}
- */
-export function allowOfflineNames(argv) {
+/** Every `--allow-offline=<name>`, in order. REPEATABLE, which `flagValue` (first match only) is not. */
+export function allowOfflineNames(argv: string[]): string[] {
   const prefix = "--allow-offline=";
   return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
 }
 
-/**
- * `--layer-ref`, read off argv and refused or accepted, so `parseArgs` stays under its complexity budget.
- *
- * @param {{ chosen: string, refuse: (message: string) => void }} args
- * @returns {Record<string, string>}
- */
-function layerCommitsOrRefuse({ chosen, refuse }) {
+/** `--layer-ref`, read off argv and refused or accepted, so `parseArgs` stays under its complexity budget. */
+function layerCommitsOrRefuse({ chosen, refuse }: { chosen: string; refuse: (message: string) => void; }): Record<string, string> {
   const { pins, refusal } = layerPinsFor({ chosen, given: layerRefValues(process.argv) });
   if (refusal) refuse(refusal);
   return pins;
@@ -1126,11 +1089,8 @@ function layerCommitsOrRefuse({ chosen, refuse }) {
 /**
  * The refusal text for a HOLD with boxes still unnamed -- OFF and UNKNOWN in separate lists, because one is
  * a walk to a machine and the other is a better read.
- *
- * @param {{ chosen: string, off: string[], unknown: string[], named: string[] }} held
- * @returns {string}
  */
-function holdRefusal({ chosen, off, unknown, named }) {
+function holdRefusal({ chosen, off, unknown, named }: { chosen: string; off: string[]; unknown: string[]; named: string[]; }): string {
   return [
     `REFUSING ${chosen}: fleet:status holds this write at layer 2 (#1313).`,
     `  off the network:  ${off.join(", ") || "none"}`,
@@ -1152,13 +1112,14 @@ function holdRefusal({ chosen, off, unknown, named }) {
  * named -- a name for a box that was never held is refused, not quietly accepted.
  *
  * PURE, the way `buildGate` is, so every case is driven without a fleet; `enforceLinkGate` is the call.
- *
- * @param {{ chosen: string, gate: { hold: boolean, off: string[], unknown: string[],
- *             moved?: { name: string, movedTo: string }[] } | null,
- *           allowOffline: string[] }} input
- * @returns {{ refusal: string | null, notice: string | null }}
  */
-export function linkGate({ chosen, gate, allowOffline }) {
+export function linkGate({ chosen, gate, allowOffline }: {
+        chosen: string; gate: {
+            hold: boolean; off: string[]; unknown: string[];
+            moved?: { name: string; movedTo: string; }[];
+        } | null;
+        allowOffline: string[];
+    }): { refusal: string | null; notice: string | null; } {
   if (!LINK_GATED.includes(chosen)) {
     return { refusal: allowOffline.length
       ? `refusing --allow-offline with --playbook=${chosen}: only ${LINK_GATED.join(" and ")} read the layer-2 gate.`
@@ -1177,7 +1138,7 @@ export function linkGate({ chosen, gate, allowOffline }) {
       + (moved.length ? ` (Moved by MAC, and so nameable: ${moved.join(", ")}.)` : ""), notice: null };
   }
   if (!gate?.hold) return { refusal: null, notice: null };
-  const unnamed = (/** @type {string[]} */ names) => names.filter((name) => !allowOffline.includes(name));
+  const unnamed = (names: string[]) => names.filter((name) => !allowOffline.includes(name));
   const off = unnamed(gate.off);
   const unknown = unnamed(gate.unknown);
   if (off.length || unknown.length) {
@@ -1191,18 +1152,15 @@ export function linkGate({ chosen, gate, allowOffline }) {
 const INVENTORY_READ_TIMEOUT_MS = 60_000;
 
 // #1356: `inventorySources`, `inventoryReadScript`, `parseInventoryReads` and the pure fleet-resolution
-// logic MOVED to `control-plane-fleet.mjs`, imported above -- every operator-host reader needs the exact
+// logic MOVED to `control-plane-fleet.ts`, imported above -- every operator-host reader needs the exact
 // same shape `gateFleet` pioneered here (#1343), not a second copy of it. `gateFleet` below is now this
 // file's own WORDING wrapped around the shared, generic resolver.
 
 /**
  * The fleet the playbook will target, or the refusal saying why it cannot be known -- `gateFleet`'s own
  * words (`REFUSING {chosen}: the layer-2 gate ...`) wrapped around `controlPlaneFleet`'s generic reason.
- *
- * @param {{ chosen: string, reads: { path: string, text: string }[], sources: string[], groupVarsText: string }} input
- * @returns {{ workers: { name: string, url: string }[], refusal: string | null }}
  */
-export function gateFleet({ chosen, reads, sources, groupVarsText }) {
+export function gateFleet({ chosen, reads, sources, groupVarsText }: { chosen: string; reads: { path: string; text: string; }[]; sources: string[]; groupVarsText: string; }): { workers: { name: string; url: string; }[]; refusal: string | null; } {
   const result = controlPlaneFleet({ reads, sources, groupVarsText });
   if (!result.refusal) return result;
   return { workers: [], refusal: `REFUSING ${chosen}: the layer-2 gate cannot know which boxes this `
@@ -1214,14 +1172,10 @@ export function gateFleet({ chosen, reads, sources, groupVarsText }) {
  * #2832: THE WORKERS THE LAYER-2 READ FOUND ELSEWHERE, each with the pin it left, for the identity check that
  * decides whether a write may be aimed at the new address. Present ONLY when something moved, the way
  * `gate.moved` is, so a healthy fleet's result is exactly what it was.
- *
- * @param {{ moved?: { name: string, movedTo: string }[] } | null} gate
- * @param {{ name: string, url: string }[]} workers
- * @returns {{ moved?: { name: string, movedTo: string, pin: string }[] }}
  */
-function movedWorkers(gate, workers) {
+function movedWorkers(gate: { moved?: { name: string; movedTo: string; }[]; } | null, workers: { name: string; url: string; }[]): { moved?: { name: string; movedTo: string; pin: string; }[]; } {
   if (!gate?.moved?.length) return {};
-  const pinOf = (/** @type {string} */ name) => {
+  const pinOf = (name: string) => {
     const url = workers.find((w) => w.name === name)?.url;
     return url ? new URL(url).hostname : "";
   };
@@ -1231,23 +1185,28 @@ function movedWorkers(gate, workers) {
 /**
  * #1313, AS THE REVIEW ASKED: THE WHOLE GATE, WITH ITS READS INJECTED, so the enforce path is driven by a test
  * and not only its pure decision. `enforceLinkGate` is this plus the real reads and the exits.
- *
- * @param {{ chosen: string, argv: string[], ansibleCfgText: string, groupVarsText: string,
- *           readInventories: (paths: string[]) => { path: string, text: string }[],
- *           status?: (deps: { workers: () => { name: string, url: string }[] }) => Promise<{ linkLayer:
- *             { lines: string[], gate: { hold: boolean, off: string[], unknown: string[],
- *               moved?: { name: string, movedTo: string }[] } | null } }> }} input
- * @returns {Promise<{ refusal: string | null, notice: string | null, lines: string[],
- *                     moved?: { name: string, movedTo: string, pin: string }[] }>}
  */
-export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText, readInventories, status = fleetStatus }) {
+export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText, readInventories, status = fleetStatus }: {
+        chosen: string; argv: string[]; ansibleCfgText: string; groupVarsText: string;
+        readInventories: (paths: string[]) => { path: string; text: string; }[];
+        status?: (deps: { workers: () => { name: string; url: string; }[]; }) => Promise<{
+            linkLayer: {
+                lines: string[]; gate: {
+                    hold: boolean; off: string[]; unknown: string[];
+                    moved?: { name: string; movedTo: string; }[];
+                } | null;
+            };
+        }>;
+    }): Promise<{
+    refusal: string | null; notice: string | null; lines: string[];
+    moved?: { name: string; movedTo: string; pin: string; }[];
+}> {
   const allowOffline = allowOfflineNames(argv);
   if (!LINK_GATED.includes(chosen)) return { ...linkGate({ chosen, gate: null, allowOffline }), lines: [] };
-  const couldNotAsk = (/** @type {unknown} */ error, /** @type {string} */ what) => ({ refusal: `REFUSING ${chosen}: `
-    + `${what} (${String(/** @type {Error} */ (error).message).split("\n")[0]}). Could not ask is not may proceed.`,
+  const couldNotAsk = (error: unknown, what: string) => ({ refusal: `REFUSING ${chosen}: `
+    + `${what} (${String((error as Error).message).split("\n")[0]}). Could not ask is not may proceed.`,
   notice: null, lines: [] });
-  /** @type {{ workers: { name: string, url: string }[], refusal: string | null }} */
-  let fleet;
+  let fleet: { workers: { name: string; url: string; }[]; refusal: string | null; };
   try {
     const sources = inventorySources(ansibleCfgText);
     fleet = gateFleet({ chosen, reads: readInventories(sources), sources, groupVarsText });
@@ -1272,10 +1231,10 @@ export async function linkGateFor({ chosen, argv, ansibleCfgText, groupVarsText,
  * checkout's in-tree file, which is gitignored and absent where the fleet is driven from. The error carries
  * ssh's stderr, not its argv, so a refusal never prints the key path.
  *
- * @param {string} chosen
+ *
  * @returns {Promise<{ moved: { name: string, movedTo: string, pin: string }[] }>} the workers found elsewhere (#2832)
  */
-async function enforceLinkGate(chosen) {
+async function enforceLinkGate(chosen: string): Promise<{ moved: { name: string; movedTo: string; pin: string; }[]; }> {
   const { refusal, notice, lines, moved } = await linkGateFor({
     chosen,
     argv: process.argv.slice(2),
@@ -1285,7 +1244,7 @@ async function enforceLinkGate(chosen) {
       try {
         return parseInventoryReads(ssh(inventoryReadScript(paths), { capture: true, timeoutMs: INVENTORY_READ_TIMEOUT_MS }));
       } catch (error) {
-        const stderr = String(/** @type {{ stderr?: unknown }} */ (error).stderr ?? "").trim().split("\n").pop();
+        const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim().split("\n").pop();
         throw new Error(`ssh to the control plane failed: ${stderr || "no stderr"}`, { cause: error });
       }
     },
@@ -1300,7 +1259,7 @@ async function enforceLinkGate(chosen) {
 }
 
 // #2832: THE WRITE-IDENTITY STEP, AFTER THE GATES THAT ASK THE LEAST OF THE CONTROL PLANE AND BEFORE ANYTHING
-// IS SHIPPED. It sits here, in `fleet-playbook.mjs`, because it is the one place that both knows which workers
+// IS SHIPPED. It sits here, in `fleet-playbook.ts`, because it is the one place that both knows which workers
 // this run touches and builds the Ansible invocation, so an address override cannot be built without having
 // passed it.
 
@@ -1317,11 +1276,8 @@ const IDENTITY_STEP_TIMEOUT_MS = 2 * 60 * 1000;
 /**
  * Is a worker inside what this run's `--limit` touches? A moved worker the run will not touch must not refuse
  * it: the identity of a box nobody is writing to is nobody's concern here.
- *
- * @param {string} name
- * @param {string | undefined} limitFlag
  */
-export function limitTouches(name, limitFlag) {
+export function limitTouches(name: string, limitFlag: string | undefined) {
   return limitFlag === undefined || limitFlag === "a11y_workers" || limitFlag.split(",").includes(name);
 }
 
@@ -1330,14 +1286,13 @@ export function limitTouches(name, limitFlag) {
  * where a key is already recorded for its current pin, check each moved worker's identity with a strict
  * handshake, and say which it will aim where -- or refuse the run. `control` runs one command on the control
  * plane and returns its stdout; a throw is the caller's "could not ask".
- *
- * @param {{ chosen: string, argv: string[], limitFlag: string | undefined,
- *           moved: { name: string, movedTo: string, pin?: string }[],
- *           fleet: { name: string, address: string }[], answering: Set<string>,
- *           control: (command: string) => string }} input
- * @returns {{ refusal: string | null, notice: string | null, lines: string[], addresses: Record<string, string> }}
  */
-export function writeIdentityFor({ chosen, argv, limitFlag, moved, fleet, answering, control }) {
+export function writeIdentityFor({ chosen, argv, limitFlag, moved, fleet, answering, control }: {
+        chosen: string; argv: string[]; limitFlag: string | undefined;
+        moved: { name: string; movedTo: string; pin?: string; }[];
+        fleet: { name: string; address: string; }[]; answering: Set<string>;
+        control: (command: string) => string;
+    }): { refusal: string | null; notice: string | null; lines: string[]; addresses: Record<string, string>; } {
   if (CONTROL_PLANE_ONLY.includes(chosen)) return { refusal: null, notice: null, lines: [], addresses: {} };
   const plan = seedPlan({ workers: fleet, answering, records: parseKnownHostsRead(control(knownHostsReadScript(fleet))) });
   const recordKeys = seedCommand(plan.lines);
@@ -1356,12 +1311,11 @@ export function writeIdentityFor({ chosen, argv, limitFlag, moved, fleet, answer
  * override file hold exactly this run's override or NOTHING (so a stale one from an earlier run can never aim
  * this one), and the `ANSIBLE_INVENTORY` that appends it after the config's own sources -- present only when
  * an address was resolved, so a healthy fleet's unit is exactly what it was.
- *
- * @param {{ unit: string, aim: { addresses: Record<string, string>, workers: string[] },
- *           ansibleCfgText: string }} input
- * @returns {{ install: string, setenv: string }}
  */
-export function overrideUnitParts({ unit, aim, ansibleCfgText }) {
+export function overrideUnitParts({ unit, aim, ansibleCfgText }: {
+        unit: string; aim: { addresses: Record<string, string>; workers: string[]; };
+        ansibleCfgText: string;
+    }): { install: string; setenv: string; } {
   const path = overridePath(unit);
   const yaml = overrideInventory({ addresses: aim.addresses, workers: aim.workers });
   return {
@@ -1378,28 +1332,19 @@ export function overrideUnitParts({ unit, aim, ansibleCfgText }) {
  * read (`recover.yml` is exempt from the busy-worker guard BECAUSE it must work on a box that is wedged), and
  * refusing one of those over a keys read would block exactly the run that is needed when things are broken:
  * it warns, and connects with whatever is recorded, as it did before this step existed.
- *
- * @param {{ chosen: string, message: string }} input
- * @returns {{ refuse: boolean, message: string }}
  */
-export function identityStepFailure({ chosen, message }) {
+export function identityStepFailure({ chosen, message }: { chosen: string; message: string; }): { refuse: boolean; message: string; } {
   const what = `the workers' host keys could not be read or recorded on the control plane (${message})`;
   return LINK_GATED.includes(chosen)
     ? { refuse: true, message: `REFUSING ${chosen}: ${what}. Could not ask is not may proceed.` }
     : { refuse: false, message: `WARNING ${chosen}: ${what}. This run connects with whatever is recorded, as it did before #2832.` };
 }
 
-/**
- * @param {string} chosen
- * @param {{ moved: { name: string, movedTo: string, pin: string }[], limitFlag: string | undefined }} placement
- * @returns {Promise<{ addresses: Record<string, string>, workers: string[] }>} where each moved worker is aimed
- */
-async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
+/** @returns {Promise<{ addresses: Record<string, string>, workers: string[] }>} where each moved worker is aimed */
+async function enforceWriteIdentity(chosen: string, { moved, limitFlag }: { moved: { name: string; movedTo: string; pin: string; }[]; limitFlag: string | undefined; }): Promise<{ addresses: Record<string, string>; workers: string[]; }> {
   if (CONTROL_PLANE_ONLY.includes(chosen)) return { addresses: {}, workers: [] };
-  /** @type {ReturnType<typeof writeIdentityFor>} */
-  let result;
-  /** @type {string[]} */
-  let workers;
+  let result: ReturnType<typeof writeIdentityFor>;
+  let workers: string[];
   try {
     const read = readControlPlaneFleet();
     if (read.refusal) throw new Error(read.refusal);
@@ -1410,7 +1355,7 @@ async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
       answering: new Set(probes.filter((probe) => probe.reachable).map((probe) => probe.name)),
       control: (command) => ssh(command, { capture: true, timeoutMs: IDENTITY_STEP_TIMEOUT_MS }) });
   } catch (error) {
-    const failure = identityStepFailure({ chosen, message: String(/** @type {Error} */ (error).message).split("\n")[0] });
+    const failure = identityStepFailure({ chosen, message: String((error as Error).message).split("\n")[0] });
     process.stderr.write(`${failure.message}\n`);
     if (failure.refuse) process.exit(2);
     return { addresses: {}, workers: [] };
@@ -1461,7 +1406,7 @@ async function enforceWriteIdentity(chosen, { moved, limitFlag }) {
 const FLEET_HOLD_LINE = /^[ \t]*#{0,6}[ \t]*Fleet-hold-until:[ \t]*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)(?:[ \t]+(a11y-worker-[0-9]{1,3}(?:,a11y-worker-[0-9]{1,3})*))?[ \t]*$/im;
 
 /** `Date.parse` rolls `2026-02-31` over to March rather than refusing it, so the matched text is round-tripped and a date `Date` had to repair is refused (#1841). */
-function roundTripsUtc(/** @type {string} */ iso) {
+function roundTripsUtc(iso: string) {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return false;
   return parsed.toISOString().slice(0, 19) === iso.slice(0, 19);
@@ -1470,10 +1415,8 @@ function roundTripsUtc(/** @type {string} */ iso) {
 /**
  * The `Fleet-hold-until:` timestamp, or `null`. A MALFORMED TIMESTAMP IS NOT A HOLD: it fails OPEN, so a typo leaves the row visible to a human
  * and never hides a live sequence.
- * @param {string | null | undefined} body
- * @returns {string | null}
  */
-export function fleetHoldUntil(body) {
+export function fleetHoldUntil(body: string | null | undefined): string | null {
   const m = FLEET_HOLD_LINE.exec(String(body ?? ""));
   if (!m) return null;
   return roundTripsUtc(m[1]) ? m[1] : null;
@@ -1482,10 +1425,8 @@ export function fleetHoldUntil(body) {
 /**
  * The workers the line names, or `[]` -- which MEANS "the whole fleet". A typo'd worker name fails the whole LINE (`FLEET_HOLD_LINE` matches the
  * list or nothing), so a hold never silently widens to the whole fleet because of a typo.
- * @param {string | null | undefined} body
- * @returns {string[]}
  */
-export function fleetHoldWorkers(body) {
+export function fleetHoldWorkers(body: string | null | undefined): string[] {
   const m = FLEET_HOLD_LINE.exec(String(body ?? ""));
   if (!m || !roundTripsUtc(m[1])) return [];
   return m[2] ? m[2].split(",") : [];
@@ -1505,12 +1446,8 @@ export function fleetHoldWorkers(body) {
  * ruling, point 2): `[]` means the row names none and so holds the whole fleet, unchanged from before this
  * field existed. `sequenceHoldGate` is what narrows a hold's reach to an operation's own `--limit`; this
  * function stays a plain read of "what is live right now", the same shape it always was.
- *
- * @param {{number?: number, body?: string}[]} issues
- * @param {number} nowMs
- * @returns {{number: number, until: string, workers: string[]}[]}
  */
-export function activeFleetHolds(issues, nowMs) {
+export function activeFleetHolds(issues: { number?: number; body?: string; }[], nowMs: number): { number: number; until: string; workers: string[]; }[] {
   const holds = [];
   for (const issue of issues ?? []) {
     const until = fleetHoldUntil(issue?.body);
@@ -1523,11 +1460,8 @@ export function activeFleetHolds(issues, nowMs) {
 /**
  * Every `--allow-hold=<row>`, in order -- REPEATABLE, matching `allowOfflineNames` above for the
  * identical reason (`flagValue` reads only the first match).
- *
- * @param {string[]} argv
- * @returns {number[]}
  */
-export function allowHoldNumbers(argv) {
+export function allowHoldNumbers(argv: string[]): number[] {
   const prefix = "--allow-hold=";
   return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => Number(argument.slice(prefix.length)));
 }
@@ -1536,11 +1470,8 @@ export function allowHoldNumbers(argv) {
  * The refusal text for one or more active holds, naming each row, the timestamp it clears at, and (ceo's
  * #928 ruling, point 2) the workers it names, when it names any -- `[]` says nothing extra, matching every
  * hold declared before that field existed.
- *
- * @param {{ chosen: string, unnamed: {number: number, until: string, workers?: string[]}[] }} held
- * @returns {string}
  */
-function sequenceHoldRefusal({ chosen, unnamed }) {
+function sequenceHoldRefusal({ chosen, unnamed }: { chosen: string; unnamed: { number: number; until: string; workers?: string[]; }[]; }): string {
   return [
     `REFUSING ${chosen}: a fleet-hold sequence is active (#1839).`,
     ...unnamed.map(({ number, until, workers }) => `  held by #${number} until ${until}`
@@ -1566,12 +1497,8 @@ function sequenceHoldRefusal({ chosen, unnamed }) {
  * own target IS the fleet -- the same default `--limit` already has -- so it reaches every scoped hold
  * too, for the identical reason an unscoped hold reaches every target: neither one is naming anything
  * narrower to be safe from.
- *
- * @param {string[]} holdWorkers
- * @param {string | undefined} limitFlag
- * @returns {boolean}
  */
-export function fleetHoldReachesTarget(holdWorkers, limitFlag) {
+export function fleetHoldReachesTarget(holdWorkers: string[], limitFlag: string | undefined): boolean {
   if (holdWorkers.length === 0) return true;
   if (!limitFlag || limitFlag === WORKER_GROUP) return true;
   const targets = limitFlag.split(",");
@@ -1591,12 +1518,11 @@ export function fleetHoldReachesTarget(holdWorkers, limitFlag) {
  * verdict below is already computed over "holds this operation could actually collide with" -- the same
  * reduction whether `holds` came from a fleet-wide default or a fully-scoped fixture, and callers that
  * never pass `limitFlag` see every hold reach them, unchanged from before this parameter existed.
- *
- * @param {{ chosen: string, holds: {number: number, until: string, workers?: string[]}[],
- *   allowHold: number[], limitFlag?: string }} input
- * @returns {{ refusal: string | null, notice: string | null }}
  */
-export function sequenceHoldGate({ chosen, holds, allowHold, limitFlag }) {
+export function sequenceHoldGate({ chosen, holds, allowHold, limitFlag }: {
+        chosen: string; holds: { number: number; until: string; workers?: string[]; }[];
+        allowHold: number[]; limitFlag?: string;
+    }): { refusal: string | null; notice: string | null; } {
   if (!LINK_GATED.includes(chosen)) {
     return { refusal: allowHold.length
       ? `refusing --allow-hold with --playbook=${chosen}: only ${LINK_GATED.join(" and ")} read the fleet-hold gate.`
@@ -1630,11 +1556,8 @@ export function sequenceHoldGate({ chosen, holds, allowHold, limitFlag }) {
  * `ghEnvironment`'s own answer, not a second derivation of it, so a blank token file (which `ghEnvironment`
  * and bootstrap's `[ ! -s ]` both treat as absent) is tokenless here too. The earlier `existsSync` called
  * it credentialed and passed gh's `gh auth login` hint through (reviewer-2 on #1910).
- *
- * @param {{ env?: NodeJS.ProcessEnv, readToken?: () => string, run?: typeof execFileSync }} [deps]
- * @returns {{number: number, body: string}[]}
  */
-export function readFleetGatedIssues({ env = process.env, readToken = readGhTokenFile, run = execFileSync } = {}) {
+export function readFleetGatedIssues({ env = process.env, readToken = readGhTokenFile, run = execFileSync }: { env?: NodeJS.ProcessEnv; readToken?: () => string; run?: typeof execFileSync; } = {}): { number: number; body: string; }[] {
   const ghEnv = ghEnvironment(env, readToken);
   try {
     return JSON.parse(String(run("gh",
@@ -1643,7 +1566,7 @@ export function readFleetGatedIssues({ env = process.env, readToken = readGhToke
       // login", which is the wrong advice for a root box (#1875) -- `fleetHoldReadRefusal` says what to do.
       { encoding: "utf8", env: ghEnv, stdio: ["ignore", "pipe", "pipe"] })));
   } catch (error) {
-    throw Object.assign(/** @type {Error} */ (error), { tokenSet: Boolean(ghEnv.GH_TOKEN) });
+    throw Object.assign((error as Error), { tokenSet: Boolean(ghEnv.GH_TOKEN) });
   }
 }
 
@@ -1652,12 +1575,9 @@ export function readFleetGatedIssues({ env = process.env, readToken = readGhToke
  * failure. With no stamp the credential was never classified: the token file was unreadable
  * (`readGhTokenFile` rethrows everything but ENOENT) or the reader was injected. That reads as PRESENT, so
  * the refusal keeps gh's own reason rather than claiming a file is missing when it is not.
- *
- * @param {unknown} error
- * @returns {boolean}
  */
-export function tokenSetOf(error) {
-  const stamped = /** @type {{ tokenSet?: unknown } | null} */ (error)?.tokenSet;
+export function tokenSetOf(error: unknown): boolean {
+  const stamped = (error as { tokenSet?: unknown } | null)?.tokenSet;
   return typeof stamped === "boolean" ? stamped : true;
 }
 
@@ -1673,12 +1593,12 @@ export function tokenSetOf(error) {
 export const GH_TOKEN_FILE = join(homedir(), ".config", "a11y-witness", "gh-token");
 
 /** @returns {string} the token file's contents, or "" when it is absent or unreadable. */
-function readGhTokenFile() {
+function readGhTokenFile(): string {
   try {
     return readFileSync(GH_TOKEN_FILE, "utf8");
   } catch (error) {
     // ABSENT IS AN ANSWER, not a swallowed error: the refusal below names this file when the read fails.
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return "";
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw error;
   }
 }
@@ -1688,12 +1608,8 @@ function readGhTokenFile() {
  * already set one. An explicit `GH_TOKEN` wins, and a host with neither (the agents host, logged in
  * through `gh auth login`) is handed back its environment unchanged, so this changes nothing anywhere the
  * file does not exist. PURE over its reader, so both branches are testable without a control plane.
- *
- * @param {NodeJS.ProcessEnv} env
- * @param {() => string} readToken
- * @returns {NodeJS.ProcessEnv}
  */
-export function ghEnvironment(env, readToken) {
+export function ghEnvironment(env: NodeJS.ProcessEnv, readToken: () => string): NodeJS.ProcessEnv {
   if (env.GH_TOKEN) return env;
   const token = readToken().trim();
   return token ? { ...env, GH_TOKEN: token } : env;
@@ -1706,11 +1622,8 @@ export function ghEnvironment(env, readToken) {
  * on a shared root box is the option the ruling rejected. Otherwise gh's own last line is the useful part
  * (an expired token, GitHub unreachable), so it is kept -- and a host logged in the ordinary way, the
  * agents host, never reads advice about a file it was never meant to have.
- *
- * @param {{ chosen: string, error: { message?: string, stderr?: string | Buffer }, tokenSet: boolean }} failure
- * @returns {string}
  */
-export function fleetHoldReadRefusal({ chosen, error, tokenSet }) {
+export function fleetHoldReadRefusal({ chosen, error, tokenSet }: { chosen: string; error: { message?: string; stderr?: string | Buffer; }; tokenSet: boolean; }): string {
   const lead = `REFUSING ${chosen}: could not ask whether a fleet-hold sequence is active`;
   const stderr = String(error.stderr ?? "");
   if (!tokenSet && stderr.includes("gh auth login")) {
@@ -1738,11 +1651,8 @@ export function fleetHoldReadRefusal({ chosen, error, tokenSet }) {
  * `--limit`, and `sequenceHoldGate` is what narrows a hold's reach by it. Undefined here means the same
  * thing it means to `parseArgs` -- no `--limit`, i.e. the whole fleet -- so an operation that never named
  * one still collides with every scoped hold, exactly as it always collided with every unscoped one.
- *
- * @param {string} chosen
- * @param {{ readIssues?: () => {number: number, body: string}[], nowMs?: number, limitFlag?: string }} [deps]
  */
-async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, nowMs = Date.now(), limitFlag } = {}) {
+async function enforceSequenceHold(chosen: string, { readIssues = readFleetGatedIssues, nowMs = Date.now(), limitFlag }: { readIssues?: () => { number: number; body: string; }[]; nowMs?: number; limitFlag?: string; } = {}) {
   const allowHold = allowHoldNumbers(process.argv.slice(2));
   if (!LINK_GATED.includes(chosen)) {
     const { refusal } = sequenceHoldGate({ chosen, holds: [], allowHold, limitFlag });
@@ -1756,7 +1666,7 @@ async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, 
     // The read's own answer (`tokenSetOf`), never a re-read: an unreadable file already failed above, and
     // re-reading it here would throw past this refusal.
     const tokenSet = tokenSetOf(error);
-    process.stderr.write(`${fleetHoldReadRefusal({ chosen, error: /** @type {any} */ (error), tokenSet })}\n`);
+    process.stderr.write(`${fleetHoldReadRefusal({ chosen, error: (error as { message?: string; stderr?: string | Buffer }), tokenSet })}\n`);
     process.exit(2);
     return;
   }
@@ -1782,10 +1692,8 @@ async function enforceSequenceHold(chosen, { readIssues = readFleetGatedIssues, 
  *
  * EXTRACTED BY #1204, not rewritten: `main` sat at exactly the 90-line limit, so adding the build gate
  * took it to 92 and the change had to pay for itself. This block was the most self-contained step in it.
- *
- * @param {string} ref
  */
-function refuseCommitShapedRef(ref) {
+function refuseCommitShapedRef(ref: string) {
 if (/^[0-9a-f]{7,40}$/i.test(ref)) {
   process.stderr.write([
     `REFUSING: --ref=${ref} looks like a COMMIT.`,
@@ -1884,11 +1792,8 @@ async function main() {
  * A pure function so the choice can be tested without a control plane. The id is 32 hex characters from
  * `systemctl show`; anything else is refused rather than interpolated into a remote shell command, on the
  * machine that holds the fleet SSH key — the same rule `validRef` follows and for the same reason.
- *
- * @param {string} unit @param {string} invocation
- * @returns {string}
  */
-function journalScope(unit, invocation) {
+function journalScope(unit: string, invocation: string): string {
   return /^[0-9a-f]{32}$/.test(invocation) ? `_SYSTEMD_INVOCATION_ID=${invocation}` : `-u ${unit}`;
 }
 
@@ -1918,7 +1823,7 @@ function journalScope(unit, invocation) {
  * @param {string} log the unit's journal
  * @returns {string | null} why it deployed to nothing, or null if it reached hosts
  */
-export function deployedToNothing(log) {
+export function deployedToNothing(log: string): string | null {
   const text = String(log ?? "");
   if (!/skipping: no hosts matched|provided hosts list is empty/.test(text)) return null;
   const unparseable = text.match(/Unable to parse (\S+) as an inventory source/);
@@ -1958,11 +1863,8 @@ export function deployedToNothing(log) {
  * keeps its `InvocationID` after it finishes, and `main` stops and `reset-failed`s the unit before
  * `systemd-run`, so the id is necessarily new. An EMPTY id still falls back to the whole unit journal and
  * SAYS SO, because showing nothing where there is plenty is worse than showing too much.
- *
- * @param {string} unit @param {number} budgetMs
- * @returns {Promise<{ status: number, log: string }>}
  */
-async function followUnit(unit, budgetMs) {
+async function followUnit(unit: string, budgetMs: number): Promise<{ status: number; log: string; }> {
   const deadline = Date.now() + budgetMs;
   let shown = 0;
   const invocation = ssh(`systemctl show -p InvocationID --value ${unit} 2>/dev/null || true`,

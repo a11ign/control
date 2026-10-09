@@ -8,7 +8,7 @@
 // try. #1343's `linkGateFor`/`gateFleet` already got this right for the layer-2 gate: the control plane's
 // OWN inventory, read live over the same ssh every other command here uses, merged across every source
 // `ansible.cfg` lists (the durable install first, the in-tree file as a migration fallback). This file
-// pulls that shape out of `fleet-playbook.mjs` so every OTHER reader on the operator host -- `fleet:status`,
+// pulls that shape out of `fleet-playbook.ts` so every OTHER reader on the operator host -- `fleet:status`,
 // `fleet:wake`, `fleet:discover`, `lab:job` -- can ask the same way instead of restating it, or reading a
 // file that is not there.
 import { execFileSync } from "node:child_process";
@@ -16,8 +16,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
-import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { WORKER_GROUP, groupPerLine, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
   from "../../worker-fleet/src/fleet-env.mjs";
 
@@ -34,10 +34,8 @@ const INVENTORY_PATH_SHAPE = /^[\w./-]+$/;
  *
  * @param {Record<string, {address?: string}[] | undefined>} [interfaces] injectable, so this is testable
  *        off the control plane — the alternative is a function whose only test is running it there
- * @param {string} [host]
- * @returns {boolean}
  */
-export function onTheControlPlane(interfaces = networkInterfaces(), host = requireControlPlaneHost()) {
+export function onTheControlPlane(interfaces: Record<string, { address?: string; }[] | undefined> = networkInterfaces(), host: string = requireControlPlaneHost()): boolean {
   return Object.values(interfaces).flat().some((iface) => iface?.address === host);
 }
 
@@ -46,11 +44,8 @@ export function onTheControlPlane(interfaces = networkInterfaces(), host = requi
  * Synchronous, matching every other read in this file: `readControlPlaneFleet` below is called from
  * ordinary top-level command flows that were never async, and a network round trip to a machine on the
  * same rack does not need to be.
- * @param {string} command
- * @param {{ capture?: boolean, timeoutMs?: number }} [options]
- * @returns {string}
  */
-export function sshToControlPlane(command, { capture = false, timeoutMs = DEFAULT_SSH_TIMEOUT_MS } = {}) {
+export function sshToControlPlane(command: string, { capture = false, timeoutMs = DEFAULT_SSH_TIMEOUT_MS }: { capture?: boolean; timeoutMs?: number; } = {}): string {
   if (onTheControlPlane()) {
     return execFileSync("sh", ["-c", `cd /root && ${command}`], {
       encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
@@ -70,10 +65,10 @@ export function sshToControlPlane(command, { capture = false, timeoutMs = DEFAUL
  * file first and the in-tree file as the migration fallback, and Ansible MERGES every listed source that
  * exists. A relative entry is relative to `ansible.cfg`'s OWN directory on the control plane -- this
  * checkout's copy of the same file names the same directory, since both are the same tracked source.
- * @param {string} ansibleCfgText
+ *
  * @returns {string[]} paths on the control plane, in the config's order
  */
-export function inventorySources(ansibleCfgText) {
+export function inventorySources(ansibleCfgText: string): string[] {
   const listed = /^\s*inventory\s*=\s*(.+?)\s*$/m.exec(ansibleCfgText)?.[1];
   if (!listed) throw new Error("ansible.cfg declares no `inventory =` line, so there is no inventory to read");
   return listed.split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
@@ -87,10 +82,8 @@ export function inventorySources(ansibleCfgText) {
 /**
  * One remote read of every source that exists, each under its own header -- the paths have passed
  * `inventorySources`' shape check, because this string is parsed by a remote shell.
- * @param {string[]} paths
- * @returns {string}
  */
-export function inventoryReadScript(paths) {
+export function inventoryReadScript(paths: string[]): string {
   return paths.map((path) => `if [ -f ${path} ]; then echo '${INVENTORY_HEADER}${path}'; cat ${path}; fi`).join("; ");
 }
 
@@ -98,9 +91,8 @@ export function inventoryReadScript(paths) {
  * @param {string} stdout what `inventoryReadScript` printed
  * @returns {{ path: string, text: string }[]} one entry per source that existed
  */
-export function parseInventoryReads(stdout) {
-  /** @type {{ path: string, text: string }[]} */
-  const reads = [];
+export function parseInventoryReads(stdout: string): { path: string; text: string; }[] {
+  const reads: { path: string; text: string; }[] = [];
   for (const line of stdout.split("\n")) {
     if (line.startsWith(INVENTORY_HEADER)) reads.push({ path: line.slice(INVENTORY_HEADER.length), text: "" });
     else if (reads.length) reads[reads.length - 1].text += `${line}\n`;
@@ -112,20 +104,15 @@ export function parseInventoryReads(stdout) {
  * Every worker's declared `mac`, keyed by `ansible_host` (#2655: the one thing a WAKE needs that a dispatch
  * does not, so it rides on the read the fleet already makes rather than costing a second ssh).
  *
- * A NARROW READER THAT RESTATES `fleet-discover.mjs`'s `inventoryHosts`, and says why: that module imports
+ * A NARROW READER THAT RESTATES `fleet-discover.ts`'s `inventoryHosts`, and says why: that module imports
  * `inventoryPathFor` FROM this one, so importing it back would be a cycle. `control-plane-fleet.test.ts`
  * pins the two equal on one fixture, since a fact stated twice is one whose copies drift. An entry with no
  * `mac:` is absent from the map: "the inventory declares none" is a state, not an error.
- *
- * @param {string} text
- * @returns {Map<string, string>}
  */
-export function macsByHost(text) {
-  /** @type {Map<string, string>} */
-  const macs = new Map();
+export function macsByHost(text: string): Map<string, string> {
+  const macs: Map<string, string> = new Map();
   const groups = groupPerLine(text);
-  /** @type {{ host?: string, mac?: string } | null} */
-  let current = null;
+  let current: { host?: string; mac?: string; } | null = null;
   const flush = () => { if (current?.host && current.mac) macs.set(current.host, current.mac); };
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     if (line.trimStart().startsWith("#") || groups[index] !== WORKER_GROUP) continue;
@@ -143,12 +130,8 @@ export function macsByHost(text) {
   return macs;
 }
 
-/**
- * Sources are merged and the FIRST to declare a value wins: the durable copy is listed first.
- * @param {Map<string, string>} into
- * @param {Map<string, string>} from
- */
-function mergeFirstWins(into, from) {
+/** Sources are merged and the FIRST to declare a value wins: the durable copy is listed first. */
+function mergeFirstWins(into: Map<string, string>, from: Map<string, string>) {
   for (const [key, value] of from) if (!into.has(key)) into.set(key, value);
 }
 
@@ -158,20 +141,15 @@ function mergeFirstWins(into, from) {
  * worker. None of the three may read as "the fleet is empty", which is why this never returns `{workers:
  * [], refusal: null}` for any of them -- could not ask is not may proceed.
  *
- * `gateFleet` (`fleet-playbook.mjs`) wraps this with the layer-2 gate's own wording; every other reader
+ * `gateFleet` (`fleet-playbook.ts`) wraps this with the layer-2 gate's own wording; every other reader
  * on the operator host wraps it with its own, per #1356's done-when 2 ("each in its own words").
- *
- * @param {{ reads: { path: string, text: string }[], sources: string[], groupVarsText: string }} input
- * @returns {{ workers: { name: string, url: string, mac?: string }[], refusal: string | null }}
  */
-export function controlPlaneFleet({ reads, sources, groupVarsText }) {
-  const refuse = (/** @type {string} */ why) => ({ workers: [], refusal: why });
+export function controlPlaneFleet({ reads, sources, groupVarsText }: { reads: { path: string; text: string; }[]; sources: string[]; groupVarsText: string; }): { workers: { name: string; url: string; mac?: string; }[]; refusal: string | null; } {
+  const refuse = (why: string) => ({ workers: [], refusal: why });
   if (!reads.length) return refuse(`no inventory exists at ${sources.join(" or ")} on the control plane`);
   const port = portFromGroupVars(groupVarsText);
-  /** @type {Map<string, string>} */
-  const byUrl = new Map();
-  /** @type {Map<string, string>} */
-  const macs = new Map();
+  const byUrl: Map<string, string> = new Map();
+  const macs: Map<string, string> = new Map();
   for (const { path, text } of reads) {
     try {
       const urls = workersFromInventory(text, { port });
@@ -181,7 +159,7 @@ export function controlPlaneFleet({ reads, sources, groupVarsText }) {
     } catch (error) {
       // THE PARSER'S OWN WORDS, never a label of mine: it throws for a malformed host line AND for an
       // empty worker group, and calling both "does not parse" was the wrong errand for the second.
-      return refuse(`${path} was refused by the inventory parser: ${String(/** @type {Error} */ (error).message).split("\n")[0]}`);
+      return refuse(`${path} was refused by the inventory parser: ${String((error as Error).message).split("\n")[0]}`);
     }
   }
   if (!byUrl.size) {
@@ -201,28 +179,27 @@ export function controlPlaneFleet({ reads, sources, groupVarsText }) {
  *
  * Every dependency is injectable so a test can drive this without a real control plane; the defaults are
  * the real reads, which is what every actual caller gets.
- *
- * @param {{ ansibleCfgText?: string, groupVarsText?: string,
- *           readInventories?: (sources: string[]) => { path: string, text: string }[] }} [deps]
- * @returns {{ workers: { name: string, url: string, mac?: string }[], refusal: string | null }}
  */
 export function readControlPlaneFleet({
   ansibleCfgText = readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"),
   groupVarsText = readFileSync(resolve(ANSIBLE_DIR, "group_vars/a11y_workers.yml"), "utf8"),
   readInventories = (sources) => parseInventoryReads(sshToControlPlane(inventoryReadScript(sources), { capture: true })),
-} = {}) {
+}: {
+        ansibleCfgText?: string; groupVarsText?: string;
+        readInventories?: (sources: string[]) => { path: string; text: string; }[];
+    } = {}): { workers: { name: string; url: string; mac?: string; }[]; refusal: string | null; } {
   let sources;
   try {
     sources = inventorySources(ansibleCfgText);
   } catch (error) {
-    return { workers: [], refusal: `the control plane's inventory could not be read (${/** @type {Error} */ (error).message})` };
+    return { workers: [], refusal: `the control plane's inventory could not be read (${(error as Error).message})` };
   }
   let reads;
   try {
     reads = readInventories(sources);
   } catch (error) {
-    const stderr = String(/** @type {{ stderr?: unknown }} */ (error).stderr ?? "").trim().split("\n").pop();
-    return { workers: [], refusal: `the control plane could not be reached (${stderr || /** @type {Error} */ (error).message})` };
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim().split("\n").pop();
+    return { workers: [], refusal: `the control plane could not be reached (${stderr || (error as Error).message})` };
   }
   return controlPlaneFleet({ reads, sources, groupVarsText });
 }
@@ -243,12 +220,12 @@ export function readControlPlaneFleet({
  * is the same surprise as a stale one.
  *
  * @param {{ source: string, copy: string, groupVarsText?: string }} input the two inventories' TEXT
- * @returns {{ missing: string[], extra: string[], changed: string[], report: string | null }}
+ *
  *          `report` is null only when the two name the same workers the same way
  */
 export function inventoryDrift({
   source, copy, groupVarsText = readFileSync(resolve(ANSIBLE_DIR, "group_vars/a11y_workers.yml"), "utf8"),
-}) {
+}: { source: string; copy: string; groupVarsText?: string; }): { missing: string[]; extra: string[]; changed: string[]; report: string | null; } {
   const sourceFleet = fleetByName(source, groupVarsText);
   let copyFleet;
   let unreadable = "";
@@ -257,7 +234,7 @@ export function inventoryDrift({
   } catch (error) {
     // A copy that does not parse is the worst drift there is, and the one this must still be able to repair.
     copyFleet = new Map();
-    unreadable = `this copy could not be read (${/** @type {Error} */ (error).message}); `;
+    unreadable = `this copy could not be read (${(error as Error).message}); `;
   }
   const missing = [...sourceFleet.keys()].filter((name) => !copyFleet.has(name));
   const extra = [...copyFleet.keys()].filter((name) => !sourceFleet.has(name));
@@ -275,35 +252,33 @@ export function inventoryDrift({
 
 /**
  * @param {string} text one inventory
- * @param {string} groupVarsText
+ *
  * @returns {Map<string, { name: string, url: string, mac?: string }>} worker name -> what it declares
  */
-function fleetByName(text, groupVarsText) {
+function fleetByName(text: string, groupVarsText: string): Map<string, { name: string; url: string; mac?: string; }> {
   const { workers, refusal } = controlPlaneFleet({ reads: [{ path: "inventory", text }], sources: [], groupVarsText });
   if (refusal) throw new Error(refusal);
   return new Map(workers.map((worker) => [worker.name, worker]));
 }
 
 /** `a11y-worker-12 a11y-worker-3` as `3 12`: the fleet's own prefix is noise in a list of fifteen. */
-const shortNames = (/** @type {string[]} */ names) => names
+const shortNames = (names: string[]) => names
   .map((name) => name.replace(/^a11y-worker-/, ""))
   .sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).join(" ");
 
 /**
  * #1683/#1684: THE DURABLE COPY FIRST, exactly the precedence `ansible.cfg`'s own `inventory =` line
  * states (`/etc/a11ign/inventory.yml,inventory.yml`) -- a plain LOCAL file read either way, never ssh,
- * never a credential. This is what lets a zero-credential reader (`fleet-wake.mjs`) or one with no
- * stated credential restriction of its own (`fleet-discover.mjs`) find a fleet on a machine, like the
+ * never a credential. This is what lets a zero-credential reader (`fleet-wake.ts`) or one with no
+ * stated credential restriction of its own (`fleet-discover.ts`) find a fleet on a machine, like the
  * lab, that carries no in-tree checkout copy -- without either file gaining ssh/control-plane knowledge
  * the way `readControlPlaneFleet` above needs. Falls back to the in-tree checkout path unchanged, so a
  * laptop checkout with nothing installed at `/etc/a11ign` behaves exactly as it always has.
- * @param {{ installed?: string, inTree?: string, exists?: (p: string) => boolean }} [paths]
- * @returns {string}
  */
 export function inventoryPathFor({
   installed = "/etc/a11ign/inventory.yml",
   inTree = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url)),
   exists = existsSync,
-} = {}) {
+}: { installed?: string; inTree?: string; exists?: (p: string) => boolean; } = {}): string {
   return exists(installed) ? installed : inTree;
 }

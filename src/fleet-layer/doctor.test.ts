@@ -287,7 +287,7 @@ test("#2034: every guest reporting it and ONE guest reporting it produce differe
 });
 
 test("#2034: `doctor` and `fleet:status` describe one fleet in the same words", () => {
-  // Done-when 5: two commands reading one `fields` must not describe it differently. `fleet-status.mjs`
+  // Done-when 5: two commands reading one `fields` must not describe it differently. `fleet-status.ts`
   // is READ, not imported -- `packages/control` takes no dependency on this package (ADR 0012), and the
   // sibling tests in this package read its Ansible defaults the same way.
   //
@@ -298,9 +298,9 @@ test("#2034: `doctor` and `fleet:status` describe one fleet in the same words", 
   // plain `includes` on the raw text fails against code that says exactly the right thing.
   const joined = (source: string) => source.replace(/`\s*\+\s*`/g, "").replace(/\s+/g, " ");
   const status = joined(readFileSync(
-    fileURLToPath(new URL("../../src/fleet-status.mjs", import.meta.url)), "utf8"));
+    fileURLToPath(new URL("../../src/fleet-status.ts", import.meta.url)), "utf8"));
   assert.match(status, /function partialClause\(/,
-    "fleet-status.mjs no longer has the clause this parity is against -- the assertions below prove nothing");
+    "fleet-status.ts no longer has the clause this parity is against -- the assertions below prove nothing");
 
   const line = fleetAgreementLine({ agreeing: 3, configured: 3,
     fields: { compared: MUST_MATCH.map(({ path }) => path), unchecked: [],

@@ -1,12 +1,12 @@
 // @ts-check
 /**
- * The CALLER of `post-qualification-status.mjs`: `lab:job -e job=gate-stability -e row=<n> --qualify-sha=<sha>`
+ * The CALLER of `post-qualification-status.ts`: `lab:job -e job=gate-stability -e row=<n> --qualify-sha=<sha>`
  * says on `<sha>` what the fleet part of the release gate found (#3289, #3136 done-when 3, done-when 6).
  *
  * ## The sequence, and why each step is where it is
  *
  * 1. `pending` is posted IMMEDIATELY BEFORE `ansible-playbook` starts, not when the command line is read:
- *    every refusal in `lab-job.mjs` (stale fleet, a worker that will not wake) happens before the dispatch,
+ *    every refusal in `lab-job.ts` (stale fleet, a worker that will not wake) happens before the dispatch,
  *    and a `pending` posted ahead of them would be left standing by a run that never began, which the release
  *    reads as "wait" until its own bound runs out.
  * 2. The verdict is posted when the dispatch returns, from the record the playbook already writes for the
@@ -45,8 +45,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { layerDeclaration, layerPinTag, separateLayers } from "./layer-checkouts.mjs";
-import { renderResult, requireFullSha, EXIT } from "./post-qualification-status.mjs";
+import { layerDeclaration, layerPinTag, separateLayers } from "./layer-checkouts.ts";
+import { renderResult, requireFullSha, EXIT, type Outcome } from "./post-qualification-status.ts";
 
 export const QUALIFY_FLAG = "--qualify-sha=";
 
@@ -66,32 +66,24 @@ export function defaultRecordDir(home = homedir()) {
   return join(home, ".cache", "a11ign", "lab-jobs");
 }
 
-/**
- * @typedef {{ schema?: unknown, job?: unknown, row?: unknown, invocation?: unknown, outcome?: unknown,
- *             exit?: unknown, commit?: unknown }} JobRecord
- * @typedef {(query: { job: string, row: number, since: number }) => JobRecord | undefined} ReadRecord
- * @typedef {(input: { sha: string, outcome?: import("../../lab/src/gates/qualification-status.mjs").Outcome,
- *                     run?: string }) => import("./post-qualification-status.mjs").PostResult} Post
- * @typedef {{ post: Post, readRecord: ReadRecord, layerRefs: LayerRefsAt, now?: () => number, say?: (text: string) => void }} Poster
- * @typedef {(sha: string) => { layer_refs: Record<string, string> } | { refusal: string }} LayerRefsAt
- * @typedef {(args: string[]) => { status: number | null, stdout: string, stderr: string }} Git
- */
+export type JobRecord = { schema?: unknown, job?: unknown, row?: unknown, invocation?: unknown, outcome?: unknown, exit?: unknown, commit?: unknown };
+export type ReadRecord = (query: { job: string, row: number, since: number }) => JobRecord | undefined;
+export type Post = (input: { sha: string, outcome?: Outcome, run?: string }) => import("./post-qualification-status.ts").PostResult;
+export type Poster = { post: Post, readRecord: ReadRecord, layerRefs: LayerRefsAt, now?: () => number, say?: (text: string) => void };
+export type LayerRefsAt = (sha: string) => { layer_refs: Record<string, string> } | { refusal: string };
+export type Git = (args: string[]) => { status: number | null, stdout: string, stderr: string };
 
 /**
  * The newest record THIS run wrote: the right job, the right row, written after `since`. Two runs of one
  * job for one row are told apart by time alone, so a record older than the dispatch is never read as its
  * verdict. A file that does not parse is skipped with its name printed, never silently.
- * @param {string} dir @param {{ job: string, row: number, since: number }} query
- * @param {(text: string) => void} say
- * @returns {JobRecord | undefined}
  */
-export function readRecordFrom(dir, { job, row, since }, say = () => {}) {
-  /** @type {string[]} */
-  let names;
+export function readRecordFrom(dir: string, { job, row, since }: { job: string; row: number; since: number; }, say: (text: string) => void = () => {}): JobRecord | undefined {
+  let names: string[];
   try {
     names = readdirSync(dir);
   } catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
   const found = names
@@ -101,7 +93,7 @@ export function readRecordFrom(dir, { job, row, since }, say = () => {}) {
     .sort((a, b) => b.at - a.at)
     .flatMap(({ path }) => {
       try {
-        return [/** @type {JobRecord} */ (JSON.parse(readFileSync(path, "utf8")))];
+        return [(JSON.parse(readFileSync(path, "utf8")) as JobRecord)];
       } catch (error) {
         say(`qualification: ${path} does not parse (${error instanceof Error ? error.message : String(error)}); not read\n`);
         return [];
@@ -113,25 +105,20 @@ export function readRecordFrom(dir, { job, row, since }, say = () => {}) {
 /**
  * What the dispatch and its record together stand for, as the poster's `Outcome`. `{}` is "no readable
  * verdict", which is posted as a `failure`.
- * @param {{ status: number, record: JobRecord | undefined, sha: string }} seen
- * @returns {import("../../lab/src/gates/qualification-status.mjs").Outcome}
  */
-export function outcomeOf({ status, record, sha }) {
-  if (!record || !Number.isInteger(record.exit)) return /** @type {any} */ ({});
+export function outcomeOf({ status, record, sha }: { status: number; record: JobRecord | undefined; sha: string; }): Outcome {
+  if (!record || !Number.isInteger(record.exit)) return ({} as Outcome);
   const ranCommit = typeof record.commit === "string" ? record.commit : "";
   const ranThisSha = ranCommit.length > 0 && sha.startsWith(ranCommit);
-  if (!ranThisSha) return /** @type {any} */ ({});
+  if (!ranThisSha) return ({} as Outcome);
   const passed = record.exit === 0;
   // A PASS is the one reading that releases, so it is the one that must agree with itself three ways.
-  if (passed && (status !== 0 || record.outcome !== "success")) return /** @type {any} */ ({});
-  return { exitCode: /** @type {number} */ (record.exit) };
+  if (passed && (status !== 0 || record.outcome !== "success")) return ({} as Outcome);
+  return { exitCode: (record.exit as number) };
 }
 
-/**
- * The label a reader finds the lab run by: the job and the systemd invocation the record names.
- * @param {JobRecord | undefined} record @returns {string | undefined}
- */
-function runLabel(record) {
+/** The label a reader finds the lab run by: the job and the systemd invocation the record names. */
+function runLabel(record: JobRecord | undefined): string | undefined {
   return record && typeof record.invocation === "string" && record.invocation
     ? `${QUALIFIED_JOB}-${record.invocation}` : undefined;
 }
@@ -139,12 +126,8 @@ function runLabel(record) {
 /**
  * The qualification request on a command line: the sha, and the argv to dispatch (the flag stripped, the
  * ref pinned), or the reason this cannot be a qualified run. `undefined` when the flag is absent.
- *
- * @param {string[]} argv
- * @param {{ job: string | undefined, row: string | undefined, ref: string | undefined, worker?: string | undefined, describeOnly: boolean }} named
- * @returns {{ sha: string, row: number, argv: string[] } | { refusal: string } | undefined}
  */
-export function qualificationRequest(argv, { job, row, ref, worker, describeOnly }) {
+export function qualificationRequest(argv: string[], { job, row, ref, worker, describeOnly }: { job: string | undefined; row: string | undefined; ref: string | undefined; worker?: string | undefined; describeOnly: boolean; }): { sha: string; row: number; argv: string[]; } | { refusal: string; } | undefined {
   const flag = argv.find((arg) => arg.startsWith(QUALIFY_FLAG));
   if (flag === undefined) return undefined;
   const sha = flag.slice(QUALIFY_FLAG.length);
@@ -183,12 +166,8 @@ export function qualificationRequest(argv, { job, row, ref, worker, describeOnly
  *
  * An operator-typed `layer_refs` is refused, not merged: ansible takes the later `-e` over the earlier, so a typed one would
  * silently replace the lockfile's, which is the second pin this exists to remove.
- *
- * @param {{ sha: string, row: number, argv: string[] }} request
- * @param {LayerRefsAt} layerRefsAt
- * @returns {{ sha: string, row: number, argv: string[] } | { refusal: string }}
  */
-export function withLayerRefs(request, layerRefsAt) {
+export function withLayerRefs(request: { sha: string; row: number; argv: string[]; }, layerRefsAt: LayerRefsAt): { sha: string; row: number; argv: string[]; } | { refusal: string; } {
   if (request.argv.some((arg) => arg.includes("layer_refs"))) {
     return { refusal: `REFUSING ${QUALIFY_FLAG}: layer_refs is set from the lockfile at ${request.sha.slice(0, ABBREVIATED_SHA)}, never typed. `
       + "A typed one would be a second pin that can disagree with the one the release publishes." };
@@ -207,10 +186,10 @@ const RESOLVABLE_TAG = /^@a11ign\/[a-z0-9-]+@\d+\.\d+\.\d+[A-Za-z0-9.+-]*$/;
  * `@a11ign/screenreader-worker`), and `layers.json` is the one place that says so; nothing is inferred from the repository's name.
  * A declaration this copy of `layers.json` does not yet carry falls back to the key, which cannot resolve, and that is a refusal.
  *
- * @param {{ name: string, package?: string }} layer
+ *
  * @returns {string} the package's name without its scope
  */
-export function packageOfLayer({ name, package: declared }) {
+export function packageOfLayer({ name, package: declared }: { name: string; package?: string; }): string {
   return declared ?? name;
 }
 
@@ -218,16 +197,13 @@ export function packageOfLayer({ name, package: declared }) {
  * The commit a tag names on `remote`: the peeled one for an annotated tag, else the tag's own. Read from the exact ref names, so a
  * different tag that merely ends the same way is not taken for it. `undefined` is "the remote holds no such tag", which is not an
  * error of git's; `{ failed }` is git not answering, which must never read as a missing tag.
- *
- * @param {{ remote: string, tag: string, git: Git }} where
- * @returns {string | undefined | { failed: string }}
  */
-function commitOfTag({ remote, tag, git }) {
+function commitOfTag({ remote, tag, git }: { remote: string; tag: string; git: Git; }): string | undefined | { failed: string; } {
   const answer = git(["ls-remote", "--tags", remote, `refs/tags/${tag}`, `refs/tags/${tag}^{}`]);
   if (answer.status !== 0) return { failed: answer.stderr.trim() || `git ls-remote exited ${answer.status}` };
   const refs = new Map(answer.stdout.split("\n").filter(Boolean).map((line) => {
     const [sha, ref] = line.split("\t");
-    return /** @type {[string, string]} */ ([ref, sha]);
+    return ([ref, sha] as [string, string]);
   }));
   const commit = refs.get(`refs/tags/${tag}^{}`) ?? refs.get(`refs/tags/${tag}`);
   return commit !== undefined && /^[0-9a-f]{40}$/.test(commit) ? commit : undefined;
@@ -236,11 +212,8 @@ function commitOfTag({ remote, tag, git }) {
 /**
  * `pnpm-lock.yaml` as it is AT `sha`. A sha this checkout has not fetched is fetched once, which writes only to `.git`; one that is
  * still not there is a refusal that says so rather than a lockfile guessed from the working tree, which is whatever is checked out.
- *
- * @param {{ sha: string, git: Git }} where
- * @returns {{ lockfile: string } | { refusal: string }}
  */
-function lockfileAt({ sha, git }) {
+function lockfileAt({ sha, git }: { sha: string; git: Git; }): { lockfile: string; } | { refusal: string; } {
   let shown = git(["show", `${sha}:pnpm-lock.yaml`]);
   if (shown.status !== 0) {
     git(["fetch", "--quiet", "origin"]);
@@ -256,15 +229,12 @@ function lockfileAt({ sha, git }) {
  * tag and its remote.
  *
  * @param {{ sha: string, git: Git, layers: { name: string, remote: string, package?: string }[] }} where `layers` are those with a repository of their own
- * @returns {{ layer_refs: Record<string, string> } | { refusal: string }}
  */
-export function layerRefsFor({ sha, git, layers }) {
+export function layerRefsFor({ sha, git, layers }: { sha: string; git: Git; layers: { name: string; remote: string; package?: string; }[]; }): { layer_refs: Record<string, string>; } | { refusal: string; } {
   const read = lockfileAt({ sha, git });
   if ("refusal" in read) return read;
-  /** @type {Record<string, string>} */
-  const layer_refs = {};
-  /** @type {string[]} */
-  const unpinned = [];
+  const layer_refs: Record<string, string> = {};
+  const unpinned: string[] = [];
   for (const layer of layers) {
     const pin = layerPinTag(read.lockfile, packageOfLayer(layer));
     if ("refusal" in pin) {
@@ -285,17 +255,15 @@ export function layerRefsFor({ sha, git, layers }) {
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const GIT_TIMEOUT_MS = 60_000;
 
-/** @type {Git} */
-const gitInCheckout = (args) => {
+const gitInCheckout: Git = (args) => {
   const result = spawnSync("git", ["-C", REPO_ROOT, ...args], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: sandboxGitEnv() });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 };
 
 /**
  * The real `layerRefs` of the poster: this checkout's git, and the layers `layers.json` declares with a repository of their own.
- * @type {LayerRefsAt}
  */
-export const layerRefsFromLockfile = (sha) =>
+export const layerRefsFromLockfile: LayerRefsAt = (sha) =>
   layerRefsFor({ sha, git: gitInCheckout, layers: separateLayers().map((name) => {
     const { remote, package: declared } = layerDeclaration(name);
     if (remote === undefined) throw new Error(`layer "${name}" declares no remote, so it is not a separate layer`);
@@ -306,12 +274,11 @@ export const layerRefsFromLockfile = (sha) =>
  * `dispatch`, wrapped so the run announces itself and says how it ended. The returned function is the
  * dispatch `run` already takes, and `seen.state` is what the verdict post said (`undefined` if nothing was).
  *
- * @param {{ sha: string, row: number, dispatch: (forwarded: string[]) => number | void }} run
- * @param {Poster} poster
+ *
+ *
  * @param {{ state: string | undefined }} seen written to, so the caller can decide on the re-run
- * @returns {(forwarded: string[]) => number}
  */
-export function announcingDispatch({ sha, row, dispatch }, { post, readRecord, now = Date.now, say = (text) => process.stdout.write(text) }, seen) {
+export function announcingDispatch({ sha, row, dispatch }: { sha: string; row: number; dispatch: (forwarded: string[]) => number | void; }, { post, readRecord, now = Date.now, say = (text) => process.stdout.write(text) }: Poster, seen: { state: string | undefined; }): (forwarded: string[]) => number {
   return (forwarded) => {
     const started = post({ sha, outcome: { started: true } });
     say(renderResult(started));
@@ -333,14 +300,15 @@ export function announcingDispatch({ sha, row, dispatch }, { post, readRecord, n
  * Run the attempts: one, then ONE more if the first said `failure`. `attempt` is a whole `lab-job` run, so
  * the re-run goes through the same wake and staleness checks as the first.
  *
- * @param {{ attempt: (wrap: (dispatch: (forwarded: string[]) => number | void) => (forwarded: string[]) => number) => Promise<number | void>,
- *           announce: (dispatch: (forwarded: string[]) => number | void, seen: { state: string | undefined }) => (forwarded: string[]) => number,
- *           say?: (text: string) => void }} parts
+ *
  * @returns {Promise<number | void>} the last dispatch's status
  */
-export async function runQualified({ attempt, announce, say = (text) => process.stdout.write(text) }) {
-  /** @type {number | void} */
-  let status = undefined;
+export async function runQualified({ attempt, announce, say = (text) => process.stdout.write(text) }: {
+        attempt: (wrap: (dispatch: (forwarded: string[]) => number | void) => (forwarded: string[]) => number) => Promise<number | void>;
+        announce: (dispatch: (forwarded: string[]) => number | void, seen: { state: string | undefined; }) => (forwarded: string[]) => number;
+        say?: (text: string) => void;
+    }): Promise<number | void> {
+  let status: number | void = undefined;
   for (let n = 1; n <= MAX_ATTEMPTS; n += 1) {
     const seen = { state: undefined };
     status = await attempt((dispatch) => announce(dispatch, seen));

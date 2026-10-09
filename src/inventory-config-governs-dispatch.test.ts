@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const WRAPPER = readFileSync(join(import.meta.dirname, "fleet-playbook.mjs"), "utf8");
+const WRAPPER = readFileSync(join(import.meta.dirname, "fleet-playbook.ts"), "utf8");
 const CFG = readFileSync(join(import.meta.dirname, "../ansible/ansible.cfg"), "utf8");
 
 /**

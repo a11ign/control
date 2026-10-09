@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTO_OFF_MIRROR_PATH, AUTO_OFF_STATE_PATH, readAutoOffRefusal, readRefusalOrSay } from "./fleet-watch.mjs";
+import { AUTO_OFF_MIRROR_PATH, AUTO_OFF_STATE_PATH, readAutoOffRefusal, readRefusalOrSay } from "./fleet-watch.ts";
 
 const refusal = { reason: "stale-checkout", detail: "2 files differ: a.mjs, b.mjs", at: 1_000 };
 
@@ -25,7 +25,7 @@ function inTempDir(body: (dir: string, path: string) => void) {
 
 test("the mirror path is a named constant beside the state path, under runs/", () => {
   // Joined rather than quoted whole: `dataset-paths.test.ts` reads a quoted `runs/<name>` as a dataset root resolved by hand,
-  // and this is a fixed local file the control package owns, not one (the same ground `fleet-watch.mjs` is exempt on).
+  // and this is a fixed local file the control package owns, not one (the same ground `fleet-watch.ts` is exempt on).
   assert.equal(AUTO_OFF_MIRROR_PATH, join("runs", "fleet-auto-off-mirror.json"));
   assert.notEqual(AUTO_OFF_MIRROR_PATH, AUTO_OFF_STATE_PATH);
 });

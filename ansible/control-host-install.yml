@@ -14,7 +14,7 @@
 #
 # ## Where the value comes from, and why this is not a fallback default
 #
-# `fleet-playbook.mjs` has ALREADY resolved a real control-plane address before this playbook is ever
+# `fleet-playbook.ts` has ALREADY resolved a real control-plane address before this playbook is ever
 # dispatched -- `requireControlPlaneHost()` runs at the top of every `main()`, or nothing here would have
 # had a host to SSH into in the first place. That resolved value is handed down as the `a11y_control_host`
 # extra-var, so this playbook never reads the environment itself: it records what was ALREADY used to
@@ -32,7 +32,7 @@
 # supply. This playbook's source is a value already resolved in the wrapper's own process and handed over
 # as an extra-var; there is no file to read from a machine this playbook cannot reach. Its target is
 # `localhost`, which needs no inventory at all, bootstrap or otherwise. Dispatched normally, it runs as a
-# systemd unit ON the control plane (`fleet-playbook.mjs`'s usual path), where `localhost` with a local
+# systemd unit ON the control plane (`fleet-playbook.ts`'s usual path), where `localhost` with a local
 # connection correctly means the control plane itself.
 # `bootstrap-playbooks-are-declared.test.ts` treats the marker as opt-in per playbook, never required --
 # this one has nothing to gain from it, and declaring it would only cost the unit-based path's own
@@ -43,13 +43,16 @@
   gather_facts: false
   vars:
     control_host_destination: /etc/a11ign/control-host
+    # The `tsx` the control plane's TypeScript runs under (#4292, #4341): one install BESIDE the layer, because a laid layer has no node_modules and ESM ignores NODE_PATH, so a bare
+    # `--import tsx` does not resolve there. `a11y-fleet-auto-off.service`, `a11y-gate-heartbeat.service`, `deploy.yml` and `roles/worker/tasks/bespoke.yml` name this path.
+    control_tsx_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
 
   tasks:
     - name: The value must actually be here -- an absent extra-var beats an empty file installed silently
       ansible.builtin.assert:
         that: a11y_control_host is defined and a11y_control_host | length > 0
         fail_msg: >-
-          `a11y_control_host` was not passed to this playbook. It comes from `fleet-playbook.mjs`, which
+          `a11y_control_host` was not passed to this playbook. It comes from `fleet-playbook.ts`, which
           resolves it before dispatching -- run this through `npm run fleet:control-host-install`, not
           `ansible-playbook` directly.
 
@@ -88,3 +91,23 @@
         success_msg: >-
           {{ control_host_destination }} installed and verified: {{ landed_content }}. A future shell with
           A11Y_CONTROL_HOST unset now falls back to this instead of refusing.
+
+    # ASSERTED, NOT INSTALLED (#4341). The loader is a host fact outside this repository, and a rebuilt control plane without it would leave `fleet-auto-off` dying at start: it
+    # stops deciding, and the failure is in the SAFE direction, so nothing else would say so. This runs the loader rather than `stat`ting a path, because "the file exists" is not
+    # "`node --import` resolves it". It does not `npm install` it: ADR 0012 keeps npm's transitive surface off the machine that holds the fleet key, and putting a package
+    # install into a routine playbook is a decision `orchestrator` made once by hand (#4292) and this playbook should not remake silently. The failure NAMES the command.
+    - name: The loader the control plane's TypeScript runs under must resolve
+      ansible.builtin.command:
+        argv: [/usr/bin/node, --import, "{{ control_tsx_loader }}", -e, "console.log('tsx ok')"]
+      register: tsx_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Say which loader resolved, or the command that installs it
+      ansible.builtin.assert:
+        that: tsx_probe.rc == 0 and 'tsx ok' in tsx_probe.stdout
+        fail_msg: >-
+          {{ control_tsx_loader }} does not resolve under /usr/bin/node (rc {{ tsx_probe.rc }}: {{ tsx_probe.stderr | default('', true) | trim }}). Without it
+          `a11y-fleet-auto-off.service` and `a11y-gate-heartbeat.service` die at start. Install it beside the layer, as the control plane's owner:
+          `mkdir -p /opt/a11y-tsx && cd /opt/a11y-tsx && npm install --ignore-scripts --save-exact tsx@4.23.15` (a11ign/a11ign#4292).
+        success_msg: "{{ control_tsx_loader }} resolves under /usr/bin/node ({{ tsx_probe.stdout | trim }})"

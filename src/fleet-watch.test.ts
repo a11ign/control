@@ -1,5 +1,5 @@
 // no-token: gh -- every test below drives pure functions or `watch()` with an injected `getStatus`/
-// `read`/`write`; none of them calls `main()`, so fleet-watch.mjs's own `execFileSync("gh", ...)` (only
+// `read`/`write`; none of them calls `main()`, so fleet-watch.ts's own `execFileSync("gh", ...)` (only
 // reached from `main()` under `--post`) is never exercised here.
 //
 // #1815: "the fleet is the org's scarcest resource and the only major subsystem with no eyes on it."
@@ -11,9 +11,9 @@ import assert from "node:assert/strict";
 
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
-} from "./fleet-watch.mjs";
+} from "./fleet-watch.ts";
 
-/** @typedef {{name: string, state: string, readiness?: {reason?: string|null}|null}} FleetRow */
+export type FleetRow = {name: string, state: string, readiness?: {reason?: string|null}|null};
 
 function row(name: string, state: string, reason: string | null = null) {
   return { name, state, readiness: reason === null ? null : { reason } };

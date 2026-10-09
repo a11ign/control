@@ -1,4 +1,4 @@
-// `fleet-switch.mjs` answers "where is each worker, and is it on" from a switch, so the tests are about the
+// `fleet-switch.ts` answers "where is each worker, and is it on" from a switch, so the tests are about the
 // states it must keep APART (on at its port, on at someone else's, off with a carrier, off without one, and
 // "could not read"), and about the one thing it must never do: send anything but a read.
 //
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
 import { PDU, buildRequest, decodeResponse, snmpClient, walk, readSwitch, switchStates, switchLine, switchReport,
-  readSwitchConfig, switchPortsByHost, readSwitchLive, macOfFdbRow, OID } from "./fleet-switch.mjs";
+  readSwitchConfig, switchPortsByHost, readSwitchLive, macOfFdbRow, OID } from "./fleet-switch.ts";
 
 // --- a fake switch: a table of OID -> value, answering GET and GETNEXT, recording every packet ----------
 

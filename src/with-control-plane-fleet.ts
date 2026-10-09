@@ -32,19 +32,19 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
-import { resolveMovedByMacLive, subnetOf } from "./fleet-status.mjs";
+import { readControlPlaneFleet } from "./control-plane-fleet.ts";
+import { resolveMovedByMacLive, subnetOf } from "./fleet-status.ts";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 
 const HEALTH_TIMEOUT_MS = 5_000;
 const NO_WORKER_LEFT_STATUS = 1;
 
-/** @typedef {{ name: string, url: string, mac?: string }} PoolWorker */
-/** @typedef {{ name: string, from: string, to: string }} MovedWorker */
-/** @typedef {{ name: string, url: string, why: string }} MissingWorker */
+export type PoolWorker = { name: string, url: string, mac?: string };
+export type MovedWorker = { name: string, from: string, to: string };
+export type MissingWorker = { name: string, url: string, why: string };
 
 /** @param {string} url the worker's own `/health` base, e.g. `http://192.0.2.2:8765` */
-async function answersHealth(url) {
+async function answersHealth(url: string) {
   try {
     return (await requestJson(`${url}/health`, { timeoutMs: HEALTH_TIMEOUT_MS })).ok;
   } catch {
@@ -52,8 +52,8 @@ async function answersHealth(url) {
   }
 }
 
-/** @param {string} url @param {string} address the same URL, aimed at another host */
-function withHost(url, address) {
+/** @param {string} address the same URL, aimed at another host */
+function withHost(url: string, address: string) {
   return url.replace(new URL(url).hostname, address);
 }
 
@@ -64,18 +64,16 @@ function withHost(url, address) {
  * machine holds that address next (the worker has no authentication, SECURITY.md). So the MAC read is made
  * TWICE and must name the same address both times, and then that address must answer `/health` before it is
  * used -- `/health` carries no identity, so the repeated read is the identity check and `/health` proves only
- * that something serving a worker is there. EXPORTED so `fleet-wake.mjs` asks the same question the same way
+ * that something serving a worker is there. EXPORTED so `fleet-wake.ts` asks the same question the same way
  * (#3401): a second copy that read once would aim a wake at whichever machine holds that address next.
  *
  * @param {PoolWorker[]} silent workers that did not answer at their pin
- * @param {{ macRead: typeof resolveMovedByMacLive, probe: (url: string) => Promise<boolean> }} deps
+ *
  * @returns {Promise<{ found: Map<string, string>, why: Map<string, string> }>} name -> verified url, name -> reason
  */
-export async function locateByMac(silent, { macRead, probe }) {
-  /** @type {Map<string, string>} */
-  const found = new Map();
-  /** @type {Map<string, string>} */
-  const why = new Map();
+export async function locateByMac(silent: PoolWorker[], { macRead, probe }: { macRead: typeof resolveMovedByMacLive; probe: (url: string) => Promise<boolean>; }): Promise<{ found: Map<string, string>; why: Map<string, string>; }> {
+  const found: Map<string, string> = new Map();
+  const why: Map<string, string> = new Map();
   const candidates = [];
   for (const { name, url, mac } of silent) {
     const host = new URL(url).hostname;
@@ -107,10 +105,8 @@ export async function locateByMac(silent, { macRead, probe }) {
  * out and NAMED, never allowed to hold the run. The inventory is read, never rewritten.
  *
  * @param {PoolWorker[]} workers the control plane's inventory, pinned addresses
- * @param {{ probe?: (url: string) => Promise<boolean>, macRead?: typeof resolveMovedByMacLive }} [deps]
- * @returns {Promise<{ pool: string[], moved: MovedWorker[], missing: MissingWorker[] }>}
  */
-export async function resolvePoolAtUseTime(workers, { probe = answersHealth, macRead = resolveMovedByMacLive } = {}) {
+export async function resolvePoolAtUseTime(workers: PoolWorker[], { probe = answersHealth, macRead = resolveMovedByMacLive }: { probe?: (url: string) => Promise<boolean>; macRead?: typeof resolveMovedByMacLive; } = {}): Promise<{ pool: string[]; moved: MovedWorker[]; missing: MissingWorker[]; }> {
   const answered = await Promise.all(workers.map(({ url }) => probe(url)));
   const silent = workers.filter((_, index) => !answered[index]);
   const { found, why } = silent.length ? await locateByMac(silent, { macRead, probe }) : { found: new Map(), why: new Map() };
@@ -121,8 +117,7 @@ export async function resolvePoolAtUseTime(workers, { probe = answersHealth, mac
   };
 }
 
-/** @param {{ moved: MovedWorker[], missing: MissingWorker[] }} resolved @returns {string[]} */
-function reportLines({ moved, missing }) {
+function reportLines({ moved, missing }: { moved: MovedWorker[]; missing: MissingWorker[]; }): string[] {
   return [
     ...moved.map(({ name, from, to }) => `with-control-plane-fleet: MOVED ${name}: pinned ${from}, answers by MAC at ${to} `
       + "-- using that address for this run; inventory.yml is not rewritten (fix it, and ask for a DHCP reservation, #2752)"),
@@ -133,16 +128,15 @@ function reportLines({ moved, missing }) {
 /**
  * @param {string} bin the worker-fleet script to run, relative to the repo root
  * @param {string[]} argv forwarded to the child verbatim
- * @param {{ readFleet?: () => { workers: PoolWorker[], refusal: string | null },
- *           run?: typeof spawnSync, env?: NodeJS.ProcessEnv,
- *           resolvePool?: typeof resolvePoolAtUseTime }} [deps]
- * @returns {Promise<{ status: number | null, env: NodeJS.ProcessEnv }>}
  */
-export async function withControlPlaneFleet(bin, argv, {
+export async function withControlPlaneFleet(bin: string, argv: string[], {
   readFleet = readControlPlaneFleet, run = spawnSync, env = process.env, resolvePool = resolvePoolAtUseTime,
-} = {}) {
-  /** @type {NodeJS.ProcessEnv} */
-  const childEnv = { ...env };
+}: {
+        readFleet?: () => { workers: PoolWorker[]; refusal: string | null; };
+        run?: typeof spawnSync; env?: NodeJS.ProcessEnv;
+        resolvePool?: typeof resolvePoolAtUseTime;
+    } = {}): Promise<{ status: number | null; env: NodeJS.ProcessEnv; }> {
+  const childEnv: NodeJS.ProcessEnv = { ...env };
   // Already named means managing them explicitly, which beats a fleet this wrapper would go fetch
   // instead -- so the control plane is not even asked.
   if (!childEnv.A11Y_WORKER && !childEnv.A11Y_WORKERS) {
@@ -167,7 +161,7 @@ export async function withControlPlaneFleet(bin, argv, {
 async function main() {
   const [bin, ...argv] = process.argv.slice(2);
   if (!bin) {
-    process.stderr.write("usage: node packages/control/src/with-control-plane-fleet.mjs <bin> [args...]\n");
+    process.stderr.write("usage: node packages/control/src/with-control-plane-fleet.ts <bin> [args...]\n");
     process.exit(2);
   }
   const { status } = await withControlPlaneFleet(bin, argv);

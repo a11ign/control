@@ -39,7 +39,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sshToControlPlane } from "./control-plane-fleet.mjs";
+import { sshToControlPlane } from "./control-plane-fleet.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const ANSIBLE_DIR = join(HERE, "..", "ansible");
@@ -63,28 +63,22 @@ type Finding = { unit: string; kind: string; detail: string };
 type Reading = { verdict: string; findings: Finding[]; reason?: string };
 type Derivation = { units: string[] } | { cannotTell: string };
 
-/**
- * @param {string} playbook
- * @returns {string[]} each play's text, split at the top-level `- name:` that opens it
- */
+/** @returns {string[]} each play's text, split at the top-level `- name:` that opens it */
 function playsOf(playbook: string): string[] {
   return playbook.split(/^(?=- name:)/m).filter((play) => play.startsWith("- name:"));
 }
 
-/** @param {string} play */
 const targetsTheControlPlane = (play: string) => /^\s{2}hosts:\s*["']?a11y_control["']?\s*$/m.test(play);
 
-/** A play installs units when it copies from `files/` into systemd's directory. @param {string} play */
+/** A play installs units when it copies from `files/` into systemd's directory. */
 const installsUnits = (play: string) => /src:\s*["']?files\/\{\{\s*item\s*\}\}/.test(play)
   && play.includes(`${INSTALLED_DIR}/{{ item }}`);
 
-/** @param {string} play */
 const unitNamesIn = (play: string) => [...play.matchAll(UNIT_LIST_ITEM)].map((match) => match[1]);
 
 /**
  * The unit names the control-plane playbooks install, derived from the playbooks' own text.
  * @param {{ playbooks: () => string[] }} source each playbook's text
- * @returns {Derivation}
  */
 export function deriveShippedUnits({ playbooks }: { playbooks: () => string[]; }): Derivation {
   const installing = playbooks().flatMap(playsOf).filter(targetsTheControlPlane).filter(installsUnits);
@@ -94,10 +88,6 @@ export function deriveShippedUnits({ playbooks }: { playbooks: () => string[]; }
   return { units };
 }
 
-/**
- * @param {{ playbooks: () => string[], shippedText: (unit: string) => string }} source
- * @returns {{ shipped: Record<string, string> } | { cannotTell: string }}
- */
 export function shippedControlUnits(source: { playbooks: () => string[]; shippedText: (unit: string) => string; }): { shipped: Record<string, string>; } | { cannotTell: string; } {
   const derived = deriveShippedUnits(source);
   if ("cannotTell" in derived) return derived;
@@ -108,17 +98,10 @@ export function shippedControlUnits(source: { playbooks: () => string[]; shipped
   }
 }
 
-/** @param {unknown} error */
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-/**
- * One finding per unit that differs, is missing on the host, or is on the host and not shipped.
- * @param {Record<string, string>} shipped
- * @param {Record<string, string>} installed
- * @returns {Finding[]}
- */
+/** One finding per unit that differs, is missing on the host, or is on the host and not shipped. */
 export function compareUnits(shipped: Record<string, string>, installed: Record<string, string>): Finding[] {
-  /** @type {Finding[]} */
   const findings: Finding[] = [];
   for (const [unit, text] of Object.entries(shipped)) {
     if (!(unit in installed)) findings.push({ unit, kind: KIND.MISSING, detail: `${unit} is shipped by a control-plane playbook and is not installed on the control host` });
@@ -130,7 +113,6 @@ export function compareUnits(shipped: Record<string, string>, installed: Record<
   return findings.sort((a, b) => a.unit.localeCompare(b.unit));
 }
 
-/** @param {string} reason @returns {Reading} */
 const cannotTell = (reason: string): Reading => ({ verdict: VERDICT.CANNOT_TELL, findings: [], reason });
 
 /**
@@ -138,10 +120,6 @@ const cannotTell = (reason: string): Reading => ({ verdict: VERDICT.CANNOT_TELL,
  * unit installed there, and THROWS when it could not look; anything but a non-empty object is an empty
  * answer. A host that runs the fleet's timers and lists no unit at all is indistinguishable from a read
  * that silently returned nothing, so it is `CANNOT_TELL` rather than "everything is missing".
- *
- * @param {{ readHost: () => Record<string, string> | null | undefined, playbooks: () => string[],
- *   shippedText: (unit: string) => string }} deps
- * @returns {Reading}
  */
 export function controlUnitDrift(deps: {
         readHost: () => Record<string, string> | null | undefined; playbooks: () => string[];
@@ -174,10 +152,7 @@ const END_MARK = "--end-of-units--";
 const LIST_COMMAND = `for f in ${INSTALLED_DIR}/a11y-*.service ${INSTALLED_DIR}/a11y-*.timer; do `
   + `[ -f "$f" ] && printf '%s %s\\n' "\${f##*/}" "$(base64 -w0 "$f")"; done; echo ${END_MARK}`;
 
-/**
- * @param {string} output what `LIST_COMMAND` printed
- * @returns {Record<string, string>}
- */
+/** @param {string} output what `LIST_COMMAND` printed */
 export function parseHostListing(output: string): Record<string, string> {
   const lines = output.split("\n").map((line) => line.trim()).filter(Boolean);
   if (lines.at(-1) !== END_MARK) throw new Error("the listing did not end where it should, so it may be truncated");
@@ -194,20 +169,18 @@ export const readControlHost = () => parseHostListing(sshToControlPlane(LIST_COM
 export const checkoutSource = {
   playbooks: () => readdirSync(ANSIBLE_DIR).filter((name) => name.endsWith(".yml"))
     .map((name) => readFileSync(join(ANSIBLE_DIR, name), "utf8")),
-  shippedText: (/** @type {string} */ unit: string) => readFileSync(join(FILES_DIR, basename(unit)), "utf8"),
+  shippedText: (unit: string) => readFileSync(join(FILES_DIR, basename(unit)), "utf8"),
 };
 
 /** Wide enough for the longest kind, `missing-on-host`, plus a space. */
 const KIND_COLUMN = 16;
 
-/** @param {Reading} reading */
 export function report({ verdict, findings, reason }: Reading) {
   if (verdict === VERDICT.CANNOT_TELL) return `CANNOT_TELL: ${reason}\n`;
   if (verdict === VERDICT.CLEAN) return "CLEAN: every unit the control-plane playbooks ship is installed on the control host as shipped\n";
   return `DRIFT: ${findings.length} unit(s)\n${findings.map((f) => `  ${f.kind.padEnd(KIND_COLUMN)} ${f.detail}`).join("\n")}\n`;
 }
 
-/** @param {Reading} reading */
 export const exitCodeFor = ({ verdict }: Reading) =>
   verdict === VERDICT.CLEAN ? EXIT.QUIET : verdict === VERDICT.DRIFT ? EXIT.ATTENTION : EXIT.CANNOT_ASK;
 

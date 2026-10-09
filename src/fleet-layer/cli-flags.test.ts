@@ -255,13 +255,13 @@ test("a SINGLE-DASH flag is refused, because an ansible-shaped argument silently
 
 test("flagValue: the five vectors measured across all fifteen pre-existing hand-rolled copies", () => {
   // audit §9 "argv parsing". These five are what distinguished the fourteen-file majority from the one
-  // outlier (`fleet-discover.mjs`'s `.split("=")[1]`) before this function existed.
+  // outlier (`fleet-discover.ts`'s `.split("=")[1]`) before this function existed.
   assert.equal(flagValue(["--url=http://host"], "url"), "http://host", "a normal value");
   assert.equal(flagValue([], "url"), undefined, "a missing flag is undefined, not an empty string");
   assert.equal(flagValue(["--url="], "url"), "", "an explicitly empty value is '', not undefined");
   assert.equal(flagValue(["--url=first", "--url=second"], "url"), "first", "first occurrence wins");
   assert.equal(flagValue(["--url=http://host?a=b"], "url"), "http://host?a=b",
-    "a value containing its own '=' is preserved whole -- this is the vector fleet-discover.mjs's "
+    "a value containing its own '=' is preserved whole -- this is the vector fleet-discover.ts's "
     + "`.split(\"=\")[1]` got wrong, truncating to 'http://host?a'");
   assert.equal(flagValue(["--worker", "http://x"], "worker"), undefined,
     "the space-separated form is not supported by any of the fifteen originals, and this must not "

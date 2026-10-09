@@ -1212,7 +1212,7 @@ test("only a job that reports progress has a progress root, and it is declared",
   // Both directions are causal rather than coincidental — a job that never touches a worker cannot
   // produce capture progress, and a job that drives the fleet is capturing, which is what writes the
   // file. `setenv: A11Y_WORKERS={{ lab_fleet_workers }}` is how the catalogue already says so, and
-  // `lab-job.mjs`'s `captureBearingJobs` already derives fleet-staleness checking from that same field.
+  // `lab-job.ts`'s `captureBearingJobs` already derives fleet-staleness checking from that same field.
   // Two consumers of one declaration beats two lists that must be kept equal by hand.
   //
   // It caught a real gap the moment it was derived: `everything` and `retrain` are capture-bearing and

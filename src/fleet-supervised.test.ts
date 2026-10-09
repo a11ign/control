@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const SOURCE = readFileSync(resolve(import.meta.dirname, "./fleet-playbook.mjs"), "utf8")
+const SOURCE = readFileSync(resolve(import.meta.dirname, "./fleet-playbook.ts"), "utf8")
   // Comments stripped: every claim below is also EXPLAINED in prose directly above the code that makes
   // it, so matching raw source would match the explanation and pass with the code removed. Three guards
   // written today had exactly that defect and one passed with its subject deleted.
@@ -27,7 +27,7 @@ const SOURCE = readFileSync(resolve(import.meta.dirname, "./fleet-playbook.mjs")
 
 test("the playbook is started as a supervised unit, not in the foreground", () => {
   assert.ok(SOURCE.includes("ansible-playbook"),
-    "fleet-playbook.mjs no longer runs ansible-playbook -- this test examines nothing");
+    "fleet-playbook.ts no longer runs ansible-playbook -- this test examines nothing");
   assert.match(SOURCE, /systemd-run\s+--unit=/,
     "the playbook must be started with `systemd-run --unit=`, so a dead caller cannot kill a ten-machine "
     + "reboot. It ran in the foreground once and left the fleet split with no record.");

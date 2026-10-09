@@ -7,12 +7,12 @@ import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
-  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive } from "./fleet-status.mjs";
+  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive } from "./fleet-status.ts";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
   from "../../worker-fleet/src/fleet-consistency.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { readSwitchLive } from "./fleet-switch.mjs";
+import { readSwitchLive } from "./fleet-switch.ts";
 
 const ready = { name: "w1", url: "http://REDACTED-INTERNAL-ADDRESS:8765", reachable: true, health: { ready: true, busy: false }, progress: { busy: false, capturing: null } };
 
@@ -108,7 +108,7 @@ test("the summary says WHICH channel it probed, never an unqualified 'reachable'
   // exactly what it said; the WORD invited a conclusion it does not support, and an afternoon went into
   // diagnosing a fleet that was healthy.
   const source = readFileSync(
-    fileURLToPath(new URL("./fleet-status.mjs", import.meta.url)), "utf8");
+    fileURLToPath(new URL("./fleet-status.ts", import.meta.url)), "utf8");
   assert.ok(!/\$\{status\.reachable\}\/\$\{status\.total\} reachable/.test(source),
     "the summary claims bare 'reachable' again; name the channel, because a reader will infer 'usable'");
   assert.match(source, /serving \/health/, "the summary must name the channel it actually probed");
@@ -372,7 +372,7 @@ test("the deprecated `consistent` field carries the CORRECTED answer, never the 
   // Kept one release for scripts outside the repo, because removing it fails silently: `undefined` is
   // falsy. But aliasing `comparedAgree` would keep #920's defect in the one field a legacy script reads,
   // so it mirrors the verdict instead. Asserted on the SOURCE because `fleetStatus` probes real workers.
-  const source = readFileSync(fileURLToPath(new URL("./fleet-status.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./fleet-status.ts", import.meta.url)), "utf8");
   assert.match(source, /consistent: verdict\.state === "CONSISTENT"/,
     "the legacy field must be true only when the whole inventory was compared and agrees");
   assert.doesNotMatch(source, /consistent: comparedAgree|consistent: consistent\b/,

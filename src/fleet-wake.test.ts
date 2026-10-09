@@ -11,8 +11,8 @@ import { join } from "node:path";
 import {
   HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, PROOF_WINDOW_MS, DEFAULT_PROOF_PATH, magicPacket, probeWorker, wakeFleet,
   wakeReportLine, readWakeProof, advanceWakeProof, recordWakeProof, proofWriteCommand, wakeFailed,
-} from "./fleet-wake.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+} from "./fleet-wake.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
 test("a magic packet is 6 x 0xFF then the MAC sixteen times", () => {
   const packet = magicPacket("00:1a:2b:3c:4d:5e");
@@ -41,7 +41,7 @@ test("anything that is not a MAC is refused, not padded into a packet nobody wil
 });
 
 // #1683's own "durable copy first" tests moved to control-plane-fleet.test.ts -- `inventoryPathFor` now
-// lives there (shared with fleet-discover.mjs, #1684), not restated here.
+// lives there (shared with fleet-discover.ts, #1684), not restated here.
 
 // ---------------------------------------------------------------------------------------------------
 // #2655: wake exactly what is needed, WAIT FOR READY, and never mistake a slow box for a down one.

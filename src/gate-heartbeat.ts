@@ -64,11 +64,9 @@ const NOT_STANDING = "none";
 export const TELEGRAM_TOKEN_FILE = join(homedir(), ".config", "a11y-witness", "telegram-bot-token");
 export const TELEGRAM_CHAT_FILE = join(homedir(), ".config", "a11y-witness", "telegram-chairman");
 
-/**
- * @typedef {{ status: "fresh", ageMs: number, atMs: number } | { status: "stale", ageMs: number, atMs: number } | { status: "cannot-tell", reason: string }} Verdict
- * @typedef {"fresh" | "stale" | "cannot-tell" | typeof NOT_STANDING} Standing
- * @typedef {{ ok: true, value: string } | { ok: false, reason: string }} Read
- */
+export type Verdict = { status: "fresh", ageMs: number, atMs: number } | { status: "stale", ageMs: number, atMs: number } | { status: "cannot-tell", reason: string };
+export type Standing = "fresh" | "stale" | "cannot-tell" | typeof NOT_STANDING;
+export type Read = { ok: true, value: string } | { ok: false, reason: string };
 
 /**
  * What the comment says about the last tick, or why it cannot be read as one.
@@ -77,10 +75,8 @@ export const TELEGRAM_CHAT_FILE = join(homedir(), ".config", "a11y-witness", "te
  * does not trust. A stamp before the comment's own `created_at` is a body that is not this comment, not a tick.
  *
  * @param {string} body the comment's `{created_at, updated_at}` as `readGateLastTick` asks for them
- * @param {number} nowMs
- * @returns {Verdict}
  */
-export function judgeTick(body, nowMs) {
+export function judgeTick(body: string, nowMs: number): Verdict {
   const times = readTimes(body);
   if (!times.ok) return { status: "cannot-tell", reason: times.reason };
   const { createdMs, updatedMs } = times;
@@ -90,11 +86,7 @@ export function judgeTick(body, nowMs) {
   return ageMs > STALE_AFTER_MS ? { status: "stale", ...age } : { status: "fresh", ...age };
 }
 
-/**
- * @param {string} body
- * @returns {{ ok: true, createdMs: number, updatedMs: number } | { ok: false, reason: string }}
- */
-function readTimes(body) {
+function readTimes(body: string): { ok: true; createdMs: number; updatedMs: number; } | { ok: false; reason: string; } {
   let parsed;
   try {
     parsed = JSON.parse(body);
@@ -107,15 +99,14 @@ function readTimes(body) {
   return { ok: true, createdMs, updatedMs };
 }
 
-/** @param {unknown} value @returns {number | null} epoch ms of an ISO-8601 string, else null */
-function isoMs(value) {
+/** @returns {number | null} epoch ms of an ISO-8601 string, else null */
+function isoMs(value: unknown): number | null {
   if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(value)) return null;
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms;
 }
 
-/** @param {number} ms @returns {string} */
-function minutes(ms) {
+function minutes(ms: number): string {
   return ms < MS_PER_MINUTE ? `${Math.round(ms / MS_PER_SECOND)} s` : `${Math.round(ms / MS_PER_MINUTE)} min`;
 }
 
@@ -123,10 +114,8 @@ function minutes(ms) {
  * The message for a change of verdict, or null when there is nothing new to say.
  *
  * @param {Standing} standing what the chairman was last told
- * @param {Verdict} verdict
- * @returns {{ text: string, standing: Standing } | null}
  */
-export function messageFor(standing, verdict) {
+export function messageFor(standing: Standing, verdict: Verdict): { text: string; standing: Standing; } | null {
   if (verdict.status === "fresh") {
     if (standing === NOT_STANDING) return null;
     return { standing: NOT_STANDING, text: `Gate heartbeat RECOVERED: the last tick is ${minutes(verdict.ageMs)} old (${new Date(verdict.atMs).toISOString()}).` };
@@ -138,16 +127,13 @@ export function messageFor(standing, verdict) {
   return { standing: "cannot-tell", text: `Gate heartbeat CANNOT TELL: the control plane could not read the gate's last tick (${verdict.reason}). This is not "alive".` };
 }
 
-/**
- * One run: read, judge, and message only on a change. Every effect is injected.
- *
- * @param {{ now: () => number, read: () => Promise<Read> | Read, send: (text: string) => Promise<{ ok: true } | { ok: false, reason: string }>,
- *   loadStanding: () => Standing, saveStanding: (s: Standing) => void }} deps
- * @returns {Promise<{ verdict: Verdict, sent: string | null, failure: string | null }>}
- */
-export async function run({ now, read, send, loadStanding, saveStanding }) {
+/** One run: read, judge, and message only on a change. Every effect is injected. */
+export async function run({ now, read, send, loadStanding, saveStanding }: {
+        now: () => number; read: () => Promise<Read> | Read; send: (text: string) => Promise<{ ok: true; } | { ok: false; reason: string; }>;
+        loadStanding: () => Standing; saveStanding: (s: Standing) => void;
+    }): Promise<{ verdict: Verdict; sent: string | null; failure: string | null; }> {
   const reading = await read();
-  const verdict = reading.ok ? judgeTick(reading.value, now()) : { status: /** @type {const} */ ("cannot-tell"), reason: reading.reason };
+  const verdict = reading.ok ? judgeTick(reading.value, now()) : { status: ("cannot-tell" as const), reason: reading.reason };
   const message = messageFor(loadStanding(), verdict);
   if (!message) return { verdict, sent: null, failure: null };
   const sent = await send(message.text);
@@ -156,43 +142,36 @@ export async function run({ now, read, send, loadStanding, saveStanding }) {
   return { verdict, sent: message.text, failure: null };
 }
 
-/**
- * `gh api` for the standing comment, under a hard timeout that KILLS: a hung `gh` must not hold the unit.
- *
- * @param {{ spawn?: typeof spawnSync, env?: NodeJS.ProcessEnv, readToken?: () => string }} [options]
- * @returns {Read}
- */
-export function readGateLastTick({ spawn = spawnSync, env = process.env, readToken = readGhToken } = {}) {
+/** `gh api` for the standing comment, under a hard timeout that KILLS: a hung `gh` must not hold the unit. */
+export function readGateLastTick({ spawn = spawnSync, env = process.env, readToken = readGhToken }: { spawn?: typeof spawnSync; env?: NodeJS.ProcessEnv; readToken?: () => string; } = {}): Read {
   const token = env.GH_TOKEN || readToken().trim();
   if (!token) return { ok: false, reason: "this host has no GitHub credential" };
   const result = spawn("gh", ["api", `repos/${HEARTBEAT_REPO}/issues/comments/${HEARTBEAT_COMMENT_ID}`, "--jq", "{created_at, updated_at}"], {
     env: { ...env, GH_TOKEN: token }, encoding: "utf8", timeout: READ_TIMEOUT_MS, killSignal: "SIGKILL",
   });
-  if (result.error) return { ok: false, reason: `gh did not answer inside ${READ_TIMEOUT_MS / MS_PER_SECOND} s (${/** @type {NodeJS.ErrnoException} */ (result.error).code ?? "error"})` };
+  if (result.error) return { ok: false, reason: `gh did not answer inside ${READ_TIMEOUT_MS / MS_PER_SECOND} s (${(result.error as NodeJS.ErrnoException).code ?? "error"})` };
   if (result.status !== 0) return { ok: false, reason: `gh exited ${result.status}: ${firstLine(result.stderr)}` };
   return { ok: true, value: String(result.stdout) };
 }
 
-/** @param {string | null | undefined} text @returns {string} */
-function firstLine(text) {
+function firstLine(text: string | null | undefined): string {
   return String(text ?? "").trim().split("\n")[0].slice(0, 200) || "no message";
 }
 
-/** The #1875 token path, read here rather than imported: `fleet-playbook.mjs` parses flags at import. */
+/** The #1875 token path, read here rather than imported: `fleet-playbook.ts` parses flags at import. */
 export const GH_TOKEN_FILE = join(homedir(), ".config", "a11y-witness", "gh-token");
 
 /** @returns {string} the token file's contents, or "" when it is absent. */
-function readGhToken() {
+function readGhToken(): string {
   return readOptionalFile(GH_TOKEN_FILE);
 }
 
-/** @param {string} path @returns {string} */
-function readOptionalFile(path) {
+function readOptionalFile(path: string): string {
   try {
     return readFileSync(path, "utf8");
   } catch (error) {
     // ABSENT IS AN ANSWER, reported by the caller by name; any other failure is a real one and rethrown.
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return "";
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw new Error(`could not read ${path}`, { cause: error });
   }
 }
@@ -205,9 +184,8 @@ function readOptionalFile(path) {
  * `chatId` (an array, `null`, a JSON string, junk) is a refusal that names the file, never a guess at what the chairman meant.
  *
  * @param {string} raw the file's text
- * @returns {{ ok: true, chatId: string | number } | { ok: false, reason: string }}
  */
-export function chatIdFrom(raw) {
+export function chatIdFrom(raw: string): { ok: true; chatId: string | number; } | { ok: false; reason: string; } {
   const text = raw.trim();
   if (text === "" || /^-?\d+$/.test(text)) return { ok: true, chatId: text };
   let parsed;
@@ -224,11 +202,8 @@ export function chatIdFrom(raw) {
 /**
  * Telegram's `sendMessage`, under a hard timeout. The token is in the URL Telegram requires, so NO error text
  * here is built from the URL: a failure names the status or the error class and nothing else.
- *
- * @param {{ fetchImpl?: typeof fetch, readFile?: (path: string) => string, env?: NodeJS.ProcessEnv }} [options]
- * @returns {(text: string) => Promise<{ ok: true } | { ok: false, reason: string }>}
  */
-export function telegramSender({ fetchImpl = fetch, readFile = readOptionalFile, env = process.env } = {}) {
+export function telegramSender({ fetchImpl = fetch, readFile = readOptionalFile, env = process.env }: { fetchImpl?: typeof fetch; readFile?: (path: string) => string; env?: NodeJS.ProcessEnv; } = {}): (text: string) => Promise<{ ok: true; } | { ok: false; reason: string; }> {
   const tokenFile = env.A11Y_HEARTBEAT_TELEGRAM_TOKEN_FILE || TELEGRAM_TOKEN_FILE;
   const chatFile = env.A11Y_HEARTBEAT_TELEGRAM_CHAT_FILE || TELEGRAM_CHAT_FILE;
   return async (text) => {
@@ -244,18 +219,18 @@ export function telegramSender({ fetchImpl = fetch, readFile = readOptionalFile,
       });
       return response.ok ? { ok: true } : { ok: false, reason: `Telegram answered HTTP ${response.status}` };
     } catch (error) {
-      return { ok: false, reason: `Telegram did not answer (${/** @type {Error} */ (error).name})` };
+      return { ok: false, reason: `Telegram did not answer (${(error as Error).name})` };
     }
   };
 }
 
 /** @returns {string} the state file, under systemd's `StateDirectory=` (`$STATE_DIRECTORY`). */
-function standingPath() {
+function standingPath(): string {
   return join(process.env.STATE_DIRECTORY || join(homedir(), ".local", "state", "a11y-gate-heartbeat"), "standing.json");
 }
 
 /** @returns {Standing} what the chairman was last told; a missing or unreadable file is "nothing told". */
-function loadStanding() {
+function loadStanding(): Standing {
   const raw = readOptionalFile(standingPath());
   if (!raw) return NOT_STANDING;
   try {
@@ -263,13 +238,12 @@ function loadStanding() {
     return standing === "stale" || standing === "cannot-tell" ? standing : NOT_STANDING;
   } catch (error) {
     // A torn file must not become silence about an outage: say so, and re-tell the chairman rather than skip.
-    console.error(`standing file unreadable, treated as nothing told: ${/** @type {Error} */ (error).message}`);
+    console.error(`standing file unreadable, treated as nothing told: ${(error as Error).message}`);
     return NOT_STANDING;
   }
 }
 
-/** @param {Standing} standing */
-function saveStanding(standing) {
+function saveStanding(standing: Standing) {
   const path = standingPath();
   mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(`${path}.tmp`, `${JSON.stringify({ standing })}\n`);

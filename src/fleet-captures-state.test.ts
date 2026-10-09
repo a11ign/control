@@ -3,14 +3,14 @@
 //
 // #2979 (found by #2937): the gate cannot ask "is the fleet idle while work waits" because no state it
 // holds says WHEN the fleet last captured. `/health` `captures` is a count since boot with no time on it, so
-// `fleet-watch.mjs` now keeps each worker's last count, when it was seen and when it last ROSE.
+// `fleet-watch.ts` now keeps each worker's last count, when it was seen and when it last ROSE.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
   advanceCaptures, captureTimes, readCapturesState, readCaptureTimes, writeCapturesState, watch,
   DEFAULT_CAPTURES_STATE_PATH,
-} from "./fleet-watch.mjs";
+} from "./fleet-watch.ts";
 
 const HOUR = 3_600_000;
 const NOW = 1_800_000_000_000;

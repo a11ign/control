@@ -50,7 +50,7 @@ import { pathToFileURL } from "node:url";
 // cross-package dependents, so keeping it in the published worker-fleet package while it reads control's
 // own inventory was the cycle with nothing on the other side to justify it. `fleet-env.mjs` stays in
 // worker-fleet -- published bins (doctor.mjs, check-worker-code.mjs) depend on it -- so these imports
-// cross the boundary the SANCTIONED way, relative, exactly like `fleet-playbook.mjs` and `lab-job.mjs`
+// cross the boundary the SANCTIONED way, relative, exactly like `fleet-playbook.ts` and `lab-job.ts`
 // already do.
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { configuredWorkers } from "../../worker-fleet/src/fleet-env.mjs";
@@ -58,13 +58,13 @@ import { assessWorker } from "../../worker-fleet/src/worker-health.mjs";
 import { fleetConsistency, describeMismatches, describeReportedOnly }
   from "../../worker-fleet/src/fleet-consistency.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
-import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.mjs";
-import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
-// #2752: the MAC fallback below reuses fleet-discover.mjs's own `normaliseMac` rather than restating it --
+import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
+import { readControlPlaneFleet } from "./control-plane-fleet.ts";
+// #2752: the MAC fallback below reuses fleet-discover.ts's own `normaliseMac` rather than restating it --
 // two MAC parsers is how a colon-vs-dash disagreement becomes a resolution that silently never matches.
-import { normaliseMac } from "./fleet-discover.mjs";
+import { normaliseMac } from "./fleet-discover.ts";
 // #3242: where each worker is and whether it is on, from the switch's read-only SNMP. Never throws.
-import { readSwitchLive } from "./fleet-switch.mjs";
+import { readSwitchLive } from "./fleet-switch.ts";
 
 /**
  * as `doctor`.
@@ -89,11 +89,8 @@ const SECONDS_PER_MINUTE = 60;
  * #1356: NEVER a checkout's own `inventory.yml` — gitignored, and absent on the operator host that
  * actually drives the fleet. A READ-ONLY reporter, so a refusal here is a thrown error naming WHICH of
  * the three causes it was (no source, unparseable, or unreachable), never a silently empty table.
- *
- * @param {{ readFleet?: () => { workers: { name: string, url: string, mac?: string }[], refusal: string | null } }} [deps]
- * @returns {{ name: string, url: string, mac?: string }[]}
  */
-export function fleetToProbe({ readFleet = readControlPlaneFleet } = {}) {
+export function fleetToProbe({ readFleet = readControlPlaneFleet }: { readFleet?: () => { workers: { name: string; url: string; mac?: string; }[]; refusal: string | null; }; } = {}): { name: string; url: string; mac?: string; }[] {
   const named = configuredWorkers();
   if (named.length) return named;
   const fleet = readFleet();
@@ -125,13 +122,11 @@ export function fleetToProbe({ readFleet = readControlPlaneFleet } = {}) {
  * Unreachable is a RESULT, not a throw: a fleet report whose job is to say which box is missing must not
  * be taken down by the box that is missing.
  */
-/**
- * @param {{ name: string, url: string }} worker
- * @returns {Promise<{ name: string, url: string, reachable: boolean,
- *                     health?: Record<string, any>, progress?: Record<string, any>, error?: string }>}
- */
-export async function probeWorker({ name, url }) {
-  const ask = async (/** @type {string} */ path) => {
+export async function probeWorker({ name, url }: { name: string; url: string; }): Promise<{
+    name: string; url: string; reachable: boolean;
+    health?: WorkerHealth; progress?: WorkerProgress; error?: string;
+}> {
+  const ask = async (path: string) => {
     const response = await requestJson(`${url}${path}`, { timeoutMs: PROBE_TIMEOUT_MS });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json ?? {};
@@ -141,16 +136,12 @@ export async function probeWorker({ name, url }) {
     const [health, progress] = await Promise.all([ask("/health"), ask("/progress")]);
     return { name, url, reachable: true, health, progress };
   } catch (error) {
-    return { name, url, reachable: false, error: /** @type {Error} */ (error).message ?? String(error) };
+    return { name, url, reachable: false, error: (error as Error).message ?? String(error) };
   }
 }
 
 /** `ready`, `busy`, `warming` or `unreachable` — four states, because collapsing any two loses the point. */
-/**
- * @param {WorkerProbe} probe
- * @returns {string}
- */
-export function stateOf(probe) {
+export function stateOf(probe: WorkerProbe): string {
   if (!probe.reachable) return "unreachable";
   if (probe.health?.busy) return "busy";
   // `ready !== false`, matching workerIsUsable: a worker predating the field reports neither, and
@@ -174,11 +165,26 @@ export function stateOf(probe) {
  * "404 and 202 are different answers" rule, applied to a status display: *finished* and *still going*
  * must never render the same.
  */
-/** @typedef {{ name: string, url: string, reachable: boolean, health?: Record<string, any>,
- *               progress?: Record<string, any>, error?: string }} WorkerProbe */
+/** What `/health.readiness` says about a worker that is up but cannot capture. */
+export type Readiness = {
+  reason?: string | null; blockingDialogs?: { title?: string; message?: string; }[];
+  foregroundBlockedBy?: string | null; browserConfigError?: string | null;
+};
 
-/** @param {WorkerProbe} probe */
-export function activityOf(probe) {
+/** A worker's `/health` body, as far as the fleet reads it; every other field rides along unread. */
+export type WorkerHealth = {
+  code?: string; busy?: boolean; ready?: boolean; environment?: Record<string, unknown>;
+  vitals?: { captures?: number; uptimeMinutes?: number; recoveries?: number; [field: string]: unknown };
+  readiness?: Readiness | null;
+  [field: string]: unknown;
+};
+
+/** A worker's `/progress` body: what it is capturing and how long it has been at it. */
+export type WorkerProgress = { busy?: boolean; capturing?: string | null; elapsedMs?: number; lastPhase?: string; [field: string]: unknown };
+
+export type WorkerProbe = { name: string, url: string, reachable: boolean, health?: WorkerHealth, progress?: WorkerProgress, error?: string };
+
+export function activityOf(probe: WorkerProbe) {
   const progress = probe.progress;
   // `progress.busy`, not `health.busy`: `capturing` comes from this same payload, and health and progress
   // are two separate requests, so reading the flag from one and the case from the other samples two
@@ -196,8 +202,7 @@ export function activityOf(probe) {
   return `${elapsed}${phase}  ${shortUrl(progress.capturing)}`;
 }
 
-/** @param {string} url */
-function shortUrl(url) {
+function shortUrl(url: string) {
   try {
     const { pathname, host } = new URL(url);
     return `${host}${pathname}`;
@@ -207,8 +212,7 @@ function shortUrl(url) {
 }
 
 /** The per-worker rows, as data, so the renderer and `--json` cannot disagree about what was found. */
-/** @param {WorkerProbe[]} probes */
-export function summarise(probes) {
+export function summarise(probes: WorkerProbe[]) {
   return probes.map((probe) => {
     const vitals = probe.health?.vitals ?? null;
     const assessment = assessWorker(vitals);
@@ -233,13 +237,8 @@ export function summarise(probes) {
   });
 }
 
-/**
- * @typedef {ReturnType<typeof summarise>[number]} WorkerRow
- *
- * DERIVED from `summarise` rather than written out again. The renderer and `--json` must not disagree
- * about what a row is -- which is what the docstring on `summarise` already says the rows exist for --
- * and a second hand-written description of the same object is how those two come apart.
- */
+/** DERIVED from `summarise` rather than written out again. The renderer and `--json` must not disagree about what a row is -- which is what the docstring on `summarise` already says the rows exist for -- and a second hand-written description of the same object is how those two come apart. */
+export type WorkerRow = ReturnType<typeof summarise>[number];
 
 /**
  * What to DO about a degraded worker, or "" when none is.
@@ -256,11 +255,8 @@ export function summarise(probes) {
  * PURE and exported so the advice can be tested without a fleet. It was first written inline in `main`
  * reading a `degradedNames` array built in `renderTable` -- a scope error that would have thrown only
  * when a worker was actually degraded, which is the one moment it must work.
- *
- * @param {Array<{name: string, degraded?: boolean}> | undefined} rows
- * @returns {string}
  */
-export function degradedAdvice(rows) {
+export function degradedAdvice(rows: Array<{ name: string; degraded?: boolean; }> | undefined): string {
   const names = (rows ?? []).filter((r) => r?.degraded).map((r) => String(r.name).split(/\s+/)[0]);
   if (!names.length) return "";
   return `  ${names.length} worker(s) DEGRADED: ${names.join(", ")}.\n`
@@ -280,12 +276,8 @@ export function degradedAdvice(rows) {
  * Checked in the runbook's own likelihood order: a blocking dialog first (it names itself), then the
  * foreground-lock-timeout fix that clears the commonest cause, then a foreground holder with no dialog
  * sampled yet, then a browser config problem, and only then the generic fallback.
- *
- * @param {{ reason?: string | null, blockingDialogs?: {title?: string, message?: string}[],
- *           foregroundBlockedBy?: string | null, browserConfigError?: string | null }} readiness
- * @returns {string}
  */
-function warmingRemedy(readiness, workerName = "") {
+function warmingRemedy(readiness: Readiness, workerName = ""): string {
   const reason = readiness.reason ?? "";
   if (readiness.blockingDialogs?.length) {
     const text = readiness.blockingDialogs.map((d) => d.message || d.title).filter(Boolean).join(" / ");
@@ -345,25 +337,24 @@ function warmingRemedy(readiness, workerName = "") {
  * existed, and until now that is all a reader ever saw -- exactly the "state a reader must interpret" gap
  * DEGRADED already got a remedy for. `readiness.reason` is read here, never re-derived, so this cannot
  * disagree with what `/health` itself diagnosed.
- *
- * @param {Array<{name: string, state?: string,
- *   readiness?: {reason?: string | null, blockingDialogs?: {title?: string, message?: string}[],
- *                foregroundBlockedBy?: string | null, browserConfigError?: string | null} | null}>
- *   | undefined} rows
- * @returns {string}
  */
-export function warmingAdvice(rows) {
+export function warmingAdvice(rows: Array<{
+        name: string; state?: string;
+        readiness?: {
+            reason?: string | null; blockingDialogs?: { title?: string; message?: string; }[];
+            foregroundBlockedBy?: string | null; browserConfigError?: string | null;
+        } | null;
+    }> | undefined): string {
   const stuck = (rows ?? []).filter((r) => r?.state === "warming" && r.readiness?.reason);
   if (!stuck.length) return "";
   return stuck.map((row) => {
     const name = String(row.name).split(/\s+/)[0];
-    return `  ${name} WARMING: ${row.readiness?.reason}\n  ${warmingRemedy(/** @type {any} */ (row.readiness), name)}\n`;
+    return `  ${name} WARMING: ${row.readiness?.reason}\n  ${warmingRemedy(row.readiness as Readiness, name)}\n`;
   }).join("");
 }
 
-/** @param {WorkerRow[]} rows */
-function renderTable(rows) {
-  const width = (/** @type {(row: WorkerRow) => unknown} */ pick) =>
+function renderTable(rows: WorkerRow[]) {
+  const width = (pick: (row: WorkerRow) => unknown) =>
     Math.max(...rows.map((r) => String(pick(r) ?? "").length), 0);
   const nameWidth = Math.max(width((r) => r.name), "worker".length);
   const stateWidth = Math.max(width((r) => r.state), "state".length);
@@ -423,12 +414,13 @@ const READS_AS_AGREEMENT = "A field no guest reports draws no values to disagree
  * read CONSISTENT while this function was written that way, which is the defect of this whole family in
  * miniature. The lists stay in the RETURN VALUE, where they are what a caller greps for the remedy.
  *
- * @param {{ compared: string[], unchecked: string[],
- *           coverage?: { field: string, reported: number, asked: number }[] } | undefined} fields
+ *
  * @param {string} across the `across N of M` clause, so both lines still report what WAS measured
- * @returns {{ state: "UNKNOWN", line: string } | null}
  */
-function fieldCoverageGap(fields, across) {
+function fieldCoverageGap(fields: {
+        compared: string[]; unchecked: string[];
+        coverage?: { field: string; reported: number; asked: number; }[];
+    } | undefined, across: string): { state: "UNKNOWN"; line: string; } | null {
   const coverage = fields?.coverage;
   if (coverage === undefined) {
     return { state: "UNKNOWN",
@@ -444,12 +436,8 @@ function fieldCoverageGap(fields, across) {
       + `fields. ${gaps.join(" ")}` };
 }
 
-/**
- * #1997's clause: the fields asked of everybody and answered by nobody. `null` when there are none.
- * @param {{ field: string, reported: number, asked: number }[]} coverage
- * @returns {string | null}
- */
-function uncheckedClause(coverage) {
+/** #1997's clause: the fields asked of everybody and answered by nobody. `null` when there are none. */
+function uncheckedClause(coverage: { field: string; reported: number; asked: number; }[]): string | null {
   const unchecked = coverage.filter(({ reported }) => reported === 0).map(({ field }) => field);
   if (unchecked.length === 0) return null;
   return `${unchecked.length} ${unchecked.length === 1 ? "was" : "were"} compared on NO guest: `
@@ -462,11 +450,8 @@ function uncheckedClause(coverage) {
  *
  * NAMED WITH ITS COUNT, never counted. "1 field was partly reported" sends a reader back to this command;
  * "displayMode: 1 of 10 reported it" tells them nine boxes owe an answer, which is the finding.
- *
- * @param {{ field: string, reported: number, asked: number }[]} coverage
- * @returns {string | null}
  */
-function partialClause(coverage) {
+function partialClause(coverage: { field: string; reported: number; asked: number; }[]): string | null {
   const partial = coverage.filter(({ reported, asked }) => reported > 0 && reported < asked);
   if (partial.length === 0) return null;
   const named = partial.map(({ field, reported, asked }) => `${field} (${reported} of ${asked} reported it)`);
@@ -590,9 +575,20 @@ function partialClause(coverage) {
  *   carries each box's `stateOf`, `fields` `fleetConsistency`'s field coverage. Neither has a default,
  *   for the same reason, and nor does `fields.coverage` (#2019). `reportedOnly` is the one input here
  *   that DOES default, and `withReportedDrift` below states why: it is the channel that gates nothing.
- * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
  */
-export function consistencyVerdict(input) {
+export function consistencyVerdict(input: {
+        consistent: boolean; compared: number; total: number; mismatches?: unknown[];
+        rows?: { name?: string; state?: string; }[];
+        fields?: {
+            compared: string[]; unchecked: string[];
+            coverage?: { field: string; reported: number; asked: number; }[];
+        };
+        reportedOnly?: {
+            field: string; why: string; values: Record<string, unknown>;
+            reported: number; asked: number;
+            state: "drifted" | "unreported";
+        }[];
+    }): { state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED"; line: string; } {
   return withReportedDrift(gatedVerdict(input), input.reportedOnly ?? [],
     `across ${input.compared} of ${input.total}`);
 }
@@ -625,13 +621,14 @@ export function consistencyVerdict(input) {
  * exists to withhold. What a caller must not lose is the field a NOBODY reports — and that is carried
  * inside the channel, as `unreported`, rather than by an absent argument.
  *
- * @param {{state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string}} verdict
- * @param {{field: string, why: string, values: Record<string, unknown>, reported: number,
- *   asked: number, state: "drifted" | "unreported"}[]} reportedOnly
+ *
+ *
  * @param {string} across the `across N of M` clause, so the rewritten line keeps its denominator
- * @returns {{state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string}}
  */
-function withReportedDrift(verdict, reportedOnly, across) {
+function withReportedDrift(verdict: { state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED"; line: string; }, reportedOnly: {
+        field: string; why: string; values: Record<string, unknown>; reported: number;
+        asked: number; state: "drifted" | "unreported";
+    }[], across: string): { state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED"; line: string; } {
   if (reportedOnly.length === 0) return verdict;
   const named = describeReportedOnly(reportedOnly).join("; ");
   const noted = `Reported, never gated (#2063): ${named}. A run is not refused for this`;
@@ -641,16 +638,15 @@ function withReportedDrift(verdict, reportedOnly, across) {
       + `identical: ${noted}` };
 }
 
-/**
- * The verdict the gating channels produce, before the reported-only one qualifies it.
- *
- * @param {{ consistent: boolean, compared: number, total: number, mismatches?: unknown[],
- *           rows?: { name?: string, state?: string }[],
- *           fields?: { compared: string[], unchecked: string[],
- *                      coverage?: { field: string, reported: number, asked: number }[] } }} input
- * @returns {{ state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED", line: string }}
- */
-function gatedVerdict({ consistent, compared, total, mismatches = [], rows, fields }) {
+/** The verdict the gating channels produce, before the reported-only one qualifies it. */
+function gatedVerdict({ consistent, compared, total, mismatches = [], rows, fields }: {
+        consistent: boolean; compared: number; total: number; mismatches?: unknown[];
+        rows?: { name?: string; state?: string; }[];
+        fields?: {
+            compared: string[]; unchecked: string[];
+            coverage?: { field: string; reported: number; asked: number; }[];
+        };
+    }): { state: "CONSISTENT" | "INCONSISTENT" | "UNKNOWN" | "BLOCKED"; line: string; } {
   const across = `across ${compared} of ${total}`;
   if (compared === 0) {
     return { state: "UNKNOWN",
@@ -658,7 +654,7 @@ function gatedVerdict({ consistent, compared, total, mismatches = [], rows, fiel
   }
   if (!consistent) {
     return { state: "INCONSISTENT",
-      line: `fleet INCONSISTENT ${across} — ${describeMismatches(/** @type {any} */ (mismatches)).join("; ")}` };
+      line: `fleet INCONSISTENT ${across} — ${describeMismatches(mismatches as Parameters<typeof describeMismatches>[0]).join("; ")}` };
   }
   if (compared < total) {
     return { state: "UNKNOWN",
@@ -725,8 +721,8 @@ const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
  */
 export const LINK = Object.freeze({ ON: "on", OFF: "off", NO_VERDICT: "noVerdict", UNASKED: "unasked" });
 
-/** @typedef {{ verdict: string, detail: string }} LinkAnswer */
-/** @typedef {Map<string, LinkAnswer>} LinkAnswers */
+export type LinkAnswer = { verdict: string, detail: string };
+export type LinkAnswers = Map<string, LinkAnswer>;
 
 /**
  * One box's answer from its neighbour-table lines over the polling window, oldest first.
@@ -737,9 +733,8 @@ export const LINK = Object.freeze({ ON: "on", OFF: "off", NO_VERDICT: "noVerdict
  * no verdict, never OFF. Not seen is not absent.
  *
  * @param {string[]} lines `ip neigh show <address>` per poll, "" where the table had no entry
- * @returns {LinkAnswer}
  */
-export function linkVerdictOf(lines) {
+export function linkVerdictOf(lines: string[]): LinkAnswer {
   const states = lines.map((line) => line.trim().split(/\s+/).pop() ?? "").filter(Boolean);
   const answer = states.filter((state) => state === "REACHABLE" || state === "FAILED").pop();
   if (answer === "REACHABLE") return { verdict: LINK.ON, detail: answer };
@@ -755,11 +750,8 @@ export function linkVerdictOf(lines) {
 /**
  * The command the control plane runs: one ping per address so the kernel re-resolves it, then each
  * address's neighbour entry once a second. Every address has matched `IPV4` before it is interpolated.
- *
- * @param {string[]} addresses
- * @returns {string}
  */
-export function neighbourScript(addresses) {
+export function neighbourScript(addresses: string[]): string {
   const refused = addresses.filter((address) => !IPV4.test(address));
   if (refused.length) {
     throw new Error(`neighbourScript: not IPv4 addresses, refusing to send them to a shell: ${refused.join(", ")}`);
@@ -771,15 +763,9 @@ export function neighbourScript(addresses) {
     + "sleep 1; i=$((i+1)); done; wait";
 }
 
-/**
- * `address|neighbour line`, one per poll, into each address's lines in order.
- *
- * @param {string} stdout
- * @returns {Map<string, string[]>}
- */
-export function parseNeighbourPolls(stdout) {
-  /** @type {Map<string, string[]>} */
-  const polls = new Map();
+/** `address|neighbour line`, one per poll, into each address's lines in order. */
+export function parseNeighbourPolls(stdout: string): Map<string, string[]> {
+  const polls: Map<string, string[]> = new Map();
   for (const line of stdout.split("\n")) {
     const bar = line.indexOf("|");
     if (bar < 0) continue;
@@ -789,17 +775,15 @@ export function parseNeighbourPolls(stdout) {
   return polls;
 }
 
-/** @param {string} url */
-function addressOf(url) {
+function addressOf(url: string) {
   try {
     return new URL(url).hostname;
   } catch (error) {
-    return `${url} (${/** @type {Error} */ (error).message})`;
+    return `${url} (${(error as Error).message})`;
   }
 }
 
-/** @returns {{ host: string, key: string }} */
-function controlPlaneFromEnvironment() {
+function controlPlaneFromEnvironment(): { host: string; key: string; } {
   return { host: requireControlPlaneHost(), key: requireControlPlaneKey() };
 }
 
@@ -820,7 +804,7 @@ function controlPlaneFromEnvironment() {
  * @param {{ error?: NodeJS.ErrnoException, status: number | null, pid?: number }} result what `spawnSync` returned
  * @returns {LinkAnswer | null} null when the read succeeded
  */
-export function failedRead({ error, status, pid }) {
+export function failedRead({ error, status, pid }: { error?: NodeJS.ErrnoException; status: number | null; pid?: number; }): LinkAnswer | null {
   if (error?.code === "ETIMEDOUT") {
     return { verdict: LINK.NO_VERDICT, detail: `the read did not finish within ${NEIGHBOUR_READ_TIMEOUT_MS / MS_PER_SECOND} s, `
       + "so whether the control plane answered is not known" };
@@ -840,20 +824,13 @@ export function failedRead({ error, status, pid }) {
   return null;
 }
 
-/**
- * One ssh to the control plane for every address, or the answer every box gets when the read failed.
- *
- * @param {string[]} addresses
- * @param {{ run: typeof spawnSync, controlPlane: () => { host: string, key: string } }} deps
- * @returns {{ failed: LinkAnswer | null, polls: Map<string, string[]> }}
- */
-function askControlPlane(addresses, { run, controlPlane }) {
-  /** @type {{ host: string, key: string }} */
-  let target;
+/** One ssh to the control plane for every address, or the answer every box gets when the read failed. */
+function askControlPlane(addresses: string[], { run, controlPlane }: { run: typeof spawnSync; controlPlane: () => { host: string; key: string; }; }): { failed: LinkAnswer | null; polls: Map<string, string[]>; } {
+  let target: { host: string; key: string; };
   try {
     target = controlPlane();
   } catch (error) {
-    const why = String(/** @type {Error} */ (error).message ?? error).split(" -- ")[0];
+    const why = String((error as Error).message ?? error).split(" -- ")[0];
     return { failed: { verdict: LINK.UNASKED, detail: `this shell was never told where it is (${why})` }, polls: new Map() };
   }
   const result = run("ssh", ["-i", target.key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
@@ -863,12 +840,7 @@ function askControlPlane(addresses, { run, controlPlane }) {
   return { failed, polls: failed ? new Map() : parseNeighbourPolls(String(result.stdout ?? "")) };
 }
 
-/**
- * @param {Map<string, string[]>} polls
- * @param {string} address
- * @returns {LinkAnswer}
- */
-function answerFor(polls, address) {
+function answerFor(polls: Map<string, string[]>, address: string): LinkAnswer {
   const lines = polls.get(address);
   return lines ? linkVerdictOf(lines)
     : { verdict: LINK.NO_VERDICT, detail: "the read returned nothing for this address" };
@@ -878,21 +850,19 @@ function answerFor(polls, address) {
  * Asks the control plane's neighbour table about the boxes that did not answer `/health`.
  *
  * FROM THE CONTROL PLANE, because it sits on the workers' segment and this shell may not: the operator Mac
- * could not resolve most of the fleet at layer 2. The ssh call is built from `control-plane-host.mjs` the
- * way `lab-pipeline.mjs` builds its own, since `fleet-playbook.mjs`'s helper is private to that file.
+ * could not resolve most of the fleet at layer 2. The ssh call is built from `control-plane-host.ts` the
+ * way `lab-pipeline.ts` builds its own, since `fleet-playbook.ts`'s helper is private to that file.
  *
  * NEVER THROWS, for the reason `probeWorker` does not: a report on which box is missing must not be taken
  * down by the question it asks about that box.
  *
- * @param {{ name: string, url: string }[]} rows
- * @param {{ run?: typeof spawnSync, controlPlane?: () => { host: string, key: string } }} [deps]
+ *
+ *
  * @returns {LinkAnswers} keyed by row name
  */
-export function readLinkLayer(rows, { run = spawnSync, controlPlane = controlPlaneFromEnvironment } = {}) {
-  /** @type {LinkAnswers} */
-  const answers = new Map();
-  /** @type {{ name: string, address: string }[]} */
-  const askable = [];
+export function readLinkLayer(rows: { name: string; url: string; }[], { run = spawnSync, controlPlane = controlPlaneFromEnvironment }: { run?: typeof spawnSync; controlPlane?: () => { host: string; key: string; }; } = {}): LinkAnswers {
+  const answers: LinkAnswers = new Map();
+  const askable: { name: string; address: string; }[] = [];
   for (const { name, url } of rows) {
     const address = addressOf(url);
     if (IPV4.test(address)) askable.push({ name, address });
@@ -905,18 +875,12 @@ export function readLinkLayer(rows, { run = spawnSync, controlPlane = controlPla
 }
 
 /** @param {string} name a row name, `<inventory name>  <address>` when the inventory supplied it */
-function inventoryName(name) {
+function inventoryName(name: string) {
   return String(name).split(/\s+/)[0];
 }
 
-/**
- * The words, one line per box. The four never share a line: they are four different errands.
- *
- * @param {string} name
- * @param {LinkAnswer} link
- * @returns {string}
- */
-export function linkLine(name, { verdict, detail }) {
+/** The words, one line per box. The four never share a line: they are four different errands. */
+export function linkLine(name: string, { verdict, detail }: LinkAnswer): string {
   if (verdict === LINK.OFF) return `OFF THE NETWORK (no layer-2 answer from ${name}: check cable and power)`;
   if (verdict === LINK.ON) {
     return `ON THE NETWORK, worker not answering (${name} answers at layer 2: the machine is on the wire, `
@@ -937,7 +901,7 @@ const OFF_ADVICE = [
 
 // --- #2752: a box unreachable at its PINNED address may only have drifted under DHCP -----------------
 
-/** How many addresses a ping sweep covers -- matches `fleet-discover.mjs`'s own `scan()`, a whole /24. */
+/** How many addresses a ping sweep covers -- matches `fleet-discover.ts`'s own `scan()`, a whole /24. */
 const LAST_HOST_IN_SUBNET = 254;
 /** One second per ping, in parallel across the subnet -- `ip neigh show` runs only after every ping returns. */
 const MAC_RESOLVE_PING_TIMEOUT_S = 1;
@@ -947,10 +911,8 @@ const MAC_RESOLVE_READ_TIMEOUT_MS = 20_000;
 /**
  * The /24 an address is on ("203.0.113" from "203.0.113.90"), or null when it is not a plain IPv4 literal
  * (a hostname, or an address already carrying a port `neighbourScript`'s own `addressOf` strips first).
- * @param {string} address
- * @returns {string | null}
  */
-export function subnetOf(address) {
+export function subnetOf(address: string): string | null {
   if (!IPV4.test(address)) return null;
   return address.split(".").slice(0, 3).join(".");
 }
@@ -959,10 +921,8 @@ export function subnetOf(address) {
  * Ping every address on the subnet once, in parallel, then dump the WHOLE neighbour table -- not one
  * address's entry the way `neighbourScript` above reads it, because a box that drifted is at an address
  * this file never pinned and so never otherwise asks about.
- * @param {string} subnet
- * @returns {string}
  */
-export function macResolveScript(subnet) {
+export function macResolveScript(subnet: string): string {
   if (!/^\d{1,3}(\.\d{1,3}){2}$/.test(subnet)) {
     throw new Error(`macResolveScript: not a /24 prefix, refusing to send it to a shell: ${subnet}`);
   }
@@ -974,12 +934,9 @@ export function macResolveScript(subnet) {
  * Every entry a bare `ip neigh show` dump carries. FAILED and INCOMPLETE lines have no `lladdr` and are
  * skipped rather than reported with a null MAC -- nothing here needs to say a table ENTRY was absent, only
  * where a MAC currently answers.
- * @param {string} stdout
- * @returns {{ ip: string, mac: string, state: string }[]}
  */
-export function parseNeighbourTable(stdout) {
-  /** @type {{ ip: string, mac: string, state: string }[]} */
-  const entries = [];
+export function parseNeighbourTable(stdout: string): { ip: string; mac: string; state: string; }[] {
+  const entries: { ip: string; mac: string; state: string; }[] = [];
   for (const line of stdout.split("\n")) {
     const match = line.match(/^(\d{1,3}(?:\.\d{1,3}){3})\s+dev\s+\S+\s+lladdr\s+([0-9a-fA-F:]{11,17})\s+(\S+)\s*$/);
     const mac = match && normaliseMac(match[2]);
@@ -992,13 +949,12 @@ export function parseNeighbourTable(stdout) {
  * Where a MAC that did not answer at its PINNED address is now -- REACHABLE entries only, reusing
  * `linkVerdictOf`'s own rule (#1298) that a cached STALE/DELAY line is not a live answer, and never the
  * pinned address itself, which is exactly the one already failing there.
- * @param {{ name: string, host: string, mac: string }[]} candidates
- * @param {{ ip: string, mac: string, state: string }[]} table
+ *
+ *
  * @returns {Map<string, string>} inventory name -> the address it now answers at
  */
-export function resolveMovedByMac(candidates, table) {
-  /** @type {Map<string, string>} */
-  const resolved = new Map();
+export function resolveMovedByMac(candidates: { name: string; host: string; mac: string; }[], table: { ip: string; mac: string; state: string; }[]): Map<string, string> {
+  const resolved: Map<string, string> = new Map();
   for (const { name, host, mac } of candidates) {
     const found = table.find((entry) => entry.mac === mac && entry.state === "REACHABLE" && entry.ip !== host);
     if (found) resolved.set(name, found.ip);
@@ -1009,28 +965,23 @@ export function resolveMovedByMac(candidates, table) {
 /**
  * THE LIVE FALLBACK #2752 ASKS FOR, run over the same ssh channel `askControlPlane` already opens for the
  * per-address read above. DESIGN NOTE, since this row's own Acceptance asked for one: this pings the whole
- * /24 over ssh rather than calling `fleet-discover.mjs`'s `scan()` in-process, because `scan()` probes
+ * /24 over ssh rather than calling `fleet-discover.ts`'s `scan()` in-process, because `scan()` probes
  * `/health` from wherever ITS OWN process runs, and the entire reason this file shells out for layer 2 at
  * all (`askControlPlane`, above) is that `fleet:status`'s caller is often not on the workers' segment --
  * running `scan()` here would scan the CALLER's subnet, not the fleet's. `normaliseMac` is reused directly
- * from `fleet-discover.mjs` (#2667) rather than restated, and the ping-sweep-then-`ip neigh show` shape is
+ * from `fleet-discover.ts` (#2667) rather than restated, and the ping-sweep-then-`ip neigh show` shape is
  * the same one that file's `scan()`/ARP read already established, moved onto the control plane's ssh
  * channel here rather than run locally.
  *
  * PAID ONLY WHEN NEEDED: called with an empty list whenever every silent box either reads ON or declares
  * no MAC, so a healthy fleet -- or one with no MACs enrolled -- asks for nothing beyond what #1298 already
  * asks, matching this file's "a healthy fleet pays nothing" rule one level up.
- *
- * @param {{ name: string, host: string, mac: string }[]} candidates
- * @param {{ run?: typeof spawnSync, controlPlane?: () => { host: string, key: string } }} [deps]
- * @returns {Map<string, string>}
  */
-export function resolveMovedByMacLive(candidates, { run = spawnSync, controlPlane = controlPlaneFromEnvironment } = {}) {
+export function resolveMovedByMacLive(candidates: { name: string; host: string; mac: string; }[], { run = spawnSync, controlPlane = controlPlaneFromEnvironment }: { run?: typeof spawnSync; controlPlane?: () => { host: string; key: string; }; } = {}): Map<string, string> {
   const askable = candidates.filter((c) => subnetOf(c.host));
   if (!askable.length) return new Map();
-  const subnet = /** @type {string} */ (subnetOf(askable[0].host));
-  /** @type {{ host: string, key: string }} */
-  let target;
+  const subnet = (subnetOf(askable[0].host) as string);
+  let target: { host: string; key: string; };
   try {
     target = controlPlane();
   } catch {
@@ -1058,10 +1009,13 @@ export function resolveMovedByMacLive(candidates, { run = spawnSync, controlPlan
  *
  * @param {{ name: string, link: LinkAnswer, movedTo?: string | null }[]} asked the boxes that did not
  *        answer, with their answers
- * @returns {{ lines: string[], gate: { hold: boolean, off: string[], unknown: string[],
- *             moved?: { name: string, movedTo: string }[] } | null }}
  */
-export function linkLayerReport(asked) {
+export function linkLayerReport(asked: { name: string; link: LinkAnswer; movedTo?: string | null; }[]): {
+    lines: string[]; gate: {
+        hold: boolean; off: string[]; unknown: string[];
+        moved?: { name: string; movedTo: string; }[];
+    } | null;
+} {
   if (!asked.length) return { lines: [], gate: null };
   const named = asked.map(({ name, link, movedTo }) => ({ name: inventoryName(name), link, movedTo: movedTo ?? null }));
   const moved = named.filter((entry) => entry.movedTo);
@@ -1078,18 +1032,12 @@ export function linkLayerReport(asked) {
   return {
     lines: [...named.filter((entry) => !entry.movedTo).map(({ name, link }) => linkLine(name, link)),
       ...movedLines, ...(off.length ? OFF_ADVICE : []), gateLine],
-    gate: { hold, off, unknown, ...(moved.length ? { moved: moved.map(({ name, movedTo }) => ({ name, movedTo: /** @type {string} */ (movedTo) })) } : {}) },
+    gate: { hold, off, unknown, ...(moved.length ? { moved: moved.map(({ name, movedTo }) => ({ name, movedTo: (movedTo as string) })) } : {}) },
   };
 }
 
-/**
- * @param {WorkerRow[]} rows
- * @param {(rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers>} linkRead
- * @param {Map<string, string>} [macByName] declared MAC per inventory name, for the #2752 fallback below
- * @param {(candidates: { name: string, host: string, mac: string }[]) =>
- *           Map<string, string> | Promise<Map<string, string>>} [macRead]
- */
-async function linkLayerFor(rows, linkRead, macByName = new Map(), macRead = resolveMovedByMacLive) {
+/** @param {Map<string, string>} [macByName] declared MAC per inventory name, for the #2752 fallback below */
+async function linkLayerFor(rows: WorkerRow[], linkRead: (rows: { name: string; url: string; }[]) => LinkAnswers | Promise<LinkAnswers>, macByName: Map<string, string> = new Map(), macRead: (candidates: { name: string; host: string; mac: string; }[]) => Map<string, string> | Promise<Map<string, string>> = resolveMovedByMacLive) {
   const silent = rows.filter((row) => row.state === "unreachable");
   if (!silent.length) return linkLayerReport([]);
   const answers = await linkRead(silent);
@@ -1104,7 +1052,7 @@ async function linkLayerFor(rows, linkRead, macByName = new Map(), macRead = res
   // on -- nothing here widens what a healthy fleet, or an un-enrolled one, pays.
   const candidates = asked
     .filter((entry) => entry.link.verdict !== LINK.ON && entry.mac)
-    .map((entry) => ({ name: entry.name, host: entry.host, mac: /** @type {string} */ (entry.mac) }));
+    .map((entry) => ({ name: entry.name, host: entry.host, mac: (entry.mac as string) }));
   const movedTo = candidates.length ? await macRead(candidates) : new Map();
   return linkLayerReport(asked.map((entry) => ({ ...entry, movedTo: movedTo.get(entry.name) ?? null })));
 }
@@ -1113,11 +1061,8 @@ async function linkLayerFor(rows, linkRead, macByName = new Map(), macRead = res
  * What a reader sees first: the link-layer lines for any box that did not answer, THEN the switch's reading
  * of each worker (#3242, beside them: both say where the wire stands), THEN the table -- #1298's "prints that
  * FIRST". A function rather than two writes in `main`, so the order is asserted, not hoped.
- *
- * @param {{ rows: WorkerRow[], linkLayer: { lines: string[] }, switch?: { lines: string[] } }} status
- * @returns {string[]}
  */
-export function renderHead(status) {
+export function renderHead(status: { rows: WorkerRow[]; linkLayer: { lines: string[]; }; switch?: { lines: string[]; }; }): string[] {
   const table = renderTable(status.rows);
   const lines = [...status.linkLayer.lines, ...(status.switch?.lines ?? [])];
   if (!lines.length) return table;
@@ -1125,26 +1070,26 @@ export function renderHead(status) {
 }
 
 /**
- * @param {{ workers?: () => { name: string, url: string, mac?: string }[],
- *           probe?: (worker: { name: string, url: string }) => Promise<any>,
- *           linkRead?: (rows: { name: string, url: string }[]) => LinkAnswers | Promise<LinkAnswers>,
- *           macRead?: (candidates: { name: string, host: string, mac: string }[]) =>
- *             Map<string, string> | Promise<Map<string, string>>,
- *           switchRead?: (workers: { name: string, url: string, mac?: string }[]) =>
- *             import("./fleet-switch.mjs").SwitchReport | Promise<import("./fleet-switch.mjs").SwitchReport> }} [deps]
  *   injectable ONLY so a
  *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
  *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
  *   the verdict holds the function and leaves the CALL unheld, which is where the 19.7 hours happened.
  *   Production passes nothing and the defaults are the real probes.
  */
-export async function fleetStatus(deps) {
+export async function fleetStatus(deps?: {
+        workers?: () => { name: string; url: string; mac?: string; }[];
+        probe?: (worker: { name: string; url: string; }) => Promise<WorkerProbe>;
+        linkRead?: (rows: { name: string; url: string; }[]) => LinkAnswers | Promise<LinkAnswers>;
+        macRead?: (candidates: { name: string; host: string; mac: string; }[]) => Map<string, string> | Promise<Map<string, string>>;
+        switchRead?: (workers: { name: string; url: string; mac?: string; }[]) =>
+            import("./fleet-switch.ts").SwitchReport | Promise<import("./fleet-switch.ts").SwitchReport>;
+    }) {
   const workers = (deps?.workers ?? fleetToProbe)();
   const probes = await Promise.all(workers.map(deps?.probe ?? probeWorker));
   const rows = summarise(probes);
   // #2752: the inventory NAME (not the `name  address` row shape) is the key both sides agree on --
   // `linkLayerFor` strips the same way via `inventoryName` before it looks a box up here.
-  const macByName = new Map(workers.filter((w) => w.mac).map((w) => [inventoryName(w.name), /** @type {string} */ (w.mac)]));
+  const macByName = new Map(workers.filter((w) => w.mac).map((w) => [inventoryName(w.name), (w.mac as string)]));
   // #1298: only the boxes that did not answer are asked about at LAYER 2, so a healthy fleet pays nothing.
   const linkLayer = await linkLayerFor(rows, deps?.linkRead ?? readLinkLayer, macByName, deps?.macRead ?? resolveMovedByMacLive);
   // #3242: the switch is asked about EVERY worker, not only the silent ones -- a box that answers /health on a
@@ -1208,11 +1153,8 @@ export async function fleetStatus(deps) {
  * `adopted`, so re-provisioning five cold boxes beside ten adopted ones reproduces the mismatch. The
  * advice then names the ruling (#2654) instead of sending the reader round a loop that cannot end.
  * Any OTHER field disagreeing alongside it keeps today's advice, because that part IS convergeable.
- *
- * @param {{ field: string }[]} mismatches
- * @returns {string}
  */
-export function inconsistentAdvice(mismatches) {
+export function inconsistentAdvice(mismatches: { field: string; }[]): string {
   const notInterchangeable = "  These guests are NOT interchangeable for capture, so a corpus run must not start: two\n"
     + "  workers on different values would share a cache key while producing different evidence.\n";
   const onlyProfile = mismatches.length > 0 && mismatches.every(({ field }) => field === "browserProfile");
@@ -1261,7 +1203,7 @@ async function main() {
     if (warming) process.stdout.write(warming);
     if (status.codes.length > 1) {
       const byCode = status.codes.map((c) =>
-        `${c.slice(0, 12)} on ${status.rows.filter((r) => r.code === c).length}`);
+        `${String(c).slice(0, 12)} on ${status.rows.filter((r) => r.code === c).length}`);
       process.stdout.write(`  fleet SPLIT — ${status.codes.length} different code hashes: `
         + `${byCode.join(", ")}.\n`
         + "  A deploy did not finish. Nothing is broken and no evidence is invalid, but a capture will\n"

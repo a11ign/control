@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 //
 // `packages/control/README.md`'s "Reaching the control plane itself" section is explicit: `A11Y_CONTROL_HOST`
 // and `A11Y_PVE_KEY` are "deliberately undocumented as specific values anywhere public ... and they do not
-// belong in git." `fleet-playbook.mjs` and `lab-pipeline.mjs` both violated that for BOTH values, one file
+// belong in git." `fleet-playbook.ts` and `lab-pipeline.ts` both violated that for BOTH values, one file
 // away from where it is written down: each hardcoded a real, specific LAN address as
 // `process.env.A11Y_CONTROL_HOST || "..."` (#83) and a real, specific key filename as
 // `process.env.A11Y_PVE_KEY || \`${HOME}/.ssh/...\`` (#85) -- so an operator who never set either variable
@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 // than silently doing something that happens to work on one machine and nowhere else.
 //
 // Called from inside `main()`, never at module load: `onTheControlPlane()` takes the host as an explicit
-// parameter in its own tests, and `fleet-playbook.mjs`'s CLI-flag validation already runs at import time --
+// parameter in its own tests, and `fleet-playbook.ts`'s CLI-flag validation already runs at import time --
 // stacking a second, unconditional throw there would make importing this module for its pure helpers (as
 // the tests do) depend on an environment variable those tests have no reason to set.
 //
@@ -56,11 +56,8 @@ const DEFAULT_CONTROL_HOST_FILE = "/etc/a11ign/control-host";
  * The durable, operator-installed copy of the control plane's address, or `null` -- never a raw ENOENT
  * or an empty string standing in for "not there". Absent on a machine that has never run
  * `fleet:control-host-install`, which is a normal, common state, not a fault.
- *
- * @param {string} [path]
- * @returns {string | null}
  */
-export function readControlHostFile(path = process.env[CONTROL_HOST_FILE_ENV] || DEFAULT_CONTROL_HOST_FILE) {
+export function readControlHostFile(path: string = process.env[CONTROL_HOST_FILE_ENV] || DEFAULT_CONTROL_HOST_FILE): string | null {
   try {
     const content = readFileSync(path, "utf8").trim();
     return content || null;
@@ -73,10 +70,8 @@ export function readControlHostFile(path = process.env[CONTROL_HOST_FILE_ENV] ||
  * The control plane's address, or a loud refusal naming the fix. Checks `A11Y_CONTROL_HOST` first, then
  * the file `readControlHostFile` reads -- see this file's header, "The third state", for why that second
  * source is not the guess #83 removed.
- *
- * @returns {string}
  */
-export function requireControlPlaneHost() {
+export function requireControlPlaneHost(): string {
   const host = process.env.A11Y_CONTROL_HOST || readControlHostFile();
   if (!host) {
     throw new Error("A11Y_CONTROL_HOST is required and has no default -- see packages/control/README.md's "
@@ -91,10 +86,8 @@ export function requireControlPlaneHost() {
  * The SSH private key that reaches the control plane itself (`A11Y_PVE_KEY`), or a loud refusal naming
  * the fix. NOT the fleet's own key (`A11Y_SSH_KEY`) -- see this file's header for why that one is a
  * different, deliberately-public convention rather than a secret.
- *
- * @returns {string}
  */
-export function requireControlPlaneKey() {
+export function requireControlPlaneKey(): string {
   const key = process.env.A11Y_PVE_KEY;
   if (!key) {
     throw new Error("A11Y_PVE_KEY is required and has no default -- see packages/control/README.md's "

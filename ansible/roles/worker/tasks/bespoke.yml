@@ -235,9 +235,11 @@
   ansible.builtin.command:
     argv:
       - node
+      - --import
+      - /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
       - --input-type=module
       - -e
-      - "import { readWakeProof, DEFAULT_PROOF_PATH } from './packages/control/src/fleet-wake.mjs'; console.log(JSON.stringify(readWakeProof(DEFAULT_PROOF_PATH)))"
+      - "import { readWakeProof, DEFAULT_PROOF_PATH } from './packages/control/src/fleet-wake.ts'; console.log(JSON.stringify(readWakeProof(DEFAULT_PROOF_PATH)))"
     chdir: "{{ playbook_dir }}/../../.."
   register: wake_proof_ledger
   changed_when: false

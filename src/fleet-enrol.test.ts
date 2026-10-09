@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { enrol, enrolmentBlock, inventoryHosts, nextWorkerName } from "./fleet-discover.mjs";
+import { enrol, enrolmentBlock, inventoryHosts, nextWorkerName } from "./fleet-discover.ts";
 
 const INVENTORY = `all:
   children:

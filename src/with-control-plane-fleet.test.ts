@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { withControlPlaneFleet, resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
+import { withControlPlaneFleet, resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
 
 /** A fake `spawnSync` that records the call and returns a clean exit, never spawning anything real. */
 function recordingRun(calls: unknown[][]) {

@@ -1,6 +1,6 @@
 // no-token: gh -- every test below runs `controlPlaneCheckout` (a pure string builder), a shell against a fixture
 // checkout, a play against a fixture lab, or reads source text; none calls `readFleetGatedIssues` or any other
-// path through fleet-playbook.mjs that runs `gh`, which is the only reason the import reaches the token.
+// path through fleet-playbook.ts that runs `gh`, which is the only reason the import reaches the token.
 /**
  * THE CONTROL PLANE AND THE LAB HANDLE THE LAYER'S CHECKOUT BESIDE THE CORE'S (ADR 0039 item 6, row 6c, #3396).
  *
@@ -27,9 +27,9 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { CONTROL_PLANE_CHECKOUT, CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
-import { controlPlaneCheckout } from "./fleet-playbook.mjs";
-import { LAYER_REF, layerCheckoutMove, layersFrom } from "./layer-checkouts.mjs";
+import { CONTROL_PLANE_CHECKOUT, CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
+import { controlPlaneCheckout } from "./fleet-playbook.ts";
+import { LAYER_REF, layerCheckoutMove, layersFrom } from "./layer-checkouts.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const ANSIBLE = resolve(REPO, "packages/control/ansible");
@@ -140,7 +140,7 @@ test("a layer with no repository of its own, or an unsafe path, cannot be pinned
 });
 
 test("lab:pipeline moves the layer with the core: it knows --layer-ref, refuses a missing pin, and adds the move", () => {
-  const source = codeText(read("packages/control/src/lab-pipeline.mjs"));
+  const source = codeText(read("packages/control/src/lab-pipeline.ts"));
   assert.match(source, /refuseUnknownFlags\(\[[^\]]*"--layer-ref="/, "an unknown flag is refused, so a pin must be a KNOWN one");
   assert.match(source, /layerPins\(layerRefValues\(args\)\)/, "the pins are validated by the same decider `fleet:deploy` uses");
   const remote = source.slice(source.indexOf("const remote = `"), source.indexOf("systemctl stop"));
@@ -150,7 +150,7 @@ test("lab:pipeline moves the layer with the core: it knows --layer-ref, refuses 
 });
 
 test("fleet:deploy passes the layers' half of the pair to the control plane's move, not only to the guests", () => {
-  const source = codeText(read("packages/control/src/fleet-playbook.mjs"));
+  const source = codeText(read("packages/control/src/fleet-playbook.ts"));
   assert.match(source, /ssh\(controlPlaneCheckout\(ref, expected, layerCommits\)\)/);
 });
 

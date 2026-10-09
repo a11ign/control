@@ -9,7 +9,7 @@
  * ## Where this runs, and why it needs no SSH
  *
  * ON THE CONTROL PLANE ITSELF, as the systemd timer `auto-off-schedule.yml` installs (live since #2734,
- * with `--apply` in its unit since #2784). `fleet-playbook.mjs` cannot be reused for the dispatch half -- its whole job is to SSH
+ * with `--apply` in its unit since #2784). `fleet-playbook.ts` cannot be reused for the dispatch half -- its whole job is to SSH
  * INTO the control plane from an operator machine that holds `A11Y_PVE_KEY`, and a timer already standing
  * on the control plane is not that machine. This file talks to workers the way `sleep.yml` itself does:
  * plain HTTP to `/health`, and `ansible-playbook` invoked LOCALLY, no ssh hop needed because it is already
@@ -23,12 +23,12 @@
  * dispatch is still protected by a SECOND, independent read -- not because this file re-derives that
  * safety, but because it never had to.
  *
- * ## The idle-since state file is `fleet-watch.mjs`'s own shape, one field over
+ * ## The idle-since state file is `fleet-watch.ts`'s own shape, one field over
  *
- * `readState`/`writeState`/`advance` here are the identical pattern `fleet-watch.mjs` already proved for
+ * `readState`/`writeState`/`advance` here are the identical pattern `fleet-watch.ts` already proved for
  * "how long has this been true, across a fresh process every tick" -- a first-seen timestamp per worker,
  * dropped the instant the condition clears rather than marked resolved. The one difference: a `no-answer`
- * probe RESETS the streak here (see `advance`'s own comment), where `fleet-watch.mjs` never has to make
+ * probe RESETS the streak here (see `advance`'s own comment), where `fleet-watch.ts` never has to make
  * that call because its own probe (`fleetStatus`) never returns "unknown".
  *
  * ## `Fleet-hold-until:` does NOT gate this file (ceo's ruling on #2726/#2728, #2737)
@@ -36,7 +36,7 @@
  * This file used to read `Fleet-hold-until:` before deciding, on the theory that a power cycle mid-hold
  * could strand a multi-round same-build capture sequence the way #1767/#1768 lost their baselines. Re-read
  * against what #1839's hold actually protects: only `fleet:deploy`/`fleet:provision` can change a worker's
- * `codeVersion`/`provisionRevision` stamp, and both already refuse while a hold is active (`fleet-playbook.mjs`'s
+ * `codeVersion`/`provisionRevision` stamp, and both already refuse while a hold is active (`fleet-playbook.ts`'s
  * own `enforceSequenceHold`). A power-off/wake cycle changes neither, so the hold read here protected
  * nothing. It also would have needed a durable GitHub credential on the control plane (#2726) purely to
  * answer a question whose answer never mattered -- removed instead of provisioned. The "never mid-capture"
@@ -48,7 +48,7 @@
  * The idle test says a box is not needed. It says nothing about whether the box can be brought BACK, and
  * auto-off used to remove any worker with a well-formed MAC, so two boxes that never woke on their reserved
  * address were in the pool (worker 4 never appeared on the network, worker 6 woke at another address).
- * The pool's admission is now a proof, written by `fleet-wake.mjs` when a worker that was SILENT came up
+ * The pool's admission is now a proof, written by `fleet-wake.ts` when a worker that was SILENT came up
  * ready on its inventory address after one packet, and dropped by any wake that fails. Without a recent
  * proof the worker is `keep wake-unproven` and named so in every report, so a box that has never proved a
  * wake is a visible to-do and never a silent absence. A fresh checkout holds no proof: nothing is powered
@@ -83,7 +83,7 @@
  *
  * A refusal is LOUD, because fail-closed that nobody sees is a fleet left powered on for days (#2784): the tick prints
  * `refuse <reason>` on every tick that holds a shutdown back, exits 1 so the oneshot unit shows FAILED in
- * `systemctl --failed` and the journal, and records the refusal in the state file for `fleet-watch.mjs`.
+ * `systemctl --failed` and the journal, and records the refusal in the state file for `fleet-watch.ts`.
  *
  * ## A play in flight is not idle (#3543, from #3524's 19:33Z failure)
  *
@@ -93,7 +93,7 @@
  * Likely the cause, not proven for worker 2: nobody read this timer's decision line for that box. A play changes a
  * box's stamp AND needs the box up, and a box waiting its turn in a serial play answers `busy: false` throughout.
  *
- * THE SIGNAL is systemd's own. `fleet-playbook.mjs`'s `startPlaybookUnit` runs every play as the transient unit
+ * THE SIGNAL is systemd's own. `fleet-playbook.ts`'s `startPlaybookUnit` runs every play as the transient unit
  * `a11y-fleet-<playbook>` (`systemd-run --remain-after-exit`), so "a play is running" is "such a unit is not
  * finished". WRITTEN by `systemd-run` when the play starts; CLEARED by systemd when ansible exits (`active (exited)`
  * or `failed`), so no session has to remember to clear it. `readPlaysInFlight` reads it with a local `systemctl`
@@ -128,13 +128,13 @@ import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
-import { CONTROL_LAYER, laidControl, layerDeclaration, layerOwning, layerPinTag, pinnedLayerTag } from "./layer-checkouts.mjs";
+import { CONTROL_LAYER, laidControl, layerDeclaration, layerOwning, layerPinTag, pinnedLayerTag } from "./layer-checkouts.ts";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
-import { inventoryHosts } from "./fleet-discover.mjs";
-import { inventoryPathFor } from "./control-plane-fleet.mjs";
-import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
-import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.mjs";
-/** @typedef {import("./fleet-wake.mjs").ProofTransport} ProofTransport */
+import { inventoryHosts } from "./fleet-discover.ts";
+import { inventoryPathFor } from "./control-plane-fleet.ts";
+import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
+import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.ts";
+export type ProofTransport = import("./fleet-wake.ts").ProofTransport;
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
 
@@ -147,7 +147,7 @@ const PORT = 8765;
 
 /**
  * THE PER-PROBE TIMEOUT, WITH ITS READING (done-when 7.2) -- this row's OWN derivation, agreeing with
- * `fleet-wake.mjs`'s `HEALTH_TIMEOUT_MS` on the READING rather than copying the number by assumption.
+ * `fleet-wake.ts`'s `HEALTH_TIMEOUT_MS` on the READING rather than copying the number by assumption.
  *
  * `orchestrator`'s #2671, read on the real fleet: `/health` is slow on the FIRST request after 5 s idle,
  * not after a minute -- the worker rebuilds its environment block with two synchronous `powershell.exe`
@@ -156,7 +156,7 @@ const PORT = 8765;
  * above 5 s), so it is ALWAYS the slow case: 2.80-3.09 s on three boxes, 0.53-0.76 s on twelve. A LOADED
  * box (one that has just stopped a capture) can take up to ~10 s, because the same two calls block the
  * worker's whole event loop for that long. 12 s is that loaded ceiling plus 2 s of headroom -- the same
- * number `fleet-wake.mjs` arrived at from the same reading, for the same reason.
+ * number `fleet-wake.ts` arrived at from the same reading, for the same reason.
  */
 export const PROBE_TIMEOUT_MS = 12_000;
 
@@ -171,7 +171,7 @@ export const PROBE_TIMEOUT_MS = 12_000;
  */
 export const POLL_INTERVAL_MS = 10_000;
 
-/** `runs/` in the control plane's own checkout -- gitignored local state, `fleet-watch.mjs`'s own home. */
+/** `runs/` in the control plane's own checkout -- gitignored local state, `fleet-watch.ts`'s own home. */
 export const DEFAULT_STATE_PATH = "runs/fleet-auto-off-state.json";
 
 const ANSIBLE_DIR = fileURLToPath(new URL("../ansible/", import.meta.url));
@@ -180,40 +180,29 @@ const ANSIBLE_DIR = fileURLToPath(new URL("../ansible/", import.meta.url));
  * Does the inventory's `mac:` field for this worker actually accept a magic packet? "Has a MAC" means
  * accepted by `magicPacket()` (12 hex digits once separators are stripped), never merely a non-empty
  * string (#2655/#2656 chairman's constraint via `ceo`, 2026-09-26).
- *
- * @param {string | null | undefined} mac
- * @returns {boolean}
  */
-export function hasWakeableMac(mac) {
+export function hasWakeableMac(mac: string | null | undefined): boolean {
   if (!mac) return false;
   try { magicPacket(mac); return true; } catch { return false; }
 }
 
+export type Vitals = { captures?: number, uptimeMinutes?: number };
+export type IdleProbe = ({ outcome: "idle" } | { outcome: "busy" }) & Vitals | { outcome: "no-answer", detail: string };
 /**
  * WHAT ONE `/health` PROBE CAN SAY FOR THE PURPOSE OF AUTO-OFF -- a NARROWER question than
- * `fleet-wake.mjs`'s `probeWorker` (which asks about readiness, not idleness), because "busy" is the only
+ * `fleet-wake.ts`'s `probeWorker` (which asks about readiness, not idleness), because "busy" is the only
  * field this row cares about (done-when 7.1). A response that answers but cannot be read -- non-OK, or a
  * `busy` field that is not a plain boolean -- is folded into `no-answer`: it is "answered but unreadable",
  * which done-when 7.1 says must `keep`, exactly as a true timeout does.
  *
  * An answered probe also carries the worker's `vitals.captures` and `vitals.uptimeMinutes` when it reports
  * them, because this poll is the one that sees the worker's LAST reading before the power-off (#3208).
- *
- * @typedef {{ captures?: number, uptimeMinutes?: number }} Vitals
- * @typedef {({ outcome: "idle" } | { outcome: "busy" }) & Vitals | { outcome: "no-answer", detail: string }} IdleProbe
  */
 
-/**
- * @param {unknown} value
- * @returns {number | undefined}
- */
-const finiteNumber = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+const finiteNumber = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
-/**
- * @param {any} json a `/health` body
- * @returns {Vitals}
- */
-function vitalsOf(json) {
+/** @param {any} json a `/health` body */
+function vitalsOf(json: { vitals?: { captures?: unknown; uptimeMinutes?: unknown } } | undefined): Vitals {
   const captures = finiteNumber(json?.vitals?.captures);
   const uptimeMinutes = finiteNumber(json?.vitals?.uptimeMinutes);
   return {
@@ -222,17 +211,13 @@ function vitalsOf(json) {
   };
 }
 
-/**
- * @param {string} url the worker's base URL
- * @param {{ timeoutMs?: number, request?: typeof requestJson }} [options]
- * @returns {Promise<IdleProbe>}
- */
-export async function probeIdle(url, { timeoutMs = PROBE_TIMEOUT_MS, request = requestJson } = {}) {
+/** @param {string} url the worker's base URL */
+export async function probeIdle(url: string, { timeoutMs = PROBE_TIMEOUT_MS, request = requestJson }: { timeoutMs?: number; request?: typeof requestJson; } = {}): Promise<IdleProbe> {
   let response;
   try {
     response = await request(`${url}/health`, { timeoutMs });
   } catch (error) {
-    const { code, message } = /** @type {NodeJS.ErrnoException} */ (error);
+    const { code, message } = (error as NodeJS.ErrnoException);
     return { outcome: "no-answer", detail: `${code ? `${code}: ` : ""}${message}` };
   }
   if (!response.ok) return { outcome: "no-answer", detail: `/health answered HTTP ${response.status}` };
@@ -241,43 +226,32 @@ export async function probeIdle(url, { timeoutMs = PROBE_TIMEOUT_MS, request = r
   return { outcome: "no-answer", detail: "/health answered without a boolean `busy`" };
 }
 
-/** @typedef {Record<string, number>} SinceState */
+export type SinceState = Record<string, number>;
 
-/**
- * @typedef {{ reason: string, detail: string, at: number, since?: number }} Refusal why a shutdown was held back, `at` the
- *   tick that last said so (seconds old for as long as it stands) and `since` the FIRST tick of the unbroken run, which is
- *   the only one of the two that can date a standing refusal (#3859). Absent on a record written before the field existed.
- * @typedef {{ idleSince: SinceState, shutdownRequestedAt: SinceState, fetchedAt: number | null,
- *   refusal: Refusal | null }} AutoOffState
- */
+/** why a shutdown was held back, `at` the tick that last said so (seconds old for as long as it stands) and `since` the FIRST tick of the unbroken run, which is the only one of the two that can date a standing refusal (#3859). Absent on a record written before the field existed. */
+export type Refusal = { reason: string, detail: string, at: number, since?: number };
+export type AutoOffState = { idleSince: SinceState, shutdownRequestedAt: SinceState, fetchedAt: number | null, refusal: Refusal | null };
 
-/** @param {unknown} value @returns {Record<string, number>} */
-const recordOf = (value) => (value && typeof value === "object" && !Array.isArray(value) ? /** @type {any} */ (value) : {});
+const recordOf = (value: unknown): Record<string, number> => (value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, number>) : {});
 
 /**
  * A recorded refusal, with `since` kept only when it is a time: a string there would otherwise be carried forward and
  * read as a date by whoever ages the refusal.
- *
- * @param {any} refusal
- * @returns {Refusal | null}
  */
-function readRefusal(refusal) {
+function readRefusal(recorded: unknown): Refusal | null {
+  const refusal = recorded as (Partial<Refusal> & { since?: unknown }) | null | undefined;
   if (!refusal || typeof refusal.reason !== "string") return null;
   const { since, ...rest } = refusal;
   const time = finiteNumber(since);
-  return time === undefined ? rest : { ...rest, since: time };
+  return (time === undefined ? rest : { ...rest, since: time }) as Refusal;
 }
 
 /**
  * The persisted state: idle-since, shutdown-requested-at, when `origin/main` was last fetched, and the refusal the
- * last tick made (#3275). Missing or corrupt reads as EMPTY, never a crash -- `fleet-watch.mjs`'s own rule, one file
+ * last tick made (#3275). Missing or corrupt reads as EMPTY, never a crash -- `fleet-watch.ts`'s own rule, one file
  * over: a tick must not take itself down over its own bookkeeping. An empty `fetchedAt` only costs a fetch.
- *
- * @param {string} path
- * @param {(path: string, encoding: "utf8") => string} read
- * @returns {AutoOffState}
  */
-export function readState(path, read = readFileSync) {
+export function readState(path: string, read: (path: string, encoding: "utf8") => string = readFileSync): AutoOffState {
   try {
     const parsed = JSON.parse(read(path, "utf8"));
     return {
@@ -291,19 +265,14 @@ export function readState(path, read = readFileSync) {
   }
 }
 
-/**
- * @param {string} path
- * @param {Partial<AutoOffState> & { idleSince: SinceState, shutdownRequestedAt: SinceState }} state
- * @param {(path: string, data: string) => void} write
- */
-export function writeState(path, state, write = writeFileSync) {
+export function writeState(path: string, state: Partial<AutoOffState> & { idleSince: SinceState; shutdownRequestedAt: SinceState; }, write: (path: string, data: string) => void = writeFileSync) {
   write(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 /**
  * The idle-since ledger, one tick on. A worker probed `idle` keeps its EXISTING first-idle timestamp, or
  * gets `now` if this is the first idle tick since it was last busy or unreadable. A worker probed `busy`
- * is dropped (the streak ends the instant it clears -- `fleet-watch.mjs`'s own choice, one condition over).
+ * is dropped (the streak ends the instant it clears -- `fleet-watch.ts`'s own choice, one condition over).
  *
  * A worker probed `no-answer` is ALSO dropped -- done-when 7.3's own question, decided RESET rather than
  * HOLD: a worker mid-capture is plausibly the one slow to answer (`#2671`: the same synchronous calls that
@@ -311,17 +280,11 @@ export function writeState(path, state, write = writeFileSync) {
  * answer and simply not answer at all). Holding the old idle-since across a no-answer would let that
  * capture's own duration count as CONFIRMED idle time the moment the worker answers again -- exactly the
  * miss done-when 7.3 warns against. Resetting costs one full re-accumulation of `IDLE_THRESHOLD_MS` after
- * every blip; that is the safe direction, the same "cost of generosity" shape `fleet-wake.mjs`'s own
+ * every blip; that is the safe direction, the same "cost of generosity" shape `fleet-wake.ts`'s own
  * `HEALTH_TIMEOUT_MS` comment argues from.
- *
- * @param {{ name: string, outcome: string }[]} probes
- * @param {SinceState} previous
- * @param {number} now
- * @returns {SinceState}
  */
-export function advance(probes, previous, now) {
-  /** @type {SinceState} */
-  const next = {};
+export function advance(probes: { name: string; outcome: string; }[], previous: SinceState, now: number): SinceState {
+  const next: SinceState = {};
   for (const probe of probes) {
     if (probe.outcome !== "idle") continue;
     next[probe.name] = previous[probe.name] ?? now;
@@ -335,41 +298,29 @@ export function advance(probes, previous, now) {
  * afterwards (the expected shape of a box actually going down), and DROPPED the moment the worker answers
  * again -- `idle` (the shutdown never actually happened, or the box came back) or `busy` (a capture raced
  * the shutdown and `sleep.yml`'s own refusal won, which is the whole point of done-when 2).
- *
- * @param {{ name: string, outcome: string }[]} probes
- * @param {SinceState} previous
- * @returns {SinceState}
  */
-export function advanceShutdownRequested(probes, previous) {
-  /** @type {SinceState} */
-  const next = {};
+export function advanceShutdownRequested(probes: { name: string; outcome: string; }[], previous: SinceState): SinceState {
+  const next: SinceState = {};
   for (const probe of probes) {
     if (probe.outcome === "no-answer" && previous[probe.name] !== undefined) next[probe.name] = previous[probe.name];
   }
   return next;
 }
 
-/**
- * @typedef {{
- *   name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer",
- *   idleSince: number | null, shutdownRequestedAt: number | null, wakeProvenAt: number | null,
- *   batchQueued: boolean, leasePending: boolean, playInFlight?: PlayReading,
- * }} DecisionInput
- * @typedef {{ action: "off" | "keep", reason: string }} Decision
- * @typedef {{ standing: ReturnType<typeof proofStanding>, provenAt: number | null }} ProofReading
- */
+export type DecisionInput = { name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer", idleSince: number | null, shutdownRequestedAt: number | null, wakeProvenAt: number | null, batchQueued: boolean, leasePending: boolean, playInFlight?: PlayReading, };
+export type Decision = { action: "off" | "keep", reason: string };
+export type ProofReading = { standing: ReturnType<typeof proofStanding>, provenAt: number | null };
 
 const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 
+export type PlayReading = "none" | "running" | "unreadable";
 /**
  * Is a play running on the control plane? `unreadable` is its own answer and never "none" (#3543). Absent on a
  * `DecisionInput` means the caller did not ask: `tick` always supplies it, and `main` supplies the real reader.
- *
- * @typedef {"none" | "running" | "unreadable"} PlayReading
  */
 
 /**
- * The playbooks `fleet-playbook.mjs` can start, and ONLY those, by the name its unit carries: its `PLAYBOOKS` minus the
+ * The playbooks `fleet-playbook.ts` can start, and ONLY those, by the name its unit carries: its `PLAYBOOKS` minus the
  * `.yml`, which is how `startPlaybookUnit` builds `a11y-fleet-<name>`. `PLAYBOOKS`, enforced at `parseArgs`, is the whole
  * set of names it can turn into a unit. Not every `ansible/*.yml`: a file there that the launcher cannot start
  * (`provision.yml`, `lab-job.yml`) is no play, and counting it would let a stale or unrelated `a11y-fleet-*` unit keep
@@ -381,27 +332,22 @@ const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 export const LAUNCHABLE_PLAYBOOK_NAMES = ["deploy", "sleep", "provision-role", "recover", "inventory-install",
   "control-host-install", "os-rollback", "collect-logs"];
 
-/** Each launchable playbook's unit, `a11y-fleet-<name>.service`. @returns {string[]} */
-const playbookUnits = () => LAUNCHABLE_PLAYBOOK_NAMES.map((name) => `a11y-fleet-${name}.service`);
+/** Each launchable playbook's unit, `a11y-fleet-<name>.service`. */
+const playbookUnits = (): string[] => LAUNCHABLE_PLAYBOOK_NAMES.map((name) => `a11y-fleet-${name}.service`);
 
 /**
  * A play unit is finished when systemd says so: `failed`, `inactive`, or `active (exited)` -- what
  * `--remain-after-exit` leaves behind. Anything else, including a sub-state this file has not seen, is a play still
  * going: unknown reads as running because the other reading powers a box off mid-play.
- *
- * @param {{ active: string, sub: string }} unit
  */
-const playFinished = ({ active, sub }) => active === "failed" || active === "inactive" || (active === "active" && sub === "exited");
+const playFinished = ({ active, sub }: { active: string; sub: string; }) => active === "failed" || active === "inactive" || (active === "active" && sub === "exited");
 
 /**
  * Read the play signal (#3543): the `a11y-fleet-<playbook>` units on this host, via `systemctl list-units`. Pure over
  * `run`, so a test supplies systemd's answer. The tick's own unit `a11y-fleet-auto-off.service` is running whenever
  * this runs and is not a playbook's unit, so only the units of `LAUNCHABLE_PLAYBOOK_NAMES` are counted.
- *
- * @param {{ run?: typeof spawnSync, units?: string[] }} [deps]
- * @returns {{ reading: PlayReading, detail: string }}
  */
-export function readPlaysInFlight({ run = spawnSync, units = playbookUnits() } = {}) {
+export function readPlaysInFlight({ run = spawnSync, units = playbookUnits() }: { run?: typeof spawnSync; units?: string[]; } = {}): { reading: PlayReading; detail: string; } {
   const result = run("systemctl", ["list-units", "--all", "--type=service", "--no-pager", "--output=json", "a11y-fleet-*.service"],
     { encoding: "utf8" });
   if (result.error || result.status !== 0) {
@@ -411,7 +357,7 @@ export function readPlaysInFlight({ run = spawnSync, units = playbookUnits() } =
   try {
     listed = JSON.parse(result.stdout);
   } catch (cause) {
-    return { reading: "unreadable", detail: `systemctl list-units did not answer JSON (${/** @type {Error} */ (cause).message})` };
+    return { reading: "unreadable", detail: `systemctl list-units did not answer JSON (${(cause as Error).message})` };
   }
   if (!Array.isArray(listed) || listed.some((u) => typeof u?.unit !== "string" || typeof u?.active !== "string" || typeof u?.sub !== "string")) {
     return { reading: "unreadable", detail: "systemctl list-units answered JSON without unit/active/sub on every row" };
@@ -434,26 +380,16 @@ export const LAPSE_WARNING_MS = 48 * MS_PER_HOUR;
  * the window, `never` no proof at all. A proof stamped in the future is a clock fault and is `never`, not `proven`:
  * the answer to "can it be brought back" is never guessed in the direction of powering off. The window's last
  * millisecond is still a proof, so `lapsed` begins one past `PROOF_WINDOW_MS`.
- *
- * @param {number | null} provenAt
- * @param {number} now
- * @returns {"proven" | "lapsing" | "lapsed" | "never"}
  */
-export function proofStanding(provenAt, now) {
+export function proofStanding(provenAt: number | null, now: number): "proven" | "lapsing" | "lapsed" | "never" {
   if (provenAt === null || provenAt > now) return "never";
   const age = now - provenAt;
   if (age > PROOF_WINDOW_MS) return "lapsed";
   return age > PROOF_WINDOW_MS - LAPSE_WARNING_MS ? "lapsing" : "proven";
 }
 
-/**
- * Did this worker prove a wake inside `PROOF_WINDOW_MS`? Both `proven` and `lapsing` are proofs.
- *
- * @param {number | null} provenAt
- * @param {number} now
- * @returns {boolean}
- */
-function hasRecentWakeProof(provenAt, now) {
+/** Did this worker prove a wake inside `PROOF_WINDOW_MS`? Both `proven` and `lapsing` are proofs. */
+function hasRecentWakeProof(provenAt: number | null, now: number): boolean {
   const standing = proofStanding(provenAt, now);
   return standing === "proven" || standing === "lapsing";
 }
@@ -462,13 +398,8 @@ function hasRecentWakeProof(provenAt, now) {
  * THE DECISION, PURE (done-when 1). Given every named input, `off` or `keep` and exactly one reason.
  * Order matters only in that each `if` is a strictly narrower question than the last is not required --
  * every branch is independently reachable and independently tested, positive and negative.
- *
- * @param {DecisionInput} input
- * @param {number} now
- * @param {number} idleThresholdMs
- * @returns {Decision}
  */
-export function autoOffDecision(input, now, idleThresholdMs = IDLE_THRESHOLD_MS) {
+export function autoOffDecision(input: DecisionInput, now: number, idleThresholdMs: number = IDLE_THRESHOLD_MS): Decision {
   if (!input.hasMac) return { action: "keep", reason: "no-mac" };
   if (!hasRecentWakeProof(input.wakeProvenAt, now)) return { action: "keep", reason: "wake-unproven" };
   if (input.shutdownRequestedAt !== null) return { action: "keep", reason: "already-off" };
@@ -490,12 +421,8 @@ export function autoOffDecision(input, now, idleThresholdMs = IDLE_THRESHOLD_MS)
  *
  * No ssh hop: this runs where the fleet SSH key already lives (the control plane), so `ansible-playbook`
  * is invoked LOCALLY, exactly as a human typing `sleep.yml`'s own header comment would.
- *
- * @param {string} name
- * @param {{ run?: typeof spawnSync }} [deps]
- * @returns {{ status: number | null, log: string }}
  */
-export function dispatchShutdown(name, { run = spawnSync } = {}) {
+export function dispatchShutdown(name: string, { run = spawnSync }: { run?: typeof spawnSync; } = {}): { status: number | null; log: string; } {
   const result = run("ansible-playbook", [`${ANSIBLE_DIR}sleep.yml`, "-l", name], {
     env: { ...process.env, ANSIBLE_CONFIG: `${ANSIBLE_DIR}ansible.cfg` },
     encoding: "utf8",
@@ -517,7 +444,7 @@ export function dispatchShutdown(name, { run = spawnSync } = {}) {
  * @param {(path: string) => string} readSource repo-relative path in, file text out
  * @returns {string[]} sorted
  */
-export function importClosure(entry, readSource) {
+export function importClosure(entry: string, readSource: (path: string) => string): string[] {
   const seen = new Set([entry]);
   const pending = [entry];
   const specifier = /(?:^\s*(?:import|export)\b[^;'"]*?\bfrom\s*|^\s*import\s*|\bimport\s*\(\s*)["'](\.{1,2}\/[^"']+)["']/gm;
@@ -549,7 +476,7 @@ export const FETCH_THROTTLE_MS = MS_PER_MINUTE;
 
 const FETCH_TIMEOUT_MS = 20_000;
 
-/** @typedef {(args: string[]) => { status: number | null, stdout: string, stderr: string }} Git */
+export type Git = (args: string[]) => { status: number | null, stdout: string, stderr: string };
 
 /**
  * THE DECISION, PURE. `differing` is the repo-relative files whose content differs from `origin/main`, or `null`
@@ -557,12 +484,11 @@ const FETCH_TIMEOUT_MS = 20_000;
  * read): "could not tell" and "identical" never share a value. `why` names what could not be read, when the caller
  * knows. `fetchOk` is whether `origin/main` is known to be at most `FETCH_THROTTLE_MS` old. Only a fresh ref and an
  * empty difference proceed.
- *
- * @param {{ differing: string[] | null, fetchOk: boolean, why?: string }} input
- * @returns {{ action: "proceed" } | { action: "refuse", reason: "fetch-failed" | "cannot-tell" | "stale-checkout",
- *   detail: string }}
  */
-export function staleCheckoutVerdict({ differing, fetchOk, why }) {
+export function staleCheckoutVerdict({ differing, fetchOk, why }: { differing: string[] | null; fetchOk: boolean; why?: string; }): { action: "proceed"; } | {
+    action: "refuse"; reason: "fetch-failed" | "cannot-tell" | "stale-checkout";
+    detail: string;
+} {
   if (!fetchOk) return { action: "refuse", reason: "fetch-failed", detail: "`git fetch origin main` did not succeed" };
   if (differing === null) {
     return { action: "refuse", reason: "cannot-tell", detail: why ?? "origin/main could not be compared with the files that run" };
@@ -578,11 +504,11 @@ export function staleCheckoutVerdict({ differing, fetchOk, why }) {
  * Files of `paths` that differ from `origin/main`, in the working tree (what RUNS, not what is committed). A file
  * `git diff` cannot see because the checkout does not track it counts as differing.
  *
- * @param {string[]} paths
- * @param {Git} git
+ *
+ *
  * @returns {string[] | null} `null` when `git` could not say
  */
-function filesDifferingFromMain(paths, git) {
+function filesDifferingFromMain(paths: string[], git: Git): string[] | null {
   // No pathspec makes `git diff` read the WHOLE tree: once control is laid (#3914) the closure holds no core file at all, and an
   // unrelated difference anywhere in the repository would refuse a timer whose own files all match their pins.
   if (paths.length === 0) return [];
@@ -594,13 +520,11 @@ function filesDifferingFromMain(paths, git) {
   return [...new Set([...diff.stdout.split("\n").filter(Boolean), ...untracked])].sort();
 }
 
-/**
- * @typedef {{ name: string, dir: string, path: string, tag: string }} LayerAtItsPin a separate layer, where this host holds it, and the
- *   tag `origin/main`'s lockfile pins it at
- * @typedef {(layer: LayerAtItsPin) => { differing: string[] } | { cannotTell: string }} JudgeLayer
- * @typedef {{ layerOwning: typeof layerOwning, layerDeclaration: typeof layerDeclaration, laidControl: typeof laidControl }} Layers where
- *   a layer lives: injectable, because the real `layers.json` declares no `pinned.control` until #3506
- */
+/** a separate layer, where this host holds it, and the tag `origin/main`'s lockfile pins it at */
+export type LayerAtItsPin = { name: string, dir: string, path: string, tag: string };
+export type JudgeLayer = (layer: LayerAtItsPin) => { differing: string[] } | { cannotTell: string };
+/** where a layer lives: injectable, because the real `layers.json` declares no `pinned.control` until #3506 */
+export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof layerDeclaration, laidControl: typeof laidControl };
 
 /**
  * A LAYER'S FILES ARE JUDGED AGAINST ITS PIN, NOT AGAINST `origin/main` (#3845). `packages/worker-fleet` is laid from
@@ -613,10 +537,8 @@ function filesDifferingFromMain(paths, git) {
  *
  * Only the laid shape (`.layer-ref` beside `src/`) is judged: a clone at the layer's path holds the layer repository's own
  * layout (`packages/worker-fleet/src` under it), which `../../worker-fleet/src/` cannot import from, so it is not a tree that runs.
- *
- * @type {JudgeLayer}
  */
-export function judgeLaidLayer({ name, dir, path, tag }) {
+export function judgeLaidLayer({ name, dir, path, tag }: LayerAtItsPin): ReturnType<JudgeLayer> {
   const refFile = join(dir, ".layer-ref");
   if (existsSync(join(dir, ".git")) || !existsSync(refFile) || !existsSync(join(dir, "src"))) {
     return { cannotTell: `layer ${name} at ${path} is not a laid tree (\`.layer-ref\` beside \`src/\`, no \`.git\`): run \`node scripts/lay-layer.mjs ${name}\`` };
@@ -631,13 +553,8 @@ export function judgeLaidLayer({ name, dir, path, tag }) {
  */
 const MANIFEST_ON_MAIN = "layers.json";
 
-/**
- * The tag `origin/main` pins a layer at: a separate layer by its lockfile entry, the laid control by its declaration in `layers.json`.
- *
- * @param {{ name: string, git: Git }} input
- * @returns {{ tag: string } | { why: string }}
- */
-function pinOnMain({ name, git }) {
+/** The tag `origin/main` pins a layer at: a separate layer by its lockfile entry, the laid control by its declaration in `layers.json`. */
+function pinOnMain({ name, git }: { name: string; git: Git; }): { tag: string; } | { why: string; } {
   const control = name === CONTROL_LAYER;
   const file = control ? MANIFEST_ON_MAIN : "pnpm-lock.yaml";
   const shown = git(["show", `origin/main:${file}`]);
@@ -649,13 +566,9 @@ function pinOnMain({ name, git }) {
 /**
  * The comparison with `origin/main`: the core's files by content, each layer's files (a separate layer's, and the control plane's own
  * once it is laid) by its pin.
- *
- * @param {{ paths: string[], git: Git, judgeLayer: JudgeLayer, layers: Layers }} input
- * @returns {{ differing: string[] | null, why?: string }}
  */
-function compareWithMain({ paths, git, judgeLayer, layers }) {
-  /** @type {Map<string, string[]>} */
-  const ofLayer = new Map();
+function compareWithMain({ paths, git, judgeLayer, layers }: { paths: string[]; git: Git; judgeLayer: JudgeLayer; layers: Layers; }): { differing: string[] | null; why?: string; } {
+  const ofLayer: Map<string, string[]> = new Map();
   const ofCore = paths.filter((path) => {
     const layer = layers.layerOwning(path);
     if (layer !== null) ofLayer.set(layer, [...(ofLayer.get(layer) ?? []), path]);
@@ -674,22 +587,15 @@ function compareWithMain({ paths, git, judgeLayer, layers }) {
   return { differing: differing.sort() };
 }
 
-/** @type {Layers} */
-const REAL_LAYERS = { layerOwning, layerDeclaration, laidControl };
+const REAL_LAYERS: Layers = { layerOwning, layerDeclaration, laidControl };
 
-/**
- * Is the checkout this program runs from the same, where it matters, as `origin/main`?
- *
- * @param {{ now: number, fetchedAt: number | null, git: Git, readSource: (path: string) => string, judgeLayer?: JudgeLayer, layers?: Layers }} where
- * @returns {{ verdict: ReturnType<typeof staleCheckoutVerdict>, fetchedAt: number | null }}
- */
-export function checkAgainstMain({ now, fetchedAt, git, readSource, judgeLayer = judgeLaidLayer, layers = REAL_LAYERS }) {
+/** Is the checkout this program runs from the same, where it matters, as `origin/main`? */
+export function checkAgainstMain({ now, fetchedAt, git, readSource, judgeLayer = judgeLaidLayer, layers = REAL_LAYERS }: { now: number; fetchedAt: number | null; git: Git; readSource: (path: string) => string; judgeLayer?: JudgeLayer; layers?: Layers; }): { verdict: ReturnType<typeof staleCheckoutVerdict>; fetchedAt: number | null; } {
   // A stamp from the future is a clock fault, not a fresh fetch.
   const fresh = fetchedAt !== null && fetchedAt <= now && now - fetchedAt < FETCH_THROTTLE_MS;
   const fetchOk = fresh || git(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"]).status === 0;
   const stamp = fetchOk && !fresh ? now : fetchedAt;
-  /** @type {{ differing: string[] | null, why?: string }} */
-  let compared = { differing: null };
+  let compared: { differing: string[] | null; why?: string; } = { differing: null };
   if (fetchOk) {
     try {
       const closure = importClosure(THIS_FILE, readSource);
@@ -702,8 +608,7 @@ export function checkAgainstMain({ now, fetchedAt, git, readSource, judgeLayer =
   return { verdict: staleCheckoutVerdict({ ...compared, fetchOk }), fetchedAt: stamp };
 }
 
-/** @type {Git} */
-const gitInRepo = (args) => {
+const gitInRepo: Git = (args) => {
   const result = spawnSync("git", ["-C", REPO_ROOT, ...args], {
     encoding: "utf8", timeout: FETCH_TIMEOUT_MS, env: sandboxGitEnv(),
   });
@@ -711,22 +616,18 @@ const gitInRepo = (args) => {
 };
 
 /** @param {string} path repo-relative */
-const readFromRepo = (path) => readFileSync(`${REPO_ROOT}${path}`, "utf8");
+const readFromRepo = (path: string) => readFileSync(`${REPO_ROOT}${path}`, "utf8");
 
 /** The instant a proof stops counting: the moment it was earned plus `PROOF_WINDOW_MS`, to the second, in UTC. */
-const lapseInstant = (/** @type {number} */ provenAt) => new Date(provenAt + PROOF_WINDOW_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+const lapseInstant = (provenAt: number) => new Date(provenAt + PROOF_WINDOW_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /**
  * What a line says about the worker's proof, beyond the decision (#3309). The decision and its reason are unchanged:
  * `wake-unproven` stays the one reason, and this only says WHICH way it is unproven -- lapsed (and when), or never
  * earned -- so the first sign of a lapse is a line in the report. A proof that still counts but will not for long is
  * named whatever the decision is, since the decision says nothing about the day it stops being `off`-able.
- *
- * @param {Decision} decision
- * @param {ProofReading | undefined} proof
- * @returns {string}
  */
-function proofNote(decision, proof) {
+function proofNote(decision: Decision, proof: ProofReading | undefined): string {
   if (!proof || proof.provenAt === null) return decision.reason === "wake-unproven" ? " (never proved)" : "";
   if (proof.standing === "lapsing") return ` (proof lapses ${lapseInstant(proof.provenAt)})`;
   if (decision.reason !== "wake-unproven") return "";
@@ -734,17 +635,11 @@ function proofNote(decision, proof) {
 }
 
 /**
- * One line per worker, in the words of what was decided -- `fleet-wake.mjs`'s `wakeReportLine` shape,
+ * One line per worker, in the words of what was decided -- `fleet-wake.ts`'s `wakeReportLine` shape,
  * one file over. `no-answer` names the seconds waited (done-when 7.4), read off the probe's own timeout
  * rather than re-measured. `proof` is the worker's wake-proof reading when the caller has one.
- *
- * @param {{ name: string, host: string }} worker
- * @param {Decision} decision
- * @param {number} probeTimeoutMs
- * @param {ProofReading} [proof]
- * @returns {string}
  */
-export function reportLine(worker, decision, probeTimeoutMs = PROBE_TIMEOUT_MS, proof = undefined) {
+export function reportLine(worker: { name: string; host: string; }, decision: Decision, probeTimeoutMs: number = PROBE_TIMEOUT_MS, proof?: ProofReading): string {
   const waited = decision.reason === "no-answer" ? ` (waited ${(probeTimeoutMs / 1000).toFixed(1)}s)` : "";
   return `  ${worker.name.padEnd(16)} ${worker.host.padEnd(15)} ${decision.action.padEnd(4)} ${decision.reason}${waited}${proofNote(decision, proof)}`;
 }
@@ -754,36 +649,30 @@ export function reportLine(worker, decision, probeTimeoutMs = PROBE_TIMEOUT_MS, 
  * (#3309). A proof is earned by a worker that was SILENT coming back, hence sleep then wake of that one worker. Empty
  * when nothing needs renewing; the caller fails the unit on a non-empty one, because a warning that exits 0 is the
  * quiet failure again. A `never` worker is not here: it is a standing to-do the existing footer names, not a deadline.
- *
- * @param {{ worker: { name: string }, proof?: ProofReading }[]} decisions
- * @returns {string}
  */
-export function renewalFooter(decisions) {
+export function renewalFooter(decisions: { worker: { name: string; }; proof?: ProofReading; }[]): string {
   const due = decisions.filter(({ proof }) => proof && proof.provenAt !== null && (proof.standing === "lapsing" || proof.standing === "lapsed"));
   if (!due.length) return "";
   const lines = due.map(({ worker, proof }) => {
-    const when = `${proof?.standing === "lapsed" ? "lapsed" : "lapses"} ${lapseInstant(/** @type {number} */ (proof?.provenAt))}`;
+    const when = `${proof?.standing === "lapsed" ? "lapsed" : "lapses"} ${lapseInstant((proof?.provenAt as number))}`;
     return `    ${worker.name} (${when}): pnpm run fleet:sleep -- --limit=${worker.name} && pnpm run fleet:wake -- ${worker.name}`;
   });
   return `\n  wake proof to renew (a lapsing proof still counts; a lapsed one keeps the worker on):\n${lines.join("\n")}\n`;
 }
 
 /**
- * Feed what the probes read into the capture ledger `fleet-watch.mjs` keeps hourly (#3208). That poll sees a
+ * Feed what the probes read into the capture ledger `fleet-watch.ts` keeps hourly (#3208). That poll sees a
  * worker only while it is up AT the poll, and this idle auto-off keeps a worker up for its job plus five
  * minutes, so a short job's worker came and went between two polls and its captures vanished with its
  * process. This loop reads every up worker every `POLL_INTERVAL_MS`, so the last reading before a power-off
  * lands here. A worker that answered without `vitals.captures` (or not at all) is no reading and records
- * nothing. Rows are named as `fleet-status.mjs` names them, `<name>  <address>`, so the two writers agree
+ * nothing. Rows are named as `fleet-status.ts` names them, `<name>  <address>`, so the two writers agree
  * on a worker's key whichever of them saw it first.
  *
  * Bookkeeping never takes the tick down: a ledger that cannot be read or written is reported on stderr and
  * the shutdown decisions go on, since a worker left up because of a bad file is a cost, not a safeguard.
- *
- * @param {(IdleProbe & { name: string, host: string })[]} probes
- * @param {{ path: string, at: number, read?: typeof readFileSync, write?: typeof writeFileSync }} where
  */
-function recordProbedCaptures(probes, where) {
+function recordProbedCaptures(probes: (IdleProbe & { name: string; host: string; })[], where: { path: string; at: number; read?: typeof readFileSync; write?: typeof writeFileSync; }) {
   const rows = probes.flatMap((probe) => (probe.outcome === "no-answer" || probe.captures === undefined ? [] : [{
     name: probe.name === probe.host ? probe.host : `${probe.name}  ${probe.host}`,
     state: probe.outcome,
@@ -802,18 +691,15 @@ function recordProbedCaptures(probes, where) {
 /**
  * One worker's decision input, from what the tick knows about the whole fleet. Every field is read BY NAME,
  * so no worker's proof, idle streak or shutdown stamp can reach another worker's decision (#3227).
- *
- * @param {{ name: string, mac: string | null }} w
- * @param {string} outcome
- * @param {{ idleSince: SinceState, shutdownRequestedAt: SinceState, wakeProof: Record<string, number>,
- *   batchQueued: () => boolean, leasePending: () => boolean, play: PlayReading }} known
- * @returns {DecisionInput}
  */
-function decisionInput(w, outcome, known) {
+function decisionInput(w: { name: string; mac: string | null; }, outcome: string, known: {
+        idleSince: SinceState; shutdownRequestedAt: SinceState; wakeProof: Record<string, number>;
+        batchQueued: () => boolean; leasePending: () => boolean; play: PlayReading;
+    }): DecisionInput {
   return {
     name: w.name,
     hasMac: hasWakeableMac(w.mac),
-    probe: /** @type {"idle" | "busy" | "no-answer"} */ (outcome),
+    probe: (outcome as "idle" | "busy" | "no-answer"),
     idleSince: known.idleSince[w.name] ?? null,
     shutdownRequestedAt: known.shutdownRequestedAt[w.name] ?? null,
     wakeProvenAt: known.wakeProof[w.name] ?? null,
@@ -823,13 +709,8 @@ function decisionInput(w, outcome, known) {
   };
 }
 
-/**
- * Dispatch `sleep.yml` at every worker decided `off`, stamping each success into `shutdownRequestedAt`.
- *
- * @param {{ worker: { name: string }, decision: Decision }[]} decisions
- * @param {{ dispatch: typeof dispatchShutdown, shutdownRequestedAt: SinceState, now: number }} where
- */
-function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
+/** Dispatch `sleep.yml` at every worker decided `off`, stamping each success into `shutdownRequestedAt`. */
+function dispatchOff(decisions: { worker: { name: string; }; decision: Decision; }[], { dispatch, shutdownRequestedAt, now }: { dispatch: typeof dispatchShutdown; shutdownRequestedAt: SinceState; now: number; }) {
   for (const { worker, decision } of decisions) {
     if (decision.action !== "off") continue;
     const dispatched = dispatch(worker.name);
@@ -855,20 +736,18 @@ function dispatchOff(decisions, { dispatch, shutdownRequestedAt, now }) {
  * `since` is when the refusal BEGAN (#3859): the previous tick's refusal's `since`, or its `at` for a record from before
  * the field, else `now`. Every path that does not refuse returns `refusal: null`, and that ends the run, so a tick that
  * proceeds in between restarts the age with no further code.
- *
- * @template {{ decision: Decision }} T
- * @param {T[]} decisions
- * @param {{ now: number, fetchedAt: number | null, previousRefusal: Refusal | null,
- *   checkout: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain> }} where
  */
-function holdBackIfStale(decisions, { now, fetchedAt, previousRefusal, checkout }) {
+function holdBackIfStale<T extends { decision: Decision }>(decisions: T[], { now, fetchedAt, previousRefusal, checkout }: {
+        now: number; fetchedAt: number | null; previousRefusal: Refusal | null;
+        checkout: (where: { now: number; fetchedAt: number | null; }) => ReturnType<typeof checkAgainstMain>;
+    }) {
   if (!decisions.some(({ decision }) => decision.action === "off")) return { decisions, refusal: null, fetchedAt };
   const checked = checkout({ now, fetchedAt });
   if (checked.verdict.action === "proceed") return { decisions, refusal: null, fetchedAt: checked.fetchedAt };
   const { reason, detail } = checked.verdict;
   return {
     decisions: decisions.map(({ decision, ...rest }) => ({
-      ...rest, decision: decision.action === "off" ? { action: /** @type {const} */ ("keep"), reason } : decision,
+      ...rest, decision: decision.action === "off" ? { action: ("keep" as const), reason } : decision,
     })),
     refusal: { reason, detail, at: now, since: previousRefusal?.since ?? previousRefusal?.at ?? now },
     fetchedAt: checked.fetchedAt,
@@ -878,31 +757,26 @@ function holdBackIfStale(decisions, { now, fetchedAt, previousRefusal, checkout 
 /**
  * The play signal for this tick, read once for the whole fleet. Absent reads `none` (see the header); an unreadable
  * one keeps every box and says why on stderr, since a fleet kept on for a reason nobody can see is the quiet failure.
- *
- * @param {typeof readPlaysInFlight | undefined} read
- * @returns {PlayReading}
  */
-function askForPlays(read) {
-  const { reading, detail } = read ? read() : { reading: /** @type {const} */ ("none"), detail: "" };
+function askForPlays(read: typeof readPlaysInFlight | undefined): PlayReading {
+  const { reading, detail } = read ? read() : { reading: ("none" as const), detail: "" };
   if (reading === "unreadable") process.stderr.write(`fleet-auto-off: the play signal could not be read, every box kept: ${detail}\n`);
   return reading;
 }
 
 /**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
- * dependency is injectable with a real default, matching `fleet-watch.mjs`'s `watch()` shape, so a test
+ * dependency is injectable with a real default, matching `fleet-watch.ts`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
- *
- * @param {{
- *   workers?: { name: string, host: string, mac: string | null }[],
- *   probe?: typeof probeIdle, now?: () => number, statePath?: string, capturesPath?: string, proofPath?: string,
- *   proofTransport?: ProofTransport, read?: typeof readFileSync, write?: typeof writeFileSync,
- *   batchQueued?: () => boolean, leasePending?: () => boolean, playsInFlight?: typeof readPlaysInFlight,
- *   apply?: boolean, dispatch?: typeof dispatchShutdown,
- *   checkout?: (where: { now: number, fetchedAt: number | null }) => ReturnType<typeof checkAgainstMain>,
- * }} [deps]
  */
-export async function tick(deps = {}) {
+export async function tick(deps: {
+    workers?: { name: string; host: string; mac: string | null; }[];
+    probe?: typeof probeIdle; now?: () => number; statePath?: string; capturesPath?: string; proofPath?: string;
+    proofTransport?: ProofTransport; read?: typeof readFileSync; write?: typeof writeFileSync;
+    batchQueued?: () => boolean; leasePending?: () => boolean; playsInFlight?: typeof readPlaysInFlight;
+    apply?: boolean; dispatch?: typeof dispatchShutdown;
+    checkout?: (where: { now: number; fetchedAt: number | null; }) => ReturnType<typeof checkAgainstMain>;
+} = {}) {
   const workers = deps.workers ?? [];
   const probe = deps.probe ?? probeIdle;
   const now = (deps.now ?? Date.now)();
@@ -914,7 +788,7 @@ export async function tick(deps = {}) {
   const apply = deps.apply ?? false;
   const dispatch = deps.dispatch ?? dispatchShutdown;
   const checkout = deps.checkout
-    ?? ((/** @type {{ now: number, fetchedAt: number | null }} */ where) => checkAgainstMain({
+    ?? ((where: { now: number; fetchedAt: number | null; }) => checkAgainstMain({
       ...where, git: gitInRepo, readSource: readFromRepo,
     }));
 
@@ -955,21 +829,18 @@ export async function tick(deps = {}) {
 /**
  * Which ledger the decisions above were read against, so a `wake-unproven` can be traced to a file and a host
  * rather than to a checkout nobody knows the cwd of (#3269 done-when 5).
- *
- * @param {string} proofPath
  */
-export const ledgerLine = (proofPath) => `  wake-proof ledger read: ${proofPath} (on the control plane)\n`;
+export const ledgerLine = (proofPath: string) => `  wake-proof ledger read: ${proofPath} (on the control plane)\n`;
 
 async function main() {
   const apply = process.argv.includes("--apply");
   const inventory = inventoryPathFor();
-  /** @type {{ name: string, host: string, mac: string | null }[]} */
-  let declared;
+  let declared: { name: string; host: string; mac: string | null; }[];
   try {
     declared = inventoryHosts(readFileSync(inventory, "utf8"));
   } catch (error) {
     process.stderr.write("No fleet to consider: inventory.yml could not be read "
-      + `(${/** @type {Error} */ (error).message}).\n`);
+      + `(${(error as Error).message}).\n`);
     process.exit(2);
     return;
   }
@@ -988,12 +859,8 @@ async function main() {
  * The whole report, and whether the unit FAILS. Two things fail it, both because a quiet exit 0 would hide them: a
  * `refuse` (every tick that holds a shutdown back says so, since a refusal nobody sees is a fleet left on) and a
  * wake proof that is `lapsing` or `lapsed` (#3309, a deadline that exits 0 is the quiet failure again).
- *
- * @param {Awaited<ReturnType<typeof tick>>} result
- * @param {boolean} apply
- * @returns {{ out: string, failed: boolean }}
  */
-export function renderReport({ decisions, refusal, proofPath }, apply) {
+export function renderReport({ decisions, refusal, proofPath }: Awaited<ReturnType<typeof tick>>, apply: boolean): { out: string; failed: boolean; } {
   let out = decisions.map(({ worker, decision, proof }) => `${reportLine(worker, decision, PROBE_TIMEOUT_MS, proof)}\n`).join("");
   out += ledgerLine(proofPath);
   if (refusal) out += `\n  refuse ${refusal.reason} -- ${refusal.detail}\n`;

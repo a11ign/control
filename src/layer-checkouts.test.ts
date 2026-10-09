@@ -15,8 +15,8 @@ import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
-import { layersFrom } from "./layer-checkouts.mjs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
+import { layersFrom } from "./layer-checkouts.ts";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.mjs";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
@@ -44,8 +44,8 @@ const fromLayer = (file: string) => import(pathToFileURL(join(layerSourceDir("nv
 
 /** The operator-side readers of the worker's code version. A reader added later belongs here. `deploy-worker.mjs` was the sixth, until screenreader-fleet 0.4.0 removed it (#3803). */
 const FIVE_READERS = [
-  "packages/control/src/fleet-playbook.mjs",
-  "packages/control/src/lab-job.mjs",
+  "packages/control/src/fleet-playbook.ts",
+  "packages/control/src/lab-job.ts",
   "packages/control/ansible/deploy.yml",
   "packages/worker-fleet/src/code-drift.mjs",
   "packages/worker-fleet/src/check-worker-code.mjs",
@@ -144,13 +144,13 @@ const nonNodeImports = (file: string, seen = new Set<string>()): string[] => {
     s.startsWith("node:") ? [] : s.startsWith(".") ? nonNodeImports(resolve(dirname(file), s), seen) : [`${file} imports "${s}"`]);
 };
 
-test("layer-checkouts.mjs reaches only node: modules and the control plane's own relative ones (control has no node_modules)", () => {
-  const file = resolve(REPO, "packages/control/src/layer-checkouts.mjs");
-  const found = specifiers(read("packages/control/src/layer-checkouts.mjs"));
+test("layer-checkouts.ts reaches only node: modules and the control plane's own relative ones (control has no node_modules)", () => {
+  const file = resolve(REPO, "packages/control/src/layer-checkouts.ts");
+  const found = specifiers(read("packages/control/src/layer-checkouts.ts"));
   assert.ok(found.length >= 3, `expected the imports to be found, got ${found.length}`);
   assert.deepEqual(nonNodeImports(file), []);
   // The positive control: the relative import is followed, and a package name in it WOULD be named.
-  assert.ok(found.includes("./control-plane-checkout.mjs"), "the relative import this walk exists to follow");
+  assert.ok(found.includes("./control-plane-checkout.ts"), "the relative import this walk exists to follow");
 });
 
 test("the hasher the resolver reaches imports only node: and relative modules, as the static import used to prove", () => {

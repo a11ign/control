@@ -258,7 +258,7 @@ test("THE INVENTORY IS A FLEET DOCTOR CAN SEE, and it is named", () => {
   // "checking 5 worker(s) from inventory.yml" and `fleet:status` showed those five BUSY with a corpus
   // run. Its next_command was `training:capture`, which would have captured on the wrong machines.
   //
-  // Named, not numbered: `fleet-status.mjs` records what an address-only report cost — ".224 is
+  // Named, not numbered: `fleet-status.ts` records what an address-only report cost — ".224 is
   // a11y-worker-FIVE, so `fleet:sleep --limit=a11y-worker-4` put a healthy machine to sleep and left the
   // drifted one serving".
   //

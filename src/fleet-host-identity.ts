@@ -43,17 +43,11 @@ const KEY_BLOB = /^[A-Za-z0-9+/]+={0,2}$/;
 /** The handshake budget for one probe; a worker that cannot complete one in this long is not identified. */
 const PROBE_CONNECT_TIMEOUT_S = 10;
 
-/**
- * @typedef {{ type: string, blob: string }} HostKey
- * @typedef {{ name: string, address: string }} Placed a worker and the address it is (or will be) aimed at
- */
+export type HostKey = { type: string, blob: string };
+/** a worker and the address it is (or will be) aimed at */
+export type Placed = { name: string, address: string };
 
-/**
- * @param {string} text
- * @param {RegExp} shape
- * @param {string} what
- */
-function mustMatch(text, shape, what) {
+function mustMatch(text: string, shape: RegExp, what: string) {
   if (!shape.test(text)) throw new Error(`refusing to build a command from ${what} ${JSON.stringify(text)}`);
 }
 
@@ -72,7 +66,7 @@ function mustMatch(text, shape, what) {
  * @param {{ addresses: Record<string, string>, workers: string[] }} input `workers` = the inventory's names
  * @returns {string | null} the YAML, or `null` when nothing moved (a healthy fleet adds no source at all)
  */
-export function overrideInventory({ addresses, workers }) {
+export function overrideInventory({ addresses, workers }: { addresses: Record<string, string>; workers: string[]; }): string | null {
   const entries = Object.entries(addresses);
   if (!entries.length) return null;
   for (const [name, address] of entries) {
@@ -80,7 +74,7 @@ export function overrideInventory({ addresses, workers }) {
     mustMatch(name, WORKER_NAME, "a worker name");
     mustMatch(address, IPV4, "an address");
   }
-  return ["# Per-run address override from fleet-playbook.mjs (#2832). Not the inventory: a moved worker is aimed",
+  return ["# Per-run address override from fleet-playbook.ts (#2832). Not the inventory: a moved worker is aimed",
     "# here for THIS run only, with the strict host-key check that goes with it. #2752 is the durable fix.",
     "all:", "  hosts:",
     ...entries.flatMap(([name, address]) => [`    ${name}:`, `      ansible_host: ${address}`,
@@ -89,7 +83,7 @@ export function overrideInventory({ addresses, workers }) {
 }
 
 /** Where a unit's override lives: tmpfs, per unit, so two playbooks never share one and a reboot clears it. */
-export const overridePath = (/** @type {string} */ unit) => {
+export const overridePath = (unit: string) => {
   mustMatch(unit, /^a11y-fleet-[a-z0-9-]+$/, "a unit name");
   return `/run/${unit}.addresses.yml`;
 };
@@ -98,11 +92,8 @@ export const overridePath = (/** @type {string} */ unit) => {
  * The shell that makes `path` hold exactly `yaml` -- or nothing, when `yaml` is null -- BEFORE the unit
  * starts, so a stale override from an earlier run can never aim this one. base64 keeps the text out of the
  * shell's grammar entirely; the alphabet cannot carry a metacharacter.
- *
- * @param {{ path: string, yaml: string | null }} input
- * @returns {string}
  */
-export function installOverrideCommand({ path, yaml }) {
+export function installOverrideCommand({ path, yaml }: { path: string; yaml: string | null; }): string {
   mustMatch(path, /^\/run\/a11y-fleet-[a-z0-9-]+\.addresses\.yml$/, "an override path");
   if (yaml === null) return `rm -f ${path}`;
   return `rm -f ${path} && printf %s ${Buffer.from(yaml).toString("base64")} | base64 -d > ${path}`;
@@ -113,11 +104,8 @@ export function installOverrideCommand({ path, yaml }) {
  * the override LAST (a later source's host vars win). An explicit `-i` would REPLACE the config's list, which
  * is the trap `startPlaybookUnit`'s own comment records; the environment variable carries the same risk, so
  * the whole list is restated from the config's own parse, never a hand-copied one.
- *
- * @param {{ sources: string[], path: string }} input
- * @returns {string}
  */
-export function inventoryEnvironment({ sources, path }) {
+export function inventoryEnvironment({ sources, path }: { sources: string[]; path: string; }): string {
   for (const source of [...sources, path]) mustMatch(source, /^[A-Za-z0-9_./-]+$/, "an inventory path");
   return [...sources, path].join(",");
 }
@@ -129,13 +117,9 @@ export function inventoryEnvironment({ sources, path }) {
  * starts with `@` (`@revoked`, `@cert-authority`) is a MARKER, never a plain trusted key: skipped, so a
  * revoked key can never be copied under a name. A key whose algorithm or body is not the shape of one is
  * dropped for the same reason `overrideInventory` refuses a malformed address.
- *
- * @param {string} output
- * @returns {HostKey[]}
  */
-export function recordedKeys(output) {
-  /** @type {HostKey[]} */
-  const keys = [];
+export function recordedKeys(output: string): HostKey[] {
+  const keys: HostKey[] = [];
   for (const line of output.split("\n")) {
     if (!line.trim() || line.startsWith("#") || line.startsWith("@")) continue;
     const [, type, blob] = line.trim().split(/\s+/);
@@ -152,9 +136,8 @@ export function recordedKeys(output) {
  * nothing.
  *
  * @param {Placed[]} workers each worker with its PIN address
- * @returns {string}
  */
-export function knownHostsReadScript(workers) {
+export function knownHostsReadScript(workers: Placed[]): string {
   return workers.map(({ name, address }) => {
     mustMatch(name, WORKER_NAME, "a worker name");
     mustMatch(address, IPV4, "a pin address");
@@ -162,22 +145,17 @@ export function knownHostsReadScript(workers) {
   }).join("; ") + "; true";
 }
 
-/**
- * @param {string} stdout what `knownHostsReadScript` printed
- * @returns {Map<string, { alias: HostKey[], pin: HostKey[] }>}
- */
-export function parseKnownHostsRead(stdout) {
-  /** @type {Map<string, { alias: string, pin: string }>} */
-  const raw = new Map();
-  /** @type {{ name: string, part: "alias" | "pin" } | null} */
-  let at = null;
+/** @param {string} stdout what `knownHostsReadScript` printed */
+export function parseKnownHostsRead(stdout: string): Map<string, { alias: HostKey[]; pin: HostKey[]; }> {
+  const raw: Map<string, { alias: string; pin: string; }> = new Map();
+  let at: { name: string; part: "alias" | "pin"; } | null = null;
   for (const line of stdout.split("\n")) {
     const header = /^=== (a11y-worker-[0-9]{1,3}) (alias|pin)$/.exec(line);
     if (header) {
-      at = { name: header[1], part: /** @type {"alias" | "pin"} */ (header[2]) };
+      at = { name: header[1], part: (header[2] as "alias" | "pin") };
       if (!raw.has(at.name)) raw.set(at.name, { alias: "", pin: "" });
     } else if (at) {
-      /** @type {{ alias: string, pin: string }} */ (raw.get(at.name))[at.part] += `${line}\n`;
+      (raw.get(at.name) as { alias: string, pin: string })[at.part] += `${line}\n`;
     }
   }
   return new Map([...raw].map(([name, { alias, pin }]) => [name, { alias: recordedKeys(alias), pin: recordedKeys(pin) }]));
@@ -192,16 +170,15 @@ export function parseKnownHostsRead(stdout) {
  * is silent at its pin is NOT seeded (it may have moved, and an entry for the old address says nothing
  * about whoever answers there now), and one with no recorded key has nothing to seed from. Both are
  * REPORTED, never filled in from a scan.
- *
- * @param {{ workers: Placed[], answering: Set<string>,
- *           records: Map<string, { alias: HostKey[], pin: HostKey[] }> }} input
- * @returns {{ lines: string[], seeded: string[], already: string[], notSeeded: { name: string, why: string }[] }}
  */
-export function seedPlan({ workers, answering, records }) {
-  /** @type {string[]} */ const lines = [];
-  /** @type {string[]} */ const seeded = [];
-  /** @type {string[]} */ const already = [];
-  /** @type {{ name: string, why: string }[]} */ const notSeeded = [];
+export function seedPlan({ workers, answering, records }: {
+        workers: Placed[]; answering: Set<string>;
+        records: Map<string, { alias: HostKey[]; pin: HostKey[]; }>;
+    }): { lines: string[]; seeded: string[]; already: string[]; notSeeded: { name: string; why: string; }[]; } {
+  const lines: string[] = [];
+  const seeded: string[] = [];
+  const already: string[] = [];
+  const notSeeded: { name: string; why: string; }[] = [];
   for (const { name, address } of workers) {
     const { alias, pin } = records.get(name) ?? { alias: [], pin: [] };
     if (alias.length) already.push(name);
@@ -224,17 +201,14 @@ export function seedPlan({ workers, answering, records }) {
  * @param {string[]} lines `seedPlan(...).lines`
  * @returns {string | null} `null` when there is nothing to record
  */
-export function seedCommand(lines) {
+export function seedCommand(lines: string[]): string | null {
   if (!lines.length) return null;
   for (const line of lines) mustMatch(line, /^a11y-worker-[0-9]{1,3} [A-Za-z0-9@.-]+ [A-Za-z0-9+/]+={0,2}$/, "a known_hosts line");
   return `umask 077; mkdir -p "\${HOME:?}/.ssh" && printf '%s\\n' ${lines.map((line) => `'${line}'`).join(" ")} >> "\${HOME:?}/.ssh/known_hosts"`;
 }
 
-/**
- * @param {ReturnType<typeof seedPlan>} plan
- * @returns {string[]} what to print, one line per worker seeded or not
- */
-export function seedReport({ seeded, notSeeded }) {
+/** @returns {string[]} what to print, one line per worker seeded or not */
+export function seedReport({ seeded, notSeeded }: ReturnType<typeof seedPlan>): string[] {
   return [
     ...seeded.map((name) => `  host key: recorded ${name} by NAME, from the key already recorded for its pin`),
     ...notSeeded.map(({ name, why }) => `  host key: ${name} NOT seeded by name -- ${why}`),
@@ -255,9 +229,8 @@ export function seedReport({ seeded, notSeeded }) {
  * recorded under the name -- the difference between "unseeded" and "mismatch".
  *
  * @param {Placed[]} moved each moved worker with the address it was found at
- * @returns {string}
  */
-export function identityProbeScript(moved) {
+export function identityProbeScript(moved: Placed[]): string {
   const probes = moved.map(({ name, address }) => {
     mustMatch(name, WORKER_NAME, "a worker name");
     mustMatch(address, IPV4, "an address");
@@ -273,17 +246,11 @@ export function identityProbeScript(moved) {
     ...probes, "true"].join("; ");
 }
 
-/**
- * @typedef {"verified" | "unseeded" | "mismatch" | "unreachable"} IdentityVerdict
- */
+export type IdentityVerdict = "verified" | "unseeded" | "mismatch" | "unreachable";
 
-/**
- * @param {string} stdout what `identityProbeScript` printed
- * @returns {Map<string, { verdict: IdentityVerdict, detail: string }>}
- */
-export function parseIdentityProbe(stdout) {
-  /** @type {Map<string, { verdict: IdentityVerdict, detail: string }>} */
-  const verdicts = new Map();
+/** @param {string} stdout what `identityProbeScript` printed */
+export function parseIdentityProbe(stdout: string): Map<string, { verdict: IdentityVerdict; detail: string; }> {
+  const verdicts: Map<string, { verdict: IdentityVerdict; detail: string; }> = new Map();
   for (const line of stdout.split("\n")) {
     const [name, recorded, ...said] = line.split("\t");
     if (!WORKER_NAME.test(name ?? "")) continue;
@@ -297,40 +264,36 @@ export function parseIdentityProbe(stdout) {
  * ANYTHING THAT IS NOT A POSITIVE "PERMISSION DENIED" IS NOT IDENTIFIED. A handshake that timed out, was
  * refused or printed something unforeseen is `unreachable`, never `verified`: absence of a complaint is not
  * a pass (an unseeded box can print the same quiet text on some failures).
- *
- * @param {{ recorded: boolean, said: string }} input
- * @returns {IdentityVerdict}
  */
-function verdictOf({ recorded, said }) {
+function verdictOf({ recorded, said }: { recorded: boolean; said: string; }): IdentityVerdict {
   if (!recorded) return "unseeded";
   if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(said)) return "mismatch";
   return /Permission denied/i.test(said) ? "verified" : "unreachable";
 }
 
 const WHY = {
-  unseeded: (/** @type {string} */ name) => `no host key is recorded under the name ${name} on the control plane, so nothing can say who answers`,
-  mismatch: (/** @type {string} */ name) => `the key that answers is NOT the one recorded under the name ${name}`
+  unseeded: (name: string) => `no host key is recorded under the name ${name} on the control plane, so nothing can say who answers`,
+  mismatch: (name: string) => `the key that answers is NOT the one recorded under the name ${name}`
     + ` (a different machine, or a reinstall: re-trust is a deliberate human act, \`ssh-keygen -R ${name}\`)`,
   unreachable: () => "the strict handshake could not be completed there",
 };
 
 /**
  * THE DECISION, pure: which moved workers are aimed at their resolved address, and whether the whole run is
- * refused. WRITE SEMANTICS (the header of `fleet-playbook.mjs`): a deploy that quietly lands on eleven of
+ * refused. WRITE SEMANTICS (the header of `fleet-playbook.ts`): a deploy that quietly lands on eleven of
  * twelve leaves the fleet INCONSISTENT, so one worker that cannot be identified refuses the WHOLE run, by
  * name and by reason -- and `--allow-offline=<name>`, `linkGate`'s own shape, is how a human proceeds
  * without it (that worker is then not aimed anywhere: Ansible reports it UNREACHABLE at its pin).
- *
- * @param {{ moved: { name: string, movedTo: string, pin?: string }[], allowOffline: string[],
- *           verdicts: Map<string, { verdict: IdentityVerdict, detail: string }> }} input
- * @returns {{ refusal: string | null, notice: string | null, addresses: Record<string, string> }}
  */
-export function identityGate({ moved, allowOffline, verdicts }) {
-  /** @type {Record<string, string>} */ const addresses = {};
-  /** @type {string[]} */ const left = [];
-  /** @type {string[]} */ const unidentified = [];
+export function identityGate({ moved, allowOffline, verdicts }: {
+        moved: { name: string; movedTo: string; pin?: string; }[]; allowOffline: string[];
+        verdicts: Map<string, { verdict: IdentityVerdict; detail: string; }>;
+    }): { refusal: string | null; notice: string | null; addresses: Record<string, string>; } {
+  const addresses: Record<string, string> = {};
+  const left: string[] = [];
+  const unidentified: string[] = [];
   for (const { name, movedTo, pin } of moved) {
-    const found = verdicts.get(name) ?? { verdict: /** @type {IdentityVerdict} */ ("unreachable"), detail: "no verdict was read" };
+    const found = verdicts.get(name) ?? { verdict: ("unreachable" as IdentityVerdict), detail: "no verdict was read" };
     if (allowOffline.includes(name)) left.push(`${name} (named with --allow-offline: not aimed at ${movedTo})`);
     else if (found.verdict === "verified") addresses[name] = movedTo;
     else unidentified.push(`  ${name}: found at ${movedTo}${pin ? `, pinned ${pin}` : ""}, NOT IDENTIFIED -- ${WHY[found.verdict](name)}.`);

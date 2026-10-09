@@ -8,9 +8,9 @@
  * REVERSE edge, because reading a FILE by a hardcoded relative path is not an import specifier its walker
  * looks at.
  *
- * That reverse edge was real: `fleet-env.mjs`, `fleet-status.mjs`, `fleet-discover.mjs` and `fleet-wake.mjs`
+ * That reverse edge was real: `fleet-env.mjs`, `fleet-status.ts`, `fleet-discover.ts` and `fleet-wake.ts`
  * all read `../../control/ansible/inventory.yml` and `group_vars/a11y_workers.yml` directly — architecture
- * audit §3.2. `fleet-status.mjs`, `fleet-discover.mjs` and `fleet-wake.mjs` had ZERO cross-package
+ * audit §3.2. `fleet-status.ts`, `fleet-discover.ts` and `fleet-wake.ts` had ZERO cross-package
  * dependents in either direction (confirmed by grep before moving them), so they moved to
  * `packages/control/src/` outright — the "more honest and larger" remedy the audit named, made cheap by
  * measuring that there was nothing on the far side to keep them here for.

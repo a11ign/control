@@ -27,22 +27,22 @@ import { createSocket } from "node:dgram";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-// MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.mjs's
-// header for why. `fleet-discover.mjs` moved alongside it, so that import stays local; the other two
+// MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.ts's
+// header for why. `fleet-discover.ts` moved alongside it, so that import stays local; the other two
 // cross back to worker-fleet the SANCTIONED way, by relative path.
-import { inventoryHosts } from "./fleet-discover.mjs";
+import { inventoryHosts } from "./fleet-discover.ts";
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
-// #1683/#1684: SHARED, not restated -- both this file and fleet-discover.mjs need "the durable copy
-// first, the in-tree checkout second", and defining it here would make fleet-discover.mjs (which this
-// file already imports `inventoryHosts` from) import back FROM here, a cycle. `control-plane-fleet.mjs`
+// #1683/#1684: SHARED, not restated -- both this file and fleet-discover.ts need "the durable copy
+// first, the in-tree checkout second", and defining it here would make fleet-discover.ts (which this
+// file already imports `inventoryHosts` from) import back FROM here, a cycle. `control-plane-fleet.ts`
 // is neither's dependent, so it is the shared home.
-import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 // #3401: where a silent worker is by MAC is asked the way the lab jobs ask it (two reads that agree, then
 // `/health`), never restated here.
-import { resolveMovedByMacLive } from "./fleet-status.mjs";
-import { locateByMac } from "./with-control-plane-fleet.mjs";
+import { resolveMovedByMacLive } from "./fleet-status.ts";
+import { locateByMac } from "./with-control-plane-fleet.ts";
 
 /**
  * takes no flags: it wakes every box in the inventory.
@@ -92,7 +92,7 @@ export const WAKE_DEADLINE_MS = 300_000;
  * timer reads it THERE. It used to be `runs/fleet-wake-proof.json` relative to the cwd, so a wake from the agents
  * host, a laptop or a `role-*` tree wrote a ledger in its own checkout that no timer ever read, and the box stayed
  * on with no error (#3255: worker 15 `woken`, auto-off still `keep wake-unproven`). Both the writer here and the
- * reader in `fleet-auto-off.mjs` take THIS constant, and reach it through `sshToControlPlane`.
+ * reader in `fleet-auto-off.ts` take THIS constant, and reach it through `sshToControlPlane`.
  */
 export const DEFAULT_PROOF_PATH = `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-wake-proof.json`;
 const MS_PER_DAY = 86_400_000;
@@ -128,24 +128,17 @@ export const PROOF_WINDOW_MS = 7 * MS_PER_DAY;
  *
  * Built here rather than pulled from a package because it is six lines and a dependency in the wake path
  * is a dependency that can stop a run from starting.
- *
- * @param {string} mac
- * @returns {Buffer}
  */
-export function magicPacket(mac) {
+export function magicPacket(mac: string): Buffer {
   const bytes = String(mac).replace(/[^0-9a-fA-F]/g, "");
   if (bytes.length !== 12) throw new Error(`not a MAC address: ${mac}`);
   const target = Buffer.from(bytes, "hex");
   return Buffer.concat([Buffer.alloc(6, 0xff), ...Array(16).fill(target)]);
 }
 
-/**
- * @param {string} mac
- * @param {string} broadcast
- */
-export function sendMagicPacket(mac, broadcast = "255.255.255.255") {
+export function sendMagicPacket(mac: string, broadcast: string = "255.255.255.255") {
   const packet = magicPacket(mac);
-  return new Promise((resolve, reject) => {
+  return new Promise<number>((resolve, reject) => {
     const socket = createSocket("udp4");
     socket.once("error", (error) => { socket.close(); reject(error); });
     socket.bind(() => {
@@ -163,6 +156,7 @@ export function sendMagicPacket(mac, broadcast = "255.255.255.255") {
   });
 }
 
+export type Probe = { outcome: "ready" } | { outcome: "busy" } | { outcome: "not-ready", reason: string } | { outcome: "refused", message: string } | { outcome: "no-answer", message: string };
 /**
  * WHAT ONE `/health` PROBE CAN SAY, and the two words that must never be confused (#2655 done-when 5.2):
  *
@@ -180,24 +174,15 @@ export function sendMagicPacket(mac, broadcast = "255.255.255.255") {
  *
  * Until #2655 this was `answering()`, which returned `false` for a timeout, a refusal, a non-OK status and
  * any thrown error alike, and swallowed the error, so nothing downstream could tell slow from down.
- *
- * @typedef {{ outcome: "ready" } | { outcome: "busy" }
- *   | { outcome: "not-ready", reason: string }
- *   | { outcome: "refused", message: string }
- *   | { outcome: "no-answer", message: string }} Probe
  */
 
-/**
- * @param {string} url the worker's base URL
- * @param {{ timeoutMs?: number, request?: typeof requestJson }} [options]
- * @returns {Promise<Probe>}
- */
-export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request = requestJson } = {}) {
+/** @param {string} url the worker's base URL */
+export async function probeWorker(url: string, { timeoutMs = HEALTH_TIMEOUT_MS, request = requestJson }: { timeoutMs?: number; request?: typeof requestJson; } = {}): Promise<Probe> {
   let response;
   try {
     response = await request(`${url}/health`, { timeoutMs });
   } catch (error) {
-    const { code, message } = /** @type {NodeJS.ErrnoException} */ (error);
+    const { code, message } = (error as NodeJS.ErrnoException);
     return code === "ECONNREFUSED"
       ? { outcome: "refused", message }
       : { outcome: "no-answer", message: `${code ? `${code}: ` : ""}${message}` };
@@ -209,15 +194,10 @@ export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request 
     reason: response.json?.reason ?? "/health answered without `ready: true` and without a reason" };
 }
 
-/**
- * @typedef {{ name: string, host: string, mac?: string | null }} WakeTarget
- * @typedef {{ port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number,
- *   log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>,
- *   request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number,
- *   macRead?: typeof resolveMovedByMacLive, proofPath?: string | null, proofTransport?: ProofTransport }} WakeOptions
- * @typedef {Required<Omit<WakeOptions, "broadcast">> & { broadcast?: string }} WakeConfig
- * @typedef {WakeTarget & { state: string, packets: number, detail?: string }} WakeResult
- */
+export type WakeTarget = { name: string, host: string, mac?: string | null };
+export type WakeOptions = { port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number, log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>, request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number, macRead?: typeof resolveMovedByMacLive, proofPath?: string | null, proofTransport?: ProofTransport };
+export type WakeConfig = Required<Omit<WakeOptions, "broadcast">> & { broadcast?: string };
+export type WakeResult = WakeTarget & { state: string, packets: number, detail?: string };
 
 /**
  * The states a worker can end in, each a different remedy. The last four are the NAMED errors of #2655
@@ -243,12 +223,8 @@ export async function probeWorker(url, { timeoutMs = HEALTH_TIMEOUT_MS, request 
  * a frame to a box that is already running changes nothing on it (ADR 0012: the packet is unauthenticated
  * and only ever turns machines ON), and with the timeout above the slowest healthy reading a healthy box
  * does not reach here at all. A REFUSED or not-ready first probe means the box is up, so it gets none.
- *
- * @param {WakeTarget} w
- * @param {WakeConfig} cfg
- * @returns {Promise<WakeResult>}
  */
-async function wakeOne(w, cfg) {
+async function wakeOne(w: WakeTarget, cfg: WakeConfig): Promise<WakeResult> {
   const url = `http://${w.host}:${cfg.port}`;
   const probe = () => probeWorker(url, { timeoutMs: cfg.probeTimeoutMs, request: cfg.request });
   const first = await probe();
@@ -269,11 +245,9 @@ async function wakeOne(w, cfg) {
   // fire the at-logon task and warm NVDA up; a deadline that expires early turns "still coming up" into
   // "did not wake", and those have completely different remedies.
   const deadline = cfg.now() + cfg.deadlineMs;
-  /** @type {Probe} */
-  let last = first;
-  /** the last KNOWN answer: what the box said before the deadline, which the timeout must not overwrite
-   * @type {Probe | null} */
-  let lastKnown = first.outcome === "no-answer" ? null : first;
+  let last: Probe = first;
+  /** the last KNOWN answer: what the box said before the deadline, which the timeout must not overwrite */
+  let lastKnown: Probe | null = first.outcome === "no-answer" ? null : first;
   while (cfg.now() < deadline) {
     await cfg.sleep(cfg.pollMs);
     last = await probe();
@@ -292,12 +266,12 @@ async function wakeOne(w, cfg) {
  * wake goes on exactly as it did. Answering is not proof (`wakeProofDelta`): the ledger is about waking a box AT
  * ITS RESERVATION.
  *
- * @param {WakeTarget & { mac: string }} w
- * @param {WakeConfig} cfg
+ *
+ *
  * @returns {Promise<string | null>} the address it answers at, or null when it was not found
  */
-async function whereByMac(w, cfg) {
-  const answers = async (/** @type {string} */ candidate) =>
+async function whereByMac(w: WakeTarget & { mac: string; }, cfg: WakeConfig): Promise<string | null> {
+  const answers = async (candidate: string) =>
     ["ready", "busy", "not-ready"].includes((await probeWorker(candidate, { timeoutMs: cfg.probeTimeoutMs, request: cfg.request })).outcome);
   const { found } = await locateByMac([{ name: w.name, url: `http://${w.host}:${cfg.port}`, mac: w.mac }],
     { macRead: cfg.macRead, probe: answers });
@@ -308,11 +282,8 @@ async function whereByMac(w, cfg) {
 /**
  * The state a wait that ran out ends in, from what the box last SAID. A silent probe after an answer does
  * not erase the answer, and silence throughout is `no-answer`, never "down".
- *
- * @param {Probe | null} lastKnown
- * @param {Probe} last
  */
-function verdictAtDeadline(lastKnown, last) {
+function verdictAtDeadline(lastKnown: Probe | null, last: Probe) {
   if (lastKnown?.outcome === "not-ready") return { state: "never-ready", detail: lastKnown.reason };
   if (lastKnown?.outcome === "refused") return { state: "not-listening", detail: lastKnown.message };
   return { state: "no-answer", detail: last.outcome === "no-answer" ? last.message : "" };
@@ -327,14 +298,9 @@ function verdictAtDeadline(lastKnown, last) {
  * Only the workers passed in are touched: a job that needs three passes three, and a worker that is up
  * (ready or busy) is sent nothing (#2655 done-when 2). The socket, the health read, the clock and the sleep
  * are all injectable, so a test reads no network and waits no time.
- *
- * @param {WakeTarget[]} workers
- * @param {WakeOptions} [options]
- * @returns {Promise<WakeResult[]>}
  */
-export async function wakeFleet(workers, options = {}) {
-  /** @type {WakeConfig} */
-  const cfg = {
+export async function wakeFleet(workers: WakeTarget[], options: WakeOptions = {}): Promise<WakeResult[]> {
+  const cfg: WakeConfig = {
     port: 8765, deadlineMs: WAKE_DEADLINE_MS, pollMs: POLL_MS, probeTimeoutMs: HEALTH_TIMEOUT_MS,
     log: () => {}, send: sendMagicPacket, request: requestJson,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: Date.now,
@@ -352,24 +318,20 @@ export async function wakeFleet(workers, options = {}) {
   return results;
 }
 
+/** worker name -> epoch ms of its last proving wake */
+export type WakeProof = Record<string, number>;
+export type ProofTransport = (command: string, options?: { capture?: boolean }) => string;
 /**
  * THE PROOF LEDGER (#3227): per worker, when it last came up from silence on its own address after one
- * packet. `fleet-auto-off.mjs` powers a box off only while this is recent, because a box that cannot be
+ * packet. `fleet-auto-off.ts` powers a box off only while this is recent, because a box that cannot be
  * brought back must never be the one auto-off removes. Missing, corrupt or unreadable reads as EMPTY, which
  * is no proof for anyone: every box is kept on, the direction auto-off may always err in.
  *
  * The file is on the control plane (#3269), so it is reached by `sshToControlPlane`, which runs the command
  * in place when this process IS the control plane and over ssh otherwise. A transport that FAILS reads as
  * empty too, but is said aloud through `log`, because a ledger nobody can read keeps every box on.
- *
- * @typedef {Record<string, number>} WakeProof worker name -> epoch ms of its last proving wake
- * @typedef {(command: string, options?: { capture?: boolean }) => string} ProofTransport
- * @param {string} path
- * @param {ProofTransport} transport
- * @param {(line: string) => void} log
- * @returns {WakeProof}
  */
-export function readWakeProof(path, transport = sshToControlPlane, log = () => {}) {
+export function readWakeProof(path: string, transport: ProofTransport = sshToControlPlane, log: (line: string) => void = () => {}): WakeProof {
   let text;
   try {
     text = transport(proofReadCommand(path), { capture: true });
@@ -380,12 +342,11 @@ export function readWakeProof(path, transport = sshToControlPlane, log = () => {
   return parseWakeProof(text);
 }
 
-/** @param {string} text @returns {WakeProof} */
-function parseWakeProof(text) {
+function parseWakeProof(text: string): WakeProof {
   try {
     const provenAt = JSON.parse(text)?.provenAt;
     if (!provenAt || typeof provenAt !== "object" || Array.isArray(provenAt)) return {};
-    return Object.fromEntries(Object.entries(provenAt).filter(([, at]) => Number.isFinite(at)));
+    return Object.fromEntries(Object.entries(provenAt).filter(([, at]) => Number.isFinite(at))) as WakeProof;
   } catch {
     return {};
   }
@@ -394,8 +355,7 @@ function parseWakeProof(text) {
 // The path goes into a remote shell, so it is refused unless it is a plain path (as `inventorySources` does).
 const PROOF_PATH_SHAPE = /^\/[\w./-]+$/;
 
-/** @param {string} path */
-function shellPath(path) {
+function shellPath(path: string) {
   if (!PROOF_PATH_SHAPE.test(path)) throw new Error(`the wake-proof ledger path is not a plain absolute path: ${path}`);
   return `'${path}'`;
 }
@@ -403,10 +363,8 @@ function shellPath(path) {
 /**
  * A MISSING file prints nothing and succeeds, so it reads as an empty ledger; a transport that fails throws.
  * The two must not share a value (an absent ledger is an answer, an unreachable one is not).
- *
- * @param {string} path
  */
-export const proofReadCommand = (path) => `if [ -f ${shellPath(path)} ]; then cat ${shellPath(path)}; fi`;
+export const proofReadCommand = (path: string) => `if [ -f ${shellPath(path)} ]; then cat ${shellPath(path)}; fi`;
 
 /**
  * What the remote step does with a delta, in the words of `advanceWakeProof` and `parseWakeProof` (a test runs
@@ -434,11 +392,8 @@ const REMOTE_ADVANCE = [
  * both proofs (#3269 done-when 4). What travels is the DELTA (who proved, who failed), never a ledger read
  * here and written back: that is the read-modify-write that loses a peer's worker. Rename-over keeps a reader
  * from ever seeing half a file.
- *
- * @param {string} path
- * @param {{ set: WakeProof, drop: string[] }} delta
  */
-export function proofWriteCommand(path, delta) {
+export function proofWriteCommand(path: string, delta: { set: WakeProof; drop: string[]; }) {
   const encoded = Buffer.from(JSON.stringify(delta)).toString("base64");
   const file = shellPath(path);
   const lock = shellPath(`${path}.lock`);
@@ -451,16 +406,10 @@ export function proofWriteCommand(path, delta) {
  * silence to wake from, so they prove nothing (and change nothing); a worker that answered at another
  * address reads as `no-answer`, because the wake only ever probes the inventory's. A wake that FAILED drops
  * the proof that worker held.
- *
- * @param {{ name: string, state: string }[]} results
- * @param {number} at
- * @returns {{ set: WakeProof, drop: string[] }}
  */
-export function wakeProofDelta(results, at) {
-  /** @type {WakeProof} */
-  const set = {};
-  /** @type {string[]} */
-  const drop = [];
+export function wakeProofDelta(results: { name: string; state: string; }[], at: number): { set: WakeProof; drop: string[]; } {
+  const set: WakeProof = {};
+  const drop: string[] = [];
   for (const r of results) {
     if (r.state === "woken") set[r.name] = at;
     else if (wakeFailed(r)) drop.push(r.name);
@@ -468,15 +417,8 @@ export function wakeProofDelta(results, at) {
   return { set, drop };
 }
 
-/**
- * The ledger after one set of wakes. Every other worker's entry is carried over untouched.
- *
- * @param {{ name: string, state: string }[]} results
- * @param {WakeProof} previous
- * @param {number} at
- * @returns {WakeProof}
- */
-export function advanceWakeProof(results, previous, at) {
+/** The ledger after one set of wakes. Every other worker's entry is carried over untouched. */
+export function advanceWakeProof(results: { name: string; state: string; }[], previous: WakeProof, at: number): WakeProof {
   const { set, drop } = wakeProofDelta(results, at);
   const next = { ...previous, ...set };
   for (const name of drop) delete next[name];
@@ -488,11 +430,8 @@ export function advanceWakeProof(results, previous, at) {
  * cannot be reached or written (an unreachable control plane, a refused ssh, an unwritable file) is reported
  * through `log`, and the worker is simply not proven, which keeps it on. A wake that changes nothing sends
  * nothing.
- *
- * @param {{ name: string, state: string }[]} results
- * @param {{ path: string, at: number, transport?: ProofTransport, log?: (line: string) => void }} where
  */
-export function recordWakeProof(results, { path, at, transport = sshToControlPlane, log = () => {} }) {
+export function recordWakeProof(results: { name: string; state: string; }[], { path, at, transport = sshToControlPlane, log = () => {} }: { path: string; at: number; transport?: ProofTransport; log?: (line: string) => void; }) {
   try {
     const delta = wakeProofDelta(results, at);
     if (!Object.keys(delta.set).length && !delta.drop.length) return;
@@ -506,12 +445,10 @@ export function recordWakeProof(results, { path, at, transport = sshToControlPla
  * One line per worker, in the words of what was OBSERVED: "did not answer" and "is down" are different
  * claims and this file only ever makes the first (#2655 done-when 5.2). `answered` is a fact about the box,
  * `nothing answered` a fact about the wait.
- *
- * @param {{ name: string, host: string, state: string, packets?: number, detail?: string }} r
  */
-export function wakeReportLine(r) {
+export function wakeReportLine(r: { name: string; host: string; state: string; packets?: number; detail?: string; }) {
   const said = r.detail ? ` (${r.detail})` : "";
-  const detail = /** @type {Record<string, string>} */ ({
+  const detail = ({
     "already-up": "already up and ready, no packet sent",
     busy: "up and busy with a capture: not woken, not waited on",
     woken: "one packet sent, then ready",
@@ -524,23 +461,21 @@ export function wakeReportLine(r) {
     "never-ready": `answered but never became ready: ${r.detail}`,
     "not-listening": `the box refuses connections (it is up) and the worker never started listening${said} `
       + "— `fleet:recover`",
-  })[r.state] ?? r.state;
+  } as Record<string, string>)[r.state] ?? r.state;
   return `  ${r.name.padEnd(16)} ${r.host.padEnd(15)} ${detail}${proofClause(r)}`;
 }
 
 /**
  * What the outcome does to the worker's wake proof (#3227), so a box that stops waking is named as one
  * auto-off will now keep on, in the wake's own output and not only in auto-off's.
- *
- * @param {{ state: string }} r
  */
-function proofClause(r) {
+function proofClause(r: { state: string; }) {
   if (r.state === "woken") return " -- wake proved: auto-off may power it off again";
   return wakeFailed(r) ? " -- wake proof dropped: auto-off keeps it on until a wake proves it" : "";
 }
 
 /** Did this worker end somewhere a capture cannot use? (`busy` is a worker that is fine and taken.) */
-export const wakeFailed = (/** @type {{ state: string }} */ r) =>
+export const wakeFailed = (r: { state: string; }) =>
   !["already-up", "busy", "woken", "came-up"].includes(r.state);
 
 async function main() {
@@ -548,13 +483,13 @@ async function main() {
   const inventory = inventoryPathFor();
   // `inventory.yml` is gitignored (real addresses, restored from the secrets store at bring-up) --
   // absence is now a state a fresh clone hits routinely, not an edge case, so it gets a named error
-  // rather than an uncaught ENOENT stack. Same message shape as `fleet-status.mjs`'s `fleetToProbe()`.
+  // rather than an uncaught ENOENT stack. Same message shape as `fleet-status.ts`'s `fleetToProbe()`.
   let declared;
   try {
     declared = inventoryHosts(readFileSync(inventory, "utf8"));
   } catch (error) {
     process.stderr.write("No fleet to wake: inventory.yml could not be read "
-      + `(${/** @type {Error} */ (error).message}). Restore it from the secrets store, or add a host.\n`);
+      + `(${(error as Error).message}). Restore it from the secrets store, or add a host.\n`);
     process.exit(2);
   }
   const workers = wanted.length ? declared.filter((w) => wanted.includes(w.name)) : declared;
