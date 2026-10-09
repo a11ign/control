@@ -79,11 +79,11 @@ jobs:
         working-directory: core
       - run: pnpm exec tsc --noEmit -p tsconfig.control.json
         working-directory: core
-      - run: pnpm exec rstest run --config scripts/rstest/rstest.config.mjs --include "packages/control/**/*.test.ts"
+      - run: pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include "packages/control/**/*.test.ts"
         working-directory: core
       # This repository's own checks: the workflows, the arming filter, the composition above, the manifest. The typecheck (`tsc --noEmit`, `package.json`'s `typecheck`) is a step of the `gate` job
       # the ruleset requires, so a type error here blocks the merge; it runs before the tests so it reads red without waiting for them. The tests are rstest on `@a11ign/toolchain`'s config
-      # (`scripts/rstest/rstest.config.mjs`, ADR 0043), the same runner the core's step above uses.
+      # (`scripts/rstest/rstest.config.ts`, ADR 0043), the same runner the core's step above uses.
       - run: pnpm install --frozen-lockfile
         working-directory: control
       # THE LAYOUT CHECK (ADR 0043, Decision 7; `@a11ign/toolchain`'s `layout-check`, a11ign/a11ign#4210): the package is at the root, with one README, one manifest and no workspace file. It

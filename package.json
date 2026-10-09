@@ -17,7 +17,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "rstest run --config scripts/rstest/rstest.config.mjs",
+    "test": "rstest run --config scripts/rstest/rstest.config.ts",
     "layout-check": "layout-check",
     "changeset": "changeset"
   },

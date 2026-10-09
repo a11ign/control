@@ -41,9 +41,9 @@ test("the layout check is a step of the job `gate` waits for (ADR 0043, Decision
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
 
 test("the tests run on rstest through @a11ign/toolchain's config, and no `tsx --test` is left (ADR 0043, a11ign/a11ign#3960)", () => {
-  assert.match(manifest.scripts.test, /^rstest run --config scripts\/rstest\/rstest\.config\.mjs$/, "positive control: the test script is found");
+  assert.match(manifest.scripts.test, /^rstest run --config scripts\/rstest\/rstest\.config\.ts$/, "positive control: the test script is found");
   assert.ok(manifest.devDependencies["@a11ign/toolchain"] && manifest.devDependencies["@rstest/core"], "both are devDependencies");
-  assert.match(readFileSync(new URL("./rstest/rstest.config.mjs", import.meta.url), "utf8"), /defineToolchainConfig\(/, "the config is a call into the toolchain");
+  assert.match(readFileSync(new URL("./rstest/rstest.config.ts", import.meta.url), "utf8"), /defineToolchainConfig\(/, "the config is a call into the toolchain");
   for (const [where, text] of [["package.json", JSON.stringify(manifest.scripts)], ["ci.yml", ci]] as const) assert.doesNotMatch(text, /tsx --test/, where);
 });
 

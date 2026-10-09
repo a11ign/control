@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import {
   STALE_AFTER_MS, READ_TIMEOUT_MS, HEARTBEAT_COMMENT_ID, TELEGRAM_TOKEN_FILE, GH_TOKEN_FILE, judgeTick, messageFor, run, readGateLastTick, telegramSender, chatIdFrom,
 } from "./gate-heartbeat.mjs";
-import { shippedControlUnits } from "./control-unit-drift.mjs";
+import { shippedControlUnits } from "./control-unit-drift.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ANSIBLE = join(HERE, "..", "ansible");
