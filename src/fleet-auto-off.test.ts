@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.ts";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerDeclaration, layerOwning, layerPinTag, layersFrom, pinnedLayerTag } from "./layer-checkouts.ts";
@@ -965,7 +965,7 @@ test("#3275 importClosure on the real program: every file it names exists, and t
   const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
   for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
   for (const expected of [THIS, "packages/control/src/fleet-watch.ts", "packages/control/src/fleet-wake.ts",
-    "packages/worker-fleet/src/worker-http.mjs"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
+    "packages/worker-fleet/src/worker-http.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
   assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
   for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
 });
@@ -1015,11 +1015,11 @@ test("#3275 checkAgainstMain: a file the checkout does not track counts as diffe
 
 const LAYER = "screenreader-fleet";
 const LAYER_PATH = "packages/worker-fleet";
-const FLEET_FILE = `${LAYER_PATH}/src/worker-http.mjs`;
+const FLEET_FILE = `${LAYER_PATH}/src/worker-http.ts`;
 const TAG = `@a11ign/${LAYER}@0.5.1`;
 const lockfileAt = (version: string) => `importers:\n\n  .:\n    dependencies:\n      '@a11ign/${LAYER}':\n        specifier: ^0.5.1\n        version: ${version}(@a11ign/scorer@packages+scorer)\n`;
 /** The program as it really is: it imports a file of the layer, which is what makes the layer part of the comparison. */
-const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/worker-http.mjs";\n` : "");
+const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/worker-http.ts";\n` : "");
 const laidAt = (tag: string) => ({ differing: tag === TAG ? [] : [`${LAYER_PATH} (layer ${LAYER} is laid at ${tag}, main pins ${TAG})`] });
 
 test("#3845 layerPinTag reads the lockfile as scripts/lay-layer.mjs does, on the REAL lockfile, CRLF and the refusals", () => {

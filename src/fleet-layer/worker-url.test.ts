@@ -16,8 +16,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { assertWorkerUrl } from "../../../worker-fleet/src/worker-http.mjs";
-import { sourceFiles } from "../../../worker-fleet/src/source-walk.mjs";
+import { assertWorkerUrl } from "../../../worker-fleet/src/worker-http.ts";
+import { sourceFiles } from "../../../worker-fleet/src/source-walk.ts";
 
 test("a well-formed address is accepted, and normalised", () => {
   assert.equal(assertWorkerUrl("http://203.0.113.107:8765"), "http://203.0.113.107:8765");
@@ -54,7 +54,7 @@ test("the source it names is the one in the message, so a second flag is not con
 /** Every script that reads a `--worker=` argument, discovered rather than listed. */
 function workerArgClients(): Array<[string, string]> {
   return sourceFiles().filter(([path, src]) =>
-    src.includes('"--worker="') && !path.endsWith("worker-http.mjs"));
+    src.includes('"--worker="') && !path.endsWith("worker-http.ts"));
 }
 
 test("every client that takes --worker validates it", () => {

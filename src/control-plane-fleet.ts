@@ -19,7 +19,7 @@ import { networkInterfaces } from "node:os";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { WORKER_GROUP, groupPerLine, workersFromInventory, workerNamesFromInventory, portFromGroupVars }
-  from "../../worker-fleet/src/fleet-env.mjs";
+  from "../../worker-fleet/src/fleet-env.ts";
 
 const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 const DEFAULT_SSH_TIMEOUT_MS = 60_000;

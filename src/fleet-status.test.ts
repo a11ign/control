@@ -9,7 +9,7 @@ import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consiste
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
   subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive } from "./fleet-status.ts";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
-  from "../../worker-fleet/src/fleet-consistency.mjs";
+  from "../../worker-fleet/src/fleet-consistency.ts";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readSwitchLive } from "./fleet-switch.ts";

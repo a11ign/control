@@ -48,8 +48,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { stripComments } from "../../../evidence/src/source-text.ts";
-import { unknownFlags, didYouMean, nameOf, refuseUnknownFlags, flagValue } from "../../../worker-fleet/src/cli-flags.mjs";
-import { commandLineModules } from "../../../worker-fleet/src/command-line-census.mjs";
+import { unknownFlags, didYouMean, nameOf, refuseUnknownFlags, flagValue } from "../../../worker-fleet/src/cli-flags.ts";
+import { commandLineModules } from "../../../worker-fleet/src/command-line-census.ts";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -305,7 +305,7 @@ test("the guard fires through a SYMLINK, because npm's own .bin entries are syml
     writeFileSync(real, [
       `import { realpathSync } from "node:fs";`,
       `import { pathToFileURL } from "node:url";`,
-      `import { refuseUnknownFlags } from ${JSON.stringify(pathToFileURL(join(REPO, "packages/worker-fleet/src/cli-flags.mjs")).href)};`,
+      `import { refuseUnknownFlags } from ${JSON.stringify(pathToFileURL(join(REPO, "packages/worker-fleet/src/cli-flags.ts")).href)};`,
       `if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) {`,
       `  refuseUnknownFlags(["--known"], { entry: import.meta.url, command: "real-command" });`,
       `  console.log("RAN");`,

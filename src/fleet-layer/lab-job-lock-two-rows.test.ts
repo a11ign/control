@@ -38,7 +38,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
 
 const LAYERS_PATH = fileURLToPath(new URL("../../layers.json", import.meta.url));
 /** Relative to the scratch dir the playbooks run from. */

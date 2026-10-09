@@ -29,7 +29,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   from "./fleet-playbook.ts";
 import { layersFrom } from "./layer-checkouts.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
+import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.ts";
 
 test("commits and ordinary branch names are accepted", () => {
   for (const ref of ["afec73d", "65ead9b1c2d3e4f5", "main", "v8-feature-schema", "origin/main", "v1.2.3"]) {

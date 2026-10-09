@@ -52,12 +52,12 @@ import { pathToFileURL } from "node:url";
 // worker-fleet -- published bins (doctor.mjs, check-worker-code.mjs) depend on it -- so these imports
 // cross the boundary the SANCTIONED way, relative, exactly like `fleet-playbook.ts` and `lab-job.ts`
 // already do.
-import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
-import { configuredWorkers } from "../../worker-fleet/src/fleet-env.mjs";
-import { assessWorker } from "../../worker-fleet/src/worker-health.mjs";
+import { requestJson } from "../../worker-fleet/src/worker-http.ts";
+import { configuredWorkers } from "../../worker-fleet/src/fleet-env.ts";
+import { assessWorker } from "../../worker-fleet/src/worker-health.ts";
 import { fleetConsistency, describeMismatches, describeReportedOnly }
-  from "../../worker-fleet/src/fleet-consistency.mjs";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+  from "../../worker-fleet/src/fleet-consistency.ts";
+import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
 import { readControlPlaneFleet } from "./control-plane-fleet.ts";
 // #2752: the MAC fallback below reuses fleet-discover.ts's own `normaliseMac` rather than restating it --

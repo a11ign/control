@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
 
 /** The lab's scripts directory, resolved the same way `read` resolves the playbooks. */
 const LAB_SCRIPTS = fileURLToPath(new URL("../../../lab/scripts/", import.meta.url));

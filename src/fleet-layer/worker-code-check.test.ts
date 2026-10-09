@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { codeDrift, describeCodeDrift, describeEmptyPool, resolveExpectedWorkerCode } from "../../../worker-fleet/src/worker-code-check.mjs";
+import { codeDrift, describeCodeDrift, describeEmptyPool, resolveExpectedWorkerCode } from "../../../worker-fleet/src/worker-code-check.ts";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 const FLEET = ["http://203.0.113.107:8765", "http://203.0.113.59:8765", "http://203.0.113.175:8765"];
@@ -104,7 +104,7 @@ test("the expected hash is the SHARED hasher, not a second implementation", asyn
   const expected = await resolveExpectedWorkerCode({ checkoutRoot: REPO });
   assert.match(expected.code, /^[0-9a-f]{16}$/);
   assert.ok(["clone", "installed"].includes(expected.source), `the reading must say where it came from, not "${expected.source}"`);
-  const source = readFileSync(`${REPO}packages/worker-fleet/src/worker-code-check.mjs`, "utf8");
+  const source = readFileSync(`${REPO}packages/worker-fleet/src/worker-code-check.ts`, "utf8");
   assert.ok(!/createHash\s*\(/.test(source),
     "worker-code-check.mjs must call codeVersion() rather than hashing itself — a second implementation "
     + "of the comparison is a second chance for the two sides to disagree.");

@@ -17,8 +17,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerPinTag, layersFrom, releaseTag } from "./layer-checkouts.ts";
-import { workerSourceDirty } from "../../worker-fleet/src/code-drift.mjs";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { workerSourceDirty } from "../../worker-fleet/src/code-drift.ts";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -47,8 +47,8 @@ const FIVE_READERS = [
   "packages/control/src/fleet-playbook.ts",
   "packages/control/src/lab-job.ts",
   "packages/control/ansible/deploy.yml",
-  "packages/worker-fleet/src/code-drift.mjs",
-  "packages/worker-fleet/src/check-worker-code.mjs",
+  "packages/worker-fleet/src/code-drift.ts",
+  "packages/worker-fleet/src/check-worker-code.ts",
 ];
 
 /** Comments out: a path named in PROSE is not a path that is read. `//`, block and `#` comments. */

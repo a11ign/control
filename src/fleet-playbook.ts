@@ -60,20 +60,20 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 // RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.ts";
 import { layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
 import type { WorkerHealth } from "./fleet-status.ts";
-import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
-import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.mjs";
+import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.ts";
+import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.ts";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
 // The first version of this reached `workerUrls` in `check-worker-code.mjs`, which imports

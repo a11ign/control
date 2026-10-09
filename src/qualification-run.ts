@@ -44,7 +44,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { layerDeclaration, layerPinTag, separateLayers } from "./layer-checkouts.ts";
 import { renderResult, requireFullSha, EXIT, type Outcome } from "./post-qualification-status.ts";
 

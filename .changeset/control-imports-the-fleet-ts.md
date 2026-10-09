@@ -1,0 +1,5 @@
+---
+"@a11ign/control": patch
+---
+
+Control imports the fleet layer's `.ts` (a11ign/a11ign#4516, for #4514): `@a11ign/screenreader-fleet` 0.6.0 ships its modules as `.ts` and no `.mjs`, so the 82 `../../worker-fleet/src/<f>.mjs` specifiers in 39 files of `src/` (18 distinct fleet modules) name `.ts` now, and so do the three bare file names the tests compare against (`fleet-auto-off.test.ts`'s `FLEET_FILE`, `fleet-scripts.test.ts`'s self-exclusion, `worker-url.test.ts`'s client exclusion). A control tree is now only as good as the fleet laid beside it: it needs a core whose lockfile pins `@a11ign/screenreader-fleet` at 0.6.0 or later, and `ci.yml`'s `CORE_REF` has to move to one (it names a core that lays 0.5.3). The tag this change makes is the one the core pins in #4514.

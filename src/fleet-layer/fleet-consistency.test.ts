@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fleetConsistency, describeMismatches, describeReportedOnly, MUST_MATCH, POLICY_MUST_MATCH,
-  REPORTED_ONLY } from "../../../worker-fleet/src/fleet-consistency.mjs";
+  REPORTED_ONLY } from "../../../worker-fleet/src/fleet-consistency.ts";
 import { layerFile } from "../../../guards/src/layer-file.mjs";
 
 /** The worker's `server.mjs` as TEXT, found by package name (#2613): it is not importable (guidepup at module scope) and not an export. */

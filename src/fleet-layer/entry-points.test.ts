@@ -69,7 +69,7 @@ const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
  * | a human typing `node scripts/x.mjs` | NO, and unknowable — the entry guard is what makes that safe |
  *
  * `*.cmd`/`*.ps1` AND THE ANSIBLE PLAYBOOKS WERE BOTH TRIED AND BACKED OUT, which is why it is listed as NOT covered rather than left
- * off. Reading those files finds `packages/worker-fleet/src/cli-flags.mjs`, `code-version.mjs`,
+ * off. Reading those files finds `packages/worker-fleet/src/cli-flags.ts`, `code-version.mjs`,
  * `dataset-paths.mjs`, `fleet-consistency.mjs`, `axe.ts`, `fetch-encoder.mjs` and `git-sandbox.ts` —
  * every one a LIBRARY MODULE named in a deployed-file manifest or a dependency list, not something
  * anyone executes. Being listed is not being invoked, and a discovery that cannot tell the
@@ -344,9 +344,9 @@ const KNOWN_PLAIN_ENTRY_GUARDS: readonly string[] = Object.freeze([
   "packages/control/src/fleet-wake.ts",
   "packages/control/src/lab-job.ts",
   "packages/control/src/lab-pipeline.ts",
-  "packages/worker-fleet/src/fleet-env.mjs",
-  "packages/worker-fleet/src/guest-run.mjs",
-  "packages/worker-fleet/src/normalise-fleet.mjs",
+  "packages/worker-fleet/src/fleet-env.ts",
+  "packages/worker-fleet/src/guest-run.ts",
+  "packages/worker-fleet/src/normalise-fleet.ts",
   "scripts/check-retired-heads.mjs",
   "scripts/check-schema-migration.mjs",
   "scripts/ci-changed.mjs",

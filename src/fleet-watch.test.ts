@@ -14,7 +14,7 @@ import {
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
-import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.mjs";
+import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
 
 export type FleetRow = {name: string, state: string, readiness?: {reason?: string|null}|null};
 

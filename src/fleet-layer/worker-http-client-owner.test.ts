@@ -48,13 +48,13 @@ const EXEMPT = {
  * kind of legitimate exception as the EXEMPT entry below and out of scope for this guard.
  */
 const CONVERTED_FUNCTIONS: Record<string, string[]> = {
-  "packages/worker-fleet/src/doctor.mjs": ["httpJson"],
+  "packages/worker-fleet/src/doctor.ts": ["httpJson"],
   "packages/lab/src/training/capture-status.mjs": ["workerState"],
   "packages/lab/src/harnesses/capture-check.mjs": ["workerIsServing"],
-  "packages/worker-fleet/src/protocol-guard.mjs": ["servedProtocols"],
-  "packages/worker-fleet/src/compare-workers.mjs": ["diagnostics", "vitals"],
-  "packages/worker-fleet/src/check-worker-code.mjs": ["versionOf"],
-  "packages/worker-fleet/src/code-drift.mjs": ["readWorkerCode"],
+  "packages/worker-fleet/src/protocol-guard.ts": ["servedProtocols"],
+  "packages/worker-fleet/src/compare-workers.ts": ["diagnostics", "vitals"],
+  "packages/worker-fleet/src/check-worker-code.ts": ["versionOf"],
+  "packages/worker-fleet/src/code-drift.ts": ["readWorkerCode"],
 };
 
 function functionBody(source: string, name: string): string {

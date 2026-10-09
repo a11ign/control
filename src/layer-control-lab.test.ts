@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT, CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { controlPlaneCheckout } from "./fleet-playbook.ts";
 import { LAYER_REF, layerCheckoutMove, layersFrom } from "./layer-checkouts.ts";
