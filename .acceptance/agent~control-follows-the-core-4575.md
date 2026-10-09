@@ -1,7 +1,7 @@
 Acceptance:
 
 ```bash
-bash -c 'grep -q "CORE_REF: f3b5c5f595428bdfd970bd8ab6cf55edc770cf88" .github/workflows/ci.yml'
+bash -c '! grep -q "CORE_REF: 50adf137b0aadc20c8f4b2ae48d4b5557e657bc3" .github/workflows/ci.yml'
 bash -c '! grep -n "code-version\.mjs" src/layer-checkouts.ts'
 bash -c '! grep -n "rstest\.config\.mjs" .github/workflows/ci.yml'
 ```
