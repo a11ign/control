@@ -81,6 +81,53 @@
     state: present
     enabled: true
 
+- name: Register the display-mode logon task
+  # #4441 (part b of #4405): `display.yml` pins the mode ONCE, through a one-shot task that removes itself, so a
+  # box that loses the mode afterwards (a driver reset, an update that reboots into the Basic Display Adapter,
+  # an RDP session) stayed off the pin until somebody re-provisioned it -- and `displayMode` is a MUST_MATCH
+  # field, so that box then refused every capture. This task re-asserts it at every logon. It is ADDED beside
+  # the provision-time task, not swapped for it: that one still runs inside the play, where its failure stops
+  # the play; this one runs on the box with nobody watching.
+  #
+  # Its own task, order-independent of `a11ysrv`, so a display write that sticks cannot keep the worker from
+  # starting; `execution_time_limit` bounds it for the same reason. It cannot disturb a capture either: at
+  # logon none is running yet, and `set-display-mode.ps1` prints `already <w> x <h>` and exits 0 when the mode
+  # already equals the pin, which is the ordinary case.
+  #
+  # The width and height are `worker_display_mode`'s, passed as the environment `display.yml` passes them --
+  # never typed here, because `tasks.yml` is exempt from the provision stamp only while every VALUE it applies
+  # lives in the hashed `defaults/main.yml`. `logon_type: interactive_token` is the same mechanism and for the
+  # same reason as `display.yml`'s one-shot: the display call fails outside the interactive window station, so
+  # this attaches to the session the auto-logon established. `run_level: highest` matches that one-shot, the
+  # only run level this call has been measured under (#1955).
+  #
+  # THE EXIT CODE IS THE READ-BACK'S VERDICT, and `exit $LASTEXITCODE` is what carries it out of
+  # `powershell.exe -Command`. The script reads the mode back after writing it, in the same process, and exits
+  # 1 when the desktop disagrees; without this the task would end 0 whatever the script said. The next
+  # "Report what was registered" reads `LastTaskResult` back, so a logon that failed shows as non-zero there.
+  become: true
+  community.windows.win_scheduled_task:
+    name: a11y-display-mode-logon
+    description: a11ign display mode, re-asserted and read back at every logon
+    actions:
+      - path: powershell.exe
+        arguments: >-
+          -NoProfile -ExecutionPolicy Bypass -Command
+          "$env:A11Y_DISPLAY_WIDTH = '{{ worker_display_mode.width }}';
+           $env:A11Y_DISPLAY_HEIGHT = '{{ worker_display_mode.height }}';
+           & '{{ worker_repo_path }}\packages\worker-fleet\src\provisioning\set-display-mode.ps1';
+           exit $LASTEXITCODE"
+    username: "{{ ansible_user }}"
+    logon_type: interactive_token
+    run_level: highest
+    triggers:
+      - type: logon
+        username: "{{ ansible_user }}"
+    # A wedged display write must end rather than sit there; the script itself takes seconds.
+    execution_time_limit: PT2M
+    state: present
+    enabled: true
+
 - name: Remove the one-shot bootstrap task if it is still armed
   # `a11ybootstrap` exists only to carry a machine across the reboot that follows account creation. It is
   # deliberately NOT a general update-on-boot mechanism, for three reasons worth keeping:
@@ -99,11 +146,14 @@
   ansible.windows.win_powershell:
     script: |
       $Ansible.Changed = $false
-      foreach ($n in @('{{ worker_task_name }}', '{{ worker_check_task_name }}')) {
+      foreach ($n in @('{{ worker_task_name }}', '{{ worker_check_task_name }}', 'a11y-display-mode-logon')) {
         $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
         if ($t) {
+          # `lastResult` is what the task's last run exited with: the display-mode logon task ends non-zero
+          # when its read-back disagreed with the pin, and 267011 (0x41303) means it has not run yet.
           "$n logon=$($t.Principal.LogonType) runLevel=$($t.Principal.RunLevel) " +
-          "triggers=$(($t.Triggers | Measure-Object).Count) restarts=$($t.Settings.RestartCount)"
+          "triggers=$(($t.Triggers | Measure-Object).Count) restarts=$($t.Settings.RestartCount) " +
+          "lastResult=$((Get-ScheduledTaskInfo -TaskName $n).LastTaskResult)"
         } else { "$n MISSING" }
       }
   register: registered_tasks
