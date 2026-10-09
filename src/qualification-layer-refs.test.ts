@@ -37,7 +37,10 @@ const IDENTITY = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.t
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", [...IDENTITY, ...args], { cwd, env: sandboxGitEnv(), encoding: "utf8" }).trim();
 
-/** A repository with two commits, an ANNOTATED tag on the first and a LIGHTWEIGHT one on the second. */
+/**
+ * A repository with two commits, an ANNOTATED tag on the first and a LIGHTWEIGHT one on the second, each named in FULL: the tag a
+ * repository really made (`v0.3.0` for `screenreader-worker` from 0.3.0, #4363), spelled out here so no fixture asks `releaseTag` what it should be.
+ */
 function layerRepository({ package: name, annotated, lightweight }: { package: string, annotated: string, lightweight: string }) {
   const dir = join(newDir(), `${name}.git`);
   mkdirSync(dir);
@@ -49,8 +52,8 @@ function layerRepository({ package: name, annotated, lightweight }: { package: s
   writeFileSync(join(dir, "f"), "two\n");
   git(dir, "commit", "-qam", "two");
   const second = git(dir, "rev-parse", "HEAD");
-  git(dir, "tag", "-a", "-m", "annotated", `@a11ign/${name}@${annotated}`, first);
-  git(dir, "tag", `@a11ign/${name}@${lightweight}`, second);
+  git(dir, "tag", "-a", "-m", "annotated", annotated, first);
+  git(dir, "tag", lightweight, second);
   return { dir, first, second };
 }
 
@@ -79,8 +82,10 @@ function coreAt(lockfile: string) {
 
 /** Two layers as `layers.json` declares them (the layer's key is NOT always its package: `nvda-worker` is `screenreader-worker`). */
 function fixtureLayers() {
-  const worker = layerRepository({ package: "screenreader-worker", annotated: "0.2.0", lightweight: "0.3.0" });
-  const fleet = layerRepository({ package: "screenreader-fleet", annotated: "0.5.0", lightweight: "0.5.1" });
+  const worker = layerRepository({ package: "screenreader-worker", annotated: "@a11ign/screenreader-worker@0.2.0", lightweight: "v0.3.0" });
+  const fleet = layerRepository({ package: "screenreader-fleet", annotated: "@a11ign/screenreader-fleet@0.5.0", lightweight: "@a11ign/screenreader-fleet@0.5.1" });
+  // The flat release is the repository's third tag on the second commit (v0.5.3 is where `screenreader-fleet` moved, #4224).
+  git(fleet.dir, "tag", "v0.5.3", fleet.second);
   return {
     worker, fleet,
     layers: [{ name: "nvda-worker", remote: worker.dir, package: "screenreader-worker" }, { name: "screenreader-fleet", remote: fleet.dir }],
@@ -106,6 +111,21 @@ test("a fixture whose both pins resolve yields the two commits: the PEELED one f
   assert.match(made.worker.first, FULL_SHA);
   const tag = execFileSync("git", ["-C", made.layers[0].remote, "rev-parse", "@a11ign/screenreader-worker@0.2.0"], { env: sandboxGitEnv(), encoding: "utf8" }).trim();
   assert.notEqual(tag, made.worker.first, "the annotated tag is its own object, so the commit is what was PEELED, not the tag's sha");
+});
+
+test("#4363 a pin at a repository's first flat version asks for `v<semver>`, and one before it for `<package>@<version>`: the tag the layer made", () => {
+  const made = fixtureLayers();
+  const flat = coreAt(lockfileWith({ "screenreader-worker": "0.3.0", "screenreader-fleet": "0.5.3" }));
+  assert.deepEqual(layerRefsFor({ sha: flat.sha, git: flat.git, layers: made.layers }),
+    { layer_refs: { "nvda-worker": made.worker.second, "screenreader-fleet": made.fleet.second } }, "v0.3.0 and v0.5.3 resolve");
+  const before = coreAt(lockfileWith({ "screenreader-worker": "0.2.0", "screenreader-fleet": "0.5.1" }));
+  assert.deepEqual(layerRefsFor({ sha: before.sha, git: before.git, layers: made.layers }),
+    { layer_refs: { "nvda-worker": made.worker.first, "screenreader-fleet": made.fleet.second } }, "the older form still resolves");
+  const missing = coreAt(lockfileWith({ "screenreader-worker": "0.4.0", "screenreader-fleet": "0.5.2" }));
+  const refused = layerRefsFor({ sha: missing.sha, git: missing.git, layers: made.layers });
+  assert.ok("refusal" in refused);
+  assert.match(refused.refusal, /layer nvda-worker is pinned at v0\.4\.0 by the lockfile/, "a flat pin the remote lacks names the flat tag");
+  assert.match(refused.refusal, /layer screenreader-fleet is pinned at @a11ign\/screenreader-fleet@0\.5\.2 by the lockfile/, "0.5.2 is still the older form");
 });
 
 test("the lockfile read is the one AT the sha, not the one in the working tree", () => {
@@ -174,8 +194,11 @@ test("every layer the real manifest declares with a repository resolves to the l
   for (const name of names) {
     const { remote, package: declared } = layerDeclaration(name);
     assert.ok(remote !== undefined);
-    const pin = layerPinTag(lockfileWith({ [packageOfLayer({ name, package: declared })]: "1.2.3" }), packageOfLayer({ name, package: declared }));
-    assert.deepEqual(pin, { tag: `@a11ign/${declared ?? name}@1.2.3` }, `${name}'s package is the one its lockfile entry names`);
+    const pkg = packageOfLayer({ name, package: declared });
+    const pin = layerPinTag(lockfileWith({ [pkg]: "1.2.3" }), pkg);
+    // 1.2.3 is past the first flat version of the two repositories that have one; a package this copy of `layers.json` does not name keeps the scoped form.
+    const made = pkg === "screenreader-worker" || pkg === "screenreader-fleet" ? "v1.2.3" : `@a11ign/${pkg}@1.2.3`;
+    assert.deepEqual(pin, { tag: made }, `${name}'s package is the one its lockfile entry names`);
   }
 });
 

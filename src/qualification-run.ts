@@ -177,8 +177,11 @@ export function withLayerRefs(request: { sha: string; row: number; argv: string[
   return { ...request, argv: [...request.argv, "-e", JSON.stringify({ layer_refs: found.layer_refs })] };
 }
 
-/** What a tag the lab can ask `git ls-remote` for looks like: `@a11ign/<package>@<version>`, with no glob character in it. */
-const RESOLVABLE_TAG = /^@a11ign\/[a-z0-9-]+@\d+\.\d+\.\d+[A-Za-z0-9.+-]*$/;
+/**
+ * What a tag the lab can ask `git ls-remote` for looks like, with no glob character in it: `@a11ign/<package>@<version>` before a
+ * repository's first flat version, `v<version>` from it (`releaseTag`, #4363).
+ */
+const RESOLVABLE_TAG = /^(?:@a11ign\/[a-z0-9-]+@|v)\d+\.\d+\.\d+[A-Za-z0-9.+-]*$/;
 
 /**
  * The package a layer's tags are named for: the `package` its declaration in `layers.json` carries, else the layer's KEY, the same

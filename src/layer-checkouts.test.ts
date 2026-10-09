@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layersFrom } from "./layer-checkouts.ts";
+import { layerPinTag, layersFrom, releaseTag } from "./layer-checkouts.ts";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.mjs";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
 import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
@@ -327,4 +327,43 @@ test("a remote that could close the quotes it is placed in is refused before any
   const manifest = { layers: { [MOVE_LAYER]: { path: MOVE_PATH, remote: "https://example.test/x.git' ; rm -rf / ; '" } } };
   const { layerCheckoutMove } = layersFrom({ manifest, root: tmpdir() });
   assert.throws(() => layerCheckoutMove({ [MOVE_LAYER]: "a".repeat(40) }), /not a plain https URL or path/);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// #4363: the tag a layer's repository made, `v<semver>` from the package's first flat version
+// ---------------------------------------------------------------------------------------------------------
+
+const pinnedAt = (layer: string, version: string) =>
+  layerPinTag(`importers:\n\n  .:\n    dependencies:\n      '@a11ign/${layer}':\n        specifier: ^${version}\n        version: ${version}\n`, layer);
+
+test("#4363 layerPinTag names the tag the layer's repository made: v<semver> from its first flat version, <package>@<version> before it", () => {
+  assert.deepEqual(pinnedAt("screenreader-worker", "0.5.0"), { tag: "v0.5.0" }, "the pin the lockfile holds today: the remote has v0.5.0 and no @a11ign/screenreader-worker@0.5.0");
+  assert.deepEqual(pinnedAt("screenreader-worker", "0.3.0"), { tag: "v0.3.0" }, "the first flat version is itself flat");
+  assert.deepEqual(pinnedAt("screenreader-worker", "0.2.0"), { tag: "@a11ign/screenreader-worker@0.2.0" }, "the one older tag the remote holds");
+  assert.deepEqual(pinnedAt("screenreader-fleet", "0.5.2"), { tag: "@a11ign/screenreader-fleet@0.5.2" }, "the fleet's last scoped release");
+  assert.deepEqual(pinnedAt("screenreader-fleet", "0.5.3"), { tag: "v0.5.3" }, "the fleet's first flat one: a patch apart from the line above");
+  assert.deepEqual(pinnedAt("screenreader-fleet", "0.6.0"), { tag: "v0.6.0" }, "a later minor");
+  assert.deepEqual(pinnedAt("screenreader-fleet", "1.0.0"), { tag: "v1.0.0" }, "a later major, whatever its minor and patch");
+  assert.deepEqual(pinnedAt("scorer", "0.5.0"), { tag: "@a11ign/scorer@0.5.0" }, "a package with no flat release keeps the scoped form");
+});
+
+/** The core's file, reachable only from inside a core checkout (`packages/control` laid beside `scripts/`), and exporting `releaseTag` only from the core's #4119 on. */
+const CORE_LAY_LAYER = join(REPO, "scripts/lay-layer.mjs");
+
+/** Why the agreement test cannot run here, or `false` when it can: a core older than `releaseTag` (what `ci.yml`'s `CORE_REF` may still pin) has no first copy to compare with. */
+function noFirstCopy(): string | false {
+  if (!existsSync(CORE_LAY_LAYER)) return `${CORE_LAY_LAYER} is not reachable from this checkout, so there is no first copy to compare the second with`;
+  if (!/export function releaseTag\(/.test(readFileSync(CORE_LAY_LAYER, "utf8"))) return `${CORE_LAY_LAYER} does not export releaseTag (a core older than a11ign/a11ign #4119), so there is no first copy to compare the second with`;
+  return false;
+}
+
+test("#4363 BARE_TAGS_FROM is a second copy of the core's, and releaseTag agrees with scripts/lay-layer.mjs's over every boundary", {
+  skip: noFirstCopy(),
+}, async () => {
+  const theirs = (await import(pathToFileURL(CORE_LAY_LAYER).href)) as { releaseTag: (name: string, version: string) => string; };
+  const versions = ["0.0.1", "0.2.9", "0.2.0", "0.3.0", "0.3.1", "0.4.0", "0.5.0", "0.5.2", "0.5.3", "0.5.4", "0.6.0", "1.0.0", "2.0.0", "0.3.0-rc.1"];
+  for (const name of ["@a11ign/screenreader-worker", "@a11ign/screenreader-fleet", "@a11ign/scorer"]) {
+    for (const version of versions) assert.equal(releaseTag(name, version), theirs.releaseTag(name, version), `${name}@${version}`);
+  }
+  assert.equal(theirs.releaseTag("@a11ign/screenreader-fleet", "0.5.3"), "v0.5.3", "positive control: the core's own function was reached and does flatten");
 });
