@@ -2,16 +2,16 @@
  * #1356: `readControlPlaneFleet` is the ONE function every operator-host reader now calls instead of a
  * checkout's own `inventory.yml`. `inventorySources`/`inventoryReadScript`/`parseInventoryReads`/
  * `controlPlaneFleet` are the pieces #1343 already proved through `fleet-playbook.test.ts`, moved here
- * unchanged -- those tests still exercise them, through this file's re-exports from `fleet-playbook.mjs`.
+ * unchanged -- those tests still exercise them, through this file's re-exports from `fleet-playbook.ts`.
  * What is NEW here, and untested until now, is `readControlPlaneFleet` ITSELF: the wiring from
  * "ansible.cfg's text" through "ssh reads" to "a resolved fleet or a refusal", with every dependency
  * injected so this never needs a real control plane.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readControlPlaneFleet, inventoryPathFor, macsByHost } from "./control-plane-fleet.mjs";
-import { inventoryHosts } from "./fleet-discover.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+import { readControlPlaneFleet, inventoryPathFor, macsByHost } from "./control-plane-fleet.ts";
+import { inventoryHosts } from "./fleet-discover.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
 const IN_TREE_FALLBACK = `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`;
 
@@ -74,8 +74,8 @@ test("#1356 MUTATION TARGET: readInventories must be called with inventorySource
 });
 
 // --- #1683/#1684: the DURABLE inventory copy is tried first, matching ansible.cfg's own stated precedence.
-// Shared here (not in fleet-wake.test.ts) because fleet-discover.mjs (#1684) needs the same function and
-// fleet-wake.mjs already imports FROM fleet-discover.mjs -- a shared, neutral home avoids a cycle.
+// Shared here (not in fleet-wake.test.ts) because fleet-discover.ts (#1684) needs the same function and
+// fleet-wake.ts already imports FROM fleet-discover.ts -- a shared, neutral home avoids a cycle.
 
 test("#1683: when the durable copy exists, it wins -- no checkout inventory.yml needed at all", () => {
   const path = inventoryPathFor({
@@ -137,7 +137,7 @@ test("#2655: macsByHost agrees with fleet-discover's inventoryHosts on every hos
 // --- #3239: ONE source. The control plane's inventory names workers 2 to 16; the agents host's copy named
 // 2 to 11. `inventoryDrift` is what `fleet:inventory-install` says before it overwrites a copy.
 import { readFileSync } from "node:fs";
-import { inventoryDrift } from "./control-plane-fleet.mjs";
+import { inventoryDrift } from "./control-plane-fleet.ts";
 
 const GROUP_VARS_TEXT = "a11y_port: 8765\n";
 const hex = (n: number) => n.toString(16).padStart(2, "0");

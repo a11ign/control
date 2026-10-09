@@ -4,12 +4,12 @@
  *
  * It was two literals in two shapes, and a rename restored one of them.
  *
- *     packages/control/src/fleet-playbook.mjs:105   const CHECKOUT = "a11ign"
- *     packages/control/src/lab-pipeline.mjs:432     const CONTROL_CHECKOUT = "/root/a11y-witness"
+ *     packages/control/src/fleet-playbook.ts:105   const CHECKOUT = "a11ign"
+ *     packages/control/src/lab-pipeline.ts:432     const CONTROL_CHECKOUT = "/root/a11y-witness"
  *
  * `e435ac17` (the product rename) moved both. #531 restored the second and missed the first, so on
  * 2026-09-08 **every fleet play was unreachable** — `deploy`, `provision`, `recover`, `wake`,
- * `inventory-install`, `control-host-install` all route through `fleet-playbook.mjs`, whose `cd
+ * `inventory-install`, `control-host-install` all route through `fleet-playbook.ts`, whose `cd
  * ${CHECKOUT}` was entering a directory that does not exist.
  *
  * ## Why FOUR sweeps by three sessions missed it
@@ -29,9 +29,9 @@
  * **The DIRECTORY NAME is the fact; the absolute path is derived from it.** The two consumers genuinely
  * need different shapes and both are correct:
  *
- *   - `fleet-playbook.mjs` ssh's as root (`ssh()` builds `root@${CONTROL_PLANE}`) and its wrapper lands
+ *   - `fleet-playbook.ts` ssh's as root (`ssh()` builds `root@${CONTROL_PLANE}`) and its wrapper lands
  *     in `/root` before running anything, so a bare `cd a11y-witness` is right there.
- *   - `lab-pipeline.mjs` builds a `systemd-run --working-directory=`, which takes an absolute path.
+ *   - `lab-pipeline.ts` builds a `systemd-run --working-directory=`, which takes an absolute path.
  *
  * Keeping each consumer's existing shape is deliberate: making them agree by changing one of them would
  * be a behaviour change riding along with an outage fix, and this file's whole job is that the NAME

@@ -4,7 +4,7 @@
  * hold protects, so the read bought nothing and needed a credential this box was never meant to hold.)
  *
  * This is the DECISION and the STATE, proven offline -- every network read, every clock read and the
- * `sleep.yml` dispatch itself are injected, exactly as `fleet-wake.test.ts` and `fleet-watch.mjs`'s own
+ * `sleep.yml` dispatch itself are injected, exactly as `fleet-wake.test.ts` and `fleet-watch.ts`'s own
  * suite already prove their neighbours without a real fleet (the resource ban bars a live run: #2656
  * ships this timer DISABLED for that reason too).
  */
@@ -16,12 +16,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, mkdtempSync, mkdirSync, linkSync, readdirSync, rmSync, writeFileSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.mjs";
+import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.ts";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
-import { layerDeclaration, layerOwning, layerPinTag, layersFrom, pinnedLayerTag } from "./layer-checkouts.mjs";
+import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
+import { layerDeclaration, layerOwning, layerPinTag, layersFrom, pinnedLayerTag } from "./layer-checkouts.ts";
 import { layingPlan } from "../../../scripts/lay-layer.mjs";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
@@ -29,7 +30,7 @@ import {
   readState, writeState, dispatchShutdown, reportLine, tick, ledgerLine, DEFAULT_STATE_PATH,
   importClosure, staleCheckoutVerdict, checkAgainstMain, judgeLaidLayer, FETCH_THROTTLE_MS,
   LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight, LAUNCHABLE_PLAYBOOK_NAMES,
-} from "./fleet-auto-off.mjs";
+} from "./fleet-auto-off.ts";
 
 // ---------------------------------------------------------------------------------------------------------
 // hasWakeableMac -- "has a MAC" means magicPacket() accepts it, not merely a non-empty field.
@@ -51,7 +52,7 @@ test("hasWakeableMac: absent, empty or short is not wakeable", () => {
 
 // ---------------------------------------------------------------------------------------------------------
 // probeIdle -- the three outcomes, and only three (done-when 7.1). #2656's own reading, agreeing with
-// fleet-wake.mjs's HEALTH_TIMEOUT_MS on the READING (5 s rebuild, 12 s loaded ceiling) not the number by
+// fleet-wake.ts's HEALTH_TIMEOUT_MS on the READING (5 s rebuild, 12 s loaded ceiling) not the number by
 // copying it -- both derive 12_000 independently.
 // ---------------------------------------------------------------------------------------------------------
 
@@ -627,10 +628,13 @@ const RECORDER = `
   recordCaptures([{ name, state: "busy", captures: 12, uptimeMinutes: null }], { path, at: 1000, read });
 `;
 
+// The child runs TypeScript, which plain node does not; `tsx` is the core's, resolved from where this test sits (the lay under the core).
+const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
+
 function recordFromAnotherProcess(path: string, name: string, start: number): Promise<number | null> {
-  const watch = pathToFileURL(fileURLToPath(new URL("./fleet-watch.mjs", import.meta.url))).href;
+  const watch = pathToFileURL(fileURLToPath(new URL("./fleet-watch.ts", import.meta.url))).href;
   // Through the environment, not argv: fleet-watch's main guard `realpathSync`s `process.argv[1]` on import.
-  const child = spawn(process.execPath, ["--input-type=module", "-e", RECORDER],
+  const child = spawn(process.execPath, ["--import", TSX, "--input-type=module", "-e", RECORDER],
     { stdio: "inherit", env: { ...process.env, WATCH: watch, LEDGER: path, WORKER: name, START: String(start) } });
   return new Promise((resolve) => child.on("close", resolve));
 }
@@ -694,7 +698,7 @@ test("#2784: the service passes --apply, or the timer is a report on a clock", (
   // live with exactly this unit and both rows closed on a fleet idle for 25h+.
   const execStart = activeLines(shippedUnit("a11y-fleet-auto-off.service")).filter((l) => l.startsWith("ExecStart="));
   assert.deepEqual(execStart,
-    ["ExecStart=/usr/bin/node /root/a11y-witness/packages/control/src/fleet-auto-off.mjs --apply"]);
+    ["ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/a11y-witness/packages/control/src/fleet-auto-off.ts --apply"]);
 });
 
 test("#2784: the service runs from the checkout, or its relative state path is ENOENT on every tick", () => {
@@ -922,7 +926,7 @@ test("#3269 3: a control plane that cannot be reached is an empty ledger, every 
 // ---------------------------------------------------------------------------------------------------------
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
-const THIS = "packages/control/src/fleet-auto-off.mjs";
+const THIS = "packages/control/src/fleet-auto-off.ts";
 const BESIDE = [
   "packages/control/ansible/sleep.yml",
   "packages/control/ansible/files/a11y-fleet-auto-off.service",
@@ -960,7 +964,7 @@ test("#3275 importClosure: follows import, export-from, multi-line and dynamic i
 test("#3275 importClosure on the real program: every file it names exists, and the ones that decide a shutdown are in", () => {
   const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
   for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
-  for (const expected of [THIS, "packages/control/src/fleet-watch.mjs", "packages/control/src/fleet-wake.mjs",
+  for (const expected of [THIS, "packages/control/src/fleet-watch.ts", "packages/control/src/fleet-wake.ts",
     "packages/worker-fleet/src/worker-http.mjs"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
   assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
   for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
@@ -1597,8 +1601,8 @@ test("#3543 readPlaysInFlight: the default counts exactly the units the launcher
   assert.ok(launchable.includes("a11y-fleet-provision-role.service") && !launchable.includes("a11y-fleet-provision.service"));
 });
 
-test("#3543 LAUNCHABLE_PLAYBOOK_NAMES is the launcher's own PLAYBOOKS without the .yml, read from fleet-playbook.mjs's source (importing it would run its CLI)", () => {
-  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
+test("#3543 LAUNCHABLE_PLAYBOOK_NAMES is the launcher's own PLAYBOOKS without the .yml, read from fleet-playbook.ts's source (importing it would run its CLI)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.ts", import.meta.url)), "utf8");
   const declared = /^const PLAYBOOKS = \[([^\]]*)\]/m.exec(source);
   assert.ok(declared, "the launcher still declares `const PLAYBOOKS = [...]`; if it moved, this pin must follow it");
   const names = [...declared[1].matchAll(/"([^"]+)\.yml"/g)].map((m) => m[1]);
@@ -1628,6 +1632,6 @@ test("#3543 4 the play ending releases the box, and the idle clock is NOT restar
 });
 
 test("#3543 main passes the real reader: tick's default is `no play`, so only this wiring makes the signal live", () => {
-  const source = readFileSync(fileURLToPath(new URL("./fleet-auto-off.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./fleet-auto-off.ts", import.meta.url)), "utf8");
   assert.match(source, /await tick\(\{ workers: declared, apply, playsInFlight: readPlaysInFlight \}\)/);
 });

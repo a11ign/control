@@ -28,7 +28,7 @@
 #
 # - the control plane HOLDS a copy: it is fetched here and written over the operator's `inventory.yml`
 #   (the file `fleet:wake` and `fleet:discover` read when no `/etc/a11ign` copy exists on this machine),
-#   after `inventoryDrift` (`control-plane-fleet.mjs`) has said what that file was missing, loudly. A copy
+#   after `inventoryDrift` (`control-plane-fleet.ts`) has said what that file was missing, loudly. A copy
 #   AHEAD of the source (a worker only the local file names) STOPS the play: add it on the control plane,
 #   or delete the local file, but never let it be overwritten unseen.
 # - the control plane holds NONE (the bootstrap this play was written for): the operator's file seeds it.
@@ -51,7 +51,7 @@
 # inventory, so the play matched no hosts and the zero-host guard refused it. The play that fixes the
 # missing inventory needed the missing inventory to find its own target.
 #
-# It does not need one. `fleet-playbook.mjs` already starts this as a systemd unit ON the control plane, so
+# It does not need one. `fleet-playbook.ts` already starts this as a systemd unit ON the control plane, so
 # the file is being written to the machine the play is running on. `localhost` with a local connection has
 # no inventory dependency at all, which is what a bootstrap step must not have.
 #
@@ -62,7 +62,7 @@
 #
 # THE DECLARATION IS HERE, not in the wrapper, and that is the whole safety of the exception.
 #
-# `fleet-playbook.mjs` reads this marker to decide the playbook runs FROM the operator's machine with the
+# `fleet-playbook.ts` reads this marker to decide the playbook runs FROM the operator's machine with the
 # control plane named on the command line, rather than as a systemd unit ON the control plane. A hardcoded
 # list in the wrapper would let a second playbook acquire the exception by copy-paste with nobody arguing
 # for it -- which is the real risk, not the first exception.
@@ -82,9 +82,13 @@
   vars:
     inventory_source: "{{ playbook_dir }}/inventory.yml"
     inventory_destination: /etc/a11ign/inventory.yml
+    # THE LOADER ON THE OPERATOR'S MACHINE, which is not the control plane's (#4341). This play runs FROM the operator's machine (the bootstrap marker above), whose Node
+    # strips no types (22.22.1 on the engineer host), so the drift script that imports a `.ts` runs under the `tsx` the core's checkout holds: `packages/control/ansible`
+    # sits three levels under the core's root, the same reach `roles/worker/tasks/bespoke.yml` makes for `chdir`. `/opt/a11y-tsx` is the CONTROL PLANE's and is not here.
+    operator_tsx: "{{ playbook_dir }}/../../../node_modules/tsx/dist/esm/index.mjs"
     drift_script: >-
       import { readFileSync } from "node:fs";
-      import { inventoryDrift } from "{{ playbook_dir }}/../src/control-plane-fleet.mjs";
+      import { inventoryDrift } from "{{ playbook_dir }}/../src/control-plane-fleet.ts";
       const [source, copy] = process.argv.slice(1).map((path) => readFileSync(path, "utf8"));
       console.log(JSON.stringify(inventoryDrift({ source, copy })));
 
@@ -147,7 +151,7 @@
           # The same SHA-256 stat as above decided there is a difference to describe; WHAT differs is
           # `inventoryDrift`, in code, so this play carries no second reading of an inventory.
           ansible.builtin.command:
-            argv: [node, --input-type=module, -e, "{{ drift_script }}", "{{ fetched.path }}", "{{ inventory_source }}"]
+            argv: [node, --import, "{{ operator_tsx }}", --input-type=module, -e, "{{ drift_script }}", "{{ fetched.path }}", "{{ inventory_source }}"]
           register: drift_read
           changed_when: false
           delegate_to: localhost

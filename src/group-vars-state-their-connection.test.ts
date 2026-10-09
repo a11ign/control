@@ -14,7 +14,7 @@ const GROUP_VARS = join(import.meta.dirname, "../ansible/group_vars");
  *     fatal: [a11y-control]: UNREACHABLE! => Permission denied (publickey,password).
  *
  * **That message names a credential problem rather than a missing variable**, which is why the absence
- * survived for as long as it did -- an operator reads it and checks their key. `fleet-playbook.mjs`
+ * survived for as long as it did -- an operator reads it and checks their key. `fleet-playbook.ts`
  * documents the identical failure at a different call site, and the remedy reached that call site and not
  * the class. This is the class.
  *

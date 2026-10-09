@@ -7,6 +7,9 @@
  *
  * The controls build small trees in a temp directory, with no `.git`, which the function reads by walking the directory: a copy of the real baseline with one name
  * removed must fail and name the file, or the first test passing on the real tree would prove nothing about the check.
+ *
+ * THE BASELINE IS ZERO (a11ign/a11ign#4341: control's last 21 `.mjs` became TypeScript), so the real tree can no longer be the source of names: the controls
+ * draw from `STUBS`, a fixed population that is not empty, and the real-tree test asserts the count is ZERO rather than "greater than zero".
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,6 +22,9 @@ import { BASELINE_FILE, checkMjsRatchet, findBaselineRoot, parseBaseline } from 
 const HERE = fileURLToPath(import.meta.url);
 const committed = () => readFileSync(join(findBaselineRoot(HERE), BASELINE_FILE), "utf8");
 const committedBaseline = () => parseBaseline(committed()).baseline;
+
+/** The names the controls build their trees from. Fixed here because the committed baseline lists none; three, so "one removed" leaves a non-empty remainder. */
+const STUBS = ["first-stub.mjs", "second-stub.mjs", "third-stub.mjs"];
 
 /** A tree holding a stub for each basename in `files`, under `src/`, plus the baseline `baseline`; `from` is a path inside it. */
 function treeWith({ files, baseline }: { files: string[]; baseline: unknown }): { from: string; remove: () => void } {
@@ -41,20 +47,20 @@ function inTree(spec: { files: string[]; baseline: unknown }, check: (from: stri
 test("the repository's real tree passes against its committed baseline", () => {
   const result = checkMjsRatchet({ from: HERE });
   assert.equal(result.ok, true, result.message);
-  // The positive control: the read found this repository's own scripts, so 'ok' is not 'the walk read nothing'.
-  assert.ok(result.count > 0, `the ratchet counted ${result.count} files in ${result.root}`);
+  // The ratchet is at zero: nothing here is `.mjs`, and the baseline says so. That the walk COUNTS is shown by the stub-tree controls below, not by this tree.
+  assert.equal(result.count, 0, `the ratchet counted ${result.count} files in ${result.root}`);
   assert.equal(result.baselineCount, committedBaseline().files.length);
 });
 
 test("the committed baseline is well-formed, and every exception it lists says why", () => {
   const { baseline, problems } = parseBaseline(committed());
   assert.deepEqual(problems, []);
-  assert.ok(baseline.files.length > 0, "the baseline lists no file, so the controls below would be built from nothing");
+  assert.deepEqual(baseline.files, [], "the baseline is lowered to zero; a name here is a `.mjs` that came back");
   for (const entry of baseline.exceptions) assert.ok(entry.why.trim() !== "", `exception ${entry.path} has no why`);
 });
 
 test("a copy of the baseline with one name removed fails and NAMES the file", () => {
-  const { files } = committedBaseline();
+  const files = STUBS;
   const removed = files[0];
   inTree({ files, baseline: { files: files.slice(1), exceptions: [] } }, (from) => {
     const result = checkMjsRatchet({ from });
@@ -64,7 +70,7 @@ test("a copy of the baseline with one name removed fails and NAMES the file", ()
 });
 
 test("the same tree against the whole baseline passes (the negative control's positive twin)", () => {
-  const { files } = committedBaseline();
+  const files = STUBS;
   inTree({ files, baseline: { files, exceptions: [] } }, (from) => {
     const result = checkMjsRatchet({ from });
     assert.equal(result.ok, true, result.message);
@@ -73,7 +79,7 @@ test("the same tree against the whole baseline passes (the negative control's po
 });
 
 test("a baseline listing a file the tree lacks passes, and says it can be lowered", () => {
-  const { files } = committedBaseline();
+  const files = STUBS;
   inTree({ files: files.slice(1), baseline: { files, exceptions: [] } }, (from) => {
     const result = checkMjsRatchet({ from });
     assert.equal(result.ok, true, result.message);
@@ -82,7 +88,7 @@ test("a baseline listing a file the tree lacks passes, and says it can be lowere
 });
 
 test("an exception with no `why` fails", () => {
-  const { files } = committedBaseline();
+  const files = STUBS;
   const [kept, ...rest] = files;
   inTree({ files, baseline: { files: rest, exceptions: [{ path: `src/${kept}` }] } }, (from) => {
     const result = checkMjsRatchet({ from });
@@ -92,7 +98,7 @@ test("an exception with no `why` fails", () => {
 });
 
 test("an exception WITH a `why` is accepted (the control for the failure above)", () => {
-  const { files } = committedBaseline();
+  const files = STUBS;
   const [kept, ...rest] = files;
   inTree({ files, baseline: { files: rest, exceptions: [{ path: `src/${kept}`, why: "a tool reads only this name" }] } }, (from) => {
     const result = checkMjsRatchet({ from });

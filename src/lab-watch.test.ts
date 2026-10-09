@@ -4,8 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { runLabStatus, extractReportJson, watchBody, REPORT_TASK_NAME } from "./lab-watch.mjs";
-import { describeFailures } from "./lab-failed-units.mjs";
+import { runLabStatus, extractReportJson, watchBody, REPORT_TASK_NAME } from "./lab-watch.ts";
+import { describeFailures } from "./lab-failed-units.ts";
 
 /** A minimal ansible `json` stdout-callback document carrying one task's result on one host. */
 function playbookRun(taskName: string, hostStdout: string) {

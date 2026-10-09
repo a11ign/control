@@ -1,6 +1,6 @@
 // no-token: gh -- every #1839 test below drives pure functions (fleetHoldUntil/activeFleetHolds/
-// allowHoldNumbers/sequenceHoldGate) or reads fleet-playbook.mjs's own source text; none calls
-// enforceSequenceHold or readFleetGatedIssues, so fleet-playbook.mjs's own `execFileSync("gh", ...)`
+// allowHoldNumbers/sequenceHoldGate) or reads fleet-playbook.ts's own source text; none calls
+// enforceSequenceHold or readFleetGatedIssues, so fleet-playbook.ts's own `execFileSync("gh", ...)`
 // (only reached from those two) is never exercised here. Same shape as fleet-watch.test.ts's own
 // declaration, one file over.
 /**
@@ -26,9 +26,9 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
   writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange }
-  from "./fleet-playbook.mjs";
-import { layersFrom } from "./layer-checkouts.mjs";
-import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.mjs";
+  from "./fleet-playbook.ts";
+import { layersFrom } from "./layer-checkouts.ts";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.mjs";
 
 test("commits and ordinary branch names are accepted", () => {
@@ -314,7 +314,7 @@ test("recover.yml names exactly ONE worker too, and for a different reason than 
 });
 
 test("recover.yml and restart.yml each assert their OWN one-host rule, before anything they do -- #1829", () => {
-  // Neither playbook has a JS-side test that can see this: `restart.yml` has no `fleet-playbook.mjs` entry
+  // Neither playbook has a JS-side test that can see this: `restart.yml` has no `fleet-playbook.ts` entry
   // to refuse it upstream at all, and `recover.yml`'s upstream refusal (above) is a SEPARATE code path from
   // its own play. Nothing else in this suite would notice either assert going missing, which is exactly
   // the mutation this test exists to catch.
@@ -357,7 +357,7 @@ test("the rollback playbook refuses before it acts, and its dry run is itself (#
   }
   // Busy is asked over HTTP from the control plane, the same channel `deploy.yml` asks on.
   assert.match(executable, /url: "http:\/\/\{\{ ansible_host \}\}:\{\{ a11y_port \}\}\/health"/);
-  // The apply switch has exactly one spelling, the one `fleet-playbook.mjs` passes.
+  // The apply switch has exactly one spelling, the one `fleet-playbook.ts` passes.
   assert.match(executable, /a11y_os_rollback_apply \| default\(false\)/);
   // The proof is the build /health reports afterwards, not DISM's exit code.
   assert.match(executable, /rollback_after\.json\.environment\.windowsVersion/);
@@ -457,7 +457,7 @@ test("#971: the comparison is on the resolved COMMITS, so an abbreviated SHA is 
 // and its message. The live confirmation stays on #921 where `orchestrator` can run it.
 // ---------------------------------------------------------------------------------------------------
 
-/** The two builds from the #921 incident, used as data. Neither appears in `fleet-playbook.mjs`. */
+/** The two builds from the #921 incident, used as data. Neither appears in `fleet-playbook.ts`. */
 const PIN = "10.0.22631";
 const DRIFTED = "10.0.26200";
 const reported = (build: string) => `Microsoft Windows 11 Pro ${build}`;
@@ -576,7 +576,7 @@ test("#1091 REVIEW: a TRAILING COMMENT is part of the declaration, not a differe
 test("#1091 REVIEW: the pin is SCOPED to the worker group, because the message says it is", () => {
   // A `windows_build` under `a11y_lab`, or at column 0, read as the FLEET pin -- and with `/m` and `exec`
   // the tiebreak was FILE ORDER. `groupPerLine` is imported rather than re-derived, which is the call
-  // `fleet-discover.mjs` already made: a second group parser there once reported the lab container as a
+  // `fleet-discover.ts` already made: a second group parser there once reported the lab container as a
   // fifth worker.
   assert.equal(pinnedBuild(`windows_build: "${PIN}"\n`), null,
     "a declaration in no group is not the worker group's");
@@ -600,13 +600,13 @@ test("#1091 REVIEW: `buildOf` reads a THREE-part version, and the limit is state
 });
 
 test("#1084: the pinned build is NOT restated in the source — a second copy of the cache key", () => {
-  // A build written into `fleet-playbook.mjs` would be the fact-stated-twice defect on the one value
+  // A build written into `fleet-playbook.ts` would be the fact-stated-twice defect on the one value
   // where it costs a corpus: the inventory and the assertion could then disagree, and the assertion
   // would win silently.
-  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.ts", import.meta.url)), "utf8");
   const buildLiteral = /\b\d+\.\d+\.\d{4,}\b/;
   assert.doesNotMatch(source, buildLiteral,
-    "fleet-playbook.mjs states a Windows build literal -- the pin is read from the inventory, never "
+    "fleet-playbook.ts states a Windows build literal -- the pin is read from the inventory, never "
     + "restated here");
   // The control on the pattern: it must be able to find one, or the assertion above passes because the
   // regex is broken rather than because the source is clean.
@@ -705,7 +705,7 @@ test("#1204: only the PROVISIONING playbook is gated -- the repair paths are not
  * passes on the very edit it exists to catch. Three rows tonight have turned on that.
  */
 test("#1204: main() CALLS the build gate -- an unreached refusal is the defect it replaces", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   assert.match(source, /await enforceBuildPin\(/,
     "nothing calls enforceBuildPin, so `fleet:provision` refuses nothing and every other clause in this "
@@ -784,7 +784,7 @@ test("#1313: --allow-offline is repeatable, which flagValue is not", () => {
 
 /** COMMENTS STRIPPED, for #1204's reason: commenting the call out IS the mutation a prose search agrees with. */
 test("#1313: main() CALLS the layer-2 gate, on the inventory, before the control plane is asked to move", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /await enforceLinkGate\(chosen\)/, "a perfect gate that no run reaches refuses nothing");
@@ -1216,7 +1216,7 @@ test("#1839: no hold at all, and no flag, dispatches exactly as today", () => {
 
 /** COMMENTS STRIPPED, #1204's own reason: commenting the call out IS the mutation a prose search agrees with. */
 test("#1839: main() CALLS the fleet-hold gate, before the control plane is asked to move", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /await enforceSequenceHold\(chosen, \{ limitFlag \}\)/,
@@ -1229,7 +1229,7 @@ test("#1839: main() CALLS the fleet-hold gate, before the control plane is asked
 });
 
 test("#1839: a gh failure refuses rather than reading as no hold -- \"could not ask\" is not \"may proceed\"", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8");
   const start = source.indexOf("async function enforceSequenceHold(");
   assert.ok(start > -1, "enforceSequenceHold must exist");
   const body = source.slice(start, source.indexOf("\n}\n", start));
@@ -1334,7 +1334,7 @@ test("#1875: a failure nobody classified (an unreadable token file, an injected 
 });
 
 test("#1955: --display-mode is a flag the guard knows, or refuseUnknownFlags kills the run before ansible", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8");
   assert.match(source, /"--display-mode="/,
     "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
 });
@@ -1419,7 +1419,7 @@ test("#1955: display.yml reads the very keys that -e writes, so the dict cannot 
  * `+ displayModeExtraVars(displayMode)` from the argv builder left all seven other #1955 tests green.
  */
 function argvBuilderSource() {
-  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./fleet-playbook.ts", import.meta.url)), "utf8");
   const start = source.indexOf("systemd-run --unit=");
   const end = source.indexOf("{ timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen]", start);
   assert.ok(start > 0 && end > start,
@@ -1540,7 +1540,7 @@ test("#2832 FIXTURE 3: a worker silent at its pin and found by MAC whose recorde
 });
 
 test("#2832: the refusal is acted on BEFORE anything is staged or started, in main()", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8")
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /const aim = await enforceWriteIdentity\(chosen, \{ moved, limitFlag \}\)/, "a perfect gate that no run reaches refuses nothing");

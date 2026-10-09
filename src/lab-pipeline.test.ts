@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { PIPELINES, jobNames, validRef } from "./lab-pipeline.mjs";
+import { PIPELINES, jobNames, validRef } from "./lab-pipeline.ts";
 
 type Job = { argv?: unknown; setenv?: string[]; timeout?: number };
 
@@ -95,7 +95,7 @@ test("every pipeline names what it is for, and orders at least two stages", () =
 });
 
 test("a ref is contained by SHAPE, because it reaches a shell on the box holding the fleet key", () => {
-  // Same rule as `isValidCaptureId` and `fleet-playbook.mjs`: inexpressible rather than rejected.
+  // Same rule as `isValidCaptureId` and `fleet-playbook.ts`: inexpressible rather than rejected.
   assert.ok(validRef("main"));
   assert.ok(validRef("feature/np-calibration"));
   assert.ok(validRef("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"));
@@ -107,10 +107,10 @@ test("a ref is contained by SHAPE, because it reaches a shell on the box holding
 test("a stage runs the package script, never a second spelling of the ansible command", () => {
   // `lab:job` sets ANSIBLE_CONFIG; a hand-spelled `ansible-playbook` here would silently use different
   // collections and host-key settings. Asserted structurally because running a stage means running a job.
-  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.ts", import.meta.url)), "utf8");
   const executable = source.split("\n").filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line)).join("\n");
   assert.ok(!/ansible-playbook/.test(executable),
-    "lab-pipeline.mjs spells out ansible-playbook again. Go through `npm run lab:job`, which owns the "
+    "lab-pipeline.ts spells out ansible-playbook again. Go through `npm run lab:job`, which owns the "
     + "invocation and its ANSIBLE_CONFIG.");
   assert.match(executable, /"run", "lab:job"/);
   assert.match(executable, /"run", "fleet:deploy"/);
@@ -119,7 +119,7 @@ test("a stage runs the package script, never a second spelling of the ansible co
 test("stages are run with their status READ, never piped", () => {
   // Two real `ANSIBLE_EXIT=2` failures were masked by `| tail` in one day, because a pipeline's status is
   // the last command's. `stdio: "inherit"` is what makes the child's status the one that is read.
-  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.ts", import.meta.url)), "utf8");
   assert.match(source, /stdio: "inherit"/);
   assert.ok(!/stdio: "pipe"/.test(source),
     "a piped stage hides the output the operator needs and invites reading the wrong status");
@@ -135,7 +135,7 @@ test("the lab stages are pinned to a COMMIT, not to a branch that can move under
   // Twice on 2026-08-25 a push had to be held by hand for exactly this — through provisioning, where each
   // box stamps the SHA it fast-forwarded to, and through this pipeline. "Do not push for six hours" is a
   // rule that depends on somebody remembering it, which is what this file exists to remove.
-  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.ts", import.meta.url)), "utf8");
   const code = source.split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
 
   // Matched loosely on the ARGUMENT, not the whole call: the first version asserted `labJob(job, pinned)`
@@ -156,7 +156,7 @@ test("the pin comes from ORIGIN, so it cannot be a stale local ref", () => {
   // `git ls-remote` asks the remote, so it needs no fetch and cannot answer with whatever this checkout
   // last happened to fetch. Resolving `origin/<branch>` locally would reintroduce exactly the staleness
   // the pin exists to remove.
-  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-pipeline.ts", import.meta.url)), "utf8");
   assert.match(source, /ls-remote/, "the pin must ask origin directly");
   assert.match(source, /\^\[0-9a-f\]\{40\}\$|\[0-9a-f\]\{40\}/,
     "and must verify origin answered a commit rather than trusting the string");

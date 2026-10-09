@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { deployedToNothing } from "./fleet-playbook.mjs";
+import { deployedToNothing } from "./fleet-playbook.ts";
 
 const ANSIBLE = join(import.meta.dirname, "../ansible");
 
@@ -63,7 +63,7 @@ test("a healthy deploy is NOT refused", () => {
 });
 
 /**
- * Playbooks that target `a11y_workers` and are dispatched somewhere OTHER than `fleet-playbook.mjs`, or
+ * Playbooks that target `a11y_workers` and are dispatched somewhere OTHER than `fleet-playbook.ts`, or
  * not at all. Declared so a NEW one cannot hide among them.
  *
  * My first version of the test below asserted that every such playbook must be named in the wrapper. That
@@ -73,7 +73,7 @@ test("a healthy deploy is NOT refused", () => {
  * the design.
  */
 const DISPATCHED_ELSEWHERE: Record<string, string> = {
-  "wake.yml": "`fleet:wake` runs it through `fleet-wake.mjs`, its own dispatcher.",
+  "wake.yml": "`fleet:wake` runs it through `fleet-wake.ts`, its own dispatcher.",
   "ssh-key.yml": "bootstrap, run once by hand when a box is first built; there is no fleet to be stale.",
   "restart.yml":
     "EXEMPT BY DESIGN, the same reason it is exempt from the busy-worker guard: it acts on a worker that "
@@ -83,7 +83,7 @@ const DISPATCHED_ELSEWHERE: Record<string, string> = {
     + "is proven (`roles/worker/`'s README says not to delete either until then), reachable from no script.",
   "update-origin-remote.yml":
     "#325's scripted fleet-remote change for the org transfer -- a deliberate ONE-TIME operation run by "
-    + "hand on transfer day, never through the routine deploy wrapper. Wiring it into `fleet-playbook.mjs` "
+    + "hand on transfer day, never through the routine deploy wrapper. Wiring it into `fleet-playbook.ts` "
     + "would make an org-move-only command reachable from the same surface as every ordinary deploy, "
     + "which is exactly the wrong affordance for something that must never run twice by accident.",
   "auth-leak-check.yml":
@@ -107,7 +107,7 @@ test("every a11y_workers playbook is dispatched by the wrapper (and so refuses) 
     `only ${targeting.length} playbook(s) target a11y_workers; the scan has gone blind rather than the `
     + "fleet being small.");
 
-  const wrapper = readFileSync(join(import.meta.dirname, "fleet-playbook.mjs"), "utf8");
+  const wrapper = readFileSync(join(import.meta.dirname, "fleet-playbook.ts"), "utf8");
   // The refusal must actually be wired into the wrapper, or "dispatched by the wrapper" proves nothing.
   assert.match(wrapper, /deployedToNothing\(outcome\.log\)/,
     "the wrapper must CALL the refusal; naming the playbooks is not the guard");
@@ -125,7 +125,7 @@ test("every a11y_workers playbook is dispatched by the wrapper (and so refuses) 
 test("nothing is declared elsewhere that the wrapper actually dispatches", () => {
   // The stale half: an entry claiming another dispatcher, for a playbook the wrapper has since adopted,
   // would exempt it from the check it now passes.
-  const wrapper = readFileSync(join(import.meta.dirname, "fleet-playbook.mjs"), "utf8");
+  const wrapper = readFileSync(join(import.meta.dirname, "fleet-playbook.ts"), "utf8");
   const wrongly = Object.keys(DISPATCHED_ELSEWHERE)
     .filter((f) => new RegExp(f.replace(".", "\\.")).test(wrapper)).sort();
   assert.deepEqual(wrongly, [],

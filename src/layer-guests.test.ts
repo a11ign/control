@@ -17,7 +17,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { layerCommitsExtraVars, layerPinsFor, layerRefValues, layersFrom, separateLayers } from "./layer-checkouts.mjs";
+import { layerCommitsExtraVars, layerPinsFor, layerRefValues, layersFrom, separateLayers } from "./layer-checkouts.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const ANSIBLE = resolve(REPO, "packages/control/ansible");
@@ -227,7 +227,7 @@ test("--layer-ref is refused on a playbook that pins no layer, and forwarded as 
 });
 
 test("fleet-playbook declares the flag, and sends the pins in the command it builds", () => {
-  const source = readFileSync(resolve(REPO, "packages/control/src/fleet-playbook.mjs"), "utf8");
+  const source = readFileSync(resolve(REPO, "packages/control/src/fleet-playbook.ts"), "utf8");
   assert.match(source, /"--display-mode=", "--layer-ref="\]/, "an undeclared flag is IGNORED, so it must be on the list");
   assert.match(source, /\+ layerCommitsExtraVars\(layerCommits\)/);
 });

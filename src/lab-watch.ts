@@ -18,30 +18,29 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { renderReport } from "./lab-failed-units.mjs";
+import { renderReport } from "./lab-failed-units.ts";
 
-/** @typedef {{ attention: boolean, entries: { unit: string, ageDescription: string }[] }} DescribedFailures */
+export type DescribedFailures = { attention: boolean, entries: { unit: string, ageDescription: string }[] };
 
 /** Exit codes are the contract: 0 nothing needs attention, 1 something does, 2 could not ask. */
 export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
 
 // MUST MATCH the task name in `lab-status.yml` exactly -- `extractReportJson` finds its result by this
 // string, not by position, so the two can drift only if one of them is edited and not the other.
-export const REPORT_TASK_NAME = "Failed units, as JSON (for lab-watch.mjs)";
+export const REPORT_TASK_NAME = "Failed units, as JSON (for lab-watch.ts)";
 
 export const ORG_READING_ISSUE = 928;
 
-/** @typedef {(argv: string[], opts?: { env?: NodeJS.ProcessEnv }) => string} Runner */
+export type Runner = (argv: string[], opts?: { env?: NodeJS.ProcessEnv }) => string;
 
-/** @type {Runner} */
-const defaultRun = (argv, opts) => execFileSync(argv[0], argv.slice(1), { encoding: "utf8", ...opts });
+const defaultRun: Runner = (argv, opts) => execFileSync(argv[0], argv.slice(1), { encoding: "utf8", ...opts });
 
 /**
  * `ansible-playbook lab-status.yml`, forced through the `json` stdout callback for this one call.
- * @param {Runner} run
+ *
  * @returns {unknown} the parsed callback document
  */
-export function runLabStatus(run = defaultRun) {
+export function runLabStatus(run: Runner = defaultRun): unknown {
   const out = run(["ansible-playbook", "packages/control/ansible/lab-status.yml"], {
     env: {
       ...process.env,
@@ -61,13 +60,10 @@ export function runLabStatus(run = defaultRun) {
 /**
  * The one task's result out of the whole run. The `json` callback's shape is `plays[].tasks[].task.name`
  * beside `hosts[<hostname>].stdout` -- one host, `a11y-lab`, in this fleet.
- * @param {unknown} playbookRun
- * @returns {string | null}
  */
-export function extractReportJson(playbookRun) {
-  const plays = /** @type {{ tasks?: { task?: { name?: string }, hosts?: Record<string, { stdout?: string }> }[] }[]} */ (
-    /** @type {{ plays?: unknown[] }} */ (playbookRun)?.plays ?? []
-  );
+export function extractReportJson(playbookRun: unknown): string | null {
+  type Play = { tasks?: { task?: { name?: string }, hosts?: Record<string, { stdout?: string }> }[] };
+  const plays = ((playbookRun as { plays?: unknown[] })?.plays ?? []) as Play[];
   for (const play of plays) {
     for (const task of play.tasks ?? []) {
       if (task.task?.name !== REPORT_TASK_NAME) continue;
@@ -78,25 +74,20 @@ export function extractReportJson(playbookRun) {
   return null;
 }
 
-/**
- * The comment this posts when something needs attention.
- * @param {DescribedFailures} described
- * @returns {string}
- */
-export function watchBody(described) {
+/** The comment this posts when something needs attention. */
+export function watchBody(described: DescribedFailures): string {
   return [
     `**${described.entries.length} a11y-job-* unit(s) in a \`failed\` state** (#866).`,
     ...renderReport(described).map((line) => `- ${line}`),
   ].join("\n");
 }
 
-/** @param {Runner} run */
-function readDescribedFailures(run) {
+function readDescribedFailures(run: Runner) {
   const reportJson = extractReportJson(runLabStatus(run));
   if (reportJson === null) {
     throw new Error("lab-status.yml's JSON report task did not run or produced nothing");
   }
-  return /** @type {DescribedFailures} */ (JSON.parse(reportJson));
+  return (JSON.parse(reportJson) as DescribedFailures);
 }
 
 function main() {

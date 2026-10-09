@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import { overrideInventory, overridePath, installOverrideCommand, inventoryEnvironment, recordedKeys,
   knownHostsReadScript, parseKnownHostsRead, seedPlan, seedCommand, seedReport, identityProbeScript,
-  parseIdentityProbe, identityGate, WORKER_NAME, IPV4 } from "./fleet-host-identity.mjs";
+  parseIdentityProbe, identityGate, WORKER_NAME, IPV4 } from "./fleet-host-identity.ts";
 
 const KEY_A = "AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const KEY_B = "AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";

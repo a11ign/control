@@ -45,15 +45,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
-// MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.mjs's
+// MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.ts's
 // header for why. These imports cross back to worker-fleet the SANCTIONED way, by relative path.
 import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
 import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.mjs";
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
-// #1684: shared with fleet-wake.mjs (#1683) -- same "durable copy first" precedence ansible.cfg's own
+// #1684: shared with fleet-wake.ts (#1683) -- same "durable copy first" precedence ansible.cfg's own
 // `inventory =` line states, for the READ half only. See main()'s own comment for why the WRITE half
 // (`--enroll`) does not use this.
-import { inventoryPathFor } from "./control-plane-fleet.mjs";
+import { inventoryPathFor } from "./control-plane-fleet.ts";
+
+import type { WorkerHealth } from "./fleet-status.ts";
+
+type MacLookup = { mac: string | null; ran: boolean; missing: string[] };
+
+/** The tool that reads the neighbour table: `execFileSync` in production, a fake in a test. */
+type RunTool = (tool: string, args: string[], options: object) => unknown;
+
+/** What `reconcile` says of one declared worker or one unexpected answer; `state` decides which other fields exist. */
+export type Finding =
+  | { state: "ok"; name: string; ip: string; health: WorkerHealth; macCompared: boolean; macNote: string | null }
+  | { state: "moved"; name: string; ip: string; foundAt: string; health: WorkerHealth }
+  | { state: "absent"; name: string; ip: string; mac: string | null; occupiedBy: string | null }
+  | { state: "unknown"; name?: undefined; ip: string; mac: string | null; health: WorkerHealth; macLookup?: MacLookup };
 
 /**
  * `--enroll` WRITES to inventory.yml; mistyped, it scans and quietly enrols nothing.
@@ -84,13 +98,9 @@ const LAST_HOST_IN_SUBNET = 254;
  *
  * The final filter guarantees every returned entry has an address, which the type states so callers do
  * not have to re-check what this function already decided.
- *
- * @param {string} text
- * @returns {Array<{name: string, host: string, mac: string | null, line: number}>}
  */
-export function inventoryHosts(text) {
-  /** @type {{ name: string, host: string|null, mac: string|null, line: number }[]} */
-  const hosts = [];
+export function inventoryHosts(text: string): Array<{ name: string; host: string; mac: string | null; line: number; }> {
+  const hosts: { name: string; host: string | null; mac: string | null; line: number; }[] = [];
   let current = null;
   // Group per line from `fleet-env.mjs`, not a second group parser here. Without it this returned the lab
   // container as a fifth worker, and `reconcile` reported it "ASLEEP?" -- probing :8765 on a box that has
@@ -103,8 +113,8 @@ export function inventoryHosts(text) {
     if (name) {
       // Declared, because `host` and `mac` are FILLED IN by the two lines below and inferred from this
       // literal they are `null` and nothing else -- so the parser's whole job reads as a type error.
-      current = /** @type {{ name: string, host: string|null, mac: string|null, line: number }} */ (
-        { name: name[1], host: null, mac: null, line: index + 1 });
+      current = (
+        { name: name[1], host: null, mac: null, line: index + 1 } as { name: string, host: string|null, mac: string|null, line: number });
       hosts.push(current);
       continue;
     }
@@ -120,8 +130,8 @@ export function inventoryHosts(text) {
   // The filter guarantees `host`, and a filter cannot narrow -- so the cast states what the line above
   // established rather than re-checking it. A host entry with no `ansible_host` is not a worker; that is
   // the whole point of the filter and it is why the declared return says `string`.
-  return /** @type {{ name: string, host: string, mac: string|null, line: number }[]} */ (
-    hosts.filter((h) => h.host));
+  return (
+    hosts.filter((h) => h.host) as { name: string, host: string, mac: string|null, line: number }[]);
 }
 
 /**
@@ -129,11 +139,8 @@ export function inventoryHosts(text) {
  *
  * Accepts null/undefined and returns null: an inventory entry with no `mac:` is the normal state for a
  * box nobody has read the address off yet, and this is called on that value directly.
- *
- * @param {string | null | undefined} value
- * @returns {string | null}
  */
-export function normaliseMac(value) {
+export function normaliseMac(value: string | null | undefined): string | null {
   if (!value) return null;
   const hex = String(value).replace(/[^0-9a-fA-F]/g, "").toLowerCase();
   if (hex.length !== 12) return null;
@@ -153,26 +160,23 @@ const LOOKUP_TIMEOUT_MS = 3000;
  * an empty table -- an unchecked MAC read OK, and an enrolment was written as "ARP had none" for a MAC the
  * table held. An error carrying a numeric exit `status` means the tool RAN; one without (ENOENT, a
  * timeout, EACCES) means it could not be asked.
- *
- * @param {string} tool @param {string[]} args @param {Function} run
- * @returns {{ ran: boolean, output: string }}
  */
-function askTool(tool, args, run) {
+function askTool(tool: string, args: string[], run: RunTool): { ran: boolean; output: string; } {
   try {
     return { ran: true, output: String(run(tool, args, { encoding: "utf8", timeout: LOOKUP_TIMEOUT_MS })) };
   } catch (error) {
-    const ranAndFailed = typeof (/** @type {any} */ (error)?.status) === "number";
+    const ranAndFailed = typeof ((error as { status?: unknown })?.status) === "number";
     return { ran: ranAndFailed, output: "" };
   }
 }
 
 /** `ip neigh show <ip>` prints `<ip> dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE`; a FAILED entry has no lladdr. */
-function macFromIpNeigh(/** @type {string} */ output) {
+function macFromIpNeigh(output: string) {
   return normaliseMac(output.match(/\blladdr\s+([0-9a-fA-F:]{11,17})/)?.[1]);
 }
 
 /** `arp -n <ip>`. macOS prints single-digit octets ("0:1a:..."), which normaliseMac would reject; pad them. */
-function macFromArp(/** @type {string} */ output) {
+function macFromArp(output: string) {
   const found = output.match(/([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})/);
   return found ? normaliseMac(found[1].split(":").map((o) => o.padStart(2, "0")).join(":")) : null;
 }
@@ -185,13 +189,11 @@ function macFromArp(/** @type {string} */ output) {
  * `missing` names every tool that could not be run, so a caller can say which one and tell a null from
  * "the table has no entry" (`missing` empty, or a tool that ran) from "nobody could look" (`ran` false).
  *
- * @param {string} ip
+ *
  * @param {Function} [run] injected for tests; defaults to `execFileSync`
- * @returns {{ mac: string|null, ran: boolean, missing: string[] }}
  */
-export function lookupMac(ip, run = execFileSync) {
-  /** @type {string[]} */
-  const missing = [];
+export function lookupMac(ip: string, run: RunTool = execFileSync): { mac: string | null; ran: boolean; missing: string[]; } {
+  const missing: string[] = [];
   const viaIp = askTool("ip", ["neigh", "show", ip], run);
   if (viaIp.ran) return { mac: macFromIpNeigh(viaIp.output), ran: true, missing };
   missing.push("ip");
@@ -202,16 +204,12 @@ export function lookupMac(ip, run = execFileSync) {
 }
 
 /** The MAC the host's neighbour table has for an address, or null. See `lookupMac` for why null is ambiguous. */
-export function macOf(/** @type {any} */ ip, /** @type {Function} */ run = execFileSync) {
+export function macOf(ip: string, run: RunTool = execFileSync) {
   return lookupMac(ip, run).mac;
 }
 
-/**
- * Why a MAC could not be compared, in a sentence -- or null when there is nothing to say.
- *
- * @param {{ mac: string|null, ran: boolean, missing: string[] } | undefined} lookup
- */
-export function macNote(lookup) {
+/** Why a MAC could not be compared, in a sentence -- or null when there is nothing to say. */
+export function macNote(lookup: { mac: string | null; ran: boolean; missing: string[]; } | undefined) {
   if (!lookup || lookup.mac) return null;
   return lookup.ran
     ? "the neighbour table has no entry for this address"
@@ -230,7 +228,7 @@ export function localSubnet() {
   return null;
 }
 
-async function probe(/** @type {any} */ ip, /** @type {any} */ port, /** @type {number} */ timeoutMs) {
+async function probe(ip: string, port: number, timeoutMs: number) {
   try {
     const response = await requestJson(`http://${ip}:${port}/health`, { timeoutMs });
     if (!response.ok || !response.json) return null;
@@ -242,12 +240,12 @@ async function probe(/** @type {any} */ ip, /** @type {any} */ port, /** @type {
 }
 
 /** Everything answering /health on the subnet. `timeoutMs` is injectable so a test can bound a scan cheaply. */
-export async function scan(/** @type {any} */ subnet, port = DEFAULT_PORT, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
+export async function scan(subnet: string, port = DEFAULT_PORT, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   const addresses = Array.from({ length: LAST_HOST_IN_SUBNET }, (_, i) => `${subnet}.${i + 1}`);
   const found = await Promise.all(addresses.map((ip) => probe(ip, port, timeoutMs)));
   // A cast rather than a predicate: `probe` answers null for an address that does not respond, and
   // the filter is what makes the declared return true. Stated once, where it is established.
-  return /** @type {any[]} */ (found.filter((entry) => entry !== null));
+  return found.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 }
 
 /**
@@ -257,10 +255,8 @@ export async function scan(/** @type {any} */ subnet, port = DEFAULT_PORT, { tim
  * `macOf` returns null whenever the neighbour table has no entry for an address it just talked to, or
  * the tool to read it could not be run. Treating either as a
  * mismatch would report every un-enrolled box absent.
- *
- * @param {string|null|undefined} declared @param {string|null|undefined} discovered
  */
-function macsAgree(declared, discovered) {
+function macsAgree(declared: string | null | undefined, discovered: string | null | undefined) {
   if (!declared || !discovered) return true;
   return declared === discovered;
 }
@@ -270,12 +266,9 @@ function macsAgree(declared, discovered) {
  *
  * Pure, and separated from the scan so the interesting cases can be tested without a network — which
  * matters, because the interesting cases are the ones that only occur when something has gone wrong.
- *
- * @param {Array<{name: string, host: string, mac: string|null}>} declared
- * @param {Array<{ip: string, mac: string|null, health: object, macLookup?: {mac: string|null, ran: boolean, missing: string[]}}>} discovered
  */
-export function reconcile(declared, discovered) {
-  const findings = [];
+export function reconcile(declared: Array<{ name: string; host: string; mac: string | null; }>, discovered: Array<{ ip: string; mac: string | null; health: WorkerHealth; macLookup?: MacLookup; }>) {
+  const findings: Finding[] = [];
   const claimed = new Set();
 
   for (const entry of declared) {
@@ -341,14 +334,12 @@ export function reconcile(declared, discovered) {
  * Numbers are never reused, even when a lower one has been retired: `wake.yml`, run summaries and this
  * project's own notes refer to boxes by that name for a long time, and handing a new machine a dead
  * machine's name makes every one of those references silently wrong.
- *
- * @param {string[]} existingNames
  */
-export function nextWorkerName(existingNames) {
+export function nextWorkerName(existingNames: string[]) {
   const used = existingNames
     // `flatMap` rather than map-filter-map: a filter cannot narrow away the null for the `match[1]`
     // two lines down, and matching then deciding in one place needs no narrowing to explain.
-    .flatMap((/** @type {string} */ name) => {
+    .flatMap((name: string) => {
       const match = name.match(/^a11y-worker-(\d+)$/);
       return match ? [Number(match[1])] : [];
     });
@@ -364,14 +355,11 @@ export function nextWorkerName(existingNames) {
  * "A worker with no `mac` is skipped by wake.yml and NAMED, rather than silently not woken." The missing
  * fact is therefore already a LOUD state, so recording the box is strictly better than refusing to — the
  * alternative leaves a real machine in no file at all, which is the quiet failure.
- *
- * @param {{name: string, ip: string, mac: string|null, health: object, today: string}} entry
  */
-/**
- * @param {{ name: string, ip: string, mac?: string|null, health?: Record<string, any>|null,
- *           today: string, macLookup?: {mac: string|null, ran: boolean, missing: string[]} }} entry
- */
-export function enrolmentBlock({ name, ip, mac, health, today, macLookup }) {
+export function enrolmentBlock({ name, ip, mac, health, today, macLookup }: {
+        name: string; ip: string; mac?: string | null; health?: WorkerHealth | null;
+        today: string; macLookup?: { mac: string | null; ran: boolean; missing: string[]; };
+    }) {
   const env = health?.environment ?? {};
   const identity = `${env.screenReaderVersion ? `NVDA ${env.screenReaderVersion}` : "no NVDA reported"}, `
     + `${env.windowsVersion ?? "unknown OS"}/${env.architecture ?? "?"}`;
@@ -402,16 +390,15 @@ export function enrolmentBlock({ name, ip, mac, health, today, macLookup }) {
  * MOVE and it needs a human: the box changed address, and appending it would put the SAME machine in the
  * file twice under two names, which is worse than the drift it was trying to fix.
  *
- * @param {string} text
- * @param {Array<{ip: string, mac: string|null, health: object, macLookup?: {mac: string|null, ran: boolean, missing: string[]}}>} unknowns
- * @param {string} today
+ *
+ *
+ *
  * @param {Array<{name: string, mac: string|null}>} [alsoKnown] (#1684) hosts declared somewhere OTHER
  *        than `text` (the durable copy, when the write target `text` came from is the in-tree file and
  *        the two have drifted) -- folded into the duplicate check so a worker already enrolled there is
  *        never re-added under a second, colliding name.
- * @returns {{text: string, added: Array<{name: string, ip: string, mac: string|null}>, skipped: Array<{ip: string, mac: string}>}}
  */
-export function enrol(text, unknowns, today, alsoKnown = []) {
+export function enrol(text: string, unknowns: Array<{ ip: string; mac: string | null; health: WorkerHealth; macLookup?: MacLookup; }>, today: string, alsoKnown: Array<{ name: string; mac: string | null; }> = []): { text: string; added: Array<{ name: string; ip: string; mac: string | null; }>; skipped: Array<{ ip: string; mac: string; }>; } {
   const declared = [...inventoryHosts(text), ...alsoKnown];
   const knownMacs = new Set(declared.map((host) => host.mac).filter(Boolean));
   const names = declared.map((host) => host.name);
@@ -448,24 +435,26 @@ export function enrol(text, unknowns, today, alsoKnown = []) {
  * tail of the block are left BELOW the insertion, because a trailing comment there belongs to the group
  * rather than to the last host in it.
  */
-function insertIntoWorkerGroup(/** @type {any} */ text, /** @type {any} */ blocks) {
+const indentOf = (line: string) => line.length - line.trimStart().length;
+
+function insertIntoWorkerGroup(text: string, blocks: string[]) {
   const body = text.endsWith("\n") ? text : `${text}\n`;
   if (!blocks.length) return body;
 
   const lines = body.split("\n");
-  const start = lines.findIndex((/** @type {any} */ line) => new RegExp(`^(\\s*)${WORKER_GROUP}\\s*:\\s*$`).test(line));
+  const start = lines.findIndex((line) => new RegExp(`^(\\s*)${WORKER_GROUP}\\s*:\\s*$`).test(line));
   if (start === -1) {
     throw new Error(
       `inventory.yml declares no \`${WORKER_GROUP}:\` group, so there is nowhere to enrol a capture worker.\n`
       + "Refusing to append at the end of the file: that is how a worker lands in another group and stops "
       + "being dispatched to. Add the group, or fix the one that was renamed.");
   }
-  const groupIndent = lines[start].match(/^(\s*)/)[1].length;
+  const groupIndent = indentOf(lines[start]);
   let end = start + 1;
   let lastHost = start;
   while (end < lines.length) {
     const line = lines[end];
-    const indent = line.match(/^(\s*)/)[1].length;
+    const indent = indentOf(line);
     if (line.trim() && indent <= groupIndent) break;
     if (line.trim() && !line.trimStart().startsWith("#")) lastHost = end;
     end += 1;
@@ -475,17 +464,17 @@ function insertIntoWorkerGroup(/** @type {any} */ text, /** @type {any} */ block
 }
 
 /** A worker's identity in one line, so two boxes can be told apart at a glance. */
-function describe(/** @type {any} */ health) {
+function describe(health: WorkerHealth | null | undefined) {
   const e = health?.environment ?? {};
   if (!health?.code && !e.screenReaderVersion) {
     // The retired Proxmox VM answers exactly this. Saying so beats printing a row of dashes.
     return "pre-dates /health.code and /health.environment — NOT a current worker";
   }
-  return `code=${health.code ?? "?"} NVDA=${e.screenReaderVersion ?? "?"} `
+  return `code=${health?.code ?? "?"} NVDA=${e.screenReaderVersion ?? "?"} `
     + `${e.browser ?? "?"} ${e.browserVersion ?? "?"} ${e.windowsVersion ?? "?"}/${e.architecture ?? "?"}`;
 }
 
-function render(/** @type {any} */ findings) {
+function render(findings: Finding[]) {
   const lines = [];
   for (const f of findings) {
     if (f.state === "ok") {
@@ -523,11 +512,11 @@ function render(/** @type {any} */ findings) {
  * Reports rather than returns quietly: `--enroll` that adds nothing must be distinguishable from
  * `--enroll` that was never reached, which is this project's most expensive recurring shape.
  *
- * @param {string} inventoryPath
- * @param {Array<{ip: string, mac: string|null, health: object}>} unknowns
+ *
+ *
  * @param {Array<{name: string, mac: string|null}>} [alsoKnown] see `enrol`'s own param doc
  */
-export function writeEnrolments(inventoryPath, unknowns, alsoKnown = []) {
+export function writeEnrolments(inventoryPath: string, unknowns: Array<{ ip: string; mac: string | null; health: WorkerHealth; }>, alsoKnown: Array<{ name: string; mac: string | null; }> = []) {
   const today = new Date().toISOString().slice(0, 10);
   let before;
   try {
@@ -537,7 +526,7 @@ export function writeEnrolments(inventoryPath, unknowns, alsoKnown = []) {
     // can still READ the fleet (the durable copy exists) but has never had this checkout path either can
     // reconcile but cannot enrol, and that is a different, actionable state from "nothing answered".
     process.stdout.write(`\n  COULD NOT ENROL: ${inventoryPath} could not be read `
-      + `(${/** @type {Error} */ (error).message}). --enroll writes a local draft at the in-tree checkout `
+      + `(${(error as Error).message}). --enroll writes a local draft at the in-tree checkout `
       + "path for a human to review, per #1684 -- create the file (or copy it from a machine that has "
       + "one), or drop --enroll to just see what was found.\n");
     return { added: [], skipped: [] };
@@ -561,7 +550,7 @@ async function main() {
   // `--cidr=`/`--port=`, which can never contain one, but a live discrepancy from the other fourteen
   // hand-rolled copies of this idiom the day this helper is asked for anything else. `flagValue` preserves
   // a value whole.
-  const arg = (/** @type {any} */ name) => flagValue(process.argv, name);
+  const arg = (name: string) => flagValue(process.argv, name);
   const subnet = arg("cidr") || localSubnet();
   if (!subnet) {
     process.stderr.write("Could not work out which /24 to scan. Pass --cidr=192.168.1\n");
@@ -570,7 +559,7 @@ async function main() {
   const port = Number(arg("port") || DEFAULT_PORT);
 
   const inventoryPath = fileURLToPath(new URL("../ansible/inventory.yml", import.meta.url));
-  // #1684: THE DURABLE COPY FIRST for the READ half, the same precedence #1683 gave fleet-wake.mjs -- a
+  // #1684: THE DURABLE COPY FIRST for the READ half, the same precedence #1683 gave fleet-wake.ts -- a
   // machine with no in-tree inventory.yml (the lab, measured 2026-09-18: ABSENT) still finds declared
   // hosts, MAC included. `readControlPlaneFleet` (#1356) cannot serve this file: it resolves {name, url}
   // pairs over ssh and drops the MAC entirely, which Wake-on-LAN and `reconcile`'s move-detection need.
@@ -587,7 +576,7 @@ async function main() {
     declaredText = readFileSync(readPath, "utf8");
   } catch (error) {
     process.stderr.write(`No fleet to reconcile against: inventory could not be read from ${readPath} `
-      + `(${/** @type {Error} */ (error).message}). Restore it from the secrets store, or add a host.\n`);
+      + `(${(error as Error).message}). Restore it from the secrets store, or add a host.\n`);
     process.exit(2);
   }
   const declared = inventoryHosts(declaredText);
@@ -600,7 +589,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify({ subnet, port, findings }, null, 2)}\n`);
   } else {
     process.stdout.write(`\n${render(findings).join("\n")}\n\n`);
-    const counts = findings.reduce((/** @type {Record<string, number>} */ acc, /** @type {any} */ f) =>
+    const counts = findings.reduce((acc: Record<string, number>, f: Finding) =>
     ({ ...acc, [f.state]: (acc[f.state] ?? 0) + 1 }), {});
     process.stdout.write(`  ${declared.length} declared, ${discovered.length} answering — `
       + `${Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ")}\n`);
@@ -610,7 +599,7 @@ async function main() {
     }
   }
   const enrolled = process.argv.includes("--enroll")
-    ? writeEnrolments(inventoryPath, /** @type {any[]} */ (findings.filter((f) => f.state === "unknown")), declared)
+    ? writeEnrolments(inventoryPath, findings.filter((f): f is Extract<Finding, { state: "unknown" }> => f.state === "unknown"), declared)
     : { added: [], skipped: [] };
 
   // Exit 1 only on a MISMATCH — a moved or unknown worker is something to act on. An absent one is not:

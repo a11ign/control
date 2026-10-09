@@ -9,9 +9,9 @@
  * when its own pull changed the checkout, so a checkout pulled by hand (or by an earlier job that died before the install)
  * reaches the play with nothing laid, and nothing on the host said so.
  *
- * It runs ON THE LAB, from `tasks/run-job.yml`, and not in `lab-job.mjs`'s `run()`: `run()` executes on the control plane or a laptop,
+ * It runs ON THE LAB, from `tasks/run-job.yml`, and not in `lab-job.ts`'s `run()`: `run()` executes on the control plane or a laptop,
  * and the control plane's checkout never installs (ADR 0012), so a check there would refuse every dispatch and say nothing about the host
- * that runs the job. One predicate, two readers: the play runs this file as a command (`node packages/control/src/lab-laid-copy.mjs`),
+ * that runs the job. One predicate, two readers: the play runs this file as a command (`node packages/control/src/lab-laid-copy.ts`),
  * and the test imports `labLaidCopyRefusal`.
  *
  * Judged: the directory exists, is the LAID shape (`.layer-ref` beside `src/`, no `.git`: a clone holds the layer repository's own layout,
@@ -29,11 +29,8 @@ const LAYER = "lab";
 const REF_FILE = ".layer-ref";
 const REFUSED = 4;
 
-/**
- * @param {{ manifest: { pinned?: Record<string, { path: string, tag?: string, lays?: string[] }> }, root: string }} from
- * @returns {string | null} what is wrong, in the words a person dispatching a job needs, or `null` when the lab's code is laid at its pin
- */
-export function labLaidCopyRefusal({ manifest, root }) {
+/** @returns {string | null} what is wrong, in the words a person dispatching a job needs, or `null` when the lab's code is laid at its pin */
+export function labLaidCopyRefusal({ manifest, root }: { manifest: { pinned?: Record<string, { path: string; tag?: string; lays?: string[]; }>; }; root: string; }): string | null {
   const declared = manifest.pinned?.[LAYER];
   if (declared?.tag === undefined) return `layers.json declares no \`pinned.${LAYER}\` with a tag: there is no lab code to look for`;
   const { path, tag, lays = ["src"] } = declared;

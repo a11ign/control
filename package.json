@@ -10,10 +10,10 @@
     "node": ">=22"
   },
   "exports": {
-    "./fleet-playbook": "./src/fleet-playbook.mjs",
-    "./lab-pipeline": "./src/lab-pipeline.mjs",
-    "./fleet-wake": "./src/fleet-wake.mjs",
-    "./layer-checkouts": "./src/layer-checkouts.mjs"
+    "./fleet-playbook": "./src/fleet-playbook.ts",
+    "./lab-pipeline": "./src/lab-pipeline.ts",
+    "./fleet-wake": "./src/fleet-wake.ts",
+    "./layer-checkouts": "./src/layer-checkouts.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

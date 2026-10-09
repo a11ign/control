@@ -19,8 +19,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { layerDeclaration, layerPinTag, separateLayers } from "./layer-checkouts.mjs";
-import { layerRefsFor, packageOfLayer, qualificationRequest, withLayerRefs } from "./qualification-run.mjs";
+import { layerDeclaration, layerPinTag, separateLayers } from "./layer-checkouts.ts";
+import { layerRefsFor, packageOfLayer, qualificationRequest, withLayerRefs } from "./qualification-run.ts";
 
 const SHA = "308b2de5bbd8a1f0c4e7d9b3a6f2e1d0c9b8a7f6";
 const FULL_SHA = /^[0-9a-f]{40}$/;

@@ -1,5 +1,5 @@
 /**
- * #83: `fleet-playbook.mjs` and `lab-pipeline.mjs` both hardcoded a real, specific LAN address as
+ * #83: `fleet-playbook.ts` and `lab-pipeline.ts` both hardcoded a real, specific LAN address as
  * `process.env.A11Y_CONTROL_HOST || "<real address>"`, one file away from `packages/control/README.md`
  * saying outright that value must never be committed. `requireControlPlaneHost` is the fix: a required
  * value refused loudly when absent, never guessed at with something that happens to work on one machine.
@@ -7,7 +7,7 @@
  * #85: the SAME two files did the identical thing for `A11Y_PVE_KEY`, defaulting to a real, specific key
  * filename -- missed by #83's own investigation, which stopped at the address (this file's header
  * comment said outright "A11Y_PVE_KEY already had no such fallback", and that was false). See
- * `control-plane-host.mjs`'s own header for why `A11Y_SSH_KEY` (the fleet's key, not the control plane's)
+ * `control-plane-host.ts`'s own header for why `A11Y_SSH_KEY` (the fleet's key, not the control plane's)
  * is a deliberately different, NOT-fixed case.
  */
 import { test } from "node:test";
@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { requireControlPlaneHost, requireControlPlaneKey, readControlHostFile } from "./control-plane-host.mjs";
+import { requireControlPlaneHost, requireControlPlaneKey, readControlHostFile } from "./control-plane-host.ts";
 
 /** Runs `fn` with both env vars saved and restored, and a real temp file cleaned up after -- #285. */
 function withHostEnv(fn: (filePath: string) => void): void {
@@ -87,14 +87,14 @@ test("#1428: the refusal still refuses on a machine that EXPORTS a control-host 
 // fallback fails a fast, offline test rather than waiting to be found in a public repo a second time.
 const FALLBACK_PRIVATE_IP = /A11Y_CONTROL_HOST\s*\|\|\s*["'](10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/;
 
-test("fleet-playbook.mjs no longer falls back to a hardcoded private address", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8");
+test("fleet-playbook.ts no longer falls back to a hardcoded private address", () => {
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, FALLBACK_PRIVATE_IP);
   assert.match(source, /requireControlPlaneHost\(\)/, "the loud refusal must still be wired in, not just removed");
 });
 
-test("lab-pipeline.mjs no longer falls back to a hardcoded private address", () => {
-  const source = readFileSync(new URL("./lab-pipeline.mjs", import.meta.url), "utf8");
+test("lab-pipeline.ts no longer falls back to a hardcoded private address", () => {
+  const source = readFileSync(new URL("./lab-pipeline.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, FALLBACK_PRIVATE_IP);
   assert.match(source, /requireControlPlaneHost\(\)/, "the loud refusal must still be wired in, not just removed");
 });
@@ -130,14 +130,14 @@ test("REFUSES rather than guessing when A11Y_PVE_KEY is unset", () => {
 // not covered by this guard, which only ever checks the two JS call sites #85 fixed.
 const FALLBACK_KEY_PATH = /A11Y_PVE_KEY\s*\|\|/;
 
-test("fleet-playbook.mjs no longer falls back to a hardcoded key path", () => {
-  const source = readFileSync(new URL("./fleet-playbook.mjs", import.meta.url), "utf8");
+test("fleet-playbook.ts no longer falls back to a hardcoded key path", () => {
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, FALLBACK_KEY_PATH);
   assert.match(source, /requireControlPlaneKey\(\)/, "the loud refusal must still be wired in, not just removed");
 });
 
-test("lab-pipeline.mjs no longer falls back to a hardcoded key path", () => {
-  const source = readFileSync(new URL("./lab-pipeline.mjs", import.meta.url), "utf8");
+test("lab-pipeline.ts no longer falls back to a hardcoded key path", () => {
+  const source = readFileSync(new URL("./lab-pipeline.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, FALLBACK_KEY_PATH);
   assert.match(source, /requireControlPlaneKey\(\)/, "the loud refusal must still be wired in, not just removed");
 });

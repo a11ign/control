@@ -2,7 +2,7 @@
  * #2655: does a job that puts a capture on a worker WAKE exactly the workers it needs, and wait for them,
  * before it dispatches?
  *
- * The seam is `lab-job.mjs`'s `run`, which every path that reaches the lab goes through: `lab:pipeline`
+ * The seam is `lab-job.ts`'s `run`, which every path that reaches the lab goes through: `lab:pipeline`
  * shells to `npm run lab:job`, and the gates' `dispatchUnlessLocal` does too. Nothing here reads a network
  * or a control plane: `wake`, `checkFleet`, `readFleet` and `dispatch` are all fakes, and `process.exit` is
  * replaced for the refusals so the test runner cannot die with the function under test.
@@ -19,14 +19,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
-import { captureBearingJobs, neededWorkers, run, wakeNeeded, wakeRefusal, workerDemand } from "./lab-job.mjs";
+import { readControlPlaneFleet } from "./control-plane-fleet.ts";
+import { captureBearingJobs, neededWorkers, run, wakeNeeded, wakeRefusal, workerDemand } from "./lab-job.ts";
 
 /** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
 const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
 
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
-const LAB_JOB_SOURCE = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+const LAB_JOB_SOURCE = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
 
 const FLEET = ["a11y-worker-2", "a11y-worker-3", "a11y-worker-4", "a11y-worker-5", "a11y-worker-6"]
   .map((name, i) => ({ name, url: `http://192.0.2.${i + 2}:8765` }));
@@ -192,5 +192,5 @@ test("the mac reaches the wake through the ONE inventory read: readControlPlaneF
     { name: "a11y-worker-2", url: "http://192.0.2.2:8765", mac: "aa:bb:cc:dd:ee:01" },
     { name: "a11y-worker-3", url: "http://192.0.2.3:8765" },
   ]);
-  assert.doesNotMatch(LAB_JOB_SOURCE, /sshToControlPlane|inventoryReadScript/, "no second read of the inventory in lab-job.mjs");
+  assert.doesNotMatch(LAB_JOB_SOURCE, /sshToControlPlane|inventoryReadScript/, "no second read of the inventory in lab-job.ts");
 });

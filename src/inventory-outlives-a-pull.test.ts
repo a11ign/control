@@ -73,7 +73,7 @@ test("the config records the three states it was verified in", () => {
  * Measured 2026-09-22 at `9faee29ef`, when that guard was hand-copied into all ten: SEVEN told the reader
  * to "install the durable copy THIS MACHINE can always read, `npm run fleet:inventory-install`". That
  * command does not install anything on the machine reading it. `inventory-install.yml` declares
- * `# a11y_bootstrap: true`, and `fleet-playbook.mjs`'s `runBootstrapFromHere()` honours that by spawning
+ * `# a11y_bootstrap: true`, and `fleet-playbook.ts`'s `runBootstrapFromHere()` honours that by spawning
  * `ansible-playbook -i root@${CONTROL_PLANE},` — so `/etc/a11ign/inventory.yml` appears on the CONTROL
  * PLANE. Worse, its source is `{{ playbook_dir }}/inventory.yml` read `delegate_to: localhost`, so the
  * command needs the very file the refusal says is missing.

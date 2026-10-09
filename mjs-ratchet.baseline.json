@@ -1,26 +1,4 @@
 {
-  "files": [
-    "control-plane-checkout.mjs",
-    "control-plane-fleet.mjs",
-    "control-plane-host.mjs",
-    "fleet-auto-off.mjs",
-    "fleet-discover.mjs",
-    "fleet-host-identity.mjs",
-    "fleet-playbook.mjs",
-    "fleet-status.mjs",
-    "fleet-switch.mjs",
-    "fleet-wake.mjs",
-    "fleet-watch.mjs",
-    "gate-heartbeat.mjs",
-    "lab-failed-units.mjs",
-    "lab-job.mjs",
-    "lab-laid-copy.mjs",
-    "lab-pipeline.mjs",
-    "lab-watch.mjs",
-    "layer-checkouts.mjs",
-    "post-qualification-status.mjs",
-    "qualification-run.mjs",
-    "with-control-plane-fleet.mjs"
-  ],
+  "files": [],
   "exceptions": []
 }

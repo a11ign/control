@@ -41,7 +41,7 @@
 # someone which errand to run.
 #
 # `fleet:status` applies this same rule to any box that does not answer `/health` (`linkVerdictOf` in
-# `packages/control/src/fleet-status.mjs`, #1298): only REACHABLE and FAILED are answers. Change one, read the other.
+# `packages/control/src/fleet-status.ts`, #1298): only REACHABLE and FAILED are answers. Change one, read the other.
 #
 # ## Why three vantage points
 #

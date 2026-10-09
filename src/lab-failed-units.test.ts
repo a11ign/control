@@ -10,7 +10,7 @@ import {
   unitsFromAnsibleResults,
   describeFailures,
   renderReport,
-} from "./lab-failed-units.mjs";
+} from "./lab-failed-units.ts";
 
 // `systemctl list-units --all --plain --no-legend a11y-job-*` -- the exact shape #866's own open-check
 // greps for (`"loaded failed failed"`), plus an active and an inactive unit so a real run's mix is covered.

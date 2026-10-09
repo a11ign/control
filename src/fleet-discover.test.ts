@@ -11,8 +11,11 @@ import type { AddressInfo } from "node:net";
 
 import {
   reconcile, inventoryHosts, normaliseMac, enrol, writeEnrolments, enrolmentBlock, lookupMac, macOf, macNote,
-  scan, PROBE_TIMEOUT_MS,
-} from "./fleet-discover.mjs";
+  scan, PROBE_TIMEOUT_MS, type Finding,
+} from "./fleet-discover.ts";
+
+/** `reconcile`'s answer where the case declares a worker that answered: an `ok` finding, which is the one carrying the MAC reading. */
+type Ok = Extract<Finding, { state: "ok" }>;
 import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
 
 /**
@@ -142,7 +145,7 @@ test("MAC formats are normalised, so 00-1A-2B and 00:1a:2b are one machine", () 
 // #2700: found on #2657. The five workers #2654 enrolled were written with a same-line comment on their
 // `mac:` line -- `/^\s*mac\s*:\s*(\S*)\s*$/`, anchored to end-of-line, failed the whole line and
 // `inventoryHosts` returned `mac: null` for a worker that has one, so `fleet:wake` refused to wake it and
-// `fleet-auto-off.mjs`'s `hasWakeableMac` took the `no-mac` branch forever. This is the row's own example
+// `fleet-auto-off.ts`'s `hasWakeableMac` took the `no-mac` branch forever. This is the row's own example
 // line, unchanged.
 test("#2700: a mac: line with a trailing # comment still parses, in the shape #2654 wrote", () => {
   const text = [
@@ -253,7 +256,7 @@ test("inventoryHosts is group-aware too, or discover reports the lab as a sleepi
 // ---------------------------------------------------------------------------------------------------
 // #1684: `--enroll` writes to the IN-TREE inventory unconditionally (the "draft for a human to review"
 // candidate off #1684's own list, needing no new write capability), while the READ half now resolves
-// the durable copy first (#1683's own precedence, shared via control-plane-fleet.mjs). Those two paths
+// the durable copy first (#1683's own precedence, shared via control-plane-fleet.ts). Those two paths
 // can disagree -- a worker already declared in the durable copy but never synced into the in-tree draft
 // -- so `enrol`'s duplicate check takes a THIRD input, `alsoKnown`, for exactly that gap.
 
@@ -354,12 +357,12 @@ test("#2667: a wrong declared MAC no longer reads as a bare OK when the host cou
 test("#2667: a compared MAC carries no warning, and neither does an entry with no declared MAC", () => {
   const read = { mac: NEIGH_MAC, ran: true, missing: [] };
   const [compared] = reconcile([{ name: "w1", host: IP.a10, mac: NEIGH_MAC }],
-    [{ ip: IP.a10, mac: NEIGH_MAC, macLookup: read, health }]);
+    [{ ip: IP.a10, mac: NEIGH_MAC, macLookup: read, health }]) as Ok[];
   assert.equal(compared.macCompared, true);
   assert.equal(compared.macNote, null);
   const blind = lookupMac(IP.a10, hostWith({}));
   const [unenrolled] = reconcile([{ name: "w1", host: IP.a10, mac: null }],
-    [{ ip: IP.a10, mac: null, macLookup: blind, health }]);
+    [{ ip: IP.a10, mac: null, macLookup: blind, health }]) as Ok[];
   assert.equal(unenrolled.macNote, null);
 });
 

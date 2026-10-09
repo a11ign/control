@@ -29,7 +29,7 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 /** Every module in this package, so a new one cannot arrive unguarded. */
-const modules = () => readdirSync(HERE).filter((f) => f.endsWith(".mjs"));
+const modules = () => readdirSync(HERE).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
 
 test("NO THIRD-PARTY DEPENDENCIES ARE DECLARED — the whole reason this package is separate", () => {
   // `../package.json` is the manifest CI LAYS at `packages/control` (`ci.yml` cuts it from the repository root's, keeping `dependencies` verbatim and dropping `devDependencies`, which the core's frozen
@@ -45,7 +45,7 @@ test("NOTHING IS IMPORTED BY PACKAGE NAME, TRANSITIVELY — one hop is not a bou
   // plane. `../../worker-fleet/src/cli-flags.mjs` resolves from a raw checkout; the export path does not.
   //
   // TRANSITIVE, and that was learned by breaking it. This test checked only `packages/control`'s OWN
-  // imports, so when `fleet-playbook.mjs` began importing `check-worker-code.mjs` BY PATH — which passes
+  // imports, so when `fleet-playbook.ts` began importing `check-worker-code.mjs` BY PATH — which passes
   // a one-hop check — it dragged in that file's `@a11ign/screenreader-worker` import and `fleet:deploy`
   // died on the control plane with ERR_MODULE_NOT_FOUND. It passed here the whole time, because a laptop
   // has node_modules. A gate that does not exercise what ships is not a gate, for the fifth time in this

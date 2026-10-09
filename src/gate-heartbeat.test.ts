@@ -12,10 +12,11 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   STALE_AFTER_MS, READ_TIMEOUT_MS, HEARTBEAT_COMMENT_ID, TELEGRAM_TOKEN_FILE, GH_TOKEN_FILE, judgeTick, messageFor, run, readGateLastTick, telegramSender, chatIdFrom,
-} from "./gate-heartbeat.mjs";
+} from "./gate-heartbeat.ts";
 import { shippedControlUnits } from "./control-unit-drift.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -227,8 +228,8 @@ test("readGateLastTick: a timeout, a failure and a missing credential are each a
 });
 
 test("readGateLastTick: the token file is used when GH_TOKEN is unset, and the path is #1875's", () => {
-  // Read as text, not imported: `fleet-playbook.mjs` parses flags at import and needs the laid fleet layer.
-  const playbookSource = readFileSync(join(HERE, "fleet-playbook.mjs"), "utf8");
+  // Read as text, not imported: `fleet-playbook.ts` parses flags at import and needs the laid fleet layer.
+  const playbookSource = readFileSync(join(HERE, "fleet-playbook.ts"), "utf8");
   assert.ok(playbookSource.includes('export const GH_TOKEN_FILE = join(homedir(), ".config", "a11y-witness", "gh-token");'), "#1875's path moved");
   assert.match(GH_TOKEN_FILE, /\/\.config\/a11y-witness\/gh-token$/, "one credential path, not two");
   let token = "";
@@ -313,12 +314,15 @@ test("telegramSender: neither an HTTP failure nor a thrown error carries the tok
 // The whole CLI, against a FAKE `gh` first on PATH and no network: the entry point, the state file and the exit.
 // ---------------------------------------------------------------------------------------------------------
 
+// The child runs TypeScript, which plain node does not; `tsx` is the core's, resolved from where this test sits (the lay under the core).
+const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
+
 function cli(updatedMs: number, extraEnv: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-"));
   const gh = join(dir, "gh");
   writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' '${comment(updatedMs)}'\n`);
   chmodSync(gh, 0o755);
-  const result = spawnSync(process.execPath, [join(HERE, "gate-heartbeat.mjs")], {
+  const result = spawnSync(process.execPath, ["--import", TSX, join(HERE, "gate-heartbeat.ts")], {
     encoding: "utf8", timeout: 30_000,
     env: {
       PATH: `${dir}:${process.env.PATH}`, GH_TOKEN: "fake", STATE_DIRECTORY: dir, HOME: dir,
@@ -365,13 +369,13 @@ test("the timer fires every 5 minutes or less (done-when 1)", () => {
 test("the service says in its header that it does not need the agents host (done-when 3), runs the script, and has a state directory", () => {
   const service = text("files/a11y-gate-heartbeat.service");
   assert.match(service.split("[Service]")[0], /DOES NOT NEED THE AGENTS HOST TO RUN/);
-  assert.match(service, /^ExecStart=\/usr\/bin\/node \/root\/a11y-witness\/packages\/control\/src\/gate-heartbeat\.mjs$/m);
+  assert.match(service, /^ExecStart=\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/a11y-witness\/packages\/control\/src\/gate-heartbeat\.ts$/m);
   assert.match(service, /^StateDirectory=a11y-gate-heartbeat$/m);
   assert.match(service, /^Type=oneshot$/m);
 });
 
 test("the service reads nothing from the agents host: no ssh, no agents-host path, in the script or the unit", () => {
-  for (const source of [readFileSync(join(HERE, "gate-heartbeat.mjs"), "utf8"), text("files/a11y-gate-heartbeat.service")]) {
+  for (const source of [readFileSync(join(HERE, "gate-heartbeat.ts"), "utf8"), text("files/a11y-gate-heartbeat.service")]) {
     const code = source.split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*|#)/.test(line)).join("\n");
     assert.ok(!/\bssh\b/i.test(code), "an ssh to a frozen host blocks");
     assert.ok(!/work-tick-completion|\.local\/state\/agent-org/.test(code), "the tick is read from GitHub, not the host's file");

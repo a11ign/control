@@ -47,7 +47,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { groupPerLine, WORKER_GROUP } from "../../worker-fleet/src/fleet-env.mjs";
 import { inventorySources, inventoryReadScript, parseInventoryReads, sshToControlPlane, macsByHost }
-  from "./control-plane-fleet.mjs";
+  from "./control-plane-fleet.ts";
 
 // --- the wire: a v2c GET / GETNEXT client, written out because this package has no dependencies --------
 
@@ -59,10 +59,9 @@ const RESPONSE_PDU = 0xa2;
 
 const TAG = Object.freeze({ INTEGER: 0x02, OCTETS: 0x04, NULL: 0x05, OID: 0x06, SEQUENCE: 0x30,
   COUNTER32: 0x41, GAUGE32: 0x42, TIME_TICKS: 0x43, COUNTER64: 0x46 });
-const EXCEPTIONS = Object.freeze(/** @type {Record<number, string>} */ ({ 0x80: "noSuchObject",
-  0x81: "noSuchInstance", 0x82: "endOfMibView" }));
-/** @type {Set<number>} */
-const UNSIGNED_TAGS = new Set([TAG.COUNTER32, TAG.GAUGE32, TAG.TIME_TICKS, TAG.COUNTER64]);
+const EXCEPTIONS = Object.freeze(({ 0x80: "noSuchObject",
+  0x81: "noSuchInstance", 0x82: "endOfMibView" } as Record<number, string>));
+const UNSIGNED_TAGS: Set<number> = new Set([TAG.COUNTER32, TAG.GAUGE32, TAG.TIME_TICKS, TAG.COUNTER64]);
 
 const LONG_FORM = 0x80;
 const SEVEN_BITS = 0x7f;
@@ -77,28 +76,20 @@ const BITS_PER_BYTE = 8;
 /** Bounds a walk so a switch that never reaches the end of the MIB cannot hold the command forever. */
 const MAX_WALK_ROWS = 4096;
 
-/** @param {number} length @returns {number[]} */
-function lengthBytes(length) {
+function lengthBytes(length: number): number[] {
   if (length < LONG_FORM) return [length];
-  /** @type {number[]} */
-  const bytes = [];
+  const bytes: number[] = [];
   for (let rest = length; rest > 0; rest = Math.floor(rest / BYTE)) bytes.unshift(rest % BYTE);
   return [LONG_FORM | bytes.length, ...bytes];
 }
 
-/** @param {number} tag @param {Buffer} content @returns {Buffer} */
-function tlv(tag, content) {
+function tlv(tag: number, content: Buffer): Buffer {
   return Buffer.concat([Buffer.from([tag, ...lengthBytes(content.length)]), content]);
 }
 
-/**
- * A non-negative INTEGER, minimal two's complement: a leading zero byte keeps a high bit from reading as a sign.
- * @param {number} value
- * @returns {Buffer}
- */
-function berInteger(value) {
-  /** @type {number[]} */
-  const bytes = [];
+/** A non-negative INTEGER, minimal two's complement: a leading zero byte keeps a high bit from reading as a sign. */
+function berInteger(value: number): Buffer {
+  const bytes: number[] = [];
   for (let rest = value; ; rest = Math.floor(rest / BYTE)) {
     bytes.unshift(rest % BYTE);
     if (rest < BYTE) break;
@@ -107,8 +98,8 @@ function berInteger(value) {
   return tlv(TAG.INTEGER, Buffer.from(bytes));
 }
 
-/** @param {number} arc @returns {number[]} base-128, high bit set on every byte but the last */
-function arcBytes(arc) {
+/** @returns {number[]} base-128, high bit set on every byte but the last */
+function arcBytes(arc: number): number[] {
   const bytes = [arc & SEVEN_BITS];
   for (let rest = Math.floor(arc / BASE_128); rest > 0; rest = Math.floor(rest / BASE_128)) {
     bytes.unshift((rest & SEVEN_BITS) | LONG_FORM);
@@ -116,8 +107,7 @@ function arcBytes(arc) {
   return bytes;
 }
 
-/** @param {string} dotted @returns {Buffer} */
-function berOid(dotted) {
+function berOid(dotted: string): Buffer {
   const arcs = dotted.split(".").map(Number);
   if (arcs.length < 2 || arcs.some((arc) => !Number.isInteger(arc) || arc < 0)) throw new Error(`not an OID: ${dotted}`);
   const [first, second, ...rest] = arcs;
@@ -125,13 +115,8 @@ function berOid(dotted) {
   return tlv(TAG.OID, Buffer.from(bytes));
 }
 
-/**
- * One v2c request. THROWS on any PDU but GET / GETNEXT: that refusal is the whole of item 3's guarantee.
- *
- * @param {{ community: string, requestId: number, oid: string, pdu: number }} request
- * @returns {Buffer}
- */
-export function buildRequest({ community, requestId, oid, pdu }) {
+/** One v2c request. THROWS on any PDU but GET / GETNEXT: that refusal is the whole of item 3's guarantee. */
+export function buildRequest({ community, requestId, oid, pdu }: { community: string; requestId: number; oid: string; pdu: number; }): Buffer {
   if (pdu !== PDU.GET && pdu !== PDU.GET_NEXT) {
     throw new Error(`refusing to build PDU 0x${pdu.toString(HEX)}: this module only reads (GET, GETNEXT)`);
   }
@@ -141,10 +126,9 @@ export function buildRequest({ community, requestId, oid, pdu }) {
     tlv(TAG.OCTETS, Buffer.from(community, "latin1")), tlv(pdu, body)]));
 }
 
-/** @typedef {{ tag: number, start: number, end: number }} Tlv */
+export type Tlv = { tag: number, start: number, end: number };
 
-/** @param {Buffer} buffer @param {number} at @returns {Tlv} */
-function readTlv(buffer, at) {
+function readTlv(buffer: Buffer, at: number): Tlv {
   if (at + 1 >= buffer.length) throw new Error("truncated SNMP reply");
   const tag = buffer[at];
   let length = buffer[at + 1];
@@ -159,10 +143,8 @@ function readTlv(buffer, at) {
   return { tag, start, end: start + length };
 }
 
-/** @param {Buffer} buffer @param {Tlv} parent @returns {Tlv[]} */
-function childrenOf(buffer, parent) {
-  /** @type {Tlv[]} */
-  const kids = [];
+function childrenOf(buffer: Buffer, parent: Tlv): Tlv[] {
+  const kids: Tlv[] = [];
   for (let at = parent.start; at < parent.end;) {
     const kid = readTlv(buffer, at);
     kids.push(kid);
@@ -171,8 +153,7 @@ function childrenOf(buffer, parent) {
   return kids;
 }
 
-/** @param {Buffer} buffer @param {Tlv} item @returns {string} */
-function decodeOid(buffer, item) {
+function decodeOid(buffer: Buffer, item: Tlv): string {
   const bytes = [...buffer.subarray(item.start, item.end)];
   const [head, ...rest] = bytes;
   const firstArc = Math.min(Math.floor(head / ARCS_PER_FIRST_BYTE), 2);
@@ -185,8 +166,7 @@ function decodeOid(buffer, item) {
   return arcs.join(".");
 }
 
-/** @param {Buffer} buffer @param {Tlv} item @returns {number} */
-function decodeNumber(buffer, item) {
+function decodeNumber(buffer: Buffer, item: Tlv): number {
   let value = 0n;
   for (const byte of buffer.subarray(item.start, item.end)) value = value * BigInt(BYTE) + BigInt(byte);
   const bits = BigInt((item.end - item.start) * BITS_PER_BYTE);
@@ -194,10 +174,9 @@ function decodeNumber(buffer, item) {
   return Number(negative ? value - (1n << bits) : value);
 }
 
-/** @typedef {{ oid: string, value: number | string | null, exception?: string }} VarBind */
+export type VarBind = { oid: string, value: number | string | null, exception?: string };
 
-/** @param {Buffer} buffer @param {Tlv} binding @returns {VarBind} */
-function decodeBinding(buffer, binding) {
+function decodeBinding(buffer: Buffer, binding: Tlv): VarBind {
   const [oid, value] = childrenOf(buffer, binding);
   if (!oid || !value || oid.tag !== TAG.OID) throw new Error("malformed SNMP varbind");
   const name = decodeOid(buffer, oid);
@@ -207,11 +186,7 @@ function decodeBinding(buffer, binding) {
   return { oid: name, value: null };
 }
 
-/**
- * @param {Buffer} reply
- * @returns {{ requestId: number, errorStatus: number, bindings: VarBind[] }}
- */
-export function decodeResponse(reply) {
+export function decodeResponse(reply: Buffer): { requestId: number; errorStatus: number; bindings: VarBind[]; } {
   const message = readTlv(reply, 0);
   const [, , pdu] = childrenOf(reply, message);
   if (message.tag !== TAG.SEQUENCE || !pdu || pdu.tag !== RESPONSE_PDU) throw new Error("not an SNMP response");
@@ -223,16 +198,10 @@ export function decodeResponse(reply) {
   };
 }
 
-/**
- * A client over an injected transport: `send(packet)` resolves with the reply packet or rejects.
- *
- * @param {{ send: (packet: Buffer) => Promise<Buffer>, community: string }} transport
- * @returns {{ get: (oid: string) => Promise<VarBind[]>, getNext: (oid: string) => Promise<VarBind[]> }}
- */
-export function snmpClient({ send, community }) {
+/** A client over an injected transport: `send(packet)` resolves with the reply packet or rejects. */
+export function snmpClient({ send, community }: { send: (packet: Buffer) => Promise<Buffer>; community: string; }): { get: (oid: string) => Promise<VarBind[]>; getNext: (oid: string) => Promise<VarBind[]>; } {
   let requestId = 0;
-  /** @param {number} pdu */
-  const ask = (pdu) => async (/** @type {string} */ oid) => {
+  const ask = (pdu: number) => async (oid: string) => {
     // Captured BEFORE the await: the port tables are walked in parallel on this one client, so the counter has
     // moved on by the time a reply returns, and comparing against it would refuse every reply but the last.
     requestId += 1;
@@ -248,14 +217,9 @@ export function snmpClient({ send, community }) {
 /**
  * Every row under `base`, by GETNEXT. The walk ends at the first OID outside the subtree, or at
  * endOfMibView; one that never ends is an error, not a short table.
- *
- * @param {{ getNext: (oid: string) => Promise<VarBind[]> }} client
- * @param {string} base
- * @returns {Promise<VarBind[]>}
  */
-export async function walk(client, base) {
-  /** @type {VarBind[]} */
-  const rows = [];
+export async function walk(client: { getNext: (oid: string) => Promise<VarBind[]>; }, base: string): Promise<VarBind[]> {
+  const rows: VarBind[] = [];
   let at = base;
   for (let step = 0; step < MAX_WALK_ROWS; step += 1) {
     const [binding] = await client.getNext(at);
@@ -282,24 +246,18 @@ export const OID = Object.freeze({
 const IF_OPER_UP = 1;
 const IF_OPER_DOWN = 2;
 
-/** @param {string} oid @returns {number} the last arc */
-const lastArc = (oid) => Number(oid.slice(oid.lastIndexOf(".") + 1));
+/** @returns {number} the last arc */
+const lastArc = (oid: string): number => Number(oid.slice(oid.lastIndexOf(".") + 1));
 
 /** @param {string} oid the FDB row's OID @returns {string} the MAC in its last six arcs, aa:bb:... */
-export function macOfFdbRow(oid) {
+export function macOfFdbRow(oid: string): string {
   return oid.split(".").slice(-MAC_ARCS).map((arc) => Number(arc).toString(HEX).padStart(2, "0")).join(":");
 }
 
-/**
- * @typedef {{ ok: true, table: string, macToPorts: Map<string, number[]>, linkByPort: Map<number, "up" | "down">,
- *             speedByPort: Map<number, number>, linkUnread: string | null, ifIndexIsPort: boolean | null }
- *         | { ok: false, reason: string }} Readings
- */
+export type Readings = { ok: true, table: string, macToPorts: Map<string, number[]>, linkByPort: Map<number, "up" | "down">, speedByPort: Map<number, number>, linkUnread: string | null, ifIndexIsPort: boolean | null } | { ok: false, reason: string };
 
-/** @param {VarBind[]} rows @returns {Map<string, number[]>} */
-function macTable(rows) {
-  /** @type {Map<string, number[]>} */
-  const table = new Map();
+function macTable(rows: VarBind[]): Map<string, number[]> {
+  const table: Map<string, number[]> = new Map();
   for (const { oid, value } of rows) {
     if (typeof value !== "number") continue;
     const mac = macOfFdbRow(oid);
@@ -312,11 +270,8 @@ function macTable(rows) {
  * The forwarding table from whichever MIB this switch keeps it in: BRIDGE-MIB first, Q-BRIDGE when that is
  * empty. Both empty is NOT "nobody is on the switch" (the control host alone makes that false) -- it is a
  * switch whose table this code cannot read, and says so.
- *
- * @param {{ getNext: (oid: string) => Promise<VarBind[]> }} client
- * @returns {Promise<{ table: string, rows: VarBind[] } | null>}
  */
-async function forwardingTable(client) {
+async function forwardingTable(client: { getNext: (oid: string) => Promise<VarBind[]>; }): Promise<{ table: string; rows: VarBind[]; } | null> {
   const bridge = await walk(client, OID.fdbBridge);
   if (bridge.length) return { table: "BRIDGE-MIB dot1dTpFdbPort", rows: bridge };
   const qBridge = await walk(client, OID.fdbQBridge);
@@ -326,18 +281,14 @@ async function forwardingTable(client) {
 /**
  * Port link, speed, and which ifIndex each bridge port is, keyed by BRIDGE port so the three share a key.
  * `ifIndexIsPort` records whether the two numberings agree on this model, READ rather than assumed (#3242 item 5).
- *
- * @param {{ getNext: (oid: string) => Promise<VarBind[]> }} client
  */
-async function portTables(client) {
+async function portTables(client: { getNext: (oid: string) => Promise<VarBind[]>; }) {
   const [base, status, speed] = await Promise.all([
     walk(client, OID.basePortIfIndex), walk(client, OID.ifOperStatus), walk(client, OID.ifHighSpeed)]);
   const statusByIf = new Map(status.map(({ oid, value }) => [lastArc(oid), value]));
   const speedByIf = new Map(speed.map(({ oid, value }) => [lastArc(oid), value]));
-  /** @type {Map<number, "up" | "down">} */
-  const linkByPort = new Map();
-  /** @type {Map<number, number>} */
-  const speedByPort = new Map();
+  const linkByPort: Map<number, "up" | "down"> = new Map();
+  const speedByPort: Map<number, number> = new Map();
   for (const { oid, value } of base) {
     const port = lastArc(oid);
     const state = statusByIf.get(Number(value));
@@ -353,16 +304,13 @@ async function portTables(client) {
 /**
  * The three readings. A switch that does not answer the forwarding-table walk is `ok: false` and says why;
  * one that answers it but not the port tables is `ok: true` with `linkUnread`, so the MAC half still reports.
- *
- * @param {{ getNext: (oid: string) => Promise<VarBind[]> }} client
- * @returns {Promise<Readings>}
  */
-export async function readSwitch(client) {
+export async function readSwitch(client: { getNext: (oid: string) => Promise<VarBind[]>; }): Promise<Readings> {
   let forwarding;
   try {
     forwarding = await forwardingTable(client);
   } catch (error) {
-    return { ok: false, reason: `the switch did not answer (${/** @type {Error} */ (error).message})` };
+    return { ok: false, reason: `the switch did not answer (${(error as Error).message})` };
   }
   if (!forwarding) {
     return { ok: false, reason: "the switch has no forwarding-table row in dot1dTpFdbPort or dot1qTpFdbPort" };
@@ -372,21 +320,13 @@ export async function readSwitch(client) {
     return { ok: true, table: forwarding.table, macToPorts, ...(await portTables(client)), linkUnread: null };
   } catch (error) {
     return { ok: true, table: forwarding.table, macToPorts, linkByPort: new Map(), speedByPort: new Map(),
-      ifIndexIsPort: null, linkUnread: /** @type {Error} */ (error).message };
+      ifIndexIsPort: null, linkUnread: (error as Error).message };
   }
 }
 
 // --- the pure half: readings and a worker-to-port map in, one state per worker out ---------------------
 
-/**
- * @typedef {{ kind: "on", port: number }
- *         | { kind: "on-elsewhere", port: number, seenOn: number[] }
- *         | { kind: "off-link-up", port: number, speedMbps: number | null }
- *         | { kind: "off-link-down", port: number }
- *         | { kind: "off-link-unread", port: number }
- *         | { kind: "unread", reason: string }
- *         | { kind: "unmapped", reason: string }} SwitchState
- */
+export type SwitchState = { kind: "on", port: number } | { kind: "on-elsewhere", port: number, seenOn: number[] } | { kind: "off-link-up", port: number, speedMbps: number | null } | { kind: "off-link-down", port: number } | { kind: "off-link-unread", port: number } | { kind: "unread", reason: string } | { kind: "unmapped", reason: string };
 
 /**
  * ONE STATE PER WORKER. Every input is injected; nothing here opens a socket or reads a file.
@@ -395,20 +335,12 @@ export async function readSwitch(client) {
  * what the PORT is doing, and `off, link up` means the port has a carrier, which a box in S5 can still give.
  * A MAC learned on a port that is not the worker's own is `on-elsewhere`, named, because a box moved to
  * another port is what a map that is only a table cannot catch.
- *
- * @param {{ workers: { name: string, mac?: string | null, port?: number | null }[], readings: Readings }} input
- * @returns {{ name: string, state: SwitchState }[]}
  */
-export function switchStates({ workers, readings }) {
+export function switchStates({ workers, readings }: { workers: { name: string; mac?: string | null; port?: number | null; }[]; readings: Readings; }): { name: string; state: SwitchState; }[] {
   return workers.map(({ name, mac, port }) => ({ name, state: stateOfWorker({ mac, port }, readings) }));
 }
 
-/**
- * @param {{ mac?: string | null, port?: number | null }} worker
- * @param {Readings} readings
- * @returns {SwitchState}
- */
-function stateOfWorker({ mac, port }, readings) {
+function stateOfWorker({ mac, port }: { mac?: string | null; port?: number | null; }, readings: Readings): SwitchState {
   if (!readings.ok) return { kind: "unread", reason: readings.reason };
   if (port == null) return { kind: "unmapped", reason: "no switch_port in the inventory" };
   if (!mac) return { kind: "unmapped", reason: "no mac in the inventory" };
@@ -421,14 +353,8 @@ function stateOfWorker({ mac, port }, readings) {
   return { kind: "off-link-unread", port };
 }
 
-/**
- * The words for one worker. NEVER the word "armed": see this file's header.
- *
- * @param {string} name
- * @param {SwitchState} state
- * @returns {string}
- */
-export function switchLine(name, state) {
+/** The words for one worker. NEVER the word "armed": see this file's header. */
+export function switchLine(name: string, state: SwitchState): string {
   switch (state.kind) {
     case "on": return `${name}: on, MAC on port ${state.port}`;
     case "on-elsewhere":
@@ -443,26 +369,18 @@ export function switchLine(name, state) {
   }
 }
 
-/**
- * @typedef {{ lines: string[], states: { name: string, state: SwitchState }[], table: string | null,
- *             ifIndexIsPort: boolean | null }} SwitchReport
- */
+export type SwitchReport = { lines: string[], states: { name: string, state: SwitchState }[], table: string | null, ifIndexIsPort: boolean | null };
 
 /**
  * What `fleet:status` prints. Every worker unread for the same reason is ONE line, not sixteen, and the
  * line says the capture-port reading is untouched -- a switch that does not answer is a fact about the
  * switch, never a reason to hide what the workers said.
- *
- * @param {{ name: string, state: SwitchState }[]} states
- * @param {Readings} readings
- * @returns {SwitchReport}
  */
-export function switchReport(states, readings) {
+export function switchReport(states: { name: string; state: SwitchState; }[], readings: Readings): SwitchReport {
   const table = readings.ok ? readings.table : null;
   const ifIndexIsPort = readings.ok ? readings.ifIndexIsPort : null;
-  const sameWord = (/** @type {SwitchState["kind"]} */ kind) => states.length > 0 && states.every(({ state }) => state.kind === kind);
-  /** @type {string[]} */
-  let lines;
+  const sameWord = (kind: SwitchState["kind"]) => states.length > 0 && states.every(({ state }) => state.kind === kind);
+  let lines: string[];
   if (!readings.ok) lines = [`switch: unread (${readings.reason}); the worker readings below are unaffected`];
   else if (sameWord("unmapped")) lines = ["switch: not read (no worker declares switch_port in the inventory)"];
   else lines = states.map(({ name, state }) => switchLine(name, state));
@@ -480,13 +398,9 @@ const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 /**
  * The switch's address and community: env first, then the file, else null. No default of either, because a
  * guessed community is a credential in a tracked file and a guessed address is a request to the wrong box.
- *
- * @param {{ env?: Record<string, string | undefined>, readFile?: (path: string) => string }} [deps]
- * @returns {{ host: string, community: string } | null}
  */
-export function readSwitchConfig({ env = process.env, readFile = (path) => readFileSync(path, "utf8") } = {}) {
-  /** @type {Record<string, string>} */
-  const fromFile = {};
+export function readSwitchConfig({ env = process.env, readFile = (path) => readFileSync(path, "utf8") }: { env?: Record<string, string | undefined>; readFile?: (path: string) => string; } = {}): { host: string; community: string; } | null {
+  const fromFile: Record<string, string> = {};
   try {
     for (const line of readFile(env.A11Y_SWITCH_FILE || DEFAULT_SWITCH_FILE).split(/\r?\n/)) {
       const pair = /^\s*(host|community)\s*=\s*(\S.*?)\s*$/.exec(line);
@@ -503,17 +417,12 @@ export function readSwitchConfig({ env = process.env, readFile = (path) => readF
 
 /**
  * Each worker's `switch_port:`, keyed by `ansible_host`, from the inventory text. A NARROW READER in the shape
- * of `macsByHost` (control-plane-fleet.mjs): a host with no `switch_port:` is absent, which is a state.
- *
- * @param {string} text
- * @returns {Map<string, number>}
+ * of `macsByHost` (control-plane-fleet.ts): a host with no `switch_port:` is absent, which is a state.
  */
-export function switchPortsByHost(text) {
-  /** @type {Map<string, number>} */
-  const ports = new Map();
+export function switchPortsByHost(text: string): Map<string, number> {
+  const ports: Map<string, number> = new Map();
   const groups = groupPerLine(text);
-  /** @type {{ host?: string, port?: number } | null} */
-  let current = null;
+  let current: { host?: string; port?: number; } | null = null;
   const flush = () => { if (current?.host && current.port) ports.set(current.host, current.port); };
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     if (line.trimStart().startsWith("#") || groups[index] !== WORKER_GROUP) continue;
@@ -530,16 +439,13 @@ export function switchPortsByHost(text) {
 /**
  * One datagram out, one back, with a retry: UDP loses packets and a status command should not report a
  * switch unread over one. Only the switch's own address is believed.
- *
- * @param {string} host
- * @returns {(packet: Buffer) => Promise<Buffer>}
  */
-export function udpSend(host) {
+export function udpSend(host: string): (packet: Buffer) => Promise<Buffer> {
   return (packet) => new Promise((resolveReply, reject) => {
     const socket = dgram.createSocket("udp4");
     let attempts = 0;
-    let timer = /** @type {NodeJS.Timeout | undefined} */ (undefined);
-    const finish = (/** @type {() => void} */ settle) => { clearTimeout(timer); socket.close(); settle(); };
+    let timer = (undefined as NodeJS.Timeout | undefined);
+    const finish = (settle: () => void) => { clearTimeout(timer); socket.close(); settle(); };
     const attempt = () => {
       attempts += 1;
       socket.send(packet, SNMP_PORT, host, (error) => { if (error) finish(() => reject(error)); });
@@ -552,17 +458,12 @@ export function udpSend(host) {
   });
 }
 
-/** @param {string} url @returns {string} */
-function hostOf(url) {
+function hostOf(url: string): string {
   try { return new URL(url).hostname; } catch { return url; }
 }
 
-/**
- * @param {{ name: string, url: string, mac?: string }[]} workers
- * @param {string[]} texts every inventory source, first to declare a value wins
- * @returns {{ name: string, mac: string | null, port: number | null }[]}
- */
-function workersWithPorts(workers, texts) {
+/** @param {string[]} texts every inventory source, first to declare a value wins */
+function workersWithPorts(workers: { name: string; url: string; mac?: string; }[], texts: string[]): { name: string; mac: string | null; port: number | null; }[] {
   return workers.map(({ name, url, mac }) => {
     const host = hostOf(url);
     const port = texts.map((text) => switchPortsByHost(text).get(host)).find(Boolean) ?? null;
@@ -574,15 +475,13 @@ function workersWithPorts(workers, texts) {
 /**
  * The control plane's own inventory texts, as every other reader takes them. The failure is worded here and
  * not passed through: an `execFileSync` error's message carries the whole ssh command line.
- *
- * @returns {string[]}
  */
-function readInventoryTexts() {
+function readInventoryTexts(): string[] {
   try {
     const sources = inventorySources(readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"));
     return parseInventoryReads(sshToControlPlane(inventoryReadScript(sources), { capture: true })).map(({ text }) => text);
   } catch (error) {
-    const stderr = String(/** @type {{ stderr?: unknown }} */ (error).stderr ?? "").trim().split("\n").pop();
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim().split("\n").pop();
     throw new Error(`the control plane's inventory could not be read${stderr ? ` (${stderr})` : ""}`, { cause: error });
   }
 }
@@ -592,17 +491,19 @@ function readInventoryTexts() {
  * an unreadable inventory are each an "unread" report, because the box that is missing is what this command
  * is for and it must not be taken down by the one that asks about it.
  *
- * @param {{ name: string, url: string, mac?: string }[]} workers
+ *
  * @param {{ config?: { host: string, community: string } | null,
  *           readInventories?: () => string[],
  *           send?: (packet: Buffer) => Promise<Buffer> }} [deps] injectable so no test opens a socket
- * @returns {Promise<SwitchReport>}
  */
-export async function readSwitchLive(workers, deps = {}) {
+export async function readSwitchLive(workers: { name: string; url: string; mac?: string; }[], deps: {
+    config?: { host: string; community: string; } | null;
+    readInventories?: () => string[];
+    send?: (packet: Buffer) => Promise<Buffer>;
+} = {}): Promise<SwitchReport> {
   const config = "config" in deps ? deps.config : readSwitchConfig();
   if (!config) {
-    /** @type {Readings} */
-    const unread = { ok: false, reason: "no switch configured: set A11Y_SWITCH_HOST and A11Y_SWITCH_COMMUNITY, or A11Y_SWITCH_FILE" };
+    const unread: Readings = { ok: false, reason: "no switch configured: set A11Y_SWITCH_HOST and A11Y_SWITCH_COMMUNITY, or A11Y_SWITCH_FILE" };
     return switchReport(switchStates({ workers: workersWithPorts(workers, []), readings: unread }), unread);
   }
   try {
@@ -610,8 +511,7 @@ export async function readSwitchLive(workers, deps = {}) {
     const readings = await readSwitch(snmpClient({ send: deps.send ?? udpSend(config.host), community: config.community }));
     return switchReport(switchStates({ workers: mapped, readings }), readings);
   } catch (error) {
-    /** @type {Readings} */
-    const unread = { ok: false, reason: `the switch could not be read: ${/** @type {Error} */ (error).message}` };
+    const unread: Readings = { ok: false, reason: `the switch could not be read: ${(error as Error).message}` };
     return switchReport(switchStates({ workers: workersWithPorts(workers, []), readings: unread }), unread);
   }
 }

@@ -168,7 +168,7 @@ test("the deploy path is found, so it cannot go unguarded unnoticed", () => {
   // with `a11ign-worker-deploy` (screenreader-fleet 0.4.0, #3803), so what is left to find is the bare-metal one, and a classifier
   // that silently stopped matching it would make this file pass having checked nothing.
   const found = deployClients().map((c) => c.file);
-  assert.ok(found.includes("packages/control/src/fleet-playbook.mjs"),
+  assert.ok(found.includes("packages/control/src/fleet-playbook.ts"),
     `the bare-metal path (the only live one) must be discovered; found ${JSON.stringify(found)}`);
 });
 

@@ -46,7 +46,7 @@
  * runs from a raw git checkout with none (ADR 0012; `control-has-no-dependencies.test.ts` enforces it).
  * `code-drift.mjs` is the part of that file with no opinion about what "expected" means — pure comparison
  * and message-building, importing nothing but `node:child_process` — and this file computes `expected`
- * itself, the same way `fleet-playbook.mjs` already does, through `layer-checkouts.mjs`, which says where
+ * itself, the same way `fleet-playbook.ts` already does, through `layer-checkouts.ts`, which says where
  * the layer lives and reaches the `code-version.mjs` that documents itself as safe: it imports nothing but
  * node stdlib and `worker-files.mjs`.
  */
@@ -55,18 +55,18 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWorkersServe } from "../../worker-fleet/src/code-drift.mjs";
-import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.mjs";
+import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.ts";
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
-import { readControlPlaneFleet } from "./control-plane-fleet.mjs";
-import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.mjs";
+import { readControlPlaneFleet } from "./control-plane-fleet.ts";
+import { wakeFailed, wakeFleet, wakeReportLine } from "./fleet-wake.ts";
 // #3289: `--qualify-sha` says the fleet part's verdict on a sha. The sequence lives beside the poster it calls.
-import { announcingDispatch, layerRefsFromLockfile, qualificationRequest, readRecordFrom, defaultRecordDir, runQualified, withLayerRefs } from "./qualification-run.mjs";
-import { postQualificationStatus } from "./post-qualification-status.mjs";
+import { announcingDispatch, layerRefsFromLockfile, qualificationRequest, readRecordFrom, defaultRecordDir, runQualified, withLayerRefs } from "./qualification-run.ts";
+import { postQualificationStatus } from "./post-qualification-status.ts";
 // #2803: the SAME two-read-plus-`/health` rule `doctor` and `worker:code` use (#2790), imported rather than
 // restated -- a second copy of "when is a neighbour-table address to be trusted" is the one that drifts.
-import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
+import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
@@ -75,13 +75,9 @@ const ANSIBLE_CONFIG = "packages/control/ansible/ansible.cfg";
 /**
  * Every `-e key=value` extra var on the command line — the only form every example in this repo's docs
  * uses (`-e job=train`, two argv entries), and the only form `lab-job.yml`'s own header shows.
- *
- * @param {string[]} argv
- * @returns {Record<string, string>}
  */
-export function extraVars(argv) {
-  /** @type {Record<string, string>} */
-  const vars = {};
+export function extraVars(argv: string[]): Record<string, string> {
+  const vars: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] !== "-e" && argv[i] !== "--extra-vars") continue;
     const pair = argv[i + 1];
@@ -97,9 +93,8 @@ export function extraVars(argv) {
  * where a job ends. Refuses loudly when the catalogue's shape changed, because a blind scan reads as clean.
  *
  * @param {string} catalogueText the raw text of `lab-job.yml`
- * @returns {{ name: string, block: string }[]}
  */
-function catalogueJobs(catalogueText) {
+function catalogueJobs(catalogueText: string): { name: string; block: string; }[] {
   const from = catalogueText.indexOf("\n    lab_jobs:");
   const to = catalogueText.indexOf("\n  tasks:", from);
   if (from < 0 || to < 0) {
@@ -131,9 +126,8 @@ function catalogueJobs(catalogueText) {
  * narrower tool than a parser, and mutation-checked rather than trusted on the strength of reading it.
  *
  * @param {string} catalogueText the raw text of `lab-job.yml`
- * @returns {string[]}
  */
-export function captureBearingJobs(catalogueText) {
+export function captureBearingJobs(catalogueText: string): string[] {
   const jobs = catalogueJobs(catalogueText);
   return jobs
     // DERIVES ITS POOL FROM THE FLEET is the property; a VERBATIM passthrough was the string. This used to
@@ -161,21 +155,15 @@ export function captureBearingJobs(catalogueText) {
 /**
  * The job named on this command line, or `undefined` if none was (a malformed invocation `lab-job.yml`'s
  * own refusal already handles, unchanged by anything here).
- *
- * @param {string[]} argv
- * @returns {string | undefined}
  */
-const jobNamed = (argv) => extraVars(argv).job;
+const jobNamed = (argv: string[]): string | undefined => extraVars(argv).job;
 
 /**
  * `-e describe=1` ends the play before anything runs — `lab-job.yml`'s own comment calls it "describing is
  * not running". Checking the fleet first would ask ten boxes over HTTP to answer a question that dispatches
  * nothing, which is not wrong, only pointless.
- *
- * @param {string[]} argv
- * @returns {boolean}
  */
-const isDescribeOnly = (argv) => extraVars(argv).describe !== undefined;
+const isDescribeOnly = (argv: string[]): boolean => extraVars(argv).describe !== undefined;
 
 /**
  * The `ansible-playbook` argv `dispatchToAnsible` runs, pulled out so a test can read it without spawning
@@ -190,38 +178,30 @@ const isDescribeOnly = (argv) => extraVars(argv).describe !== undefined;
  * matched" on the control plane's own persistent checkout even though `/etc/a11ign/inventory.yml` was
  * present and correct. `ANSIBLE_CONFIG` (read where this is spawned) is what makes that fallback list
  * apply at all.
- * @param {string[]} forwarded
- * @returns {string[]}
  */
-export function ansiblePlaybookArgs(forwarded) {
+export function ansiblePlaybookArgs(forwarded: string[]): string[] {
   return ["packages/control/ansible/lab-job.yml", ...forwarded];
 }
 
 /**
- * The SAME command a human would type — `ANSIBLE_CONFIG` matters, exactly as `lab-pipeline.mjs` states.
+ * The SAME command a human would type — `ANSIBLE_CONFIG` matters, exactly as `lab-pipeline.ts` states.
  * RETURNS the status rather than exiting (#3289): a qualified run says what the gate found AFTER the
  * dispatch, and the entry point below is what exits with it.
- * @param {string[]} forwarded
- * @returns {number}
  */
-function dispatchToAnsible(forwarded) {
+function dispatchToAnsible(forwarded: string[]): number {
   const result = spawnSync("ansible-playbook", ansiblePlaybookArgs(forwarded),
     { cwd: REPO, stdio: "inherit", env: { ...process.env, ANSIBLE_CONFIG } });
   return result.status ?? 1;
 }
 
-/** @typedef {{ name: string, url: string, mac?: string }} Worker */
+export type Worker = { name: string, url: string, mac?: string };
 
 /**
  * The fleet a job may draw on, as `{ name, url }` -- the control plane's own resolved inventory, or an
  * explicit `workers` list (whose names are the addresses, since a caller that gave addresses gave no names).
  * A refusal is a value, so `run` can exit on it and a test never touches `process.exit`.
- *
- * @param {string} job
- * @param {{ workers?: string[], readFleet: () => { workers: Worker[], refusal: string | null } }} input
- * @returns {{ fleet: Worker[], refusal: null } | { fleet: null, refusal: string }}
  */
-export function fleetFor(job, { workers, readFleet }) {
+export function fleetFor(job: string, { workers, readFleet }: { workers?: string[]; readFleet: () => { workers: Worker[]; refusal: string | null; }; }): { fleet: Worker[]; refusal: null; } | { fleet: null; refusal: string; } {
   if (workers) return { fleet: workers.map((url) => ({ name: url, url })), refusal: null };
   const fleet = readFleet();
   if (fleet.refusal) {
@@ -234,11 +214,8 @@ export function fleetFor(job, { workers, readFleet }) {
 /**
  * #1356: THE POOL a capture-bearing job checks against, pure -- given an explicit `workers` list or the
  * control plane's own resolved fleet. `run` below is this plus the real exit.
- * @param {string} job
- * @param {{ workers?: string[], readFleet: () => { workers: Worker[], refusal: string | null } }} input
- * @returns {{ pool: string[], refusal: null } | { pool: null, refusal: string }}
  */
-export function poolFor(job, input) {
+export function poolFor(job: string, input: { workers?: string[]; readFleet: () => { workers: Worker[]; refusal: string | null; }; }): { pool: string[]; refusal: null; } | { pool: null; refusal: string; } {
   const resolved = fleetFor(job, input);
   return resolved.fleet
     ? { pool: resolved.fleet.map((w) => w.url), refusal: null }
@@ -251,12 +228,8 @@ export function poolFor(job, input) {
  * and wider on purpose: the diagnostics that `captureBearingJobs` excludes from the STALENESS check
  * (`stability`, `gate-stability`, `capture-check`, `evidence-check`) still put captures on workers, so they
  * need those workers awake even though a stale one must not stop them.
- *
- * @param {string} catalogueText
- * @param {string} job
- * @returns {{ fleet: boolean, selectable: boolean, named: boolean } | null}
  */
-export function workerDemand(catalogueText, job) {
+export function workerDemand(catalogueText: string, job: string): { fleet: boolean; selectable: boolean; named: boolean; } | null {
   // COMMENTS ARE NOT DEMAND. `capture-check`'s own header says it takes one worker "rather than reading
   // `lab_fleet_workers`", and scanning that sentence made a run with no `worker=` (which the playbook
   // refuses) wake the whole fleet. Only the YAML the playbook actually renders is read.
@@ -280,14 +253,12 @@ export function workerDemand(catalogueText, job) {
  * part of what it states (`#21`) may not proceed with a smaller one, which `run` reads as "all of them or
  * refuse".
  *
- * @param {{ fleet: boolean, selectable: boolean, named: boolean }} demand
+ *
  * @param {Record<string, string>} vars the `-e` extra vars
- * @param {Worker[]} fleet
- * @returns {{ needed: Worker[], selected: boolean, refusal: null } | { refusal: string }}
  */
-export function neededWorkers(demand, vars, fleet) {
+export function neededWorkers(demand: { fleet: boolean; selectable: boolean; named: boolean; }, vars: Record<string, string>, fleet: Worker[]): { needed: Worker[]; selected: boolean; refusal: null; } | { refusal: string; } {
   const names = fleet.map((w) => w.name);
-  const pick = (/** @type {string[]} */ wanted) => {
+  const pick = (wanted: string[]) => {
     const missing = wanted.filter((name) => !names.includes(name));
     if (missing.length || !wanted.length) {
       return { refusal: `REFUSING: ${wanted.length ? `${missing.join(", ")} not in the inventory (${names.join(", ")})` : "that names no worker"}` };
@@ -314,11 +285,8 @@ export function neededWorkers(demand, vars, fleet) {
  * `readControlPlaneFleet` already makes (#2655): a worker the inventory gives no `mac` is `no-mac` when it
  * is silent, and needs none when it is up. `wakeFleet`'s own options (`send`, `request`, `sleep`, `now`)
  * pass through `wakeOptions`.
- *
- * @param {Worker[]} needed
- * @param {{ wake?: typeof wakeFleet, wakeOptions?: import("./fleet-wake.mjs").WakeOptions }} [options]
  */
-export async function wakeNeeded(needed, { wake = wakeFleet, wakeOptions = {} } = {}) {
+export async function wakeNeeded(needed: Worker[], { wake = wakeFleet, wakeOptions = {} }: { wake?: typeof wakeFleet; wakeOptions?: import("./fleet-wake.ts").WakeOptions; } = {}) {
   const targets = needed.map(({ name, url, mac }) => ({ name, host: new URL(url).hostname, mac: mac ?? null }));
   return wake(targets, { log: (line) => process.stdout.write(`${line}\n`), ...wakeOptions });
 }
@@ -335,12 +303,8 @@ export async function wakeNeeded(needed, { wake = wakeFleet, wakeOptions = {} } 
  *     NOTHING is usable, which is `assertWorkersServe`'s own line ("none answered is not a clean fleet").
  *
  * PURE: the refusal is returned, and `run` exits on it.
- *
- * @param {{ name: string, host: string, state: string, detail?: string }[]} results
- * @param {boolean} selected
- * @returns {string | null}
  */
-export function wakeRefusal(results, selected) {
+export function wakeRefusal(results: { name: string; host: string; state: string; detail?: string; }[], selected: boolean): string | null {
   const failed = results.filter(wakeFailed);
   if (!failed.length) return null;
   if (!selected && failed.length < results.length) return null;
@@ -359,13 +323,9 @@ export function wakeRefusal(results, selected) {
  */
 const USE_TIME_VARS = ["resolved_addresses", "left_out_workers"];
 
-/**
- * @param {{ moved: Record<string, string>, leftOut: string[] }} placement
- * @returns {string[]} `-e` arguments, none when nothing moved and nothing was left out
- */
-export function useTimeArgs({ moved, leftOut }) {
-  /** @type {Record<string, unknown>} */
-  const vars = {};
+/** @returns {string[]} `-e` arguments, none when nothing moved and nothing was left out */
+export function useTimeArgs({ moved, leftOut }: { moved: Record<string, string>; leftOut: string[]; }): string[] {
+  const vars: Record<string, unknown> = {};
   if (Object.keys(moved).length) vars.resolved_addresses = moved;
   if (leftOut.length) vars.left_out_workers = leftOut;
   return Object.keys(vars).length ? ["-e", JSON.stringify(vars)] : [];
@@ -379,15 +339,10 @@ export function useTimeArgs({ moved, leftOut }) {
  *
  * A worker not found is NOT dropped here: it may simply be powered off, which is what the wake step is
  * for, and a box that comes up comes up at its pin. What is left out is decided AFTER the wake.
- *
- * @param {Worker[]} needed
- * @param {typeof resolvePoolAtUseTime} resolvePool
- * @returns {Promise<{ needed: Worker[], moved: Record<string, string>, why: Map<string, string> }>}
  */
-async function placeAtUseTime(needed, resolvePool) {
+async function placeAtUseTime(needed: Worker[], resolvePool: typeof resolvePoolAtUseTime): Promise<{ needed: Worker[]; moved: Record<string, string>; why: Map<string, string>; }> {
   const resolved = await resolvePool(needed);
-  /** @type {Record<string, string>} */
-  const moved = {};
+  const moved: Record<string, string> = {};
   for (const { name, from, to } of resolved.moved) {
     moved[name] = new URL(to).hostname;
     process.stderr.write(`lab-job: MOVED ${name}: pinned ${from}, answers by MAC at ${to} -- using that address for `
@@ -400,21 +355,18 @@ async function placeAtUseTime(needed, resolvePool) {
   };
 }
 
-/** @param {string} url @param {string} address the same URL, aimed at another host */
-const withAddress = (url, address) => url.replace(new URL(url).hostname, address);
+/** @param {string} address the same URL, aimed at another host */
+const withAddress = (url: string, address: string) => url.replace(new URL(url).hostname, address);
 
 /**
  * Under pnpm 10, `pnpm run lab:job -- -e job=...` (the form `packages/control/CLAUDE.md` documents) runs
- * `node lab-job.mjs -- -e job=...`: the `--` is KEPT. Forwarded, `ansible-playbook` reads it as the end of
+ * `node lab-job.ts -- -e job=...`: the `--` is KEPT. Forwarded, `ansible-playbook` reads it as the end of
  * options and takes `-e` for a playbook name, in ITS words (`the playbook: -e could not be found`), which
  * reads as a broken lab (#3919). Only a LEADING `--` is the package manager's; one later in the argv is
  * the caller's and is left alone. Dropped here, before `qualificationRequest` reads the argv, so no
  * status is posted for a run that cannot begin.
- *
- * @param {string[]} argv
- * @returns {string[]}
  */
-export function withoutLeadingSeparator(argv) {
+export function withoutLeadingSeparator(argv: string[]): string[] {
   return argv[0] === "--" ? argv.slice(1) : argv;
 }
 
@@ -422,11 +374,10 @@ export function withoutLeadingSeparator(argv) {
  * `lab:job`, with `--qualify-sha=<sha>` (#3289): the same run, announced as `pending` on the sha, its verdict
  * posted when it ends, and ONE re-run if the first said `failure`. Everything else is `runOnce`, unchanged.
  *
- * @param {string[]} rawArgv
+ *
  * @param {Parameters<typeof runOnce>[1]} [deps] as `runOnce`
- * @returns {Promise<number | void>}
  */
-export async function run(rawArgv, deps = {}) {
+export async function run(rawArgv: string[], deps: Parameters<typeof runOnce>[1] = {}): Promise<number | void> {
   const argv = withoutLeadingSeparator(rawArgv);
   const vars = extraVars(argv);
   const request = qualificationRequest(argv, {
@@ -466,26 +417,28 @@ export async function run(rawArgv, deps = {}) {
  * directory hash and (the layer lives in its own repository, so a tree without the checkout REFUSES) a host that has it, and a job like `train` or `rules-gate` that will never reach `checkFleet`
  * should not pay any of them. Resolved lazily, inside the branch that actually needs them.
  *
- * @param {string[]} argv
- * @param {{ catalogueText?: string, workers?: string[], expected?: string, sourceDir?: string,
- *           checkFleet?: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
- *           dispatch?: (forwarded: string[]) => number | void,
- *           readFleet?: () => { workers: Worker[], refusal: string | null },
- *           wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
- *           resolvePool?: typeof resolvePoolAtUseTime,
- *           qualify?: import("./qualification-run.mjs").Poster }} [deps]
+ *
+ *
  *   `wake`, `resolvePool` and `qualify` have NO default: only the command-line entry passes the real ones
  *   (#2655, #2803, #3289), so a test that leaves one out cannot reach a socket or post a status.
  * @returns {Promise<number | void>} the dispatch's status, which the entry point exits with
  */
-async function runOnce(argv, {
+async function runOnce(argv: string[], {
   catalogueText, workers, expected, sourceDir,
   checkFleet = assertWorkersServe,
   dispatch = dispatchToAnsible,
   readFleet = readControlPlaneFleet,
   wake,
   resolvePool,
-} = {}) {
+}: {
+        catalogueText?: string; workers?: string[]; expected?: string; sourceDir?: string;
+        checkFleet?: (expected: string, workers: string[], options: { sourceDir: string; when?: string; allow?: boolean; bareMetalUrls?: string[]; }) => Promise<void>;
+        dispatch?: (forwarded: string[]) => number | void;
+        readFleet?: () => { workers: Worker[]; refusal: string | null; };
+        wake?: (needed: Worker[]) => Promise<{ name: string; host: string; state: string; detail?: string; }[]>;
+        resolvePool?: typeof resolvePoolAtUseTime;
+        qualify?: import("./qualification-run.ts").Poster;
+    } = {}): Promise<number | void> {
   // Stripped before forwarding: `ansible-playbook` does not recognise this flag and would refuse the
   // whole command line with it still attached, and it is this file's own concern, not the playbook's.
   const allowStale = argv.includes("--allow-stale-workers");
@@ -518,16 +471,12 @@ async function runOnce(argv, {
   return dispatch(forwarded);
 }
 
-/**
- * Resolve, wake, then check staleness -- in that order, each for a reason the comments below give.
- *
- * @param {{ needs: { needed: Worker[], selected: boolean }, catalogue: string, job: string }} run
- * @param {{ expected?: string, sourceDir?: string, checkFleet: (expected: string, workers: string[], options: { sourceDir: string, when?: string, allow?: boolean, bareMetalUrls?: string[] }) => Promise<void>,
- *           allowStale: boolean, wake?: (needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>,
- *           resolvePool?: typeof resolvePoolAtUseTime }} deps
- * @returns {Promise<{ moved: Record<string, string>, leftOut: string[] }>}
- */
-async function placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool }) {
+/** Resolve, wake, then check staleness -- in that order, each for a reason the comments below give. */
+async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: Worker[]; selected: boolean; }; catalogue: string; job: string; }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool }: {
+        expected?: string; sourceDir?: string; checkFleet: (expected: string, workers: string[], options: { sourceDir: string; when?: string; allow?: boolean; bareMetalUrls?: string[]; }) => Promise<void>;
+        allowStale: boolean; wake?: (needed: Worker[]) => Promise<{ name: string; host: string; state: string; detail?: string; }[]>;
+        resolvePool?: typeof resolvePoolAtUseTime;
+    }): Promise<{ moved: Record<string, string>; leftOut: string[]; }> {
   // RESOLVE FIRST (#2803): the wake and the staleness check below both aim at an address, and a worker that
   // moved answers nothing at its pin -- which the wake would wait five minutes on and then call missing.
   const placed = resolvePool && needs.needed.length
@@ -548,16 +497,8 @@ async function placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDi
   return { moved: placed.moved, leftOut };
 }
 
-/**
- * The fleet, then the part of it this run needs -- each refusal in its own words.
- *
- * @param {string} job
- * @param {{ fleet: boolean, selectable: boolean, named: boolean }} demand
- * @param {string[]} argv
- * @param {{ workers?: string[], readFleet: () => { workers: Worker[], refusal: string | null } }} sources
- * @returns {{ needed: Worker[], selected: boolean, refusal: null } | { refusal: string }}
- */
-function neededFor(job, demand, argv, sources) {
+/** The fleet, then the part of it this run needs -- each refusal in its own words. */
+function neededFor(job: string, demand: { fleet: boolean; selectable: boolean; named: boolean; }, argv: string[], sources: { workers?: string[]; readFleet: () => { workers: Worker[]; refusal: string | null; }; }): { needed: Worker[]; selected: boolean; refusal: null; } | { refusal: string; } {
   const resolved = fleetFor(job, sources);
   return resolved.fleet ? neededWorkers(demand, extraVars(argv), resolved.fleet) : { refusal: resolved.refusal };
 }
@@ -567,12 +508,11 @@ function neededFor(job, demand, argv, sources) {
  * (#2803): each is printed as MISSING with the reason the resolution gave, and the playbook leaves it out
  * of the pool it builds. A job that named its pool refuses instead (`wakeRefusal`), unchanged.
  *
- * @param {{ needed: Worker[], selected: boolean }} needs
- * @param {(needed: Worker[]) => Promise<{ name: string, host: string, state: string, detail?: string }[]>} wake
+ *
+ *
  * @param {Map<string, string>} why the resolution's reason per worker it could not find
- * @returns {Promise<string[]>}
  */
-async function wakeOrRefuse({ needed, selected }, wake, why) {
+async function wakeOrRefuse({ needed, selected }: { needed: Worker[]; selected: boolean; }, wake: (needed: Worker[]) => Promise<{ name: string; host: string; state: string; detail?: string; }[]>, why: Map<string, string>): Promise<string[]> {
   const results = await wake(needed);
   process.stdout.write(`${results.map((r) => wakeReportLine(r)).join("\n")}\n`);
   const refusal = wakeRefusal(results, selected);
@@ -595,7 +535,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const qualify = {
     post: postQualificationStatus,
     layerRefs: layerRefsFromLockfile,
-    readRecord: (/** @type {{ job: string, row: number, since: number }} */ query) =>
+    readRecord: (query: { job: string; row: number; since: number; }) =>
       readRecordFrom(recordDir, query, (text) => process.stderr.write(text)),
   };
   process.exit(await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify }) ?? 0);

@@ -2,7 +2,7 @@
  * #3833 (follow-up of #3505): a lab host that PULLS and does not INSTALL holds no lab code, and a lab job names the missing laid copy
  * before it plays a lab script.
  *
- * What is EXECUTED: `labLaidCopyRefusal` against fixture trees, and the real command (`node lab-laid-copy.mjs`, which the play runs on
+ * What is EXECUTED: `labLaidCopyRefusal` against fixture trees, and the real command (`node lab-laid-copy.ts`, which the play runs on
  * the lab) copied into a fixture checkout so its exit status and words are read, not assumed. What is read as text: that
  * `tasks/run-job.yml` asks the question before it starts a unit, which a CI job can only read. What none of it shows is a real lab host
  * refusing: that is `orchestrator`'s fleet step, not this row's.
@@ -17,12 +17,13 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { labLaidCopyRefusal } from "./lab-laid-copy.mjs";
+import { labLaidCopyRefusal } from "./lab-laid-copy.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const MODULE = join(HERE, "lab-laid-copy.mjs");
+const MODULE = join(HERE, "lab-laid-copy.ts");
 const REAL_MANIFEST = JSON.parse(readFileSync(join(HERE, "../layers.json"), "utf8"));
 const RUN_JOB = readFileSync(join(HERE, "../ansible/tasks/run-job.yml"), "utf8");
 const { path: LAB_PATH, tag: PINNED, lays: LAYS } = REAL_MANIFEST.pinned.lab as { path: string, tag: string, lays: string[] };
@@ -107,11 +108,16 @@ test("a manifest that declares no pinned lab is refused, never read as 'nothing 
 function commandFileIn(root: string) {
   const control = join(root, "packages/control");
   mkdirSync(join(control, "src"), { recursive: true });
-  copyFileSync(MODULE, join(control, "src/lab-laid-copy.mjs"));
+  copyFileSync(MODULE, join(control, "src/lab-laid-copy.ts"));
   writeFileSync(join(control, "layers.json"), JSON.stringify(REAL_MANIFEST));
-  return join(control, "src/lab-laid-copy.mjs");
+  // The laid package carries its `package.json`, and a loader reads `"type": "module"` from it: without one a `.ts` file is
+  // CommonJS and this module's `import.meta` is a syntax error, which the .mjs spelling never had to say.
+  writeFileSync(join(control, "package.json"), JSON.stringify({ type: "module" }));
+  return join(control, "src/lab-laid-copy.ts");
 }
-const play = (entry: string) => spawnSync(process.execPath, [entry], { encoding: "utf8" });
+// The child runs TypeScript, which plain node does not; `tsx` is the core's, resolved from where this test sits (the lay under the core).
+const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
+const play = (entry: string) => spawnSync(process.execPath, ["--import", TSX, entry], { encoding: "utf8" });
 const commandIn = (root: string) => play(commandFileIn(root));
 
 test("the command the play runs exits with the refusal status and names the missing packages/lab on a pulled-not-installed fixture, and 0 on a laid one", () => {
@@ -143,5 +149,5 @@ test("tasks/run-job.yml asks the question before the unit starts, and the argv i
   assert.ok(asked < code.indexOf('- name: "Start it:'), "the question is asked after the unit starts");
   assert.ok(asked > code.indexOf("pnpm, install, --frozen-lockfile"), "the question is asked before the install lays the copy, so it would refuse a host the install is about to fix");
   const group = readFileSync(join(dirname(HERE), "ansible/group_vars/a11y_lab.yml"), "utf8");
-  assert.match(group, /^lab_laid_copy_check: \["\/usr\/bin\/node", "packages\/control\/src\/lab-laid-copy\.mjs"\]$/m);
+  assert.match(group, /^lab_laid_copy_check: \["\{\{ lab_tsx \}\}", "packages\/control\/src\/lab-laid-copy\.ts"\]$/m);
 });

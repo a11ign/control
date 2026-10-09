@@ -21,10 +21,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.mjs";
-import { resolvePoolAtUseTime } from "./with-control-plane-fleet.mjs";
-import { postQualificationStatus } from "./post-qualification-status.mjs";
-import { outcomeOf, qualificationRequest, readRecordFrom, withLayerRefs } from "./qualification-run.mjs";
+import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
+import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
+import { postQualificationStatus } from "./post-qualification-status.ts";
+import { outcomeOf, qualificationRequest, readRecordFrom, withLayerRefs } from "./qualification-run.ts";
 
 /** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
 const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
@@ -868,7 +868,7 @@ test("#2803: useTimeArgs renders nothing for an undisturbed fleet, and JSON for 
 });
 
 test("#2803: the real entry hands run() the real resolver, and run() has no default for it (a test cannot reach a socket)", () => {
-  const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
   assert.match(source, /resolvePool: resolvePoolAtUseTime, qualify \}\)/);
   assert.doesNotMatch(source, /resolvePool = /, "a default would let a test that leaves it out reach the real neighbour table");
 });
@@ -1033,7 +1033,7 @@ test("#3920: a pin with no tag refuses with exit 3 BEFORE `pending` is posted or
 });
 
 test("#3920: only the real entry passes the lockfile reader, as it alone passes the poster", () => {
-  const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
   assert.match(source, /layerRefs: layerRefsFromLockfile,/);
 });
 
@@ -1182,7 +1182,7 @@ test("#3988: a launch with no -e worker= posts nothing and dispatches nothing; t
 
 test("#3289: `--qualify-sha` with no poster handed to run() throws; only the real entry passes one", async () => {
   await assert.rejects(run(QARGV, { catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }), dispatch: () => 0 }), /no poster/);
-  const source = readFileSync(fileURLToPath(new URL("./lab-job.mjs", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
   assert.match(source, /post: postQualificationStatus,/);
 });
 
@@ -1215,7 +1215,7 @@ test("#3289: readRecordFrom reads THIS run's record: right job, right row, writt
 
 test("#3289: there is no token file and no second credential: the poster never names one, and passes `gh` the environment untouched", () => {
   // The host's AMBIENT `gh`: it must not pick an account (`GH_CONFIG_DIR`, `GH_TOKEN`, `gh-api-budget.md`) or read a token file.
-  const poster = readFileSync(fileURLToPath(new URL("./post-qualification-status.mjs", import.meta.url)), "utf8");
+  const poster = readFileSync(fileURLToPath(new URL("./post-qualification-status.ts", import.meta.url)), "utf8");
   assert.doesNotMatch(poster, /GH_CONFIG_DIR\s*[:=]|GH_TOKEN\s*[:=]|process\.env\.GH_|qualification-status-token/);
   assert.doesNotMatch(poster, /spawnSync\("gh", args, \{[^}]*\benv\b/, "the default runner must pass the environment through untouched");
   // POSITIVE CONTROL: the patterns above are looking at the right file -- it does spawn `gh`.
