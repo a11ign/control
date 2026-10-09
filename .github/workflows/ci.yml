@@ -58,10 +58,19 @@ jobs:
         with: { path: control }
       - uses: actions/checkout@v7
         with: { repository: a11ign/a11ign, ref: "${{ env.CORE_REF }}", path: core }
+      # pnpm/action-setup reads the version out of `packageManager`, and comes before setup-node because `cache: pnpm` shells out to it.
+      - uses: pnpm/action-setup@v6
+        with: { package_json_file: core/package.json }
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: core/pnpm-lock.yaml }
+      - run: pnpm install --frozen-lockfile
+        working-directory: core
       # The package is the root here and `packages/control` there. `jq` keeps what the core's workspace resolves by (`name`, `exports`) and what the dependency-free test reads (`dependencies`), and drops
       # what only this repository's own tooling uses. `tsconfig.control.json` is written rather than tracked: this repository holds ONE tsconfig, and this one means nothing outside the lay.
       # The core's tests list files with `git ls-files` (`walkTree`), and the core at `CORE_REF` still TRACKS `packages/control`, so a file this repository renames (a11ign/a11ign#4268) would be listed under its old
       # name and read from a disk that no longer has it. `git add -Af` makes the index say what the lay put on disk; nothing is committed. `-f` because a core that lays this package (a11ign/a11ign#3506) gitignores `/packages/control`, and a plain `add` refuses an ignored path (exit 1, run 37986489972).
+      # AFTER the install, not before (a11ign/a11ign#3506): the core's `prepare` lays `a11ign/control` itself, at the tag its `layers.json` declares, so a lay made first is overwritten by that tag's source
+      # (run 37987050034 typechecked the OLD `.mjs` imports). The same `prepare` lays the fleet layer, which is where `packages/worker-fleet` comes from.
       - name: Lay this repository's package over the core's own
         run: |
           rm -rf core/packages/control
@@ -70,20 +79,13 @@ jobs:
           jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
           printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"], "exclude": ["packages/guards/src/fixtures"] }\n' > core/tsconfig.control.json
           git -C core add -Af packages/control
-      # pnpm/action-setup reads the version out of `packageManager`, and comes before setup-node because `cache: pnpm` shells out to it.
-      - uses: pnpm/action-setup@v6
-        with: { package_json_file: core/package.json }
-      - uses: actions/setup-node@v7
-        with: { node-version: 22, cache: pnpm, cache-dependency-path: core/pnpm-lock.yaml }
-      - run: pnpm install --frozen-lockfile
-        working-directory: core
       # Lint and typecheck run before the tests so a style or type failure reads red without waiting for the suite.
       # `--no-ignore`: a core that lays this package lints it nowhere (`packages/control/**` is in its `ignores`, a11ign/a11ign#3506), because the package is linted HERE. Without the flag eslint exits 2 on "all files ignored".
       - run: pnpm exec eslint --no-ignore packages/control
         working-directory: core
       - run: pnpm exec tsc --noEmit -p tsconfig.control.json
         working-directory: core
-      - run: pnpm exec rstest run --config scripts/rstest/rstest.config.mjs --include "packages/control/**/*.test.ts"
+      - run: pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include "packages/control/**/*.test.ts"
         working-directory: core
       # This repository's own checks: the workflows, the arming filter, the composition above, the manifest. The typecheck (`tsc --noEmit`, `package.json`'s `typecheck`) is a step of the `gate` job
       # the ruleset requires, so a type error here blocks the merge; it runs before the tests so it reads red without waiting for them. The tests are rstest on `@a11ign/toolchain`'s config
