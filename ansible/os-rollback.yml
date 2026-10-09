@@ -18,7 +18,7 @@
 #
 # ## It refuses more than it does
 #
-# - EXACTLY ONE host. `fleet-playbook.mjs` requires `--limit=<one worker>`, and the play asserts it again,
+# - EXACTLY ONE host. `fleet-playbook.ts` requires `--limit=<one worker>`, and the play asserts it again,
 #   so a fleet-wide OS change cannot be expressed.
 # - Anything but a box AHEAD of the fleet. The target must be on the edition every other answering worker
 #   agrees on, with a strictly greater build number, so a wrong `--limit` cannot roll back a healthy box,

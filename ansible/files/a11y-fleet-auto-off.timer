@@ -8,7 +8,7 @@ Description=a11y: poll the fleet for idle workers every 10s
 
 [Timer]
 # 10 s, strictly under the shortest measured capture (12 s, `sleep.yml`'s own header) -- `POLL_INTERVAL_MS`
-# in `fleet-auto-off.mjs`, pinned by its own test. A gap at or above 12 s could let a whole capture start
+# in `fleet-auto-off.ts`, pinned by its own test. A gap at or above 12 s could let a whole capture start
 # and finish between two polls and never be sampled `busy` at all; this cadence guarantees at least one
 # poll lands inside any real capture.
 OnBootSec=10s

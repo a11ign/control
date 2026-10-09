@@ -12,24 +12,24 @@ nothing is imported by package name — the credential that can reconfigure twel
 violated on both machines it described before anyone checked. The `devDependencies` are this repository's own tooling and the control plane never installs them.
 
 ```
-src/                   fleet-playbook.mjs   drives Ansible against the fleet: provision, deploy, wake/sleep
-                       lab-pipeline.mjs     sequences ordered stages (deploy -> capture -> gates) as one unit
-                       lab-job.mjs          dispatches one named long-running job on the lab, over Ansible
-                       fleet-status.mjs     what every worker is doing right now
-                       fleet-discover.mjs   scans the subnet against inventory.yml, reports drift
-                       fleet-wake.mjs       power the fleet on (Wake-on-LAN) or check it answered
+src/                   fleet-playbook.ts   drives Ansible against the fleet: provision, deploy, wake/sleep
+                       lab-pipeline.ts     sequences ordered stages (deploy -> capture -> gates) as one unit
+                       lab-job.ts          dispatches one named long-running job on the lab, over Ansible
+                       fleet-status.ts     what every worker is doing right now
+                       fleet-discover.ts   scans the subnet against inventory.yml, reports drift
+                       fleet-wake.ts       power the fleet on (Wake-on-LAN) or check it answered
 ansible/               the playbooks themselves, and ansible/README.md is the map:
                        why SSH and not WinRM, why the fleet is defined once in inventory.yml
-layers.json            where each layer's code lives (read through src/layer-checkouts.mjs)
+layers.json            where each layer's code lives (read through src/layer-checkouts.ts)
 scripts/               this repository's own tests: the workflows, the arming filter, the manifest
 ```
 
 Exports three entry points other packages import: `./fleet-playbook`, `./lab-pipeline` and `./fleet-wake` (#2682: `packages/lab`'s by-hand entries wake exactly the workers they name, the same
-credential-free call `fleet-wake.mjs`'s own CLI makes), and `./layer-checkouts`.
+credential-free call `fleet-wake.ts`'s own CLI makes), and `./layer-checkouts`.
 
 ## Reaching the control plane itself
 
-`fleet-playbook.mjs` and `lab-pipeline.mjs` both SSH into the control-plane machine to run Ansible there —
+`fleet-playbook.ts` and `lab-pipeline.ts` both SSH into the control-plane machine to run Ansible there —
 that machine holds the fleet key, so the command has to run on it rather than merely be issued from
 wherever you are. Two variables name that connection, and **both are REQUIRED — neither has a default**:
 

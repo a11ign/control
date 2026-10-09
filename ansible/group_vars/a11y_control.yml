@@ -10,7 +10,7 @@
 #     danielbeck@<the control plane>: Permission denied (publickey,password).
 #
 # **That message names a credential problem and not a missing variable**, which is why the absence
-# survived: it reads as "your key is wrong", and an operator checks their key. `fleet-playbook.mjs:559-569`
+# survived: it reads as "your key is wrong", and an operator checks their key. `fleet-playbook.ts:559-569`
 # already documents the identical failure at a different call site, in as many words -- *"Ansible defaults
 # an unqualified `-i '<host>,'` to the LOCAL username, so it tried `danielbeck@` and got Permission denied
 # (publickey) -- a credentials failure that reads like a missing key rather than a wrong user."* The remedy

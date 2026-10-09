@@ -13,7 +13,7 @@
 #
 # The transfer's history purge force-pushes the repository, so every commit gets a new SHA and the old
 # history is gone from origin. Every routine path that moves a fleet checkout refuses exactly that:
-# `deploy.yml` fast-forwards each guest with `merge --ff-only`, and `fleet-playbook.mjs`'s control-plane
+# `deploy.yml` fast-forwards each guest with `merge --ff-only`, and `fleet-playbook.ts`'s control-plane
 # step does the same. That refusal is RIGHT for an ordinary deploy, where a guest that cannot fast-forward
 # has diverged and must fail loudly, and this playbook does not change it. It is wrong exactly once, on the
 # day the history itself is replaced. So this is a separate, one-time operation, not a flag on the deploy.

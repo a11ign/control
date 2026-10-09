@@ -1467,7 +1467,7 @@
           Refusing to run: a worker declares a11y_capture as something other than `true` or `false`.
           A value read as "not declared" would leave a host in the capture pool that meant to be out of it.
 
-    # USE-TIME ADDRESSES (#2803). `lab-job.mjs` resolves each worker it needs where it is used: one that
+    # USE-TIME ADDRESSES (#2803). `lab-job.ts` resolves each worker it needs where it is used: one that
     # answers `/health` at its inventory pin is used as pinned, one that does not is looked up by its
     # declared MAC (two reads that must agree, then `/health`, #2790) and handed here as
     # `-e '{"resolved_addresses": {"<inventory name>": "<ipv4>"}}'`. DHCP moves boxes (workers 3 and 6
@@ -1484,7 +1484,7 @@
     #
     # NOT A NEW DOOR FOR AN ADDRESS. Extra vars outrank everything, so this is checked as the other
     # inputs are: keys must be inventory workers and values bare IPv4 addresses, or the run is refused.
-    # `lab-job.mjs` refuses a command line that sets it, so the only writer is what it resolved itself.
+    # `lab-job.ts` refuses a command line that sets it, so the only writer is what it resolved itself.
     - name: A use-time address names an inventory worker and a bare IPv4 address, and nothing else
       when: resolved_addresses is defined
       ansible.builtin.assert:
@@ -1508,7 +1508,7 @@
       loop_control:
         label: "{{ item.key }} -> {{ item.value }}"
 
-    # A worker `lab-job.mjs` found neither at its pin nor by MAC, and could not wake, for a job that took
+    # A worker `lab-job.ts` found neither at its pin nor by MAC, and could not wake, for a job that took
     # the WHOLE fleet: left out of the pool by name (it printed why). A job that NAMED its pool is refused
     # there instead, so nothing named is ever left out here.
     - name: A left-out worker is an inventory worker

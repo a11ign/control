@@ -34,7 +34,7 @@
   # #1829: `target`/`--limit` omitted means the whole fleet, same as every other playbook -- except this
   # one is EXEMPT from the capturing-worker guard on purpose (deploy.yml's own comment: "the deliberate
   # exception in the other direction"), so an omitted or fleet-wide target here can reboot a box a
-  # DIFFERENT session is mid-capture on right now. `fleet-playbook.mjs`'s `osRollbackRefusal` refuses that
+  # DIFFERENT session is mid-capture on right now. `fleet-playbook.ts`'s `osRollbackRefusal` refuses that
   # upstream for `npm run fleet:recover`; the assert below is the same refusal for a bare
   # `ansible-playbook recover.yml`, which that JS layer never sees.
   hosts: "{{ target | default('a11y_workers') }}"

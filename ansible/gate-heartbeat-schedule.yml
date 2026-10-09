@@ -5,7 +5,7 @@
 #
 # ## What this ships
 #
-# `gate-heartbeat.mjs` reads the gate's last completed tick from GitHub (the `GATE_LAST_TICK` Actions variable,
+# `gate-heartbeat.ts` reads the gate's last completed tick from GitHub (the `GATE_LAST_TICK` Actions variable,
 # a11ign/a11ign#3880) and messages the chairman on Telegram when it is older than ten minutes, once per outage. This
 # playbook installs the systemd unit pair and enables and starts the timer, which fires it every minute. The unit does
 # not need the agents host: that is why it lives on the control plane (`files/a11y-gate-heartbeat.service`'s header).

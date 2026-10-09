@@ -5,7 +5,7 @@
 #
 # ## What this ships
 #
-# `fleet-auto-off.mjs` decides, per worker, `off` or `keep` and why; `sleep.yml` (reused, not
+# `fleet-auto-off.ts` decides, per worker, `off` or `keep` and why; `sleep.yml` (reused, not
 # reimplemented) does the actual shutdown, busy re-checked immediately before it. This playbook installs
 # the systemd unit pair and enables and starts the timer, which fires that decision on a schedule.
 # `npm run fleet:auto-off` (no `--apply`) stays report-only regardless; that is a property of the command,

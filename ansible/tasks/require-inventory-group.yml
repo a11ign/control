@@ -36,7 +36,7 @@
 # ## The remedy below names a machine deliberately
 #
 # `npm run fleet:inventory-install` does not install anything on the machine that just read this refusal.
-# `inventory-install.yml` declares `# a11y_bootstrap: true`, and `fleet-playbook.mjs` honours that in
+# `inventory-install.yml` declares `# a11y_bootstrap: true`, and `fleet-playbook.ts` honours that in
 # `runBootstrapFromHere()` by spawning `ansible-playbook -i root@${CONTROL_PLANE},` — so it runs FROM
 # here AGAINST the control plane, and `/etc/a11ign/inventory.yml` appears THERE. That is the playbook
 # working as designed (a bootstrap must not depend on what it bootstraps), and it is also the second

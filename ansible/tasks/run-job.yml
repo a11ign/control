@@ -470,7 +470,7 @@
   #
   # Asked on EVERY dispatch, for the reason the corepack question below is, and for EVERY job: the catalogue's argvs name
   # `packages/lab/...` directly or through a root script, so a check that fired for some of them would be the one a forgotten job slips past.
-  # It runs HERE and not in `lab-job.mjs`'s `run()`, which executes on the control plane, whose checkout never installs (ADR 0012).
+  # It runs HERE and not in `lab-job.ts`'s `run()`, which executes on the control plane, whose checkout never installs (ADR 0012).
   #
   # `lab_laid_copy_check` is read by this question ONLY and is overridden by ONE caller, `lab-job-lock-two-rows.test.ts`, whose fixture
   # checkout holds no `packages/control`. The refusal itself is `lab-laid-copy.test.ts`'s to pin.

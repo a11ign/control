@@ -7,7 +7,7 @@
 #     ansible-playbook auth-leak-check.yml -l a11y-worker-3
 #     ansible-playbook auth-leak-check.yml -l a11y-worker-3 -e leak_rehearse_exit=2   # walk the restore, capture nothing
 #
-# `fleet-playbook.mjs` does not list this playbook (its `PLAYBOOKS` is outside #2399's Region), so the wrapper's
+# `fleet-playbook.ts` does not list this playbook (its `PLAYBOOKS` is outside #2399's Region), so the wrapper's
 # supervised-unit path is not used: this is a few minutes' run, not a ten-machine reboot, and a caller that is
 # killed mid-run still gets its restore, because the restore is the play's own `always`, not the caller's.
 #

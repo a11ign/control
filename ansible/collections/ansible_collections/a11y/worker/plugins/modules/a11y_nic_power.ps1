@@ -33,7 +33,7 @@
 # readback is the done-when, a task that ran the enable and did not read is the defect again.
 #
 # A worker is `wake-armed, UNPROVEN` here and never more. Arming says Windows will honour a packet; only a
-# real power cycle (fleet-wake.mjs's `woken` outcome) says the box comes back, and provisioning cannot power
+# real power cycle (fleet-wake.ts's `woken` outcome) says the box comes back, and provisioning cannot power
 # a box off mid-play, so it names what is still owed instead of claiming it.
 
 #AnsibleRequires -CSharpUtil Ansible.Basic

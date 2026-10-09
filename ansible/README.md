@@ -192,7 +192,7 @@ Four prerequisites, **all enforced and read back** (#3230), and each fails the p
 **What provisioning does not claim.** Every worker is reported `wake-armed, UNPROVEN`, never `ok`: the arming
 says Windows will honour a packet, and only a real cycle (box off, one magic packet from the agents host,
 `/health` 200 on its reserved address within `WAKE_DEADLINE_MS`) says it comes back. A play cannot power a
-box off mid-run, so that proof is `fleet-wake.mjs`'s `woken` outcome, not this role's: the role reads
+box off mid-run, so that proof is `fleet-wake.ts`'s `woken` outcome, not this role's: the role reads
 `runs/fleet-wake-proof.json` (#3227) through the reader auto-off uses and says `PROVEN` only for a worker
 that ledger holds.
 

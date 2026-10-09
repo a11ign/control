@@ -22,7 +22,7 @@
 # whole worker process is a different thing: `startScreenReader` cold-starts a clean NVDA on the next
 # capture, which is the supported path.
 - name: Restart the capture workers
-  # Unlike recover.yml this has no `fleet-playbook.mjs` entry at all -- there is no JS layer that could
+  # Unlike recover.yml this has no `fleet-playbook.ts` entry at all -- there is no JS layer that could
   # ever refuse a missing `-l` before this runs, so the assert below is the only guard that sees every call.
   hosts: a11y_workers
   gather_facts: false
