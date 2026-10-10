@@ -18,7 +18,7 @@ import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerPinTag, layersFrom, releaseTag } from "./layer-checkouts.ts";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.ts";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
-import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
+import { withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");

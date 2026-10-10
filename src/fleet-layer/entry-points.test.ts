@@ -21,11 +21,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stripComments } from "../../../evidence/src/source-text.ts";
+import { stripComments } from "@a11ign/toolchain/lib/source-text";
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, basename } from "node:path";
-import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.ts";
+import { declareTreeWideGuard, walkTree } from "@a11ign/toolchain/lib/tree-wide-guard";
 import { filesUnder } from "../../../guards/src/files-under.ts";
 import { installedPackageDir } from "../../../guards/src/layer-file.ts";
 

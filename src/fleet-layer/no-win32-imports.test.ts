@@ -102,7 +102,7 @@ function sourcesIn(dir: string): string[] {
  * STATIC imports only — `import x from "y"` and `export … from "y"`.
  *
  * A dynamic `await import()` inside a function is the CORRECT way to reach the driver from portable code
- * and must not be flagged: `capture-fixtures.mjs` does exactly that, so the module loads anywhere and only
+ * and must not be flagged: `capture-fixtures.ts` does exactly that, so the module loads anywhere and only
  * pays for guidepup on the machine that calls the function. That distinction is the whole remedy, so a
  * guard that could not express it would forbid the fix along with the bug.
  */
@@ -207,7 +207,7 @@ test("no portable module statically reaches the capture driver", () => {
     + "check passes and only the lab fails.\n"
     + `Import the specific module by PATH rather than ${WORKER_PACKAGE} — code-version.ts, `
     + "capture-pure.ts and worker-files.ts are dependency-free for this reason — or reach the driver "
-    + "through a dynamic `await import()` inside the function that needs it, as capture-fixtures.mjs does.");
+    + "through a dynamic `await import()` inside the function that needs it, as capture-fixtures.ts does.");
 });
 
 test("the allowlist is honest: every file on it really is win32-only", () => {
@@ -223,10 +223,10 @@ test("the allowlist is honest: every file on it really is win32-only", () => {
 });
 
 test("a dynamic import is not flagged, because it is the remedy", () => {
-  // `capture-fixtures.mjs` reaches the driver through `await import()` inside a function, so it loads
+  // `capture-fixtures.ts` reaches the driver through `await import()` inside a function, so it loads
   // anywhere and only pays for guidepup where it is called. If this test ever fails, the import scanner
   // has started matching dynamic imports and would forbid the fix along with the bug.
-  const fixtures = "packages/lab/src/harnesses/capture-fixtures.mjs";
+  const fixtures = "packages/lab/src/harnesses/capture-fixtures.ts";
   assert.match(readFileSync(join(REPO, fixtures), "utf8"), /await import\("@a11ign\/screenreader-worker"\)/);
   assert.equal(pathToDriver(fixtures), null,
     `${fixtures} reaches the driver statically; only its dynamic import should exist`);

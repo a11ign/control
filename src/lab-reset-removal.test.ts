@@ -27,8 +27,8 @@ import { writeFileSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
-import { withGitSandbox, sandboxGitEnv } from "../../../scripts/test-support/git-sandbox.ts";
-import type { GitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
+import { withGitSandbox, sandboxGitEnv } from "@a11ign/toolchain/lib/git-sandbox";
+import type { GitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK = resolve(HERE, "../ansible/lab-reset.yml");

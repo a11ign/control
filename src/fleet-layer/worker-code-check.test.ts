@@ -130,10 +130,10 @@ const CORPUS_WRITERS = [
 
 const DIAGNOSTICS = [
   "packages/lab/src/training/repeat-capture.mjs",
-  "packages/lab/src/harnesses/capture-fixtures.mjs",
-  "packages/lab/src/harnesses/page-identity-rate.mjs",
-  "packages/lab/src/harnesses/occurrence-verdict-stability.mjs",
-  "packages/lab/src/harnesses/capture-check.mjs",
+  "packages/lab/src/harnesses/capture-fixtures.ts",
+  "packages/lab/src/harnesses/page-identity-rate.ts",
+  "packages/lab/src/harnesses/occurrence-verdict-stability.ts",
+  "packages/lab/src/harnesses/capture-check.ts",
 ];
 
 /** Every lab module that POSTs a capture to a worker. */
