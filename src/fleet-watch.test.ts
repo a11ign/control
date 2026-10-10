@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
-  unitDriftTick, unitDriftBody, exitCodeFor, EXIT,
+  unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
@@ -581,6 +581,15 @@ test("exitCodeFor: an unread host is CANNOT_ASK and never QUIET; a clean read is
   assert.equal(exitCodeFor(found({ fresh: [`unit-drift: ${UNIT} differs`] }), null), EXIT.ATTENTION);
   assert.equal(exitCodeFor(found({ cannotTell: "ssh refused" }, { offFleet: ["a11y-worker-5: build x (fleet y)"] }), null), EXIT.ATTENTION,
     "a finding that was made stays made");
+});
+
+test("exitCodeFor: an unread auto-off refusal is CANNOT_ASK and never QUIET; a read {} is QUIET; a read refusal is ATTENTION (#4734)", () => {
+  const nothing = { overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null } };
+  const refusal = { reason: "stale-checkout", detail: "behind main", at: 1 };
+  assert.equal(exitCodeFor(nothing, null), EXIT.QUIET, "positive control: the host was read and refused nothing");
+  assert.equal(exitCodeFor(nothing, UNREAD), EXIT.CANNOT_ASK);
+  assert.equal(exitCodeFor(nothing, refusal), EXIT.ATTENTION);
+  assert.equal(exitCodeFor({ ...nothing, offFleet: ["a11y-worker-5: build x (fleet y)"] }, UNREAD), EXIT.ATTENTION, "ATTENTION outranks it");
 });
 
 test("watchFleet(): a differing unit is raised once, carried through an unreadable tick, and clears when the unit is re-installed", async () => {

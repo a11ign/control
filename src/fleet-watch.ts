@@ -734,30 +734,37 @@ function carriesEntry(rows: FleetRow[], carry: { patch: boolean, unitDrift: bool
     || (carry.unitDrift && line.startsWith(UNIT_DRIFT_LINE_PREFIX));
 }
 
+/** What `readRefusalOrSay` answers: the refusal, `null` for a host that was read and refused nothing, or `UNREAD` (#4734). */
+export const UNREAD = "unread" as const;
+export type AutoOffReading = AutoOffRefusal | null | typeof UNREAD;
+
 /**
- * The auto-off refusal, or `null` — and when the host could not be read, SAYS so on stderr rather than reading as
- * clean. A read that succeeded is mirrored for `org-health` (#3860); one that threw leaves the mirror to age.
+ * The auto-off refusal, `null` when the host was read and refused nothing, or `UNREAD` when it could not be read --
+ * which also SAYS so on stderr. `UNREAD` is not `null`: an unread host is not a clean one (#4734, #4714's shape).
+ * A read that succeeded is mirrored for `org-health` (#3860); one that threw leaves the mirror to age.
  *
  * @param {{ readState?: () => string, path?: string, now?: () => number }} [deps] for a test
  */
-export function readRefusalOrSay({ readState, path, now = Date.now }: { readState?: () => string; path?: string; now?: () => number; } = {}): AutoOffRefusal | null {
+export function readRefusalOrSay({ readState, path, now = Date.now }: { readState?: () => string; path?: string; now?: () => number; } = {}): AutoOffReading {
   try {
     return readAutoOffRefusal(readState, { readAt: now(), path });
   } catch (cause) {
     console.error(`CANNOT READ the auto-off refusal from the control host: ${cause instanceof Error ? cause.message : String(cause)}`);
-    return null;
+    return UNREAD;
   }
 }
 
 /**
  * ATTENTION when this tick has anything new to say. Otherwise QUIET -- unless the control host's units could not be read,
- * which is `CANNOT_ASK` and never QUIET (#4714): an unread host is not a clean one. ATTENTION outranks it, because a
+ * or its auto-off refusal could not be read (#4734), which is `CANNOT_ASK` and never QUIET (#4714): an unread host is not a clean one. ATTENTION outranks it, because a
  * finding that was made stays made whatever the host will not say about the rest.
  */
-export function exitCodeFor(found: WatchFound, refusal: AutoOffRefusal | null): number {
-  const attention = found.overdue.length > 0 || found.offFleet.length > 0 || found.unitDrift.fresh.length > 0 || refusal !== null;
+export function exitCodeFor(found: WatchFound, refusal: AutoOffReading): number {
+  const refused = refusal !== null && refusal !== UNREAD;
+  const attention = found.overdue.length > 0 || found.offFleet.length > 0 || found.unitDrift.fresh.length > 0 || refused;
   if (attention) return EXIT.ATTENTION;
-  return found.unitDrift.cannotTell === null ? EXIT.QUIET : EXIT.CANNOT_ASK;
+  const unread = found.unitDrift.cannotTell !== null || refusal === UNREAD;
+  return unread ? EXIT.CANNOT_ASK : EXIT.QUIET;
 }
 
 /** The tick's own reader of the control host's units: the host through ssh, the playbooks and unit files from this checkout. */
@@ -787,7 +794,7 @@ async function main() {
     return;
   }
   const body = [found.overdue.length ? watchBody(found.overdue) : null, found.offFleet.length ? offFleetBody(found.offFleet) : null,
-    fresh.length ? unitDriftBody(fresh) : null, refusal ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
+    fresh.length ? unitDriftBody(fresh) : null, refusal !== null && refusal !== UNREAD ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
   console.log(body);
   if (post) {
     execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });
