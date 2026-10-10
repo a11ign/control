@@ -133,8 +133,9 @@ test("the restore reads worker_update_deferral_policy; the play declares no defe
   assert.ok(!restoresFromRolesList(unrestored), "no restore in `always` must be caught");
 
   const text = readFileSync(PATCH, "utf8").split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
-  assert.doesNotMatch(text, /DeferFeatureUpdates|DeferQualityUpdates(?!PeriodInDays)|:\s*365\b|\bvalue:\s*30\b/,
-    "the play must not restate the role's values; only the lifted entry's NAME and the window's 0 are its own");
+  // #4897: the window may also name `DeferFeatureUpdatesPeriodInDays` (with a target), as it names the quality entry.
+  assert.doesNotMatch(text, /DeferFeatureUpdates(?!PeriodInDays)|DeferQualityUpdates(?!PeriodInDays)|:\s*365\b|\bvalue:\s*30\b/,
+    "the play must not restate the role's values; only the lifted entries' NAMES and the window's 0 are its own");
   // The variable it reads really lives in the file it loads: otherwise the read is of an undefined name.
   const defaults = readFileSync(join(ANSIBLE, "roles/worker/defaults/main.yml"), "utf8");
   assert.match(defaults, /^worker_update_deferral_policy:/m);
@@ -191,4 +192,136 @@ test("an unreadable box is reported as unreadable, never as a differing build", 
 test("the verdict play exists and is tagged, so the behavioural tests cannot silently run nothing", () => {
   assert.deepEqual(VERDICT_PLAY.tags, ["patch_verdict"]);
   assert.ok(allTasks(VERDICT_PLAY.tasks).some((task) => task["ansible.builtin.fail"]), "the verdict play must be able to fail");
+});
+
+// --- #4897: a box below the target build is brought up to it, a feature update included ---------------------
+
+const TARGET = { patch_target_release: "25H2", patch_target_build: "26200.9457" };
+const NO_TARGET = {};
+type Extra = Record<string, string>;
+
+/** Run `ansible-playbook` on `playbook` in a scratch directory over the given hosts' local connections. */
+function runLocal(opts: { playbook: string, hosts: Record<string, Record<string, string>>, extra: Extra, tags?: string }):
+  { status: number | null, out: string, dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), "patch-target-"));
+  const inventory = join(dir, "inventory.json");
+  const hosts = Object.fromEntries(Object.entries(opts.hosts).map(([name, vars]) => [name, { ansible_connection: "local", ...vars }]));
+  writeFileSync(inventory, JSON.stringify({ a11y_workers: { hosts } }));
+  const config = join(dir, "ansible.cfg");
+  writeFileSync(config, "[defaults]\nlocalhost_warning = False\n");
+  const argv = ["-i", inventory, opts.playbook, "-e", JSON.stringify(opts.extra), ...(opts.tags ? ["--tags", opts.tags] : [])];
+  const run = spawnSync("ansible-playbook", argv, { cwd: dir, encoding: "utf8", env: { ...process.env, ANSIBLE_CONFIG: config, ANSIBLE_NOCOLOR: "1" } });
+  return { status: run.status, out: `${run.stdout}\n${run.stderr}`, dir };
+}
+
+interface WindowValue { path: string, name: string, value: string | number, type?: string }
+interface Evaluated { categories: string[], lifted: WindowValue[], window: WindowValue[], targetValues: WindowValue[], timeout: number }
+
+/**
+ * The patch play's OWN vars, templated by the real Ansible over the role's real defaults, with `extra` as the
+ * caller's `-e`. Reads what the play would hand `win_updates` and `win_regedit`, and reaches no box.
+ */
+function evaluatedVars(extra: Extra): Evaluated {
+  const dir = mkdtempSync(join(tmpdir(), "patch-vars-"));
+  const out = join(dir, "out.json");
+  const playbook = join(dir, "vars.yml");
+  const result = "{'categories': patch_categories, 'lifted': patch_lifted_values, 'window': patch_window_values, "
+    + "'targetValues': patch_target_values, 'timeout': (7200 if patch_target_set | bool else 1800)}";
+  writeFileSync(playbook, JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false,
+    vars_files: [join(ANSIBLE, "roles/worker/defaults/main.yml")], vars: PATCH_PLAY.vars,
+    tasks: [{ "ansible.builtin.copy": { dest: out, content: `{{ ${result} | to_json }}` } }] }]));
+  const run = runLocal({ playbook, hosts: { localhost: {} }, extra });
+  assert.equal(run.status, 0, run.out);
+  return JSON.parse(readFileSync(out, "utf8"));
+}
+const names = (values: WindowValue[]): string[] => values.map((v) => v.name);
+const valueOf = (values: WindowValue[], name: string): string | number | undefined => values.find((v) => v.name === name)?.value;
+const BASE_CATEGORIES = ["SecurityUpdates", "CriticalUpdates", "UpdateRollups", "Updates"];
+
+test("#4897 negative control: with no target the categories, the deferral and the reboot rule are what they were", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const none = evaluatedVars(NO_TARGET);
+  assert.deepEqual(none.categories, BASE_CATEGORIES, "no Upgrades category without a target");
+  assert.deepEqual(none.window.map((v) => `${v.name}=${v.value}`), ["DeferQualityUpdatesPeriodInDays=0"],
+    "the window lifts the quality deferral and nothing else, and writes no target release");
+  assert.deepEqual(none.targetValues, []);
+  assert.equal(none.timeout, 1800, "the reboot timeout is the cumulative one");
+  assert.ok(rebootsOnlyItself(PATCH_PLAY));
+  // The reboot rule never mentions the target: a box already on it installs nothing, so it is not restarted.
+  assert.doesNotMatch(JSON.stringify(tasksUsing(PATCH_PLAY, "ansible.windows.win_reboot")[0].when), /patch_target/);
+});
+
+test("#4897: with a target the feature deferral is lifted for the window, the target is set, and Upgrades is a category", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const set = evaluatedVars(TARGET);
+  assert.deepEqual(set.categories, [...BASE_CATEGORIES, "Upgrades"]);
+  assert.equal(valueOf(set.window, "DeferFeatureUpdatesPeriodInDays"), 0, "feature deferral lifted");
+  assert.equal(valueOf(set.window, "DeferQualityUpdatesPeriodInDays"), 0, "quality deferral still lifted");
+  assert.equal(valueOf(set.window, "TargetReleaseVersion"), 1);
+  assert.equal(valueOf(set.window, "TargetReleaseVersionInfo"), "25H2");
+  assert.equal(valueOf(set.window, "ProductVersion"), "Windows 11");
+  assert.equal(set.window.find((v) => v.name === "TargetReleaseVersionInfo")?.type, "string", "a release name is not a dword");
+  assert.ok(!names(set.window).includes("DeferFeatureUpdates"), "the on/off flag is the role's and stays on");
+  assert.ok(set.window.every((v) => v.path.startsWith("HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate")));
+  assert.equal(set.timeout, 7200);
+});
+
+/** The restore (in `always`) removes every target name the window can write, and reads the removal back. */
+function removesTargetThenReadsBack(play: Play): boolean {
+  const always: Task[] = play.tasks.find((task: Task) => Array.isArray(task.always))?.always ?? [];
+  const removeAt = always.findIndex((task) => moduleOf(task, "ansible.windows.win_regedit")?.state === "absent"
+    && /patch_target_names/.test(String(task.loop)));
+  const readsBack = always.slice(removeAt + 1).some((task) => /Names/.test(JSON.stringify(task["ansible.windows.win_powershell"] ?? "")));
+  return removeAt > 0 && readsBack && String(play.vars.patch_target_names).includes("TargetReleaseVersionInfo");
+}
+
+test("#4897: the target is REMOVED in the `always`, after the role's list is back, on every run, and read back", () => {
+  assert.ok(removesTargetThenReadsBack(PATCH_PLAY));
+  const noRemoval = clone(PATCH_PLAY);
+  const always = noRemoval.tasks.find((task: Task) => task.always);
+  always.always = always.always.filter((task: Task) => moduleOf(task, "ansible.windows.win_regedit")?.state !== "absent");
+  assert.ok(!removesTargetThenReadsBack(noRemoval), "no removal must be caught");
+  const noReadBack = clone(PATCH_PLAY);
+  const tail = noReadBack.tasks.find((task: Task) => task.always);
+  tail.always = tail.always.filter((task: Task) => !/Names/.test(JSON.stringify(task["ansible.windows.win_powershell"] ?? "")));
+  assert.ok(!removesTargetThenReadsBack(noReadBack), "a removal nobody read back must be caught");
+  // Never conditional on the target: a target a killed run left behind is healed by the next window of any kind.
+  const removal = PATCH_PLAY.tasks.find((task: Task) => task.always).always.find((task: Task) => moduleOf(task, "ansible.windows.win_regedit")?.state === "absent");
+  assert.equal(removal.when, undefined);
+});
+
+/** Run only the box-level target verdict over invented readings, with the caller's `-e`. */
+const targetVerdict = (readings: Record<string, string>, extra: Extra): { status: number | null, out: string } =>
+  runLocal({ playbook: PATCH, tags: "patch_target_verdict", extra,
+    hosts: Object.fromEntries(Object.entries(readings).map(([name, reading]) => [name, { patch_build_reading: reading }])) });
+
+test("#4897: the closing task fails a box whose build is below the target, by worker number", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const below = targetVerdict({ "a11y-worker-7": "26100.9457" }, TARGET);
+  assert.notEqual(below.status, 0, below.out);
+  assert.match(below.out, /a11y-worker-7 is on 26100\.9457, below\s+the target build 26200\.9457/);
+  const lowerRevision = targetVerdict({ "a11y-worker-8": "26200.9000" }, TARGET);
+  assert.notEqual(lowerRevision.status, 0, "the same release at an older revision is still below");
+  const unreadable = targetVerdict({ "a11y-worker-9": "unreadable" }, TARGET);
+  assert.notEqual(unreadable.status, 0, "a box nobody could read has not been shown to have reached the target");
+  assert.match(unreadable.out, /a11y-worker-9 is UNREADABLE/);
+});
+
+test("#4897: the closing task passes a box at or above the target, compares numbers not text, and is inert without one", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  assert.equal(targetVerdict({ "a11y-worker-2": "26200.9457" }, TARGET).status, 0, "exactly on the target");
+  assert.equal(targetVerdict({ "a11y-worker-3": "26200.10000" }, TARGET).status, 0, "10000 is above 9457; as text it would sort below");
+  assert.equal(targetVerdict({ "a11y-worker-4": "26300.1" }, TARGET).status, 0, "a later release is above");
+  // negative control: no target given is the play as it was. The unreadable box is the discriminating one: a
+  // below-target reading alone would pass even with the target guard removed, an empty build comparing as 0.
+  assert.equal(targetVerdict({ "a11y-worker-5": "22631.1", "a11y-worker-6": "unreadable" }, NO_TARGET).status, 0, "no target, no verdict");
+});
+
+/** The input check on its own, over one invented local host. */
+const targetInputs = (extra: Extra): number | null =>
+  runLocal({ playbook: PATCH, tags: "patch_target_inputs", extra, hosts: { "a11y-worker-2": {} } }).status;
+
+test("#4897: a target is given whole and well-formed, or not at all", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  assert.equal(targetInputs(TARGET), 0);
+  assert.equal(targetInputs(NO_TARGET), 0, "the default is no target");
+  assert.notEqual(targetInputs({ patch_target_release: "25H2" }), 0, "a release with no build could never be checked");
+  assert.notEqual(targetInputs({ patch_target_build: "26200.9457" }), 0, "a build with no release would change nothing");
+  assert.notEqual(targetInputs({ patch_target_release: "Windows 11", patch_target_build: "26200.9457" }), 0, "a release is NNHn");
+  assert.notEqual(targetInputs({ patch_target_release: "25H2", patch_target_build: "26200" }), 0, "a build is <build>.<UBR>");
 });
