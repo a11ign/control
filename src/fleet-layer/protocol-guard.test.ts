@@ -193,7 +193,7 @@ test("check-worker-code IMPORTS the working-tree protocol version", () => {
     // The fleet repo's `check-worker-code.mjs` no longer carries `protocolBumpNote` (it was dropped there, after this
     // guard was written), so it reads no protocol version at all; a file that does not read one has nothing to import.
     if (readsProtocolVersion(source)) assert.match(source, /from\s+["']@a11ign\/screenreader-worker\/protocol-version["']/,
-      `${file} must import CAPTURE_PROTOCOL_VERSION from the dependency-free protocol-version.mjs`);
+      `${file} must import CAPTURE_PROTOCOL_VERSION from the dependency-free protocol-version module`);
     assert.doesNotMatch(source, /readFileSync\([^)]*capture-core\.mjs/,
       `${file} still reads capture-core.mjs's TEXT for the working-tree value -- the whole point of the `
       + "move was to stop doing that");
@@ -204,18 +204,19 @@ test("check-worker-code IMPORTS the working-tree protocol version", () => {
  * THE HEAD-COMPARISON HALF NOW SCRAPES THE RIGHT FILE.
  *
  * Both guards ALSO compare against `git show HEAD:...` for a second reason (detecting an uncommitted
- * bump) -- that half cannot become an import, but it must point at `protocol-version.mjs` now, or it
+ * bump) -- that half cannot become an import, but it must point at `protocol-version.ts` (`.mjs` before layer v0.9.0) now, or it
  * would silently stop matching anything the moment this move landed as a real commit: the constant no
  * longer exists in `capture-core.mjs`'s text at all.
  */
-test("the git-HEAD comparison targets protocol-version.mjs, not the file the constant moved OUT of", () => {
+test("the git-HEAD comparison targets protocol-version.ts, not the file the constant moved OUT of", () => {
   const root = resolve(import.meta.dirname, "../../../..");
   for (const file of ["packages/worker-fleet/src/check-worker-code.ts"]) {
     const source = readFileSync(resolve(root, file), "utf8");
-    // `git -C <the worker's source dir> show HEAD:./protocol-version.mjs` (#3394): the directory is asked of the
-    // worker package rather than named here, so `./` is protocol-version.mjs's own directory.
-    if (readsProtocolVersion(source)) assert.match(source, /"-C",[^\]]*"show",\s*"HEAD:\.\/protocol-version\.mjs"/,
-      `${file}'s HEAD comparison must target protocol-version.mjs -- capture-core.mjs no longer declares `
+    // `git -C <the worker's source dir> show HEAD:./protocol-version.ts` (#3394): the directory is asked of the
+    // worker package rather than named here, so `./` is the version file's own directory. `.mjs` is what layer tags
+    // before v0.9.0 ship, and the control guard reads both (#4708), so this one accepts both.
+    if (readsProtocolVersion(source)) assert.match(source, /"-C",[^\]]*"show",\s*"HEAD:\.\/protocol-version\.(?:ts|mjs)"/,
+      `${file}'s HEAD comparison must target protocol-version.ts (or the older .mjs) -- capture-core.mjs no longer declares `
       + "the constant, so scraping it there would silently stop matching");
     assert.doesNotMatch(source, /HEAD:(?:\.\/|packages\/nvda-worker\/src\/)capture-core\.mjs/,
       `${file} still compares against capture-core.mjs at HEAD, which the constant no longer lives in`);
