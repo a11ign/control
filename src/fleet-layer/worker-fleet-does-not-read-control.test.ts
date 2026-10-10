@@ -94,7 +94,7 @@ function relativeLiterals(source: string): string[] {
  * A REASON, never a bare acknowledgement, matching every other EXEMPT table added this session.
  */
 const EXEMPT: Record<string, string> = {
-  "fleet-env.ts:98":
+  "fleet-env.ts:134":
     "GAP, recorded 2026-09-06 (architecture audit §3.2), not fully closed: the monorepo's own default for INVENTORY and GROUP_VARS. "
     + "doctor.mjs and check-worker-code.mjs are published bins that must keep resolving THIS monorepo's "
     + "bare-metal fleet when run as `npm run doctor`, so the path is an injected PARAMETER rather than "
