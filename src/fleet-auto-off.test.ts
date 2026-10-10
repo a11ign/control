@@ -933,6 +933,42 @@ const BESIDE = [
   "packages/control/ansible/files/a11y-fleet-auto-off.timer",
 ];
 
+/**
+ * Every script the unit's Exec lines run, core-relative: the absolute ones under the checkout's literal path, and the bare ones
+ * (`scripts/lay-layer.ts`) the follow step runs from `WorkingDirectory=`. An absolute path elsewhere (the loader under `/opt`) is the host's, not the core's.
+ */
+function scriptsRun(unit: string): string[] {
+  const exec = activeLines(unit.replace(/\\\n\s*/g, " ")).filter((l) => /^ExecStart(Pre)?=/.test(l)).join("\n");
+  const tokens = [...exec.matchAll(/(?<![\w./-])(?:\/root\/a11y-witness\/)?([\w./-]+\.(?:ts|mjs|cjs|js))\b/g)].map((m) => m[1]);
+  return tokens.filter((path) => !path.startsWith("/"));
+}
+
+const absentFrom = (root: string, paths: string[]) => [...new Set(paths.filter((p) => !existsSync(join(root, p))))];
+
+test("#4571: every script the unit runs exists in the core it is laid into, and the old `.mjs` line is what this would have caught", () => {
+  // The follow step's `-` hides a missing script: from a11ign/a11ign#4268 until #4571 both lay lines logged `Cannot find module` on every firing.
+  const unit = shippedUnit("a11y-fleet-auto-off.service");
+  const named = scriptsRun(unit);
+  // By PREFIX, so a unit still on `.mjs` fails the absence check below with the script's name, not this one.
+  assert.ok(named.includes(THIS) && named.some((p) => p.startsWith("scripts/lay-layer.")),
+    `the scan finds the scripts it exists for (positive control for the emptiness below), found ${JSON.stringify(named)}`);
+  assert.deepEqual(absentFrom(REPO, named), [], "a script the unit runs that the laid core does not hold");
+  // The marker is checked in both directions, against a core that holds exactly what the shipped unit names: it must say nothing there,
+  // and it must name the script on the unit as it stood, so it is not a scan that only ever finds the remedy present.
+  const core = mkdtempSync(join(tmpdir(), "unit-scripts-"));
+  try {
+    for (const path of named) {
+      mkdirSync(join(core, dirname(path)), { recursive: true });
+      writeFileSync(join(core, path), "");
+    }
+    assert.deepEqual(absentFrom(core, scriptsRun(unit)), []);
+    const asItStood = unit.replaceAll("lay-layer.ts", "lay-layer.mjs");
+    assert.deepEqual(absentFrom(core, scriptsRun(asItStood)), ["scripts/lay-layer.mjs"]);
+  } finally {
+    rmSync(core, { recursive: true, force: true });
+  }
+});
+
 test("#3275 the watch reads the file the timer writes: one path, stated in both files and pinned equal", () => {
   assert.equal(AUTO_OFF_STATE_PATH, DEFAULT_STATE_PATH);
 });
