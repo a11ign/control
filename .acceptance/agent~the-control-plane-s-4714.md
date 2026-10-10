@@ -3,13 +3,10 @@ Part of a11ign/a11ign#4714. Names no workflow, so it is not `lane:ceo`.
 Acceptance:
 
 ```bash
-cd /home/agent/repos/control && pnpm exec rstest run src/fleet-watch.test.ts
+cd /home/agent/repos/wt-4714 && pnpm exec rstest run --config packages/control/scripts/rstest/rstest.config.ts --include 'src/fleet-watch.test.ts'
 ```
 
-**As run (measured, 2026-10-10):** the row's command cannot run as written in that clone: its `node_modules` predates `rstest` (`Command "rstest" not found`) and, without `--config`, rstest finds no `node:test` suites (#4708's PR recorded the same). The same file was run two ways, on this branch's tree:
-
-- `node --test src/fleet-watch.test.ts`: `tests 54, pass 54, fail 0` (45 before this change, 9 added).
-- under the shared toolchain config, with this tree copied to `packages/control` beside `packages/worker-fleet` (a copy in the session scratchpad, not a core worktree): `rstest run --config scripts/rstest/rstest.config.ts --include 'src/fleet-watch.test.ts'` printed `VERDICT pass: 54 tests in 1 file`.
+**As run (measured, 2026-10-10):** `VERDICT pass: 54 tests in 1 file`, in a core worktree with this tree copied to `packages/control` beside `packages/worker-fleet` and `node_modules` hybrid-linked (an untracked overlay, never committed; the core's checkout gets reset afterwards). The row's own `cd /home/agent/repos/control && pnpm exec rstest run src/fleet-watch.test.ts` cannot run: that clone is 97 commits behind `main` and does not hold this branch, its `node_modules` predates `rstest` (`Command "rstest" not found`), and without `--config` rstest finds no `node:test` suites (#4708's PR recorded the same). `node --test src/fleet-watch.test.ts` over this tree also printed `tests 54, pass 54, fail 0` (45 before this change, 9 added).
 
 `tsc --noEmit` reports nothing in `src/fleet-watch.ts`, `src/fleet-watch.test.ts` or `src/control-unit-drift.ts`; its only errors are the `@a11ign/toolchain/*` imports under `scripts/`, which this checkout's stale `node_modules` cannot resolve.
 
