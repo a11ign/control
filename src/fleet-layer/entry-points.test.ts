@@ -25,9 +25,9 @@ import { stripComments } from "../../../evidence/src/source-text.ts";
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, basename } from "node:path";
-import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.mjs";
-import { filesUnder } from "../../../guards/src/files-under.mjs";
-import { installedPackageDir } from "../../../guards/src/layer-file.mjs";
+import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.ts";
+import { filesUnder } from "../../../guards/src/files-under.ts";
+import { installedPackageDir } from "../../../guards/src/layer-file.ts";
 
 // #716/#704: this file's own population is the whole tracked tree, not one file -- declared here
 // rather than inferred from its source, per ceo's ruling (2026-09-09) that the tree-wide-guard
@@ -69,7 +69,7 @@ const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
  * | a human typing `node scripts/x.mjs` | NO, and unknowable — the entry guard is what makes that safe |
  *
  * `*.cmd`/`*.ps1` AND THE ANSIBLE PLAYBOOKS WERE BOTH TRIED AND BACKED OUT, which is why it is listed as NOT covered rather than left
- * off. Reading those files finds `packages/worker-fleet/src/cli-flags.mjs`, `code-version.mjs`,
+ * off. Reading those files finds `packages/worker-fleet/src/cli-flags.ts`, `code-version.mjs`,
  * `dataset-paths.mjs`, `fleet-consistency.mjs`, `axe.ts`, `fetch-encoder.mjs` and `git-sandbox.ts` —
  * every one a LIBRARY MODULE named in a deployed-file manifest or a dependency list, not something
  * anyone executes. Being listed is not being invoked, and a discovery that cannot tell the
@@ -344,14 +344,14 @@ const KNOWN_PLAIN_ENTRY_GUARDS: readonly string[] = Object.freeze([
   "packages/control/src/fleet-wake.ts",
   "packages/control/src/lab-job.ts",
   "packages/control/src/lab-pipeline.ts",
-  "packages/worker-fleet/src/fleet-env.mjs",
-  "packages/worker-fleet/src/guest-run.mjs",
-  "packages/worker-fleet/src/normalise-fleet.mjs",
-  "scripts/check-retired-heads.mjs",
-  "scripts/check-schema-migration.mjs",
-  "scripts/ci-changed.mjs",
-  "scripts/known-gaps-index.mjs",
-  "scripts/stale-dist-diagnosis.mjs",
+  "packages/worker-fleet/src/fleet-env.ts",
+  "packages/worker-fleet/src/guest-run.ts",
+  "packages/worker-fleet/src/normalise-fleet.ts",
+  "scripts/check-retired-heads.ts",
+  "scripts/check-schema-migration.ts",
+  "scripts/ci-changed.ts",
+  "scripts/known-gaps-index.ts",
+  "scripts/stale-dist-diagnosis.ts",
 ]);
 
 /** Every tracked source whose entry guard is the plain form, comment-stripped. */

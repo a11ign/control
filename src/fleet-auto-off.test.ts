@@ -19,11 +19,11 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.ts";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerDeclaration, layerOwning, layerPinTag, layersFrom, pinnedLayerTag } from "./layer-checkouts.ts";
-import { layingPlan } from "../../../scripts/lay-layer.mjs";
+import { layingPlan } from "../../../scripts/lay-layer.ts";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
   hasWakeableMac, probeIdle, advance, advanceShutdownRequested, autoOffDecision,
@@ -794,7 +794,7 @@ test("#3852: behind `main`, the checkout fast-forwards and THEN lays the layer a
     assert.notEqual(sandbox.head(), before);
     const laid = sandbox.calls().filter((c) => c.startsWith("node "));
     const head = sandbox.head().slice(0, 7);
-    assert.deepEqual(laid, [`node scripts/lay-layer.mjs screenreader-fleet: ${head}`, `node scripts/lay-layer.mjs control: ${head}`],
+    assert.deepEqual(laid, [`node scripts/lay-layer.ts screenreader-fleet: ${head}`, `node scripts/lay-layer.ts control: ${head}`],
       "each layer laid once, and the tree already held the merged commit when it was (the pin it reads is the new one, #3976)");
   } finally {
     sandbox.dispose();
@@ -965,7 +965,7 @@ test("#3275 importClosure on the real program: every file it names exists, and t
   const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
   for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
   for (const expected of [THIS, "packages/control/src/fleet-watch.ts", "packages/control/src/fleet-wake.ts",
-    "packages/worker-fleet/src/worker-http.mjs"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
+    "packages/worker-fleet/src/worker-http.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
   assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
   for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
 });
@@ -1015,14 +1015,14 @@ test("#3275 checkAgainstMain: a file the checkout does not track counts as diffe
 
 const LAYER = "screenreader-fleet";
 const LAYER_PATH = "packages/worker-fleet";
-const FLEET_FILE = `${LAYER_PATH}/src/worker-http.mjs`;
+const FLEET_FILE = `${LAYER_PATH}/src/worker-http.ts`;
 const TAG = `@a11ign/${LAYER}@0.5.1`;
 const lockfileAt = (version: string) => `importers:\n\n  .:\n    dependencies:\n      '@a11ign/${LAYER}':\n        specifier: ^0.5.1\n        version: ${version}(@a11ign/scorer@packages+scorer)\n`;
 /** The program as it really is: it imports a file of the layer, which is what makes the layer part of the comparison. */
-const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/worker-http.mjs";\n` : "");
+const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/worker-http.ts";\n` : "");
 const laidAt = (tag: string) => ({ differing: tag === TAG ? [] : [`${LAYER_PATH} (layer ${LAYER} is laid at ${tag}, main pins ${TAG})`] });
 
-test("#3845 layerPinTag reads the lockfile as scripts/lay-layer.mjs does, on the REAL lockfile, CRLF and the refusals", () => {
+test("#3845 layerPinTag reads the lockfile as scripts/lay-layer.ts does, on the REAL lockfile, CRLF and the refusals", () => {
   const real = readFileSync(join(REPO, "pnpm-lock.yaml"), "utf8");
   const manifest = JSON.parse(readFileSync(join(REPO, "packages/control/layers.json"), "utf8"));
   for (const [text, label] of [[real, "the real lockfile"], [real.replace(/\n/g, "\r\n"), "the same with CRLF"]]) {
@@ -1060,7 +1060,7 @@ test("#3845 checkAgainstMain: the layer's files go to its pin and NEVER to git's
   assert.ok(git.calls.some((c) => c[0] === "show" && c[1] === "origin/main:pnpm-lock.yaml"), "the pin is main's, not the working tree's");
 });
 
-test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.mjs IS at the pin the lockfile names, and the older tag form is not", () => {
+test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.ts IS at the pin the lockfile names, and the older tag form is not", () => {
   const root = mkdtempSync(join(tmpdir(), "auto-off-4363-"));
   const laidAs = (tag: string) => {
     const dir = join(root, tag.replace(/\W/g, "_"));
@@ -1126,7 +1126,7 @@ test("#3845 judgeLaidLayer on real directories: laid at the pin passes; another 
     ] as [string, (dir: string) => void][]) {
       const judged = layerAt(name, make);
       assert.ok("cannotTell" in judged, `${name}: could not be read, so it must not read as the pin`);
-      assert.match((judged as { cannotTell: string }).cannotTell, /node scripts\/lay-layer\.mjs screenreader-fleet/, `${name}: names the remedy`);
+      assert.match((judged as { cannotTell: string }).cannotTell, /node scripts\/lay-layer\.ts screenreader-fleet/, `${name}: names the remedy`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1184,7 +1184,7 @@ test("#3914 a laid control at another tag REFUSES naming both tags; one with no 
 
   const unmarked = checkLaidControl({ laidTag: null }).verdict as { action: string; reason: string; detail: string };
   assert.deepEqual([unmarked.action, unmarked.reason], ["refuse", "cannot-tell"]);
-  assert.match(unmarked.detail, /node scripts\/lay-layer\.mjs control/, "names the remedy");
+  assert.match(unmarked.detail, /node scripts\/lay-layer\.ts control/, "names the remedy");
 });
 
 test("#3914 a pin on main that cannot be read is CANNOT_TELL and says why, never the working tree's pin", () => {

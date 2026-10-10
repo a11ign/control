@@ -31,8 +31,8 @@ import { pathToFileURL } from "node:url";
 // header for why. `fleet-discover.ts` moved alongside it, so that import stays local; the other two
 // cross back to worker-fleet the SANCTIONED way, by relative path.
 import { inventoryHosts } from "./fleet-discover.ts";
-import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { requestJson } from "../../worker-fleet/src/worker-http.ts";
+import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 // #1683/#1684: SHARED, not restated -- both this file and fleet-discover.ts need "the durable copy
 // first, the in-tree checkout second", and defining it here would make fleet-discover.ts (which this
 // file already imports `inventoryHosts` from) import back FROM here, a cycle. `control-plane-fleet.ts`

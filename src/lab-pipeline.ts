@@ -47,15 +47,15 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { pnpmCliInvocation } from "../../worker-fleet/src/npm-cli-executable.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { pnpmCliInvocation } from "../../worker-fleet/src/npm-cli-executable.ts";
 // RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
 // `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
 // away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.ts";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.ts";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";

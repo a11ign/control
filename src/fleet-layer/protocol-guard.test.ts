@@ -12,9 +12,9 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
-import { protocolVerdict, RECAPTURE_COST } from "../../../worker-fleet/src/protocol-guard.mjs";
-import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.mjs";
-import { filesUnder } from "../../../guards/src/files-under.mjs";
+import { protocolVerdict, RECAPTURE_COST } from "../../../worker-fleet/src/protocol-guard.ts";
+import { declareTreeWideGuard, walkTree } from "../../../guards/src/tree-wide-guard.ts";
+import { filesUnder } from "../../../guards/src/files-under.ts";
 
 // #716/#704: this file's own population is the whole tracked tree, not one file -- declared here
 // rather than inferred from its source, per ceo's ruling (2026-09-09) that the tree-wide-guard
@@ -188,7 +188,7 @@ const readsProtocolVersion = (source: string): boolean => source.includes("CAPTU
  */
 test("check-worker-code IMPORTS the working-tree protocol version", () => {
   const root = resolve(import.meta.dirname, "../../../..");
-  for (const file of ["packages/worker-fleet/src/check-worker-code.mjs"]) {
+  for (const file of ["packages/worker-fleet/src/check-worker-code.ts"]) {
     const source = readFileSync(resolve(root, file), "utf8");
     // The fleet repo's `check-worker-code.mjs` no longer carries `protocolBumpNote` (it was dropped there, after this
     // guard was written), so it reads no protocol version at all; a file that does not read one has nothing to import.
@@ -210,7 +210,7 @@ test("check-worker-code IMPORTS the working-tree protocol version", () => {
  */
 test("the git-HEAD comparison targets protocol-version.mjs, not the file the constant moved OUT of", () => {
   const root = resolve(import.meta.dirname, "../../../..");
-  for (const file of ["packages/worker-fleet/src/check-worker-code.mjs"]) {
+  for (const file of ["packages/worker-fleet/src/check-worker-code.ts"]) {
     const source = readFileSync(resolve(root, file), "utf8");
     // `git -C <the worker's source dir> show HEAD:./protocol-version.mjs` (#3394): the directory is asked of the
     // worker package rather than named here, so `./` is protocol-version.mjs's own directory.

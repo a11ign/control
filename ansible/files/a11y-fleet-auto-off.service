@@ -54,12 +54,12 @@ ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.m
 #   2. Fetch `main`, unless the tick's own fetch (the guard's, throttled to a minute) did it within the minute.
 #   3. `git merge --ff-only origin/main`. Never `checkout`: a checkout a deploy put on another ref is left standing, and the
 #      guard refuses it by name. Where `main` has moved on and this tree cannot fast-forward, it is refused, not forced.
-#   4. `node scripts/lay-layer.mjs screenreader-fleet`, AFTER the merge because it reads the pin from the lockfile this merge
+#   4. `node scripts/lay-layer.ts screenreader-fleet`, AFTER the merge because it reads the pin from the lockfile this merge
 #      brought. The layer is untracked (#3504), so the merge never touches it and the order cannot strand it; only a checkout
 #      that still tracks the old `packages/worker-fleet` (the one-time move off it) needs the layer laid BEFORE any merge,
 #      which `orchestrator` does by hand once. `controlPlaneCheckout()` is not used: it wants the layer as a clone with a
 #      `.git` (exit 4 without one), and the control plane holds it LAID, which is the only shape the guard judges (#3845).
-#   5. `node scripts/lay-layer.mjs control`, for the same reason and in the same place (#3976): the guard also judges
+#   5. `node scripts/lay-layer.ts control`, for the same reason and in the same place (#3976): the guard also judges
 #      `packages/control` against the tag `layers.json` pins for `control` (#3914), and `layers.json` is tracked, so a merge
 #      that moves that pin moves `main` while the laid copy stays at the old tag. From 08:31Z to 08:53Z on 2026-10-07 (#3940
 #      moved the pin to v0.1.5) every tick refused `stale-checkout -- layer control is laid at v0.1.4, main pins v0.1.5` and the
@@ -82,5 +82,5 @@ ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --
   { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
   { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
   git merge --ff-only --quiet origin/main && \
-  node scripts/lay-layer.mjs screenreader-fleet && \
-  node scripts/lay-layer.mjs control'
+  node scripts/lay-layer.ts screenreader-fleet && \
+  node scripts/lay-layer.ts control'

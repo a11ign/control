@@ -21,7 +21,7 @@ const healthyFleet = (workers: Parameters<typeof resolvePoolAtUseTime>[0]) =>
 
 test("with A11Y_WORKERS resolved from the control plane, the child sees it -- the bin itself never changes", async () => {
   const calls: unknown[][] = [];
-  const { status, env } = await withControlPlaneFleet("packages/worker-fleet/src/doctor.mjs", ["--json"], {
+  const { status, env } = await withControlPlaneFleet("packages/worker-fleet/src/doctor.ts", ["--json"], {
     readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" },
       { name: "a11y-worker-3", url: "http://192.0.2.3:8765" }] }),
     run: recordingRun(calls),
@@ -31,7 +31,7 @@ test("with A11Y_WORKERS resolved from the control plane, the child sees it -- th
   assert.equal(status, 0);
   assert.equal(env.A11Y_WORKERS, "http://192.0.2.2:8765,http://192.0.2.3:8765");
   assert.deepEqual(calls[0][0], process.execPath);
-  assert.deepEqual(calls[0][1], ["packages/worker-fleet/src/doctor.mjs", "--json"], "argv is forwarded verbatim");
+  assert.deepEqual(calls[0][1], ["packages/worker-fleet/src/doctor.ts", "--json"], "argv is forwarded verbatim");
   assert.equal((calls[0][2] as { env: Record<string, string> }).env.A11Y_WORKERS,
     "http://192.0.2.2:8765,http://192.0.2.3:8765", "and the SAME env reaches the actual spawn call");
 });
@@ -39,7 +39,7 @@ test("with A11Y_WORKERS resolved from the control plane, the child sees it -- th
 test("an operator's own A11Y_WORKER(S) is never overridden -- naming workers means managing them", async () => {
   const calls: unknown[][] = [];
   let readFleetCalled = false;
-  const { env } = await withControlPlaneFleet("packages/worker-fleet/src/check-worker-code.mjs", [], {
+  const { env } = await withControlPlaneFleet("packages/worker-fleet/src/check-worker-code.ts", [], {
     readFleet: () => { readFleetCalled = true; return { refusal: null, workers: [] }; },
     run: recordingRun(calls),
     env: { A11Y_WORKERS: "http://203.0.113.9:8765" },
@@ -50,7 +50,7 @@ test("an operator's own A11Y_WORKER(S) is never overridden -- naming workers mea
 
 test("A11Y_WORKER (singular) also counts as already named", async () => {
   let readFleetCalled = false;
-  await withControlPlaneFleet("packages/worker-fleet/src/doctor.mjs", [], {
+  await withControlPlaneFleet("packages/worker-fleet/src/doctor.ts", [], {
     readFleet: () => { readFleetCalled = true; return { refusal: null, workers: [] }; },
     run: recordingRun([]),
     env: { A11Y_WORKER: "http://203.0.113.9:8765" },
@@ -66,7 +66,7 @@ test("a control-plane refusal WARNS and falls through to the bin's own default -
   process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as never;
   let result: Awaited<ReturnType<typeof withControlPlaneFleet>>;
   try {
-    result = await withControlPlaneFleet("packages/worker-fleet/src/doctor.mjs", [], {
+    result = await withControlPlaneFleet("packages/worker-fleet/src/doctor.ts", [], {
       readFleet: () => ({ refusal: "no inventory exists at /etc/a11ign/inventory.yml on the control plane", workers: [] }),
       run: recordingRun(calls),
       env: {},
@@ -82,7 +82,7 @@ test("a control-plane refusal WARNS and falls through to the bin's own default -
 
 test("MUTATION TARGET: dropping the A11Y_WORKER(S)-already-named check would silently overwrite an "
   + "operator's own explicit choice with the control plane's", async () => {
-  const { env } = await withControlPlaneFleet("packages/worker-fleet/src/doctor.mjs", [], {
+  const { env } = await withControlPlaneFleet("packages/worker-fleet/src/doctor.ts", [], {
     readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-9", url: "http://192.0.2.9:8765" }] }),
     run: recordingRun([]),
     resolvePool: healthyFleet,
@@ -165,7 +165,7 @@ test("#2790: the wrapper puts the moved address in A11Y_WORKERS and REPORTS the 
   process.stderr.write = ((chunk: string) => { written.push(chunk); return true; }) as never;
   let env: NodeJS.ProcessEnv;
   try {
-    ({ env } = await withControlPlaneFleet("packages/worker-fleet/src/doctor.mjs", [], {
+    ({ env } = await withControlPlaneFleet("packages/worker-fleet/src/doctor.ts", [], {
       readFleet: () => ({ refusal: null, workers: [worker(2), worker(3, MAC_3), worker(4)] }),
       run: recordingRun([]),
       resolvePool: (workers) => resolvePoolAtUseTime(workers, {
@@ -190,7 +190,7 @@ test("#2790: with NO worker left the wrapper refuses, says so, and never spawns 
   process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as never;
   let result: Awaited<ReturnType<typeof withControlPlaneFleet>>;
   try {
-    result = await withControlPlaneFleet("packages/worker-fleet/src/doctor.mjs", [], {
+    result = await withControlPlaneFleet("packages/worker-fleet/src/doctor.ts", [], {
       readFleet: () => ({ refusal: null, workers: [worker(2)] }),
       run: recordingRun(calls),
       resolvePool: (workers) => resolvePoolAtUseTime(workers, { probe: answersAt(), macRead: macTable({}) }),

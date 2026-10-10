@@ -14,14 +14,14 @@
  * The related rule — that nothing spawns a sibling by a cwd-relative path — is checked repo-wide in
  * `packages/lab/src/packaging/spawned-paths.test.ts`, because the split found three instances of it.
  */
-import { declareWalkScope } from "../../../guards/src/walk-scope.mjs";
+import { declareWalkScope } from "../../../guards/src/walk-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { isAbsolute, join } from "node:path";
 
-import { fleetScriptPaths } from "../../../worker-fleet/src/fleet-scripts.mjs";
+import { fleetScriptPaths } from "../../../worker-fleet/src/fleet-scripts.ts";
 
 // #929: THIS GUARD READS ONLY `packages/lab`, `packages/worker-fleet`, so a diff that cannot reach it need not run this file.
 // Undeclared means unbounded, which is why the selector runs 173 always-run guards on every pull
@@ -46,7 +46,7 @@ test("no module resolves a fleet asset for itself", () => {
   // The regression is a second definition, not a wrong one: a copy that agrees today is a copy that can stop
   // agreeing. Any module needing an asset path asks `fleetScriptPaths()`.
   const offenders = readdirSync(here)
-    .filter((f) => (f.endsWith(".mjs") || f.endsWith(".ts")) && f !== "fleet-scripts.mjs" && !f.endsWith(".test.ts"))
+    .filter((f) => (f.endsWith(".mjs") || f.endsWith(".ts")) && f !== "fleet-scripts.ts" && !f.endsWith(".test.ts"))
     .filter((f) => /new URL\(\s*["'][^"']*local-worker\//.test(readFileSync(join(here, f), "utf8")));
   assert.deepEqual(offenders, [],
     `${offenders.join(", ")} resolve(s) a local-worker asset directly. Use fleetScriptPaths() — this package "

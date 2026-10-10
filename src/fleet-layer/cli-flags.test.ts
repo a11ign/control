@@ -48,8 +48,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { stripComments } from "../../../evidence/src/source-text.ts";
-import { unknownFlags, didYouMean, nameOf, refuseUnknownFlags, flagValue } from "../../../worker-fleet/src/cli-flags.mjs";
-import { commandLineModules } from "../../../worker-fleet/src/command-line-census.mjs";
+import { unknownFlags, didYouMean, nameOf, refuseUnknownFlags, flagValue } from "../../../worker-fleet/src/cli-flags.ts";
+import { commandLineModules } from "../../../worker-fleet/src/command-line-census.ts";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -61,16 +61,16 @@ const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
  * one. Guarding one means deleting its line.
  */
 const UNGUARDED: Record<string, string> = {
-  "scripts/run.mjs":
+  "scripts/run.ts":
     "the command DISPATCHER (A3). Its argv is `<command name> [everything the command takes]`, and "
     + "everything after the name belongs to the child, not to it -- `refuseUnknownFlags` here would "
-    + "refuse `node scripts/run.mjs merge-guard --pr=123` for a flag that is `merge-guard`'s and is "
+    + "refuse `node scripts/run.ts merge-guard --pr=123` for a flag that is `merge-guard`'s and is "
     + "perfectly valid. It refuses on its own terms instead, which is the same guarantee by the only "
     + "route open to it: an unrecognised command NAME is refused with the near miss named, never ignored, "
     + "because a dispatcher that ran nothing and exited 0 would make \"no such command\" and \"the "
     + "command found nothing\" the same observation. `command-dispatcher.test.ts` pins that refusal.",
-  "scripts/pnpm.mjs":
-    "a PASSTHROUGH (#3141): `node scripts/pnpm.mjs run X --silent -- --flag` is `pnpm run X --silent -- --flag` on a "
+  "scripts/pnpm.ts":
+    "a PASSTHROUGH (#3141): `node scripts/pnpm.ts run X --silent -- --flag` is `pnpm run X --silent -- --flag` on a "
     + "box with no `pnpm` on PATH, so every argument belongs to pnpm and is handed over verbatim; "
     + "`refuseUnknownFlags` here would refuse `--silent`. Nothing is dropped, which is the guarantee that guard "
     + "exists for: pnpm itself refuses a script or flag it does not know, and its exit status is returned.",
@@ -91,7 +91,7 @@ const UNGUARDED: Record<string, string> = {
   // ITS ONE FLAG IS `--evaluating`, read at the top of `main()`. A mistyped one is discarded and the
   // command answers the stricter question instead — which fails closed, and is the reason this exemption
   // is affordable at all.
-  "scripts/check-schema-migration.mjs":
+  "scripts/check-schema-migration.ts":
     "copied into a throwaway directory and run there by `migration-gate-refuses.test.ts`, so a workspace "
     + "import of `cli-flags.mjs` dies on startup with ERR_MODULE_NOT_FOUND. Its one flag, `--evaluating`, "
     + "fails CLOSED when discarded -- the command answers the stricter question -- which is what makes "
@@ -105,7 +105,7 @@ const UNGUARDED: Record<string, string> = {
   // precedent above rather than accepting the same bind twice. Its unknown-flag check is now a bare
   // `process.argv.slice(3).length > 0` and fails CLOSED (exit 2) on anything unexpected -- the same
   // affordability argument as its sibling entry.
-  "packages/guards/src/piped-exit-status-guard.mjs":
+  "packages/guards/src/piped-exit-status-guard.ts":
     "runs in every fresh worktree via `scripts/git-hooks/pre-commit`, including one with no `node_modules` "
     + "yet -- a workspace import of `cli-flags.mjs` there threw ERR_MODULE_NOT_FOUND and was misread as a "
     + "hazard finding on every staged line (#535). Its extra-argument check is now a bare argv length "
@@ -305,7 +305,7 @@ test("the guard fires through a SYMLINK, because npm's own .bin entries are syml
     writeFileSync(real, [
       `import { realpathSync } from "node:fs";`,
       `import { pathToFileURL } from "node:url";`,
-      `import { refuseUnknownFlags } from ${JSON.stringify(pathToFileURL(join(REPO, "packages/worker-fleet/src/cli-flags.mjs")).href)};`,
+      `import { refuseUnknownFlags } from ${JSON.stringify(pathToFileURL(join(REPO, "packages/worker-fleet/src/cli-flags.ts")).href)};`,
       `if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) {`,
       `  refuseUnknownFlags(["--known"], { entry: import.meta.url, command: "real-command" });`,
       `  console.log("RAN");`,

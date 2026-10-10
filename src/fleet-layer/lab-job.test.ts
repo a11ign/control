@@ -10,13 +10,13 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.mjs";
+import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
 
 /** The lab's scripts directory, resolved the same way `read` resolves the playbooks. */
 const LAB_SCRIPTS = fileURLToPath(new URL("../../../lab/scripts/", import.meta.url));
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { stripComments } from "../../../guards/src/local-import-closure.mjs";
+import { stripComments } from "../../../guards/src/local-import-closure.ts";
 
 const read = (name: string) =>
   readFileSync(fileURLToPath(new URL(`../../ansible/${name}`, import.meta.url)), "utf8");

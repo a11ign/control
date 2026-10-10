@@ -19,7 +19,7 @@
  */
 import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 
 /** Exit codes are the contract: 0 nothing failed, 1 something did. */
 export const EXIT = { QUIET: 0, ATTENTION: 1 };

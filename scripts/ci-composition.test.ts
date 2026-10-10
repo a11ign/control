@@ -18,12 +18,15 @@ test("the core is laid at a full commit sha, never a branch", () => {
   assert.match(ci, /ref: "\$\{\{ env\.CORE_REF \}\}"/, "the checkout uses the pin");
 });
 
-test("this repository's package replaces the core's own before anything runs, as the files the core knows it by", () => {
+test("this repository's package replaces the core's own after the core's install and before anything checks it, as the files the core knows it by", () => {
+  const install = /- run: pnpm install --frozen-lockfile\n\s+working-directory: core/.exec(ci)?.index ?? -1;
   const lay = ci.indexOf("rm -rf core/packages/control");
+  assert.ok(install > 0, "positive control: the core's install step is found");
   assert.ok(lay > 0, "positive control: the laying step is found");
-  assert.ok(lay < ci.indexOf("pnpm install --frozen-lockfile"), "laid before the install");
+  // a11ign/a11ign#4516: the core's `prepare` (run by that install) lays the core's own control, so laying first would be replaced by it.
+  assert.ok(install < lay, "laid after the install");
   assert.ok(lay < ci.indexOf("pnpm exec rstest run"), "laid before the tests");
-  assert.match(ci, /pnpm exec eslint packages\/control/);
+  assert.match(ci, /pnpm exec eslint --no-ignore packages\/control/);
   assert.match(ci, /tsc --noEmit -p tsconfig\.control\.json/);
   assert.match(ci, /cp -R control\/src control\/ansible control\/layers\.json control\/CLAUDE\.md control\/README\.md core\/packages\/control\//, "the package is the root's files, not a directory of it");
   assert.match(ci, /control\/package\.json > core\/packages\/control\/package\.json/, "the laid manifest is cut from the root's");

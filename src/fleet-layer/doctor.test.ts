@@ -24,8 +24,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   resolvesToThisCheckout, checkoutRootFor, missingExportTargets, fleetAgreementLine,
-} from "../../../worker-fleet/src/doctor.mjs";
-import { MUST_MATCH } from "../../../worker-fleet/src/fleet-consistency.mjs";
+} from "../../../worker-fleet/src/doctor.ts";
+import { MUST_MATCH } from "../../../worker-fleet/src/fleet-consistency.ts";
 
 // --- resolvesToThisCheckout: pure ---
 
@@ -329,7 +329,7 @@ test("#1997: the CALL SITE uses the derived line -- an extracted helper leaves i
   // pass on a `checkFleetConsistency` that ignores it and retypes the four names inline, because nothing
   // drives that function: it needs probed workers and it only ever calls `add()`. So the call is asserted
   // on the source, the same narrow exception `fleet-consistency.test.ts` states for `server.mjs`.
-  const source = readFileSync(new URL("../../../worker-fleet/src/doctor.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../../worker-fleet/src/doctor.ts", import.meta.url), "utf8");
   const start = source.indexOf("function checkFleetConsistency(");
   const end = source.indexOf("export function fleetAgreementLine(");
   assert.ok(start !== -1 && end > start, "doctor.mjs no longer has a checkFleetConsistency block to read");

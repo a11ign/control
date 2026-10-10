@@ -16,7 +16,7 @@ import {
 
 /** `reconcile`'s answer where the case declares a worker that answered: an `ok` finding, which is the one carrying the MAC reading. */
 type Ok = Extract<Finding, { state: "ok" }>;
-import { workersFromInventory } from "../../worker-fleet/src/fleet-env.mjs";
+import { workersFromInventory } from "../../worker-fleet/src/fleet-env.ts";
 
 /**
  * THE FIXTURE ADDRESSES, BUILT FROM OCTETS rather than written out -- and this file is why that matters

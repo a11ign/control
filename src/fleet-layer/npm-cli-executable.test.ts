@@ -29,13 +29,13 @@ import {
   resolveNpmCliScript as rootResolve,
   npmCliInvocation as rootInvocation,
   pnpmCliInvocation as rootPnpm,
-} from "../../../../scripts/npm-cli-executable.mjs";
+} from "../../../../scripts/npm-cli-executable.ts";
 import {
   npmCliScriptCandidates as localCandidates,
   resolveNpmCliScript as localResolve,
   npmCliInvocation as localInvocation,
   pnpmCliInvocation as localPnpm,
-} from "../../../worker-fleet/src/npm-cli-executable.mjs";
+} from "../../../worker-fleet/src/npm-cli-executable.ts";
 
 /** Runs `fn` with `process.execPath` overridden, and restores it afterwards even if `fn` throws. */
 function withExecPath(execPath: string, fn: () => void): void {

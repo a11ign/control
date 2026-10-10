@@ -2,7 +2,7 @@
 /**
  * ONE PORT, DECLARED THREE TIMES, IN THREE LANGUAGES, WITH NOTHING COMPARING THEM.
  *
- *   packages/worker-fleet/src/fleet-env.mjs          DEFAULT_WORKER_PORT = 8765   what NODE asks on
+ *   packages/worker-fleet/src/fleet-env.ts          DEFAULT_WORKER_PORT = 8765   what NODE asks on
  *   packages/control/ansible/group_vars/…yml         a11y_port: 8765              what the FLEET answers on
  *   packages/control/ansible/roles/worker/defaults/  worker_port: 8765            what the ROLE opens
  *
@@ -32,7 +32,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_WORKER_PORT } from "../../../worker-fleet/src/fleet-env.mjs";
+import { DEFAULT_WORKER_PORT } from "../../../worker-fleet/src/fleet-env.ts";
 
 const repo = (path: string) => readFileSync(fileURLToPath(new URL(`../../../../${path}`, import.meta.url)), "utf8");
 

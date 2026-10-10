@@ -42,7 +42,7 @@ test("NO THIRD-PARTY DEPENDENCIES ARE DECLARED — the whole reason this package
 
 test("NOTHING IS IMPORTED BY PACKAGE NAME, TRANSITIVELY — one hop is not a boundary", () => {
   // The failure prose would miss: a package-name import works on a laptop and CRASHES on the control
-  // plane. `../../worker-fleet/src/cli-flags.mjs` resolves from a raw checkout; the export path does not.
+  // plane. `../../worker-fleet/src/cli-flags.ts` resolves from a raw checkout; the export path does not.
   //
   // TRANSITIVE, and that was learned by breaking it. This test checked only `packages/control`'s OWN
   // imports, so when `fleet-playbook.ts` began importing `check-worker-code.mjs` BY PATH — which passes

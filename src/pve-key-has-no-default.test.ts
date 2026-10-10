@@ -23,7 +23,7 @@
  * tests. Verified by running it (#248's commit message records the method). The one-word fix produces a
  * guard that silently permits exactly what it was added to refuse.
  */
-import { declareWalkScope } from "../../guards/src/walk-scope.mjs";
+import { declareWalkScope } from "../../guards/src/walk-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, existsSync } from "node:fs";

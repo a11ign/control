@@ -54,7 +54,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { assertWorkersServe } from "../../worker-fleet/src/code-drift.mjs";
+import { assertWorkersServe } from "../../worker-fleet/src/code-drift.ts";
 import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.ts";
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same

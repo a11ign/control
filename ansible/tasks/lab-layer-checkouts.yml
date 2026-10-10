@@ -13,7 +13,7 @@
 # layer and the path. The core's tree never stands in for a layer that is missing.
 #
 # A LAYER MAY ALSO BE HELD LAID, NOT CHECKED OUT (#3819). `pnpm install` runs `prepare`, which runs
-# `scripts/lay-layer.mjs`, and that REPLACES the layer's directory with its `src/` at the tag the lockfile pins, plus
+# `scripts/lay-layer.ts`, and that REPLACES the layer's directory with its `src/` at the tag the lockfile pins, plus
 # `.layer-ref` naming the tag, and no `.git`. So a host that has installed holds the layer as a laid tree, and a check
 # that wanted a `.git` refused every job the day the second layer left the core (#3504). A laid tree is accepted ONLY
 # as `.layer-ref` beside `src/` with no `.git`: the core's own tree at that path (`src/` and no `.layer-ref`) is still
@@ -30,7 +30,7 @@
 # laid it. So when the core just moved (`lab_core_moved`) and the path holds no `src/`, the layer is left to the install and not judged here;
 # `run-job.yml`'s read AFTER the install judges what it laid against `layer_refs`, and refuses a tree that is not the layer. A directory with
 # `src/` and no `.layer-ref` is the core's own tree and still refuses, and so does an absent layer when the core did NOT move: nothing lays it.
-# NOT EVERY LAYER IS LAID BY THE INSTALL: the core's `prepare` lays `screenreader-fleet`, `lab` and `control`, and no `lay-layer.mjs` call names
+# NOT EVERY LAYER IS LAID BY THE INSTALL: the core's `prepare` lays `screenreader-fleet`, `lab` and `control`, and no `lay-layer.ts` call names
 # `nvda-worker`, so an absent `nvda-worker` is deferred here and then REFUSED by that read after the install, naming the layer and the path.
 #
 # `layer_refs` is `{ <layer>: <ref> }`, passed `-e '{"layer_refs": {"nvda-worker": "<ref>"}}'` (lab:job forwards
@@ -95,7 +95,7 @@
 
 - name: "Or is it laid: the source beside it"
   # The marker alone is not a laid tree: a rebase over the commit that deleted the tracked layer left `.layer-ref`
-  # and removed `src/` (`scripts/lay-layer.mjs` says so), and that is an empty directory, not the layer.
+  # and removed `src/` (`scripts/lay-layer.ts` says so), and that is an empty directory, not the layer.
   ansible.builtin.stat:
     path: "{{ lab_repo_path }}/{{ item.value.path }}/src"
   loop: "{{ a11y_layer_checkouts }}"
@@ -114,7 +114,7 @@
 - name: "Which layers the install that follows will lay: the core just moved and nothing of the layer is at its path"
   # The three stats above, read together, and only when the core moved: the install runs when, and only when, `lab_core_moved`.
   # `src/` absent is the test, not the directory absent: a pre-split install leaves untracked `node_modules` where the layer was,
-  # and `scripts/lay-layer.mjs` replaces whatever is there that is not a git clone.
+  # and `scripts/lay-layer.ts` replaces whatever is there that is not a git clone.
   ansible.builtin.set_fact:
     lab_layer_awaiting_install: >-
       {{ ((a11y_layer_checkouts | map(attribute='key') | list)
@@ -149,7 +149,7 @@
   register: lab_layer_laid_tag
 
 - name: "A laid tag must look like a tag"
-  # `@scope/name@x.y.z` is what `lay-layer.mjs` writes: the `@` is why this is not `LAYER_REF`'s pattern, and the
+  # `@scope/name@x.y.z` is what `lay-layer.ts` writes: the `@` is why this is not `LAYER_REF`'s pattern, and the
   # absence of `*?[` is why it can be a `git ls-remote` pattern below.
   ansible.builtin.assert:
     that:

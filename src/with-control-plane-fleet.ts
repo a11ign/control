@@ -12,7 +12,7 @@
 // decisive, regardless of whether that copy happens to run without a key today.
 //
 // This wrapper achieves the identical operational outcome with zero risk to that boundary:
-// `resolveWorkerPool`'s own precedence (`packages/worker-fleet/src/fleet-env.mjs`) already puts
+// `resolveWorkerPool`'s own precedence (`packages/worker-fleet/src/fleet-env.ts`) already puts
 // `A11Y_WORKER(S)` first, before it ever touches a local inventory.yml -- so supplying that one
 // environment variable is enough. Nothing about ssh, `A11Y_PVE_KEY`, or the control plane ever enters
 // `@a11ign/screenreader-fleet`'s source or its published surface; `doctor.mjs`/`check-worker-code.mjs` run
@@ -34,7 +34,7 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { readControlPlaneFleet } from "./control-plane-fleet.ts";
 import { resolveMovedByMacLive, subnetOf } from "./fleet-status.ts";
-import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
+import { requestJson } from "../../worker-fleet/src/worker-http.ts";
 
 const HEALTH_TIMEOUT_MS = 5_000;
 const NO_WORKER_LEFT_STATUS = 1;

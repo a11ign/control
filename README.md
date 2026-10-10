@@ -72,6 +72,8 @@ pnpm exec eslint packages/control && pnpm exec tsc --noEmit -p tsconfig.control.
 pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include "packages/control/**/*.test.ts"
 ```
 
+The fleet layer is laid by the core, at the tag the core's lockfile pins, and `src/` names its files by that layer's extension: `.ts` since `@a11ign/screenreader-fleet` 0.6.0 (a11ign/a11ign#4516), `.mjs` before. So a core at `CORE_REF` that still pins 0.5.3 cannot resolve this tree's imports; move `CORE_REF` to a core that pins 0.6.0 or later.
+
 Bumping `CORE_REF` is a pull request: the only way the core's changes reach this repository. `pnpm test` here runs only this repository's own checks (`scripts/`), and `pnpm run layout-check` is
 `@a11ign/toolchain`'s check that the package stays at the root (one README, one manifest, no workspace file).
 

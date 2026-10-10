@@ -43,7 +43,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // #2171: shared, because four private copies of this walk descended a directory symlink and threw ELOOP.
-import { filesUnder } from "../../../guards/src/files-under.mjs";
+import { filesUnder } from "../../../guards/src/files-under.ts";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -52,7 +52,7 @@ const POISON = "@guidepup/guidepup";
 
 /** Importing this by NAME reaches POISON, because the package index re-exports `capture-core.mjs`. */
 const WORKER_PACKAGE = "@a11ign/screenreader-worker";
-const WORKER_INDEX = "packages/nvda-worker/src/index.mjs";
+const WORKER_INDEX = "packages/nvda-worker/src/index.ts";
 /** The only file left that reaches guidepup statically ON PURPOSE -- named once, used by the allowlist
  *  below and by the anti-vacuity test that proves the walker still works (#1772). */
 const VOICEOVER_SPIKE = "packages/lab/src/harnesses/run-spike.ts";
@@ -129,8 +129,8 @@ function resolveLocal(fromFile: string, specifier: string): string | null {
   if (specifier === WORKER_PACKAGE) return WORKER_INDEX;
   if (specifier.startsWith(`${WORKER_PACKAGE}/`)) {
     const sub = specifier.slice(WORKER_PACKAGE.length + 1);
-    return existsSync(join(REPO, `packages/nvda-worker/src/${sub}.mjs`))
-      ? `packages/nvda-worker/src/${sub}.mjs` : null;
+    return existsSync(join(REPO, `packages/nvda-worker/src/${sub}.ts`))
+      ? `packages/nvda-worker/src/${sub}.ts` : null;
   }
   if (!specifier.startsWith(".")) return null;
   const base = resolve(REPO, dirname(fromFile), specifier);
@@ -182,7 +182,7 @@ test("the poison really is reachable from a real file, or this guard proves noth
 });
 
 test("the worker package's own index no longer reaches the driver statically -- guidepup is a lazy import now (#1772)", () => {
-  // `capture-setup.mjs` and `capture-probes.mjs` used to `import … from "@guidepup/guidepup"` at the top of
+  // `capture-setup.ts` and `capture-probes.ts` used to `import … from "@guidepup/guidepup"` at the top of
   // the file, so merely importing `@a11ign/screenreader-worker` BY NAME crashed on any host without a screen
   // reader -- even over the `--worker` HTTP path, which never drives NVDA locally and never needed that
   // throw at all. Both now reach the driver through a dynamic `await import()` inside the function that
@@ -191,7 +191,7 @@ test("the worker package's own index no longer reaches the driver statically -- 
   // has gone back to loading at import time.
   const chain = pathToDriver(WORKER_INDEX);
   assert.equal(chain, null, `${WORKER_INDEX} reaches ${POISON} statically again via `
-    + `${chain?.join(" -> ")}; the guidepup import in capture-setup.mjs/capture-probes.mjs must stay a `
+    + `${chain?.join(" -> ")}; the guidepup import in capture-setup.ts/capture-probes.ts must stay a `
     + "dynamic import() inside the function that needs it.");
 });
 
@@ -205,8 +205,8 @@ test("no portable module statically reaches the capture driver", () => {
     `A module that runs on the Linux lab (or in the shipped CLI) loads ${POISON} at import time, which `
     + "throws `No available supported screen readers` there. macOS resolves VoiceOver, so every local "
     + "check passes and only the lab fails.\n"
-    + `Import the specific module by PATH rather than ${WORKER_PACKAGE} — code-version.mjs, `
-    + "capture-pure.mjs and worker-files.mjs are dependency-free for this reason — or reach the driver "
+    + `Import the specific module by PATH rather than ${WORKER_PACKAGE} — code-version.ts, `
+    + "capture-pure.ts and worker-files.ts are dependency-free for this reason — or reach the driver "
     + "through a dynamic `await import()` inside the function that needs it, as capture-fixtures.mjs does.");
 });
 

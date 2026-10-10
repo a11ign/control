@@ -45,7 +45,7 @@
 import dgram from "node:dgram";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { groupPerLine, WORKER_GROUP } from "../../worker-fleet/src/fleet-env.mjs";
+import { groupPerLine, WORKER_GROUP } from "../../worker-fleet/src/fleet-env.ts";
 import { inventorySources, inventoryReadScript, parseInventoryReads, sshToControlPlane, macsByHost }
   from "./control-plane-fleet.ts";
 

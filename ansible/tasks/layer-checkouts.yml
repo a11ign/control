@@ -44,7 +44,7 @@
   # and is not a checkout (an old `node_modules` is what is left behind) is REFUSED by name, not cloned over.
   #
   # EXCEPT A LAID TREE (#3819): `.layer-ref` beside `src/` and no `.git`, which is what the clone becomes once
-  # `pnpm install` has run on this box (`prepare` runs `scripts/lay-layer.mjs`, which replaces the directory). It
+  # `pnpm install` has run on this box (`prepare` runs `scripts/lay-layer.ts`, which replaces the directory). It
   # is reported `laid` and is left alone. `src/` is required too: the marker alone survived a rebase that removed
   # the code. The core's own copy of the layer (`src/`, no marker) is neither, and is refused as before.
   ansible.windows.win_shell: |

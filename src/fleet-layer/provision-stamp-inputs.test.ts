@@ -45,7 +45,7 @@
  * invalidates the corpus, which is a decision for whoever owns the live recapture, not something a test
  * should decide unilaterally by asserting a bigger list into existence.
  */
-import { declareWalkScope } from "../../../guards/src/walk-scope.mjs";
+import { declareWalkScope } from "../../../guards/src/walk-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -57,7 +57,7 @@ import { stampEnvironmentFiles } from "../../../../scripts/test-support/stamp-fi
 // request. The declaration is ENFORCED rather than trusted: `declareWalkScope` observes what this
 // file actually reads and fails it here if anything lands outside the scope -- so a scope that is
 // too narrow is loud, never a guard that silently stopped running.
-export const WALK_SCOPE = ["packages/control","packages/worker-fleet","scripts/test-support"];
+export const WALK_SCOPE = ["layers.json","packages/control","packages/worker-fleet","scripts/test-support"];
 await declareWalkScope(import.meta.url);
 
 const ROLE = fileURLToPath(new URL("../../ansible/roles/worker/", import.meta.url));

@@ -126,10 +126,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
-import { requestJson } from "../../worker-fleet/src/worker-http.mjs";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { requestJson } from "../../worker-fleet/src/worker-http.ts";
 import { CONTROL_LAYER, laidControl, layerDeclaration, layerOwning, layerPinTag, pinnedLayerTag } from "./layer-checkouts.ts";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
 import { inventoryPathFor } from "./control-plane-fleet.ts";
 import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
@@ -532,7 +532,7 @@ export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof
  * itself included, read as six files differing: the timer refused every tick for hours. Dropping those files from the
  * comparison would blind it to the wake proof and the busy check, which live in them (#3275). What `main` says about a layer is the
  * release its lockfile pins, so that is what the laid tree is held to: same tag or refusal, and a layer that cannot be read
- * is CANNOT_TELL, never "same". The laid copy is the tag's `src/` and nothing else (`scripts/lay-layer.mjs`), so equal tags
+ * is CANNOT_TELL, never "same". The laid copy is the tag's `src/` and nothing else (`scripts/lay-layer.ts`), so equal tags
  * are equal files.
  *
  * Only the laid shape (`.layer-ref` beside `src/`) is judged: a clone at the layer's path holds the layer repository's own
@@ -541,7 +541,7 @@ export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof
 export function judgeLaidLayer({ name, dir, path, tag }: LayerAtItsPin): ReturnType<JudgeLayer> {
   const refFile = join(dir, ".layer-ref");
   if (existsSync(join(dir, ".git")) || !existsSync(refFile) || !existsSync(join(dir, "src"))) {
-    return { cannotTell: `layer ${name} at ${path} is not a laid tree (\`.layer-ref\` beside \`src/\`, no \`.git\`): run \`node scripts/lay-layer.mjs ${name}\`` };
+    return { cannotTell: `layer ${name} at ${path} is not a laid tree (\`.layer-ref\` beside \`src/\`, no \`.git\`): run \`node scripts/lay-layer.ts ${name}\`` };
   }
   const laid = readFileSync(refFile, "utf8").trim();
   return { differing: laid === tag ? [] : [`${path} (layer ${name} is laid at ${laid}, main pins ${tag})`] };

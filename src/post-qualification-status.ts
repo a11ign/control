@@ -41,7 +41,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { flagValue, refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.mjs";
+import { flagValue, refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 import { qualificationStatus } from "../../lab/src/gates/qualification-status.mjs";
 
 /** What the lab job printed, as the gate reads it; `{}` is "no readable verdict". */

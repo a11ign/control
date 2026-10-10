@@ -24,15 +24,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { layerFile } from "../../../guards/src/layer-file.mjs";
+import { join } from "node:path";
+import { layerSourceDir } from "../layer-checkouts.ts";
 import { parse } from "yaml";
-// BY PACKAGE NAME (#2613), through the resolver: `browsers.mjs` is not in the package's `exports` map, and adding an export
-// to the layer's public surface for a test is a decision for the layer. `layerFile` answers "where is this file of
-// `@a11ign/screenreader-worker`" the same way in the monorepo and in an install, and refuses a file the package does not publish.
-// Dynamic, because a path is not a specifier. The source itself is imported (not scraped): `browsers.mjs` is safe to load,
-// unlike `server.mjs`, which constructs a guidepup ScreenReader at module scope.
+// THROUGH THE LAYER RESOLVER (#4516): `browsers.ts` is not in the package's `exports` map, and adding an export to the layer's public surface for a
+// test is a decision for the layer. From screenreader-worker v0.9.0 the PACKAGE ships `dist/` alone (and `dist/` has no `browsers`), so the file is
+// read where a host holds it: in the layer's checkout, which `layers.json` declares and `layerSourceDir` answers for.
+// Dynamic, because a path is not a specifier. The source itself is imported (not scraped): `browsers.ts` is safe to load,
+// unlike `server.ts`, which constructs a guidepup ScreenReader at module scope.
 const { BROWSERS, browserProfileDir } = await import(
-  pathToFileURL(layerFile("@a11ign/screenreader-worker", "src/browsers.mjs", { from: import.meta.dirname })).href);
+  pathToFileURL(join(layerSourceDir("nvda-worker"), "browsers.ts")).href);
 
 const BESPOKE = fileURLToPath(
   new URL("../../ansible/roles/worker/tasks/bespoke.yml", import.meta.url));

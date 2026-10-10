@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   workersFromInventory, portFromGroupVars, DEFAULT_WORKER_PORT, configuredWorkers, namedInventoryWorkers,
-  fleetEnvOutput, hostsOutOfCaptureSet } from "../../../worker-fleet/src/fleet-env.mjs";
+  fleetEnvOutput, hostsOutOfCaptureSet } from "../../../worker-fleet/src/fleet-env.ts";
 
 test("hosts become worker URLs on the declared port", () => {
   const workers = workersFromInventory([

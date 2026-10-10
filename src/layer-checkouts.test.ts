@@ -12,13 +12,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerPinTag, layersFrom, releaseTag } from "./layer-checkouts.ts";
-import { workerSourceDirty } from "../../worker-fleet/src/code-drift.mjs";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.mjs";
+import { workerSourceDirty } from "../../worker-fleet/src/code-drift.ts";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { withGitSandbox } from "../../../scripts/test-support/git-sandbox.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -26,13 +25,14 @@ const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
 
 /**
  * THE LAYER IS NOT IN THIS TREE (#3447): it lives in `a11ign/screenreader-worker`, and a host holds a checkout of it. A copy of the
- * PUBLISHED package stands in for that checkout, placed at the path `layers.json` declares in a root of its own, so these tests
- * run the real resolver over the real manifest and the real worker files, and name no path into the tree they are in.
+ * LAID layer stands in for that checkout, placed at the path `layers.json` declares in a root of its own, so these tests run the real
+ * resolver over the real manifest and the real worker files. It is the laid layer and no longer the published package because, from
+ * v0.9.0 (#4516), the package ships `dist/` alone and a host's checkout holds `src/*.ts`: the shape the resolver reads is the laid one.
  */
 const MANIFEST = JSON.parse(read("packages/control/layers.json"));
-const PUBLISHED = dirname(createRequire(import.meta.url).resolve("@a11ign/screenreader-worker/package.json"));
+const LAID = resolve(REPO, MANIFEST.layers["nvda-worker"].path);
 const CHECKOUT = mkdtempSync(join(tmpdir(), "layer-checkout-"));
-cpSync(PUBLISHED, join(CHECKOUT, MANIFEST.layers["nvda-worker"].path), { recursive: true, filter: (src) => !/(^|\/)node_modules(\/|$)/.test(src.slice(PUBLISHED.length)) });
+cpSync(LAID, join(CHECKOUT, MANIFEST.layers["nvda-worker"].path), { recursive: true });
 after(() => rmSync(CHECKOUT, { recursive: true, force: true }));
 const { layerRoot, layerSourceDir, layerCodeVersion } = layersFrom({ manifest: MANIFEST, root: CHECKOUT });
 
@@ -47,8 +47,8 @@ const FIVE_READERS = [
   "packages/control/src/fleet-playbook.ts",
   "packages/control/src/lab-job.ts",
   "packages/control/ansible/deploy.yml",
-  "packages/worker-fleet/src/code-drift.mjs",
-  "packages/worker-fleet/src/check-worker-code.mjs",
+  "packages/worker-fleet/src/code-drift.ts",
+  "packages/worker-fleet/src/check-worker-code.ts",
 ];
 
 /** Comments out: a path named in PROSE is not a path that is read. `//`, block and `#` comments. */
@@ -61,7 +61,7 @@ const namingTheWorkerPath = (source: string) => codeLines(source).filter((l) => 
 
 /** A layer at a second path, holding every file the hasher reads, each with `body` as its content. */
 async function fixtureRepo(body: string): Promise<string> {
-  const { WORKER_FILES } = await fromLayer("worker-files.mjs");
+  const { WORKER_FILES } = await fromLayer("worker-files.ts");
   const root = mkdtempSync(join(tmpdir(), "layer-checkouts-"));
   for (const file of WORKER_FILES as string[]) {
     const target = join(root, "elsewhere", "src", file);
@@ -78,13 +78,13 @@ test("layers.json declares nvda-worker and screenreader-fleet and NOTHING else, 
 });
 
 test("layerSourceDir(\"nvda-worker\") is the directory workerSourceDir() names (today, the same one)", async () => {
-  const { workerSourceDir } = await fromLayer("code-version.mjs");
+  const { workerSourceDir } = await fromLayer("code-version.ts");
   assert.equal(layerSourceDir("nvda-worker"), workerSourceDir());
   assert.equal(layerSourceDir("nvda-worker"), `${join(layerRoot("nvda-worker"), "src")}/`);
 });
 
 test("layerCodeVersion is the hash the worker's own hasher gives over that directory", async () => {
-  const { codeVersion, workerSourceDir } = await fromLayer("code-version.mjs");
+  const { codeVersion, workerSourceDir } = await fromLayer("code-version.ts");
   const hash = await layerCodeVersion("nvda-worker");
   assert.match(hash, /^[0-9a-f]{16}$/);
   assert.equal(hash, codeVersion(workerSourceDir()));
@@ -123,13 +123,41 @@ test("#3761: layerDeclaration names a declared layer WITHOUT its directory exist
 
 test("POSITIVE CONTROL: a layer at a second path gives a different codeVersion from the real one", async () => {
   const root = await fixtureRepo("a fixture, not the worker\n");
-  const { codeVersion } = await fromLayer("code-version.mjs");
+  const { codeVersion } = await fromLayer("code-version.ts");
   try {
     const fixture = layersFrom({ manifest: { layers: { "nvda-worker": { path: "elsewhere" } } }, root });
     const there = codeVersion(fixture.layerSourceDir("nvda-worker"));
     assert.match(there, /^[0-9a-f]{16}$/);
     assert.notEqual(there, await layerCodeVersion("nvda-worker"));
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/**
+ * A layer whose `src/` holds only the named hasher files, each returning `answer` as its codeVersion (#4516): the two spellings the resolver
+ * reads, one fixture each. `.mjs` is the nvda-worker tags before v0.9.0 and a host may still hold one; it is a fallback and no other reader copies it.
+ */
+function hasherLayer(files: string[], answer: string): string {
+  const root = mkdtempSync(join(tmpdir(), "layer-checkouts-"));
+  mkdirSync(join(root, "elsewhere", "src"), { recursive: true });
+  for (const file of files) writeFileSync(join(root, "elsewhere", "src", file), `export const codeVersion = () => ${JSON.stringify(`${answer} from ${file}`)};\n`);
+  return root;
+}
+
+const hashOf = (root: string) => layersFrom({ manifest: { layers: { "nvda-worker": { path: "elsewhere" } } }, root }).layerCodeVersion("nvda-worker");
+
+test("#4516 a layer holding code-version.ts ONLY is hashed by it", async () => {
+  const root = hasherLayer(["code-version.ts"], "ts-only");
+  try { assert.equal(await hashOf(root), "ts-only from code-version.ts"); } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#4516 a layer holding code-version.mjs ONLY (an .mjs-era tag a host may still hold) is hashed by it", async () => {
+  const root = hasherLayer(["code-version.mjs"], "mjs-only");
+  try { assert.equal(await hashOf(root), "mjs-only from code-version.mjs"); } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#4516 a layer holding BOTH is hashed by the .ts: the fallback is only a fallback", async () => {
+  const root = hasherLayer(["code-version.mjs", "code-version.ts"], "both");
+  try { assert.equal(await hashOf(root), "both from code-version.ts"); } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 /** `from "..."` and dynamic `import("...")` literals of a source, comments out. */
@@ -163,8 +191,8 @@ test("the hasher the resolver reaches imports only node: and relative modules, a
     return specifiers(readFileSync(file, "utf8")).flatMap((s) =>
       s.startsWith("node:") ? [] : s.startsWith(".") ? walk(resolve(dirname(file), s)) : [`${file} imports "${s}"`]);
   };
-  assert.deepEqual(walk(join(layerSourceDir("nvda-worker"), "code-version.mjs")), []);
-  assert.ok(seen.size >= 2, "the walk reached code-version.mjs and its sibling worker-files.mjs");
+  assert.deepEqual(walk(join(layerSourceDir("nvda-worker"), "code-version.ts")), []);
+  assert.ok(seen.size >= 2, "the walk reached code-version.ts and its sibling worker-files.ts");
 });
 
 test("none of the five readers still names nvda-worker/src on a line of code", () => {
@@ -241,7 +269,7 @@ function layerFixture({ annotated }: { annotated: boolean }) {
   return { origin, core, layerDir: join(core, MOVE_PATH), released, branchTip, move };
 }
 
-/** A laid tree as `scripts/lay-layer.mjs` leaves it: `src/` and `.layer-ref`, and no `.git`. */
+/** A laid tree as `scripts/lay-layer.ts` leaves it: `src/` and `.layer-ref`, and no `.git`. */
 function lay(layerDir: string, ref: string) {
   mkdirSync(join(layerDir, "src"), { recursive: true });
   writeFileSync(join(layerDir, ".layer-ref"), `${ref}\n`);
@@ -348,7 +376,7 @@ test("#4363 layerPinTag names the tag the layer's repository made: v<semver> fro
 });
 
 /** The core's file, reachable only from inside a core checkout (`packages/control` laid beside `scripts/`), and exporting `releaseTag` only from the core's #4119 on. */
-const CORE_LAY_LAYER = join(REPO, "scripts/lay-layer.mjs");
+const CORE_LAY_LAYER = join(REPO, "scripts/lay-layer.ts");
 
 /** Why the agreement test cannot run here, or `false` when it can: a core older than `releaseTag` (what `ci.yml`'s `CORE_REF` may still pin) has no first copy to compare with. */
 function noFirstCopy(): string | false {
@@ -357,7 +385,7 @@ function noFirstCopy(): string | false {
   return false;
 }
 
-test("#4363 BARE_TAGS_FROM is a second copy of the core's, and releaseTag agrees with scripts/lay-layer.mjs's over every boundary", {
+test("#4363 BARE_TAGS_FROM is a second copy of the core's, and releaseTag agrees with scripts/lay-layer.ts's over every boundary", {
   skip: noFirstCopy(),
 }, async () => {
   const theirs = (await import(pathToFileURL(CORE_LAY_LAYER).href)) as { releaseTag: (name: string, version: string) => string; };
