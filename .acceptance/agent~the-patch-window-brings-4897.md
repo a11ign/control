@@ -1,6 +1,6 @@
 Row a11ign/a11ign#4897 (under #4405; reading a11ign#4894, chairman amendment a11ign#4795). The patch window can now bring a box below the fleet's target build up to it, a feature update included: with `patch_target_release` and `patch_target_build` set it lifts the feature deferral, sets `TargetReleaseVersion`/`TargetReleaseVersionInfo` (and `ProductVersion`) for the window, adds `Upgrades` to the categories, and removes the target and restores the role's deferral in the `always`, read back. Each box's last task fails it, by worker number, when its build is below the target or unreadable. With no target the play is unchanged.
 
-Closes: none -- a11ign/a11ign#4897 cannot be closed from this repository; `product-manager` closes it at merge.
+Closes a11ign/a11ign#4897
 
 Acceptance:
 
