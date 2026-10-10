@@ -3,10 +3,10 @@ Part of a11ign/a11ign#4708 (parent #4405). Names no workflow, so it is not `lane
 Acceptance:
 
 ```bash
-cd /home/agent/repos/wt-4708 && pnpm exec rstest run packages/control/src/fleet-playbook.test.ts packages/control/src/fleet-layer/protocol-guard.test.ts
+cd /home/agent/repos/wt-4708 && pnpm exec rstest run --config packages/control/scripts/rstest/rstest.config.ts --include 'src/fleet-playbook.test.ts' --include 'src/fleet-layer/protocol-guard.test.ts'
 ```
 
-**As run (measured, 2026-10-10):** this tree overlaid on `packages/control` of a core worktree (a clone at `/home/agent/repos/control` has no sibling `worker-fleet`/`guards`, so the row's `cd` form cannot import). Every test in `fleet-playbook.test.ts` printed `✔`; the two DISCOVERY tests in `protocol-guard.test.ts` print `✖` only while `packages/` is untracked (`walkTree` finds zero tracked files in a laid, gitignored tree) and `✔` with `git add -f packages/control packages/worker-fleet` (reset afterwards). rstest's own tally reads `0 tests` for these `node:test` files without the toolchain config, as in #28/#4445.
+**As run (measured, 2026-10-10):** `VERDICT pass: 129 tests in 2 files`, in a core worktree with this tree overlaid on the laid `packages/control` (and `packages/worker-fleet`, `node_modules` linked, both `git add -f`ed so the discovery tests' `git ls-files` walk sees them; reset afterwards). The row's own `cd /home/agent/repos/control && pnpm exec rstest run src/...` cannot run: that clone has no sibling `worker-fleet`/`guards`, and without `--config` rstest prints `No test suites found` (no `node:test` shim), as #28 and #4445 recorded.
 
 ## What changed
 
