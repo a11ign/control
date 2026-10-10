@@ -889,9 +889,14 @@
       # possible answers -- definitional, a probe that never ran, a thin corpus -- need opposite work.
       # A job because it needs the AUTHORITATIVE export: a laptop's copy predates the parse and the
       # featurizer refuses it by name.
+      #
+      # NO `--` between the script and its flags: the lab's pnpm forwards it to `explain_feature.py`, where
+      # argparse reads it as the end of options and `--subtype`/`--feature` arrive as positionals, so the
+      # job exited 2 with "the following arguments are required" (a11ign#4866). The package script ends in
+      # the script's own path, so the flags are appended to it as they are.
       explain-feature:
         params: {subtype: required, feature: required}
-        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain-feature", "--",
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain-feature",
                "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]
         timeout: 900
       # WHAT DID THE MODEL SEE on a held-out acceptance case? Its label, each head's score against its cut, and
