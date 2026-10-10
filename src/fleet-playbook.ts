@@ -9,10 +9,17 @@
  * place. A remedy reaching one path and not the other, this repo's most expensive recurring shape, with
  * the twist that the surviving path was a REFUSAL and so looked like a working guard from a distance.
  *
- * `protocol-version-file.test.ts` pins this name against the file that actually exports the constant, so
- * the next move breaks a test instead of the fleet.
+ * It was `protocol-version.mjs` until the layer moved to TypeScript (#4708) and the same refusal came back.
+ * `protocol-guard.test.ts` pins that a clone holding either name is read.
  */
-export const PROTOCOL_VERSION_FILE = "protocol-version.mjs";
+export const PROTOCOL_VERSION_FILE = "protocol-version.ts";
+
+/**
+ * The names the layer has shipped it under, newest first. `screenreader-worker` v0.9.0 ships `protocol-version.ts`
+ * and the guard still named `.mjs`, so `fleet:deploy` refused "the worker layer is not checked out" with a full
+ * clone present (#4708). The `.mjs` name is kept for one release so an older layer tag stays deployable.
+ */
+export const PROTOCOL_VERSION_FILES = [PROTOCOL_VERSION_FILE, "protocol-version.mjs"];
 
 /** What `guardProtocolChange` exits with on every refusal it makes. */
 const PROTOCOL_REFUSAL_EXIT_CODE = 3;
@@ -638,6 +645,16 @@ export function protocolGuardVerdict({ chosen, local, fleet, served, allowed }: 
     message: `${verdict.message}  asked ${fleet.workers.length} worker(s) from the control plane's inventory.` };
 }
 
+/** The first of `paths` that reads; ENOENT on the last is rethrown, any other failure at once. */
+function readFirstPresent(readFile: (path: string, encoding: "utf8") => string, paths: string[]): string {
+  for (const path of paths.slice(0, -1)) {
+    try { return readFile(path, "utf8"); } catch (cause) {
+      if ((cause as NodeJS.ErrnoException)?.code !== "ENOENT") throw cause;
+    }
+  }
+  return readFile(paths[paths.length - 1], "utf8");
+}
+
 /**
  * THE PROTOCOL VERSION THIS CHECKOUT WOULD DEPLOY, read from the operator's own clone of the worker layer, or
  * the refusal to print when there is no clone to read (#3761).
@@ -665,13 +682,13 @@ export function readLocalProtocol({ readFile = readFileSync, declaration = layer
 } = {}): { local: string | null; refusal: string | null; } {
   const { name, path, remote, dir } = declaration("nvda-worker");
   try {
-    const text = readFile(resolve(dir, "src", PROTOCOL_VERSION_FILE), "utf8");
+    const text = readFirstPresent(readFile, PROTOCOL_VERSION_FILES.map((file) => resolve(dir, "src", file)));
     return { local: /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(text)?.[1] ?? null, refusal: null };
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException)?.code !== "ENOENT") throw cause;
     return { local: null, refusal: `the worker layer "${name}" is not checked out at ${path}, so this checkout `
-      + `cannot say which protocol the deploy would put on the workers (${dir}/src/${PROTOCOL_VERSION_FILE} does `
-      + `not exist). Its repository is ${remote ?? "inside this checkout (layers.json declares no remote)"}; `
+      + `cannot say which protocol the deploy would put on the workers (${dir}/src/ holds none of ${PROTOCOL_VERSION_FILES.join(", ")}`
+      + `). Its repository is ${remote ?? "inside this checkout (layers.json declares no remote)"}; `
       + "git refuses a non-empty destination, so move aside anything left at that path first (a primary checkout "
       + `keeps a node_modules there); then create the clone with: git clone ${remote ?? "<its repository>"} ${dir}` };
   }

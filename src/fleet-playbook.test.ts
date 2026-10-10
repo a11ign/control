@@ -990,9 +990,23 @@ test("#3761: with a clone present, readLocalProtocol returns the version it decl
   const asked: string[] = [];
   const read = (path: string) => { asked.push(path); return "export const CAPTURE_PROTOCOL_VERSION = 21;\n"; };
   assert.deepEqual(readLocalProtocol({ readFile: read, declaration: CLONELESS }), { local: "21", refusal: null });
-  assert.deepEqual(asked, [`${CLONE_DIR}/src/protocol-version.mjs`]);
+  assert.deepEqual(asked, [`${CLONE_DIR}/src/protocol-version.ts`]);
   assert.deepEqual(readLocalProtocol({ readFile: () => "no constant here", declaration: CLONELESS },),
     { local: null, refusal: null }, "a file with no constant is protocolVerdict's case (local: null), not a missing clone");
+});
+
+test("#4708: a clone holding only the older protocol-version.mjs is still read; one holding neither is refused", () => {
+  const only = (name: string) => (path: string) => {
+    if (!path.endsWith(`/${name}`)) return absent();
+    return "export const CAPTURE_PROTOCOL_VERSION = 17;\n";
+  };
+  assert.deepEqual(readLocalProtocol({ readFile: only("protocol-version.ts"), declaration: CLONELESS }),
+    { local: "17", refusal: null }, "the file v0.9.0 ships");
+  assert.deepEqual(readLocalProtocol({ readFile: only("protocol-version.mjs"), declaration: CLONELESS }),
+    { local: "17", refusal: null }, "the name older layer tags ship");
+  const { local, refusal } = readLocalProtocol({ readFile: only("neither.ts"), declaration: CLONELESS });
+  assert.equal(local, null);
+  assert.match(refusal ?? "", /is not checked out at packages\/nvda-worker.*holds none of protocol-version\.ts, protocol-version\.mjs/);
 });
 
 test("#3761: only a MISSING clone is refused -- any other read failure is rethrown, not read as 'no clone'", () => {
