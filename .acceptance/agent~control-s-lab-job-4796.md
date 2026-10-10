@@ -33,7 +33,7 @@ cd /home/agent/repos/wt-4796-control && bash -c '! git grep -nE "lab/scripts/[a-
 ## Mutation (`cp` before, `cp` after, `diff` identical each time)
 
 - `lab-inventory.ts` put back to `.mjs` in `ansible/lab-job.yml`: the Acceptance exits 1 naming line 809; restored, exit 0.
-- `--local` removed from the `gate-probe-order` argv (scratch copy): `lab-job.test.ts` fails with `gate-probe-order runs gate-probe-order.ts without --local`. Before the test edit the discovery read the shims and found no dispatching gate by name, so this mutation could not have been seen.
+- `--local` removed from the `gate-probe-order` argv (scratch copy): `lab-job.test.ts` fails with `gate-probe-order runs gate-probe-order.ts without --local`. Measured at lab v0.1.28: 0 of the `.mjs` files contain `gates/dispatch.mjs` and 2 `.ts` files contain `gates/dispatch.ts`, so the unedited discovery would have stopped at its own `>= 2` guard ("the discovery is broken") once the pin moved, and the edited one finds exactly the two.
 - `refuseUnknownFlags(` renamed in the scratch lab's `axe-calibration.ts`: `cli-flags.test.ts` fails naming `packages/lab/scripts/axe-calibration.mjs`; restored, passes.
 
 ## Not done here
