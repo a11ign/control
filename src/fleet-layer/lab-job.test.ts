@@ -224,6 +224,26 @@ test("the shortcuts job hands the audit its flags directly, with no `--` between
   assert.ok(!parts.slice(script + 1).includes("--"), "nor may one sit anywhere among the flags");
 });
 
+test("the explain-feature job hands the script its flags directly, with no `--` between the script and them", () => {
+  // MEASURED 2026-10-10 (a11ign#4866, found at #4858). The job ran `pnpm run --silent scorer:explain-feature
+  // -- --subtype ... --feature ...` and `explain_feature.py` exited 2 with `the following arguments are
+  // required: --subtype, --feature`: the lab's pnpm forwards the `--` to the script, where argparse reads it
+  // as the end of options, so both flags arrive as positionals. The package script ends in the script's own
+  // path, so the job's flags follow it and need no separator. The same defect as `shortcuts` above.
+  //
+  // Scoped to `explain-feature` and the one script it runs: the other jobs that put a `--` after a
+  // `pnpm run` script are not read here, and whether each target tolerates it is not established.
+  const argv = (catalogueJobs()["explain-feature"]?.argv ?? []) as unknown[];
+  const parts = argv.map(String);
+  const script = parts.indexOf("scorer:explain-feature");
+  assert.ok(script > 0, "the job still runs `scorer:explain-feature`, or this guard is reading the wrong job");
+  assert.ok(parts.includes("--subtype") && parts.includes("--feature"),
+    "the flags are still handed over, so the absence of a `--` is not the absence of the argv");
+  assert.notEqual(parts[script + 1], "--",
+    "a `--` after the script reaches it and ends its options, so every flag after it is read as a positional");
+  assert.ok(!parts.slice(script + 1).includes("--"), "nor may one sit anywhere among the flags");
+});
+
 test("no job can be handed a worker URL — a worker is always resolved from the inventory", () => {
   // `--worker=http://:8765` cost 29 minutes. Resolving a NAME through the inventory makes a malformed
   // address inexpressible rather than merely rejected — the same shape as `isValidCaptureId`.

@@ -493,7 +493,7 @@ test("#2334: `case` reaches the argv ONLY as the value of `--case=`, and is asse
 
 test("#2334: no existing job's argv changed -- the neighbours that share its asserts render what they always did", () => {
   const jobs = jobsOf();
-  assert.deepEqual(jobs["explain-feature"].argv, ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain-feature", "--",
+  assert.deepEqual(jobs["explain-feature"].argv, ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:explain-feature",
     "--subtype", "{{ subtype }}", "--feature", "{{ feature }}"]);
   // The three that read `out` beside it, through the assert whose `when` list gained a member.
   assert.ok(jobs.acceptance.argv.at(-1)?.endsWith("model-{{ out | default('candidate') }}/acceptance-report.json"));
