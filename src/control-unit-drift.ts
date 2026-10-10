@@ -53,14 +53,21 @@ export const VERDICT = { CLEAN: "CLEAN", DRIFT: "DRIFT", CANNOT_TELL: "CANNOT_TE
 
 export const KIND = { DIFFERS: "differs", MISSING: "missing-on-host", NOT_SHIPPED: "not-shipped" };
 
+/**
+ * The kinds a clock may call ATTENTION (#4714): a unit that runs other text than the repository ships, or is not
+ * installed at all. `not-shipped` is reported and never paged: `a11y-bootstrap.service` is installed on the plane and
+ * shipped by no playbook, so counting it would raise the same line forever about something that is not this class.
+ */
+export const ATTENTION_KINDS: readonly string[] = [KIND.DIFFERS, KIND.MISSING];
+
 /** The prefix every unit this repo installs carries, so a foreign unit on the host is nobody's finding. */
 const OUR_UNIT = /^a11y-[\w.@-]+\.(?:service|timer)$/;
 
 /** A list item that names a unit file: `      - a11y-fleet-auto-off.timer`. */
 const UNIT_LIST_ITEM = /^\s*-\s+["']?([\w.@-]+\.(?:service|timer))["']?\s*$/gm;
 
-type Finding = { unit: string; kind: string; detail: string };
-type Reading = { verdict: string; findings: Finding[]; reason?: string };
+export type Finding = { unit: string; kind: string; detail: string };
+export type Reading = { verdict: string; findings: Finding[]; reason?: string };
 type Derivation = { units: string[] } | { cannotTell: string };
 
 /** @returns {string[]} each play's text, split at the top-level `- name:` that opens it */

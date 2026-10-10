@@ -47,6 +47,17 @@
  * would read as a down worker. The shape and the clearing are the same: an entry for a box that returned to the fleet's
  * value is DROPPED. An unreachable box is the resting state (#3023): never counted, and its entries are carried
  * unchanged rather than dropped, so a box that sleeps odd and wakes odd is not announced a second time.
+ *
+ * ## A control-plane unit that runs other text than the repository ships (#4714, class repeat of #3852)
+ *
+ * The installed unit is the program, and `control-unit-drift` is the reading that says which text it is: it had
+ * no caller on a clock, so an `a11y-fleet-auto-off.service` still naming `lay-layer.mjs` failed 316 ticks behind a
+ * `-`-prefixed pre-step before anyone typed the command. The hourly tick now takes that reading. `differs` and
+ * `missing-on-host` are ATTENTION, one `unit-drift: <unit> <kind>` line each, in the off-fleet ledger (so a line is
+ * posted once and clears when the unit is re-installed). `not-shipped` is printed and never raised
+ * (`ATTENTION_KINDS`). A host that could not be read is `CANNOT_TELL`: said on stderr, the ledger's drift lines carried
+ * (an unread host is not a unit that was re-installed), and the exit is `CANNOT_ASK` unless something else is
+ * ATTENTION -- never QUIET, which is the reading this exists to end.
  */
 import { readFileSync, writeFileSync, renameSync, openSync, closeSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -55,6 +66,9 @@ import { pathToFileURL } from "node:url";
 import { fleetStatus } from "./fleet-status.ts";
 import { sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
+import {
+  ATTENTION_KINDS, KIND, VERDICT, checkoutSource, controlUnitDrift, readControlHost, type Reading,
+} from "./control-unit-drift.ts";
 
 export const ORG_READING_ISSUE = 928;
 
@@ -572,6 +586,29 @@ export function refusalBody(refusal: AutoOffRefusal, now: number): string {
   ].join("\n");
 }
 
+const UNIT_DRIFT_LINE_PREFIX = "unit-drift: ";
+
+/** What one tick's unit-drift reading adds: lines to raise, units only reported, and why it could not tell (`null` if it could). */
+export type UnitDriftTick = { found: Oddity[], notShipped: string[], cannotTell: string | null };
+
+/** Pure: the ATTENTION lines of one drift reading, the units it only reports, and its `CANNOT_TELL` reason. */
+export function unitDriftTick(drift: Reading): UnitDriftTick {
+  if (drift.verdict === VERDICT.CANNOT_TELL) return { found: [], notShipped: [], cannotTell: drift.reason ?? "no reason given" };
+  const found = drift.findings.filter(({ kind }) => ATTENTION_KINDS.includes(kind))
+    .map(({ unit, kind }) => ({ box: null, line: `${UNIT_DRIFT_LINE_PREFIX}${unit} ${kind}` }));
+  const notShipped = drift.findings.filter(({ kind }) => kind === KIND.NOT_SHIPPED).map(({ unit }) => unit);
+  return { found, notShipped, cannotTell: null };
+}
+
+/** The comment body for drift lines not posted before. */
+export function unitDriftBody(lines: string[]): string {
+  return [
+    `**${lines.length} control-plane unit(s) not running the text this repository ships** (#4714).`,
+    ...lines.map((line) => `- ${line.slice(UNIT_DRIFT_LINE_PREFIX.length)}`),
+    "The installed copy is the program: re-run the playbook that ships it, and `node src/control-unit-drift.ts` for the live reading.",
+  ].join("\n");
+}
+
 /**
  * Fold one reading of the fleet into the persisted ledger. Exported so `fleet-auto-off.ts` can feed the
  * same ledger from its own 10 s probe: the hourly poll alone never sees a worker that boots, works and is
@@ -591,6 +628,8 @@ export type WatchDeps = {
     thresholdMs?: number; read?: typeof readFileSync; write?: typeof writeFileSync;
     /** The newest completed patch run, epoch ms (see `readPatchRun`). Absent: the patch window is not read this tick. */
     lastPatchRunAt?: () => number | null;
+    /** The control host's installed units against the shipped ones. Absent: not read this tick, and the ledger's drift lines stand. */
+    unitDrift?: () => Reading;
     /** Where the off-fleet ledger is written when it is not `write`: a dry run must not use up the lines a posting run will say. */
     writeOffFleet?: (path: string, data: string) => void;
 };
@@ -602,7 +641,7 @@ export type WatchDeps = {
  * of it is a parameter with a real default -- the shape `runLabStatus`'s `run` parameter already
  * established for the identical reason: a test drives this without a fleet, a fleet, or a clock.
  */
-export async function watchFleet(deps: WatchDeps = {}): Promise<{ overdue: OverdueEntry[], offFleet: string[] }> {
+export async function watchFleet(deps: WatchDeps = {}): Promise<WatchFound> {
   const getStatus = deps.getStatus ?? fleetStatus;
   const now = deps.now ?? Date.now;
   const statePath = deps.statePath ?? DEFAULT_STATE_PATH;
@@ -613,17 +652,26 @@ export async function watchFleet(deps: WatchDeps = {}): Promise<{ overdue: Overd
   const next = advance(status.rows, previous, at);
   writeState(statePath, next, deps.write);
   recordCaptures(status.rows, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at, read: deps.read, write: deps.write });
-  return { overdue: overdue(status.rows, next, at, thresholdMs), offFleet: recordOffFleet(status, at, deps) };
+  const { offFleet, unitDrift } = recordOffFleet(status, at, deps);
+  return { overdue: overdue(status.rows, next, at, thresholdMs), offFleet, unitDrift };
 }
 
-/** The off-fleet lines this tick that were not posted before; the ledger is read and rewritten here. */
-function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }, at: number, deps: WatchDeps): string[] {
+/** What one tick found: stuck workers, new off-fleet lines, and the control-plane unit-drift reading (#4714). */
+export type WatchFound = { overdue: OverdueEntry[], offFleet: string[], unitDrift: { fresh: string[], notShipped: string[], cannotTell: string | null } };
+
+/** The off-fleet and unit-drift lines this tick that were not posted before; the one ledger is read and rewritten here. */
+function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }, at: number, deps: WatchDeps) {
   const path = deps.offFleetPath ?? DEFAULT_OFF_FLEET_STATE_PATH;
   const patch = patchReading(deps.lastPatchRunAt, at);
-  const { state, fresh } = advanceOffFleet([...offFleetLines(status), ...patch.found], readState(path, deps.read),
-    { now: at, keep: carriesEntry(status.rows, patch.carry) });
+  const drift = unitDriftReading(deps.unitDrift);
+  const { state, fresh } = advanceOffFleet([...offFleetLines(status), ...patch.found, ...drift.tick.found], readState(path, deps.read),
+    { now: at, keep: carriesEntry(status.rows, { patch: patch.carry, unitDrift: drift.carry }) });
   writeState(path, state, deps.writeOffFleet ?? deps.write);
-  return fresh;
+  const isDrift = (line: string) => line.startsWith(UNIT_DRIFT_LINE_PREFIX);
+  return {
+    offFleet: fresh.filter((line) => !isDrift(line)),
+    unitDrift: { fresh: fresh.filter(isDrift), notShipped: drift.tick.notShipped, cannotTell: drift.tick.cannotTell },
+  };
 }
 
 /** `watchFleet`'s stuck workers alone. */
@@ -660,10 +708,30 @@ function patchReading(readLastRun: (() => number | null) | undefined, now: numbe
   }
 }
 
-/** Entries about a box that did not answer, or about a patch run that could not be read, are not cleared by silence. */
-function carriesEntry(rows: FleetRow[], carryPatch: boolean): (line: string) => boolean {
+/**
+ * The drift reading of this tick, and whether an unread host means the last lines stand. A reader that THROWS (the playbooks
+ * could not be listed) is `CANNOT_TELL` like a host that could not be read: both are "I did not look", and both say so on stderr.
+ * With no reader at all (a caller that did not ask) the lines are carried and nothing is claimed.
+ */
+function unitDriftReading(read: (() => Reading) | undefined): { tick: UnitDriftTick, carry: boolean } {
+  if (!read) return { tick: { found: [], notShipped: [], cannotTell: null }, carry: true };
+  let reading: Reading;
+  try {
+    reading = read();
+  } catch (cause) {
+    reading = { verdict: VERDICT.CANNOT_TELL, findings: [], reason: cause instanceof Error ? cause.message : String(cause) };
+  }
+  const tick = unitDriftTick(reading);
+  if (tick.cannotTell !== null) console.error(`CANNOT READ the control host's unit drift: ${tick.cannotTell}`);
+  return { tick, carry: tick.cannotTell !== null };
+}
+
+/** Entries about a box that did not answer, or about a patch run or the control host's units that could not be read, are not cleared by silence. */
+function carriesEntry(rows: FleetRow[], carry: { patch: boolean, unitDrift: boolean }): (line: string) => boolean {
   const asleep = new Set(rows.filter((row) => row.state === "unreachable").map((row) => workerKey(row.name)));
-  return (line) => asleep.has(line.split(": ")[0]) || (carryPatch && line.startsWith(PATCH_LINE_PREFIX));
+  return (line) => asleep.has(line.split(": ")[0])
+    || (carry.patch && line.startsWith(PATCH_LINE_PREFIX))
+    || (carry.unitDrift && line.startsWith(UNIT_DRIFT_LINE_PREFIX));
 }
 
 /**
@@ -681,13 +749,27 @@ export function readRefusalOrSay({ readState, path, now = Date.now }: { readStat
   }
 }
 
+/**
+ * ATTENTION when this tick has anything new to say. Otherwise QUIET -- unless the control host's units could not be read,
+ * which is `CANNOT_ASK` and never QUIET (#4714): an unread host is not a clean one. ATTENTION outranks it, because a
+ * finding that was made stays made whatever the host will not say about the rest.
+ */
+export function exitCodeFor(found: WatchFound, refusal: AutoOffRefusal | null): number {
+  const attention = found.overdue.length > 0 || found.offFleet.length > 0 || found.unitDrift.fresh.length > 0 || refusal !== null;
+  if (attention) return EXIT.ATTENTION;
+  return found.unitDrift.cannotTell === null ? EXIT.QUIET : EXIT.CANNOT_ASK;
+}
+
+/** The tick's own reader of the control host's units: the host through ssh, the playbooks and unit files from this checkout. */
+const readUnitDrift = () => controlUnitDrift({ readHost: readControlHost, ...checkoutSource });
+
 async function main() {
   const post = process.argv.includes("--post");
   const thresholdArg = process.argv.find((a) => a.startsWith("--threshold-ms="));
   const thresholdMs = thresholdArg ? Number(thresholdArg.slice("--threshold-ms=".length)) : undefined;
   let found;
   try {
-    found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), lastPatchRunAt: readPatchRun,
+    found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), lastPatchRunAt: readPatchRun, unitDrift: readUnitDrift,
       ...(post ? {} : { writeOffFleet: () => undefined }) });
   } catch (cause) {
     console.error(`CANNOT ASK: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -695,12 +777,17 @@ async function main() {
     return;
   }
   const refusal = readRefusalOrSay();
-  if (!found.overdue.length && !found.offFleet.length && !refusal) {
-    process.exitCode = EXIT.QUIET;
+  if (found.unitDrift.notShipped.length) {
+    console.log(`unit-drift, reported and not raised: ${found.unitDrift.notShipped.join(", ")} installed on the control host and shipped by no playbook`);
+  }
+  const { fresh } = found.unitDrift;
+  const exitCode = exitCodeFor(found, refusal);
+  if (exitCode !== EXIT.ATTENTION) {
+    process.exitCode = exitCode;
     return;
   }
   const body = [found.overdue.length ? watchBody(found.overdue) : null, found.offFleet.length ? offFleetBody(found.offFleet) : null,
-    refusal ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
+    fresh.length ? unitDriftBody(fresh) : null, refusal ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
   console.log(body);
   if (post) {
     execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });
