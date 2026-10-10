@@ -83,7 +83,9 @@ test("only the named playbooks are runnable, and they are names rather than path
   // -- is an endpoint ON the worker, so it cannot answer for a worker that has died, and `lab:log` and
   // `lab:fetch` are both localhost. This is the only route to a dead worker's `server.log`.
   assert.deepEqual(PLAYBOOKS, ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml",
-    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml", "collect-logs.yml"]);
+    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml", "collect-logs.yml", "patch.yml"]);
+  // `patch.yml` joined on 2026-10-10 (#4446): it moves a box's Windows build, so it is fenced as `os-rollback.yml` is
+  // (dry unless `--apply`, behind the link and hold gates) and busy boxes refuse it; `fleet-patch.test.ts` pins that.
   // `provision.yml` stays REFUSED and that is not an oversight: it is the UTM/PowerShell provisioning
   // playbook, a different file from `provision-role.yml`, and only the role one should be reachable from
   // a laptop. Two files one character apart, one allowed and one not, is exactly what an allowlist is for.
@@ -284,7 +286,7 @@ test("an OS rollback names exactly ONE worker, and --apply belongs to it alone (
   // Accepted and ignored would be the silently-discarded flag this repo refuses everywhere else.
   // `recover.yml` is excluded from the "nothing required" half below -- #1829 gave it the identical
   // one-worker requirement for a different reason, and its own test just below covers it.
-  for (const chosen of PLAYBOOKS.filter((name) => name !== "os-rollback.yml")) {
+  for (const chosen of PLAYBOOKS.filter((name) => !["os-rollback.yml", "patch.yml"].includes(name))) {
     assert.match(osRollbackRefusal({ chosen, limitFlag: "a11y-worker-4", apply: true }) ?? "",
       /refusing --apply/, chosen);
   }
@@ -772,7 +774,7 @@ test("#1313: only deploy and provision are gated -- the repair paths are not blo
     assert.deepEqual(linkGate({ chosen, gate: HOLD, allowOffline: [] }), { refusal: null, notice: null },
       `${chosen} acts on boxes that are already in trouble, so a hold must not block it`);
     assert.match(String(linkGate({ chosen, gate: HOLD, allowOffline: ["a11y-worker-3"] }).refusal),
-      /only deploy\.yml and provision-role\.yml read the layer-2 gate/);
+      /only deploy\.yml and provision-role\.yml and patch\.yml read the layer-2 gate/);
   }
 });
 
@@ -1204,7 +1206,7 @@ test("#1839: only deploy and provision are gated -- repair paths are not blocked
     assert.deepEqual(sequenceHoldGate({ chosen, holds: ONE_HOLD, allowHold: [] }), { refusal: null, notice: null },
       `${chosen} acts on boxes already in trouble, or on nothing that changes what a box runs, so a hold must not block it`);
     assert.match(String(sequenceHoldGate({ chosen, holds: ONE_HOLD, allowHold: [1768] }).refusal),
-      /only deploy\.yml and provision-role\.yml read the fleet-hold gate/);
+      /only deploy\.yml and provision-role\.yml and patch\.yml read the fleet-hold gate/);
   }
 });
 
@@ -1630,12 +1632,12 @@ test("#2832 (6b): the alias covers EVERY playbook that targets workers, and the 
 });
 
 test("#2832: an unreadable keys file REFUSES deploy and provision (which already refuse without an inventory) and only WARNS a repair path", () => {
-  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+  for (const chosen of ["deploy.yml", "provision-role.yml", "patch.yml"]) {
     const failure = identityStepFailure({ chosen, message: "ssh to the control plane failed" });
     assert.equal(failure.refuse, true, chosen);
     assert.match(failure.message, /Could not ask is not may proceed/);
   }
-  const repair = PLAYBOOKS.filter((chosen) => !["deploy.yml", "provision-role.yml"].includes(chosen));
+  const repair = PLAYBOOKS.filter((chosen) => !["deploy.yml", "provision-role.yml", "patch.yml"].includes(chosen));
   assert.ok(repair.includes("recover.yml") && repair.length >= 5, "positive control: the repair paths are in the population");
   for (const chosen of repair) {
     const failure = identityStepFailure({ chosen, message: "ssh to the control plane failed" });

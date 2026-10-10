@@ -330,7 +330,7 @@ export type PlayReading = "none" | "running" | "unreadable";
  * name as a path that SHIPS worker code, and this file only reads a unit's state.
  */
 export const LAUNCHABLE_PLAYBOOK_NAMES = ["deploy", "sleep", "provision-role", "recover", "inventory-install",
-  "control-host-install", "os-rollback", "collect-logs"];
+  "control-host-install", "os-rollback", "collect-logs", "patch"];
 
 /** Each launchable playbook's unit, `a11y-fleet-<name>.service`. */
 const playbookUnits = (): string[] => LAUNCHABLE_PLAYBOOK_NAMES.map((name) => `a11y-fleet-${name}.service`);

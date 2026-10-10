@@ -78,7 +78,7 @@ ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.m
 ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
     a11y-fleet-deploy.service a11y-fleet-sleep.service a11y-fleet-provision-role.service a11y-fleet-recover.service \
     a11y-fleet-inventory-install.service a11y-fleet-control-host-install.service a11y-fleet-os-rollback.service \
-    a11y-fleet-collect-logs.service) && \
+    a11y-fleet-collect-logs.service a11y-fleet-patch.service) && \
   { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
   { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
   git merge --ff-only --quiet origin/main && \
