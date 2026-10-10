@@ -551,7 +551,7 @@ test("unit drift: an installed unit whose text differs is ATTENTION and names th
 });
 
 test("unit drift: a shipped unit absent from the host is ATTENTION too", () => {
-  const { [TIMER]: _gone, ...withoutTimer } = SHIPPED_TEXT;
+  const withoutTimer = Object.fromEntries(Object.entries(SHIPPED_TEXT).filter(([unit]) => unit !== TIMER));
   assert.deepEqual(lines(unitDriftTick(driftReader(withoutTimer)()).found), [`unit-drift: ${TIMER} missing-on-host`]);
 });
 
