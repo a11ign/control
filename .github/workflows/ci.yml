@@ -33,8 +33,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # a11ign/a11ign#4803's merge (main, 2026-10-10, #4785, step 2 of #4519): the core that pins lab v0.1.27, whose `src/gates/qualification-status.ts` exists beside the `.mjs` shim kept for one release, so `post-qualification-status.ts` imports the `.ts` (#4786, step 3). It also locks @a11ign/screenreader-fleet 0.7.3 and nvda-worker 0.9.0. The pin before it, 83b46f522 (#4692's merge), laid lab v0.1.24, which holds only the `.mjs`.
   # a11ign/a11ign#4692's merge (main, 2026-10-10, #4516): the core that locks @a11ign/screenreader-fleet 0.7.2 (its files are `.ts`, and neither `fleet-env.ts` nor `cli-flags.ts` imports a package, so every fleet module this package reaches loads from the control plane's raw checkout, #4680, #4686) and lays lab v0.1.24 and nvda-worker 0.9.0. The pins before it: 78f353032 (#4684's merge) locked fleet 0.7.1, whose `cli-flags.ts` still re-exported `@a11ign/toolchain` and failed `control-has-no-dependencies`; 19a0795 (#4675's merge) locked 0.7.0, whose `fleet-env.ts` did the same; d32bc6cb7 (a draft head) laid 0.6.0, whose `worker-code-check` imported a hasher nvda-worker 0.9.0 no longer ships (#4651). A sha and never a branch: a branch moves under a pull request that did not touch it.
-  CORE_REF: 83b46f522cd1ad1203a2131aec24cd6251c6c44e
+  CORE_REF: 393f26a9249116777fc7843eba4ecee1a4265d33
 
 jobs:
   # A releasable change needs a changeset or a `no-release:` line (a11ign/a11ign#4127, adopted by #4135). `releasable-paths` is this repository's `dora` entry's `releasablePaths`

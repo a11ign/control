@@ -47,7 +47,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { stripComments } from "../../../evidence/src/source-text.ts";
+import { stripComments } from "@a11ign/toolchain/lib/source-text";
 import { unknownFlags, didYouMean, nameOf, refuseUnknownFlags, flagValue } from "../../../worker-fleet/src/cli-flags.ts";
 import { commandLineModules } from "../../../worker-fleet/src/command-line-census.ts";
 

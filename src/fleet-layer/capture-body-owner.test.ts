@@ -16,8 +16,8 @@
  *     can be silently dropped if the forwarding code names fields instead of matching a prefix.
  *   - Five send a FIXED, SMALL set of fields chosen for one narrow purpose, wired to CLI flags or a
  *     literal test fixture rather than to an open-ended per-case object
- *     (`repeat-capture.mjs`, `capture-fixtures.mjs`, `page-identity-rate.mjs`,
- *     `occurrence-verdict-stability.mjs`, `capture-check.mjs`) — structurally immune to the same defect,
+ *     (`repeat-capture.mjs`, `capture-fixtures.ts`, `page-identity-rate.ts`,
+ *     `occurrence-verdict-stability.ts`, `capture-check.ts`) — structurally immune to the same defect,
  *     because there is no dynamic object whose keys could silently fail to reach the wire.
  *
  * A SINGLE SHARED BUILDER across all seven was tried on paper and rejected: the five fixed-policy clients
@@ -80,13 +80,13 @@ const FIXED_POLICY: Record<string, string> = {
   "packages/lab/src/training/repeat-capture.mjs":
     "every field is wired to its own named CLI flag (--probe-forms, --probe-focus, ...); a new probe "
     + "needs a new flag, which is a visible addition, not a silent drop",
-  "packages/lab/src/harnesses/capture-fixtures.mjs":
+  "packages/lab/src/harnesses/capture-fixtures.ts":
     "a fixed { url, steps, probeForms: true, probeFocus: true } for every eval fixture, not case-driven",
-  "packages/lab/src/harnesses/page-identity-rate.mjs":
+  "packages/lab/src/harnesses/page-identity-rate.ts":
     "asks only whether a capture reads the right page -- { url, steps }, no probes at all",
-  "packages/lab/src/harnesses/occurrence-verdict-stability.mjs":
+  "packages/lab/src/harnesses/occurrence-verdict-stability.ts":
     "one literal body for one named page, hardcoded in the file",
-  "packages/lab/src/harnesses/capture-check.mjs":
+  "packages/lab/src/harnesses/capture-check.ts":
     "a fixed regression-check body, { url, steps, probeForms }, not derived from case data",
 };
 
@@ -95,7 +95,8 @@ function captureClients(): string[] {
   const found: string[] = [];
   for (const dir of ["packages/lab/src/training", "packages/lab/src/harnesses"]) {
     for (const entry of readdirSync(`${REPO}${dir}`)) {
-      if (!entry.endsWith(".mjs")) continue;
+      // `.ts` since lab v0.1.27 (a11ign/a11ign#4519); a `.mjs` left beside it is a one-release shim that throws, so it matches no dispatch below.
+      if (!/\.(mjs|ts)$/.test(entry) || /\.(test|d)\.ts$/.test(entry)) continue;
       const path = `${dir}/${entry}`;
       const source = read(path);
       const dispatches = /["'`][^"'`]*\/capture["'`][^]{0,120}?method:\s*["']POST["']/.test(source)

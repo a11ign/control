@@ -50,7 +50,7 @@ const EXEMPT = {
 const CONVERTED_FUNCTIONS: Record<string, string[]> = {
   "packages/worker-fleet/src/doctor.ts": ["httpJson"],
   "packages/lab/src/training/capture-status.mjs": ["workerState"],
-  "packages/lab/src/harnesses/capture-check.mjs": ["workerIsServing"],
+  "packages/lab/src/harnesses/capture-check.ts": ["workerIsServing"],
   "packages/worker-fleet/src/protocol-guard.ts": ["servedProtocols"],
   "packages/worker-fleet/src/compare-workers.ts": ["diagnostics", "vitals"],
   "packages/worker-fleet/src/check-worker-code.ts": ["versionOf"],

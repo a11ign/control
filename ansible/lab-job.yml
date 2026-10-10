@@ -1068,7 +1068,7 @@
         # wrong verdict; a stale worker on a corpus writer costs 2,122 captures indistinguishable from
         # current ones for ever.
         #
-        # `worker` is REQUIRED rather than defaulted. `capture-check.mjs`'s own header records that a
+        # `worker` is REQUIRED rather than defaulted. `capture-check.ts`'s own header records that a
         # mistyped `--worker=` falls back to IN-PROCESS mode, which on the lab is not a weaker test but a
         # meaningless one — the lab has no NVDA. A default would make that fallback reachable by omission.
         exitMeanings:
@@ -1084,11 +1084,11 @@
         # rather than merely rejected. This job's first draft built the URL from the raw `worker` param and
         # that guard caught it, which is the guard doing exactly what the incident bought it for.
         #
-        # Spelled out here rather than reusing `lab_named_worker` because `capture-check.mjs` reads only
+        # Spelled out here rather than reusing `lab_named_worker` because `capture-check.ts` reads only
         # the FLAG (`flagValue(process.argv, "worker")`), never `A11Y_WORKER` — so the `setenv` form the
         # `stability` job uses would resolve correctly and then be ignored, which is worse than not
         # resolving at all.
-        argv: "{{ [lab_tsx, 'packages/lab/src/harnesses/capture-check.mjs',
+        argv: "{{ [lab_tsx, 'packages/lab/src/harnesses/capture-check.ts',
                   '--worker=http://' ~ hostvars[worker].ansible_host ~ ':8765'] }}"
         timeout: 1800
 
