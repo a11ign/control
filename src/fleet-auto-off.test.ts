@@ -1615,7 +1615,7 @@ test("#3543 readPlaysInFlight: the default counts exactly the units the launcher
   const notLaunchable = ["provision", "lab-job", "auto-off", "auto-off-schedule", "unrelated"].map((n) => `a11y-fleet-${n}.service`);
   const answer = (names: string[]) => ({ status: 0, stdout: JSON.stringify(names.map((unit) => ({ unit, active: "active", sub: "running" }))) });
   const counted = (names: string[]) => readPlaysInFlight({ run: (() => answer(names)) as never }).detail;
-  assert.equal(counted([...notLaunchable, ...launchable]), launchable.join(", "), "all eight launchable units, and not one of the others");
+  assert.equal(counted([...notLaunchable, ...launchable]), launchable.join(", "), "all nine launchable units, and not one of the others");
   assert.equal(counted(notLaunchable), "", "the control: running units that are not plays read as no play");
   assert.equal(readPlaysInFlight({ run: (() => answer(notLaunchable)) as never }).reading, "none");
   assert.ok(launchable.includes("a11y-fleet-provision-role.service") && !launchable.includes("a11y-fleet-provision.service"));

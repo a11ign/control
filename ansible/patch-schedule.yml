@@ -1,0 +1,167 @@
+---
+# Install the PATCH WINDOW timer on the control plane -- LIVE. #4446, under #4405.
+#
+#     ansible-playbook patch-schedule.yml
+#     ansible-playbook patch-schedule.yml -e patch_window_weekday=0 -e patch_window_start_hour=3   # move the window
+#
+# ## What this ships
+#
+# `fleet:patch --apply` (`fleet-playbook.ts`, `--playbook=patch.yml`) is the command: dry unless `--apply`, behind the link
+# and hold gates, refusing a busy box, a box that cannot be asked, and a `Fleet-hold-until:` in the future. This installs
+# the unit pair that runs it on a clock, modelled on `auto-off-schedule.yml` (the same require-inventory precondition on
+# localhost, the same "install, reload only if changed, enable and start, read back" shape), and for the same reason as
+# its header spells out: a command that is only ever run by hand is run once and forgotten.
+#
+# ## THE UNIT PASSES `--apply`, AND SAYS `--scheduled`
+#
+# A unit without `--apply` is a report on a clock: `a11y-fleet-auto-off.service` shipped that way for 25 hours (#2784).
+# `--scheduled` refuses to run without `--apply`, so the omission is a refusal and not a silent timer, and
+# `fleet-patch.test.ts` reads this file for both flags.
+#
+# ## THE WINDOW IS DATA (#4446 change 3)
+#
+# Every number below is a variable of THIS playbook, rendered into the unit, so `ceo` moves the window by changing a
+# variable and re-running it. No constant lives in a unit file, and the test asserts the unit's arguments are Jinja
+# references, not digits.
+#
+# - `patch_window_days` -- the cadence, 28: under the 30-day quality deferral (#4438), and the age at which
+#   `fleet-watch` calls a run missed (`patch-window-missed`).
+# - `patch_window_retry_days` -- how many days before that the window OPENS. The first attempt is the Saturday inside
+#   it; a refusal is retried the next day, up to the day the window closes.
+# - `patch_window_weekday` -- 0 = Sunday ... 6 = Saturday (`Date#getDay`), in the control host's local time.
+# - `patch_window_start_hour`, `patch_window_end_hour` -- an attempt may START in [start, end), local: Saturday
+#   02:00 to 06:00. The timer fires daily at the start hour; the command decides whether today is an attempt.
+#   The end hour bounds when a run may BEGIN. It never kills one: the play restores the update deferral in an
+#   `always:`, and a SIGKILL would skip it.
+#
+# ## A REFUSAL IS LOGGED AND RETRIED; THE LAST DAY RAISES A LINE
+#
+# The timer fires every day and `fleet:patch --scheduled` reads `runs/fleet-patch-last-run.json` (written by a
+# COMPLETED `--apply`, the file `fleet-watch` reads) to decide. A refusal exits 0 with its reason in the journal and the
+# next firing retries. On the window's last day a refusal prints `fleet-health: patch-window-missed: ...` and exits 4,
+# which fails the unit where `systemctl --failed` shows it.
+#
+# ## THE UNIT NAME IS NOT `a11y-fleet-patch`
+#
+# `fleet-playbook.ts` dispatches `patch.yml` as a transient unit named `a11y-fleet-patch`, and stops and resets that
+# name before every run. A trigger unit of the same name would be stopped by the very command it fires.
+- name: The control plane must be in the inventory before anything claims to have run
+  # `ansible-playbook` prints `skipping: no hosts matched` and exits 0 on zero hosts (#1980), so this precondition
+  # runs on localhost first, as every playbook here does.
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control plane
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Install and enable the patch window timer on the control plane (#4446)
+  hosts: a11y_control
+  gather_facts: false
+  vars:
+    # THE WINDOW. Overridable with `-e`; nothing below this block states a number.
+    patch_window_days: 28
+    patch_window_retry_days: 7
+    patch_window_weekday: 6
+    patch_window_start_hour: 2
+    patch_window_end_hour: 6
+    # The control plane's checkout and the loader, as `a11y-fleet-auto-off.service` names them (#4292, #4341).
+    patch_checkout: /root/a11y-witness
+    patch_node_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
+    patch_units:
+      - a11y-fleet-patch-window.service
+      - a11y-fleet-patch-window.timer
+
+    patch_service_unit: |
+      [Unit]
+      # THE PATCH WINDOW -- #4446. Installed by patch-schedule.yml; the window below is that playbook's variables.
+      Description=a11y: patch the fleet inside its window, one box at a time
+
+      [Service]
+      Type=oneshot
+      # `ansible-playbook` lives in /root/.local/bin on the control plane, which systemd's default PATH omits
+      # (#2725: the same omission made auto-off dispatch nothing, silently, on every tick).
+      Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+      WorkingDirectory={{ patch_checkout }}
+      # THE CHECKOUT FOLLOWS `main` BEFORE THE RUN, OR A STALE ONE REFUSES EVERY DAY OF THE WINDOW. `fleet-playbook.ts` refuses a
+      # checkout that differs from `origin/main` (`staleRefRefusal`) and nothing else moves `{{ patch_checkout }}` between
+      # deploys; a timer that refused for seven days would raise the missed-window line for a fault it could have cured.
+      # `a11y-fleet-auto-off.service`'s own step (#3852, #3976), IN ORDER and each only if the one before succeeded: no
+      # play running, fetch, `--ff-only` (never a checkout), then lay the two layers the merge may have re-pinned. The `-`
+      # is the point: a failed step leaves the tree as it was and the command's own refusal says so.
+      # `$$` is systemd's escape for a literal `$`.
+      ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
+          a11y-fleet-deploy.service a11y-fleet-sleep.service a11y-fleet-provision-role.service a11y-fleet-recover.service \
+          a11y-fleet-inventory-install.service a11y-fleet-control-host-install.service a11y-fleet-os-rollback.service \
+          a11y-fleet-collect-logs.service a11y-fleet-patch.service) && \
+        { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
+        { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
+        git merge --ff-only --quiet origin/main && \
+        node scripts/lay-layer.ts screenreader-fleet && \
+        node scripts/lay-layer.ts control'
+      # `--apply` IS HERE, OR THE TIMER IS A REPORT ON A CLOCK (#2784); `--scheduled` refuses without it.
+      ExecStart=/usr/bin/node --import {{ patch_node_loader }} {{ patch_checkout }}/packages/control/src/fleet-playbook.ts --playbook=patch.yml --apply --scheduled --window-days={{ patch_window_days }} --retry-days={{ patch_window_retry_days }} --weekday={{ patch_window_weekday }} --window-start-hour={{ patch_window_start_hour }} --window-end-hour={{ patch_window_end_hour }}
+
+    patch_timer_unit: |
+      [Unit]
+      Description=a11y: ask once a day whether the patch window is open
+
+      [Timer]
+      # Daily at the window's start hour, local time. Whether today is an ATTEMPT is the command's decision (the record
+      # of the last completed run, the weekday, the retry days), so a refusal needs no state here: tomorrow's firing is
+      # the retry. `Persistent` runs a firing the host slept through; the command's own hour check then declines a
+      # late one rather than patching at noon.
+      OnCalendar=*-*-* {{ '%02d' | format(patch_window_start_hour | int) }}:00:00
+      Persistent=true
+      Unit=a11y-fleet-patch-window.service
+
+      [Install]
+      WantedBy=timers.target
+
+  tasks:
+    - name: Install the unit files
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "/etc/systemd/system/{{ item.name }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { name: a11y-fleet-patch-window.service, content: "{{ patch_service_unit }}" }
+        - { name: a11y-fleet-patch-window.timer, content: "{{ patch_timer_unit }}" }
+      register: patch_units_installed
+
+    - name: Pick up any unit that changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: patch_units_installed.results | selectattr('changed') | list | length > 0
+
+    # The `.timer` is enabled and started and its `.service` is neither: one run by hand is `systemctl start` on the
+    # SAME service the timer uses (`auto-off-schedule.yml`'s reasoning, one unit over).
+    - name: Enable and start the timer
+      ansible.builtin.systemd:
+        name: a11y-fleet-patch-window.timer
+        state: started
+        enabled: true
+
+    - name: Read the unit's own state back
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, a11y-fleet-patch-window.timer]
+      register: patch_timer_enabled
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The timer must be installed and ENABLED
+      ansible.builtin.assert:
+        that:
+          - "'enabled' in patch_timer_enabled.stdout"
+        fail_msg: >-
+          `systemctl is-enabled a11y-fleet-patch-window.timer` on {{ inventory_hostname }} must say `enabled`.
+          Got: {{ patch_timer_enabled.stdout }}
+        success_msg: "a11y-fleet-patch-window.timer is installed and enabled"
