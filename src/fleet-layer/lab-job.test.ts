@@ -205,6 +205,25 @@ test("a job may not run a script whose input another command has to derive", () 
     "these jobs skip the command that derives their input, so they read whatever is on the lab's disk");
 });
 
+test("the shortcuts job hands the audit its flags directly, with no `--` between the script and them", () => {
+  // MEASURED 2026-10-10 (a11ign#4552). The job ran `pnpm run --silent scorer:shortcuts -- --model ...` and
+  // the audit exited 2 with `unrecognized arguments: -- --model ... --no-baseline`: the lab's pnpm forwards
+  // the `--` to the script, where argparse reads it as the end of options. The package script already
+  // ends in the audit's own arguments, so the job's flags are appended to them and need no separator.
+  //
+  // Scoped to `shortcuts` and the one script it runs: the other jobs that put a `--` after a `pnpm run`
+  // script are not read here, and whether each target tolerates it is not established.
+  const argv = (catalogueJobs().shortcuts?.argv ?? []) as unknown[];
+  const parts = argv.map(String);
+  const script = parts.indexOf("scorer:shortcuts");
+  assert.ok(script > 0, "the job still runs `scorer:shortcuts`, or this guard is reading the wrong job");
+  assert.ok(parts.includes("--no-baseline") && parts.includes("--model"),
+    "the flags are still handed over, so the absence of a `--` is not the absence of the argv");
+  assert.notEqual(parts[script + 1], "--",
+    "a `--` after the script reaches the audit and ends its options, so every flag after it is refused");
+  assert.ok(!parts.slice(script + 1).includes("--"), "nor may one sit anywhere among the flags");
+});
+
 test("no job can be handed a worker URL — a worker is always resolved from the inventory", () => {
   // `--worker=http://:8765` cost 29 minutes. Resolving a NAME through the inventory makes a malformed
   // address inexpressible rather than merely rejected — the same shape as `isValidCaptureId`.

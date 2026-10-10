@@ -208,7 +208,12 @@
         # The chain lives in the package script, exactly as `corpus:grants-audit` puts its `corpus:grants-map`
         # there. NOT `/bin/sh -c` here: this file's own rule is that a shell reintroduces the quoting
         # class that sent four capture shards at `--worker=http://:8765` for 29 minutes.
-        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:shortcuts", "--",
+        #
+        # NO `--` BEFORE THE FLAGS. The lab's pnpm forwards a `--` to the script, where Python's argparse
+        # reads it as the end of options and refuses every flag after it (`unrecognized arguments: --
+        # --model ...`, exit 2, a11ign#4552). The package script already ends in the audit's own
+        # arguments, so what follows `scorer:shortcuts` here is appended to them directly.
+        argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "scorer:shortcuts",
                "--model", "runs/model-{{ out | default('candidate') }}",
                "--data", "runs/screenreader-dataset/with-realism.jsonl",
                "--no-baseline"]
