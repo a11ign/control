@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTO_OFF_MIRROR_PATH, AUTO_OFF_STATE_PATH, readAutoOffRefusal, readRefusalOrSay } from "./fleet-watch.ts";
+import { AUTO_OFF_MIRROR_PATH, AUTO_OFF_STATE_PATH, UNREAD, readAutoOffRefusal, readRefusalOrSay } from "./fleet-watch.ts";
 
 const refusal = { reason: "stale-checkout", detail: "2 files differ: a.mjs, b.mjs", at: 1_000 };
 
@@ -134,7 +134,7 @@ test("the run's own reader (what `main` calls) mirrors a read with the clock's r
     console.error = (...args: unknown[]) => { said.push(args.join(" ")); };
     try {
       const unreachable = () => { throw new Error("ssh: connect timed out"); };
-      assert.equal(readRefusalOrSay({ readState: unreachable, path, now: () => 888 }), null);
+      assert.equal(readRefusalOrSay({ readState: unreachable, path, now: () => 888 }), UNREAD);
     } finally {
       console.error = original;
     }
