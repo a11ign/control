@@ -12,9 +12,11 @@ import assert from "node:assert/strict";
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
+  unitDriftTick, unitDriftBody, exitCodeFor, EXIT,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
+import { controlUnitDrift } from "./control-unit-drift.ts";
 
 export type FleetRow = {name: string, state: string, readiness?: {reason?: string|null}|null};
 
@@ -505,4 +507,131 @@ test("watchFleet(): the patch window is read from the control host, posted once,
   answer = () => lastRun + 31 * DAY;
   await run(quiet, lastRun + 33 * DAY);
   assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "a completed patch run clears the line");
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// #4714: the hourly tick takes the control-unit-drift reading. Every reading below goes through the REAL
+// `controlUnitDrift`, with a playbook and unit texts as fixtures, so a fixture cannot invent a finding the module
+// does not produce. The row that motivated it: an installed unit still naming `lay-layer.mjs` failed 316 ticks.
+// ---------------------------------------------------------------------------------------------------------------
+const UNIT = "a11y-fleet-auto-off.service";
+const TIMER = "a11y-fleet-auto-off.timer";
+const SHIPPED_TEXT: Record<string, string> = {
+  [UNIT]: "ExecStartPre=-node scripts/lay-layer.ts control\n",
+  [TIMER]: "OnCalendar=hourly\n",
+};
+const STALE_TEXT = "ExecStartPre=-node scripts/lay-layer.mjs control\n";
+const PLAYBOOK = `- name: install the units
+  hosts: a11y_control
+  tasks:
+    - name: copy
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+      loop:
+        - ${UNIT}
+        - ${TIMER}
+`;
+
+/** The real reading over a control host holding `installed`; `host` may be a function that throws. */
+function driftReader(host: Record<string, string> | (() => Record<string, string>)) {
+  return () => controlUnitDrift({
+    readHost: typeof host === "function" ? host : () => host,
+    playbooks: () => [PLAYBOOK], shippedText: (unit) => SHIPPED_TEXT[unit],
+  });
+}
+const asShipped = { ...SHIPPED_TEXT };
+const staleService = { ...SHIPPED_TEXT, [UNIT]: STALE_TEXT };
+
+test("unit drift: an installed unit whose text differs is ATTENTION and names the unit; an identical set is QUIET", () => {
+  const stale = unitDriftTick(driftReader(staleService)());
+  assert.deepEqual(lines(stale.found), [`unit-drift: ${UNIT} differs`]);
+  assert.equal(stale.cannotTell, null);
+  assert.deepEqual(unitDriftTick(driftReader(asShipped)()), { found: [], notShipped: [], cannotTell: null }, "positive control: the shipped text raises nothing");
+});
+
+test("unit drift: a shipped unit absent from the host is ATTENTION too", () => {
+  const { [TIMER]: _gone, ...withoutTimer } = SHIPPED_TEXT;
+  assert.deepEqual(lines(unitDriftTick(driftReader(withoutTimer)()).found), [`unit-drift: ${TIMER} missing-on-host`]);
+});
+
+test("unit drift: a `not-shipped` unit alone is reported, never raised (a11y-bootstrap.service is on the plane and no playbook ships it)", () => {
+  const tick = unitDriftTick(driftReader({ ...SHIPPED_TEXT, "a11y-bootstrap.service": "[Unit]\n" })());
+  assert.deepEqual(tick.found, [], "not ATTENTION");
+  assert.deepEqual(tick.notShipped, ["a11y-bootstrap.service"], "and still named");
+  // Negative control: beside a real finding it is still not a line of its own.
+  const beside = unitDriftTick(driftReader({ ...staleService, "a11y-bootstrap.service": "[Unit]\n" })());
+  assert.deepEqual(lines(beside.found), [`unit-drift: ${UNIT} differs`]);
+});
+
+test("unit drift: a host that cannot be read is CANNOT_TELL with its reason, and is neither a finding nor a clean reading", () => {
+  const unreadable = unitDriftTick(driftReader(() => { throw new Error("ssh: no route to host"); })());
+  assert.match(unreadable.cannotTell ?? "", /no route to host/);
+  assert.deepEqual(unreadable.found, []);
+  const empty = unitDriftTick(driftReader({})());
+  assert.match(empty.cannotTell ?? "", /no unit files/, "an empty answer is also 'I did not look'");
+});
+
+test("exitCodeFor: an unread host is CANNOT_ASK and never QUIET; a clean read is QUIET; any finding is ATTENTION and outranks it", () => {
+  const found = (unitDrift: Partial<Parameters<typeof exitCodeFor>[0]["unitDrift"]>, rest: Partial<Parameters<typeof exitCodeFor>[0]> = {}) =>
+    ({ overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null, ...unitDrift }, ...rest });
+  assert.equal(exitCodeFor(found({}), null), EXIT.QUIET, "positive control: nothing to say, host read");
+  assert.equal(exitCodeFor(found({ cannotTell: "ssh refused" }), null), EXIT.CANNOT_ASK);
+  assert.equal(exitCodeFor(found({ notShipped: ["a11y-bootstrap.service"] }), null), EXIT.QUIET, "not-shipped alone");
+  assert.equal(exitCodeFor(found({ fresh: [`unit-drift: ${UNIT} differs`] }), null), EXIT.ATTENTION);
+  assert.equal(exitCodeFor(found({ cannotTell: "ssh refused" }, { offFleet: ["a11y-worker-5: build x (fleet y)"] }), null), EXIT.ATTENTION,
+    "a finding that was made stays made");
+});
+
+test("watchFleet(): a differing unit is raised once, carried through an unreadable tick, and clears when the unit is re-installed", async () => {
+  const store = memoryStore();
+  const quiet = reading([boxRow(2)], {});
+  let host: () => Record<string, string> = () => staleService;
+  const run = offFleetRun(store, { unitDrift: () => driftReader(host)() });
+  const first = await run(quiet, 1_000);
+  assert.deepEqual(first.unitDrift.fresh, [`unit-drift: ${UNIT} differs`], "first tick: raised");
+  assert.deepEqual(first.offFleet, [], "and not as an off-fleet box line, which has its own heading");
+  assert.deepEqual((await run(quiet, 2_000)).unitDrift.fresh, [], "second tick, nothing changed: not raised twice");
+  const said: string[] = [];
+  const spy = console.error; console.error = (message: string) => { said.push(message); };
+  try {
+    host = () => { throw new Error("ssh: no route to host"); };
+    const unread = await run(quiet, 3_000);
+    assert.equal(unread.unitDrift.fresh.length, 0, "an unread host raises nothing");
+    assert.match(unread.unitDrift.cannotTell ?? "", /no route to host/);
+  } finally { console.error = spy; }
+  assert.match(said.join("\n"), /CANNOT READ the control host's unit drift.*no route to host/, "and SAYS it could not look");
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), { [`unit-drift: ${UNIT} differs`]: 1_000 }, "the line was carried, with its first-seen time");
+  host = () => staleService;
+  assert.deepEqual((await run(quiet, 4_000)).unitDrift.fresh, [], "the host answers again, still stale: not re-posted");
+  host = () => asShipped;
+  assert.equal((await run(quiet, 5_000)).unitDrift.cannotTell, null);
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "a re-installed unit clears the line");
+  host = () => staleService;
+  assert.equal((await run(quiet, 6_000)).unitDrift.fresh.length, 1, "a relapse is a new event and is raised again");
+});
+
+test("watchFleet(): with no drift reader the tick claims nothing and the ledger's drift lines stand", async () => {
+  const store = memoryStore();
+  const quiet = reading([boxRow(2)], {});
+  await offFleetRun(store, { unitDrift: driftReader(staleService) })(quiet, 1_000);
+  const unasked = await offFleetRun(store)(quiet, 2_000);
+  assert.deepEqual(unasked.unitDrift, { fresh: [], notShipped: [], cannotTell: null });
+  assert.deepEqual(Object.keys(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read)), [`unit-drift: ${UNIT} differs`]);
+});
+
+test("watchFleet(): a drift reader that THROWS (not just a host that will not answer) is CANNOT_TELL, not a crash and not clean", async () => {
+  const store = memoryStore();
+  const spy = console.error; console.error = () => undefined;
+  try {
+    const run = await offFleetRun(store, { unitDrift: () => { throw new Error("ENOENT: ansible"); } })(reading([boxRow(2)], {}), 1_000);
+    assert.match(run.unitDrift.cannotTell ?? "", /ENOENT: ansible/);
+  } finally { console.error = spy; }
+});
+
+test("unitDriftBody names the count, every unit and kind, and the live-reading command", () => {
+  const body = unitDriftBody([`unit-drift: ${UNIT} differs`, `unit-drift: ${TIMER} missing-on-host`]);
+  assert.match(body, /\*\*2 control-plane unit\(s\) not running the text this repository ships/);
+  assert.match(body, new RegExp(`^- ${UNIT} differs$`, "m"));
+  assert.match(body, /control-unit-drift\.ts/);
 });
