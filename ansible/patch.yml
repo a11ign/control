@@ -33,10 +33,38 @@
 # is reported and left alone; rebooting a box that installed nothing is a restart nobody asked for, on a
 # machine that may be holding a capture.
 #
+# ## A box BELOW the fleet's target build is brought up to it, a feature update included -- #4897, under #4405
+#
+# The categories above carry cumulative updates only, and feature deferral stays at 365 days, so a 22631 box
+# could never reach 26100 or 26200 here (#4894 read 14 boxes below the target). The chairman's amendment
+# (a11ign#4795) is "a box below the target is patched, never excluded". So the play takes a TARGET, and only
+# when one is given:
+#
+#     ansible-playbook patch.yml -e patch_target_release=25H2 -e patch_target_build=26200.9457
+#
+#   - `patch_target_release` is the release NAME (`TargetReleaseVersionInfo`), `patch_target_build` the
+#     `<CurrentBuild>.<UBR>` the boxes must reach. Both are read from the fleet by the CALLER and never written
+#     into this file: the fleet's target moves with its cumulative update. Both empty (the default) is the
+#     play exactly as it was: same categories, same deferral, same reboot rule.
+#   - Lifted for the window: the feature deferral (days to 0, the same lift the quality deferral gets),
+#     `TargetReleaseVersion` = 1, `TargetReleaseVersionInfo`, and `ProductVersion` (`Windows 11`, which the
+#     policy writes with the other two); `Upgrades` joins the categories.
+#   - Put back in the `always`: the role's whole list, AND the target values REMOVED, because "as provisioned"
+#     has none. The removal runs on every run, target or not: a target left by a process that was killed
+#     (an `always` cannot run then) would otherwise stay a standing lever for a feature update, which is
+#     the drift #921 closed, and the next window of any kind heals it.
+#   - The reboot is unchanged and still this play's own `win_reboot`, conditional on an install that asked for
+#     one: a box already on the target is offered no `Upgrades`, so it installs nothing and is not restarted.
+#   - The last task of the box fails it, by worker number, when its build is below the target or cannot be read.
+#     A window that moved nothing must not read as success (#4733). A box that needed a second pass (the new
+#     build's own cumulative) fails here and is re-run with `--limit`; `any_errors_fatal` halts the rest.
+#
 # ## Not read here
 #
 # That `win_updates` works on this fleet's Windows edition has not been read: the first run is row E's, with
-# `--check --limit <one idle box>` first.
+# `--check --limit <one idle box>` first. Neither has the `Upgrades` path: that the feature update installs
+# through `win_updates`, that `ProductVersion` is honoured beside the two named values, and how long a
+# feature update's reboot takes on these boxes (the timeout below is a guess, longer than the cumulative's).
 
 - name: The workers must be in the inventory
   # A run that matches no host prints "skipping: no hosts matched" and EXITS 0, so a patch window could "pass"
@@ -61,22 +89,50 @@
   vars_files:
     - roles/worker/defaults/main.yml
   vars:
-    # The ONE entry the window lifts. Feature-update deferral stays exactly as provisioned the whole time.
+    # The target, supplied by the caller (`-e`, which outranks this). Empty means no target: the play is
+    # then what it was before #4897, and nothing below changes a value, a category or a rule.
+    patch_target_release: ''
+    patch_target_build: ''
+    patch_target_set: "{{ (patch_target_release | string | length) > 0 }}"
+    # The deferral entries the window lifts, by NAME out of the role's list: the quality one always, the
+    # feature one only with a target, so feature deferral stays exactly as provisioned otherwise.
+    patch_lifted_names: >-
+      {{ ['DeferQualityUpdatesPeriodInDays']
+         + (['DeferFeatureUpdatesPeriodInDays'] if patch_target_set | bool else []) }}
     patch_lifted_values: >-
       {{ worker_update_deferral_policy
-         | selectattr('name', 'equalto', 'DeferQualityUpdatesPeriodInDays')
+         | selectattr('name', 'in', patch_lifted_names)
          | map('combine', {'value': 0}) | list }}
-    patch_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
+    # Written for the window only and REMOVED afterwards (the role provisions none). Same key as the deferral.
+    patch_policy_path: "{{ (worker_update_deferral_policy | first).path }}"
+    patch_target_names: [TargetReleaseVersion, TargetReleaseVersionInfo, ProductVersion]
+    patch_target_values: >-
+      {{ [{'path': patch_policy_path, 'name': 'TargetReleaseVersion', 'value': 1, 'type': 'dword'},
+          {'path': patch_policy_path, 'name': 'TargetReleaseVersionInfo', 'value': patch_target_release, 'type': 'string'},
+          {'path': patch_policy_path, 'name': 'ProductVersion', 'value': 'Windows 11', 'type': 'string'}]
+         if patch_target_set | bool else [] }}
+    patch_window_values: "{{ patch_lifted_values + patch_target_values }}"
+    patch_base_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
+    patch_categories: "{{ patch_base_categories + (['Upgrades'] if patch_target_set | bool else []) }}"
   tasks:
-    - name: The quality deferral is declared, or the window would lift nothing
+    - name: The deferrals to lift are declared and the target is given whole, or the window would do nothing
       # A lift that matches no entry "succeeds" and installs nothing -- a green result vouching for an inert
-      # remedy. Exactly one entry, by name.
+      # remedy. Exactly one entry per name. And a release with no build could never be checked at the end,
+      # a build with no release would change nothing: either is a window that reads as patched. The shapes
+      # are checked because both land in the registry and in a comparison. One task, so that nothing
+      # sits between the guard and the busy check below.
+      tags: [patch_target_inputs]
       ansible.builtin.assert:
         that:
-          - patch_lifted_values | length == 1
+          - patch_lifted_values | length == patch_lifted_names | length
+          - (patch_target_release | string | length > 0) == (patch_target_build | string | length > 0)
+          - not (patch_target_set | bool) or (patch_target_release | string) is match('^[0-9]{2}H[12]$')
+          - not (patch_target_set | bool) or (patch_target_build | string) is match('^[0-9]+\.[0-9]+$')
         fail_msg: >-
-          worker_update_deferral_policy has no DeferQualityUpdatesPeriodInDays entry (or more than one), so
-          there is no quality deferral for the patch window to lift.
+          Either worker_update_deferral_policy has no entry (or more than one) for each of {{ patch_lifted_names }},
+          so there is no deferral for the patch window to lift; or patch_target_release
+          ('{{ patch_target_release }}') and patch_target_build ('{{ patch_target_build }}') are not given
+          together, as a release like 25H2 and a build like 26200.9457, or not at all.
 
     - name: Refuse to patch a worker that is mid-capture
       # Same shape and same reason as display.yml's and edge-version.yml's check: an install that ends in a
@@ -98,8 +154,8 @@
             path: "{{ item.path }}"
             name: "{{ item.name }}"
             data: "{{ item.value }}"
-            type: dword
-          loop: "{{ patch_lifted_values }}"
+            type: "{{ item.type | default('dword') }}"
+          loop: "{{ patch_window_values }}"
           loop_control:
             label: "{{ item.name }} = {{ item.value }}"
 
@@ -111,7 +167,7 @@
           become: true
           ansible.windows.win_powershell:
             parameters:
-              Wanted: "{{ patch_lifted_values }}"
+              Wanted: "{{ patch_window_values }}"
             script: &read_back_deferral |
               param($Wanted)
               $Ansible.Changed = $false
@@ -119,7 +175,7 @@
               foreach ($v in $Wanted) {
                 $cur = $null
                 try { $cur = (Get-ItemProperty -LiteralPath $v.path -Name $v.name -ErrorAction Stop).($v.name) } catch { $cur = $null }
-                if ($null -eq $cur -or [int]$cur -ne [int]$v.value) { $wrong += "$($v.path)\$($v.name) is '$cur', wanted '$($v.value)'" }
+                if ($null -eq $cur -or "$cur" -ne "$($v.value)") { $wrong += "$($v.path)\$($v.name) is '$cur', wanted '$($v.value)'" }
               }
               if ($wrong.Count -gt 0) { $Ansible.Failed = $true; "deferral did not read back: " + ($wrong -join '; ') }
               else { "$($Wanted.Count) deferral value(s) read back" }
@@ -148,7 +204,8 @@
             - patch_updates.reboot_required | default(false)
           become: true
           ansible.windows.win_reboot:
-            reboot_timeout: 1800
+            # A feature update's servicing reboots run longer than a cumulative's; only a target lengthens it.
+            reboot_timeout: "{{ 7200 if patch_target_set | bool else 1800 }}"
 
         - name: Wait for the worker to be READY again
           # `ready`, not `ok` -- see the busy check above. Only after a reboot we made.
@@ -194,6 +251,33 @@
               Wanted: "{{ worker_update_deferral_policy }}"
             script: *read_back_deferral
 
+        - name: Remove the target release, which the role does not provision
+          # On every run, not only a targeted one: see the header. An absent value is already as wanted.
+          become: true
+          ansible.windows.win_regedit:
+            path: "{{ patch_policy_path }}"
+            name: "{{ item }}"
+            state: absent
+          loop: "{{ patch_target_names }}"
+
+        - name: Refuse to call the box patched while a target release is still set
+          when: not ansible_check_mode
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Path: "{{ patch_policy_path }}"
+              Names: "{{ patch_target_names }}"
+            script: |
+              param($Path, $Names)
+              $Ansible.Changed = $false
+              $left = @()
+              foreach ($n in $Names) {
+                $cur = (Get-ItemProperty -LiteralPath $Path -Name $n -ErrorAction SilentlyContinue).$n
+                if ($null -ne $cur) { $left += "$n = '$cur'" }
+              }
+              if ($left.Count -gt 0) { $Ansible.Failed = $true; "target release still set: " + ($left -join '; ') }
+              else { "$($Names.Count) target release value(s) absent" }
+
     - name: Ask the box what Windows build it is on now
       # `CurrentBuild.UBR` is the whole build; `CurrentBuild` alone is the same for every monthly update.
       # A box that cannot be asked is `unreadable` below, which is a different fact from a build that differs.
@@ -220,6 +304,25 @@
     - name: Name the build
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }}: {{ patch_build_reading }}"
+
+    - name: A box below the target build, or one that cannot be read, is a failed window
+      # Last on purpose: everything above ran, so this is the box's own reading after the run. Numbers
+      # compare as `[build, UBR]`, never as text ('9457' sorts above '10000'). Unreadable fails here although
+      # the verdict play does not count it a mismatch: that play judges agreement, this one a promise to
+      # reach a build, and a box nobody could read has not been shown to have reached it.
+      tags: [patch_target_verdict]
+      when:
+        - patch_target_set | bool
+        - >-
+          patch_build_reading | default('unreadable', true) == 'unreadable'
+          or (patch_build_reading.split('.') | map('int') | list) < (patch_target_build.split('.') | map('int') | list)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is {{ 'UNREADABLE, so it is not shown to have reached' if
+          patch_build_reading | default('unreadable', true) == 'unreadable' else 'on ' ~ patch_build_reading ~ ', below' }}
+          the target build {{ patch_target_build }} (release {{ patch_target_release }}). Re-run with
+          `--limit {{ inventory_hostname }}`: a box that needed a feature update may need a second pass for the
+          new build's own cumulative update.
 
 # The proof (a) asks for: after the window, ONE build. A separate play so it sees every box's reading, and
 # tagged so a test can run it alone over a synthetic inventory (`patch-playbook.test.ts`).
