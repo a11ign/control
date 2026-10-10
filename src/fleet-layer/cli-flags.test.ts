@@ -152,6 +152,17 @@ test("a near miss is named, and a wild guess is not", () => {
     "suggesting anything for an unrelated flag sends the reader somewhere wrong with confidence");
 });
 
+/**
+ * WHERE THE PROGRAM IS, for a transitional shim (a11ign/a11ign#4551). Lab v0.1.28 keeps each renamed `scripts/*.mjs` for ONE release as a file that re-exports its `.ts` and, as the entry file,
+ * spawns it with the same argv, so it reads `process.argv` to forward it and the census counts it, and it cannot call a guard that lives in the `.ts` it forwards to. The question "is this CLI
+ * guarded" is asked of the `.ts`, which is the program; a shim classified by its own source would put thirty-five forwarding files on the failure list and say nothing about the guard.
+ * Deleted with the shims by a11ign/a11ign#4798, when no file carries the marker and this is the identity.
+ */
+function programOf(rel: string): string {
+  const shim = readFileSync(join(REPO, rel), "utf8").includes("TRANSITIONAL (a11ign/a11ign#4551)");
+  return shim ? rel.replace(/\.mjs$/, ".ts") : rel;
+}
+
 test("the unguarded list names files that exist and are not already guarded", () => {
   // A stale entry is a list that lies two different ways: it silently exempts nothing while making the
   // gap look larger than it is (a rename, checked below), or it goes on claiming an exemption for a file
@@ -170,7 +181,7 @@ test("a new CLI cannot quietly join the unguarded ones", () => {
   // calling the guard, not by somebody adding it here. Only a DELIBERATE exemption still needs a line, in
   // UNGUARDED, with a reason.
   const surprises = commandLineModules(REPO)
-    .filter((path) => !callsTheGuard(path) && !(path in UNGUARDED));
+    .filter((path) => !callsTheGuard(programOf(path)) && !(path in UNGUARDED));
   assert.deepEqual(surprises, [],
     "these read argv and neither call refuseUnknownFlags nor appear in UNGUARDED. Call the guard in the "
     + "file itself (preferred — an ignored flag runs the default and reports success), or add an entry "

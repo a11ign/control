@@ -170,8 +170,8 @@ test("a gate that dispatches to the control plane must be told --local when the 
   // wiring. DISCOVERED here rather than listed, because "which scripts dispatch" is a fact about the
   // source that a hand-written list goes stale against, exactly as the worker-file list did.
   const dispatching = readdirSync(LAB_SCRIPTS)
-    .filter((file) => file.endsWith(".mjs"))
-    .filter((file) => readFileSync(LAB_SCRIPTS + file, "utf8").includes("gates/dispatch.mjs"));
+    .filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
+    .filter((file) => readFileSync(LAB_SCRIPTS + file, "utf8").includes("gates/dispatch.ts"));
   assert.ok(dispatching.length >= 2,
     `found ${dispatching.length} dispatching gates; the discovery is broken, not the catalogue clean`);
 
@@ -1179,9 +1179,9 @@ test("#1626: install-axe-browser never invokes npx, and names a file this checko
 });
 
 test("#1626: axe-calibration's declared exit codes are ones its own script can actually produce", () => {
-  // The #1511 lesson applied to a job with no shared gateVerdict/exitCodeFor to borrow: axe-calibration.mjs
+  // The #1511 lesson applied to a job with no shared gateVerdict/exitCodeFor to borrow: axe-calibration.ts
   // is its own contract, so what it can return is read from ITS source, never typed by hand here.
-  const source = readFileSync(resolve(LAB_SCRIPTS, "axe-calibration.mjs"), "utf8");
+  const source = readFileSync(resolve(LAB_SCRIPTS, "axe-calibration.ts"), "utf8");
   const meanings = (PLAY_VARS.lab_jobs["axe-calibration"] as JobEntry & { exitMeanings?: Record<string, string> })
     .exitMeanings ?? {};
   const declared = Object.keys(meanings);

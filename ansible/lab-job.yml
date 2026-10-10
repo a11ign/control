@@ -172,7 +172,7 @@
         argvAppend: "{{ (lab_train_exclusions[exclude] | map('regex_replace', '^', lab_exclude_flag) | list)
                         if exclude is defined else [] }}"
       build-realism:
-        argv: ["/usr/bin/node", "packages/lab/scripts/build-realism-tier.mjs",
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/build-realism-tier.ts",
                "--out=runs/screenreader-dataset/with-realism.jsonl"]
         timeout: 900
       # The one check that scores REAL pages through the PRODUCT path. It measured the shipped model and
@@ -181,7 +181,7 @@
       # resolving the shipped artefact always.
       sweep:
         params: {model: optional}
-        argv: ["/usr/bin/node", "packages/lab/scripts/calibrate-abstention.mjs"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/calibrate-abstention.ts"]
         setenv: ["A11Y_SCORER_MODEL={{ ('/opt/a11y/runs/model-' ~ model) if model is defined else '' }}"]
         timeout: 1800
       # WHICH records does a head fire on wrongly, and what do they have in common? A report says "36 false
@@ -586,7 +586,7 @@
             INCONCLUSIVE -- one or more canaries could not be judged (errored, or too few usable captures),
             which reduces the denominator rather than counting as stable. "Could not measure" and "it
             varied" need opposite responses; re-run before trusting a PASS or FAIL from this one.
-        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.ts", "--local"]
         setenv: ["A11Y_WORKER={{ lab_named_worker }}"]
         timeout: 5400
       # SCORE THE SHIPPED MODEL FROM A COPY, which is what `release:gate` needs and could not do.
@@ -684,7 +684,7 @@
             INCONCLUSIVE -- one or more canaries could not be judged (errored, or too few usable captures),
             which reduces the denominator rather than counting as stable. Re-run before trusting a PASS or
             FAIL from this one.
-        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.mjs", "--local"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.ts", "--local"]
         # #1041: A NAMED WORKER, THE SAME AS `stability` ABOVE, AND FOR THE SAME STATED REASON -- this gate
         # asks whether the PIPELINE is deterministic, so a second guest is a second variable. The entry ran
         # the identical script with the identical flag and passed NO worker at all, so every dispatch died
@@ -709,7 +709,7 @@
           "2": >-
             INCONCLUSIVE -- fewer pages were examined than this sweep's own population (corpus pages plus
             live sites, minus known movers); re-run rather than trusting the result shown.
-        argv: ["/usr/bin/node", "packages/lab/scripts/gate-probe-order.mjs", "--local"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/gate-probe-order.ts", "--local"]
         timeout: 3600
       rules-real-pages:
         # gateVerdict/exitCodeFor -- see rules-gate's entry above for why this is declared.
@@ -795,7 +795,7 @@
             REFUSED before any page was scanned -- either install-axe-browser has not put a Chromium at
             PLAYWRIGHT_BROWSERS_PATH (the printed message names the exact path checked), or a fatal error
             aborted the run before it could examine anything. Nothing was written.
-        argv: ["/usr/bin/node", "packages/lab/scripts/axe-calibration.mjs"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/axe-calibration.ts"]
         setenv: ["PLAYWRIGHT_BROWSERS_PATH=/opt/a11ign/playwright-browsers"]
         timeout: 3600
       # WHAT STATE IS THE CORPUS IN? The question that had no command, so it was answered by opening an
@@ -806,7 +806,7 @@
       # it is a job at all: a laptop's `runs/` is gitignored and only as fresh as its last sync, and it
       # carries no `runs/model-*` -- so run there it answers a different question and says so.
       inventory:
-        argv: ["/usr/bin/node", "packages/lab/scripts/lab-inventory.mjs"]
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/lab-inventory.ts"]
         timeout: 900
       # CAPTURES NO DECLARED PAGE CLAIMS — named and classified here, because only this box has the
       # authoritative corpus. A laptop's `runs/` is as fresh as its last sync and would report a set that
@@ -825,7 +825,7 @@
         params: {apply: optional}
         # The flag is APPENDED or absent, never passed as an empty placeholder: `refuseUnknownFlags`
         # would reject a bare `--`, and a job whose no-op form is refused is one nobody runs.
-        argv: "{{ ['/usr/bin/node', 'packages/lab/scripts/corpus-prune-orphans.mjs']
+        argv: "{{ [lab_tsx, 'packages/lab/scripts/corpus-prune-orphans.ts']
                   + (['--apply'] if (apply | default('') | string | lower) == 'true' else []) }}"
         timeout: 900
       # THE PYTHON TESTS, WHERE THE CORPUS IS. Several of them read `runs/` and SKIP HONESTLY without it,
@@ -981,7 +981,7 @@
         # this the only thing `fleet:hours` could report is the whole corpus — every arm and every
         # protocol averaged into one number describing no run that ever happened.
         params: {captures_dir: optional}
-        argv: ["/usr/bin/node", "packages/lab/scripts/fleet-hours.mjs", "--json",
+        argv: ["{{ lab_tsx }}", "packages/lab/scripts/fleet-hours.ts", "--json",
                "--dir={{ captures_dir | default(lab_repo_path ~ '/runs') }}"]
         timeout: 1800
       # THE CORPUS'S ONLY DEFENCE, AND IT HAD NO JOB — added 2026-09-06 for issue #43.
@@ -1162,7 +1162,7 @@
         # takes every positional argument as a worker and pools across them. `[lab_named_worker]` is that
         # list with one entry, which is the same code path a five-box dispatch takes — nothing here tells
         # the script it is being aimed, and nothing in the script has to know.
-        argv: "{{ [lab_tsx, 'packages/lab/scripts/evidence-check.mjs']
+        argv: "{{ [lab_tsx, 'packages/lab/scripts/evidence-check.ts']
                   + ([lab_named_worker] if worker is defined else (lab_fleet_workers | split(',')))
                   + ['--sample=' ~ (sample | default(24) | int)]
                   + (['--only=' ~ only] if only is defined else []) }}"
