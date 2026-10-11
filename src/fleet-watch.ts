@@ -58,6 +58,13 @@
  * (`ATTENTION_KINDS`). A host that could not be read is `CANNOT_TELL`: said on stderr, the ledger's drift lines carried
  * (an unread host is not a unit that was re-installed), and the exit is `CANNOT_ASK` unless something else is
  * ATTENTION -- never QUIET, which is the reading this exists to end.
+ *
+ * ## A fleet lock that died holding the fleet awake (#4405 item 2, #5019)
+ *
+ * A fleet operation's lock (`fleet-lock.ts`) keeps the boxes awake until its `expiresAt`. A lock whose operation never ENDED and
+ * whose expiry has passed is a run that crashed, so `fleet-lock: <operation> stale since <time>` is one line in the same ledger,
+ * posted once and dropped when the lock is `none` or taken afresh. An ENDED lock raises nothing: letting go after the grace is its
+ * design. A lock that cannot be read is `fleet-lock: unreadable`, never quiet.
  */
 import { readFileSync, writeFileSync, renameSync, openSync, closeSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -66,6 +73,7 @@ import { pathToFileURL } from "node:url";
 import { fleetStatus } from "./fleet-status.ts";
 import { sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
+import { readFleetLock, type FleetLockReading } from "./fleet-lock.ts";
 import {
   fleetBuildIncidentTick, ghIncidentDeps, readOnlyIncidentDeps, incidentFiledBody, NO_INCIDENT_TICK, type BuildIncidentTick, type BuildStatus,
 } from "./fleet-build-incident.ts";
@@ -681,7 +689,7 @@ export function advanceOffFleet(found: Oddity[], previous: SinceState, { now, ke
 /** The comment body for lines not posted before. */
 export function offFleetBody(lines: string[]): string {
   return [
-    `**${lines.length} off the fleet's build or display mode, or with the Edge updater back on, ahead of capture** (#4447, #5022).`,
+    `**${lines.length} new on the fleet watch, ahead of capture** (#4447, #5022, #4405).`,
     ...lines.map((line) => `- ${line}`),
     "`npm run fleet:status` for the live reading.",
   ].join("\n");
@@ -797,6 +805,8 @@ export type WatchDeps = {
     unitDrift?: () => Reading;
     /** The Windows build spread and its one stop-the-line incident (#5026). Absent: not read this tick, and nothing is claimed. */
     buildIncident?: (status: BuildStatus) => BuildIncidentTick;
+    /** The fleet lock on the control plane at this tick's clock (see `readFleetLock`). Absent: not read this tick, and the lock line stands. */
+    fleetLock?: (now: number) => FleetLockReading;
     /** Where the off-fleet ledger is written when it is not `write`: a dry run must not use up the lines a posting run will say. */
     writeOffFleet?: (path: string, data: string) => void;
 };
@@ -832,8 +842,9 @@ function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], report
   const path = deps.offFleetPath ?? DEFAULT_OFF_FLEET_STATE_PATH;
   const patch = patchReading(deps.lastPatchRunAt, at);
   const drift = unitDriftReading(deps.unitDrift);
-  const { state, fresh } = advanceOffFleet([...offFleetLines(status), ...patch.found, ...drift.tick.found], readState(path, deps.read),
-    { now: at, keep: carriesEntry(status.rows, { patch: patch.carry, unitDrift: drift.carry }) });
+  const lock = fleetLockTick(deps.fleetLock, at);
+  const { state, fresh } = advanceOffFleet([...offFleetLines(status), ...patch.found, ...drift.tick.found, ...lock.found], readState(path, deps.read),
+    { now: at, keep: carriesEntry(status.rows, { patch: patch.carry, unitDrift: drift.carry, fleetLock: lock.carry }) });
   writeState(path, state, deps.writeOffFleet ?? deps.write);
   const isDrift = (line: string) => line.startsWith(UNIT_DRIFT_LINE_PREFIX);
   return {
@@ -894,17 +905,42 @@ function unitDriftReading(read: (() => Reading) | undefined): { tick: UnitDriftT
   return { tick, carry: tick.cannotTell !== null };
 }
 
+const FLEET_LOCK_LINE_PREFIX = "fleet-lock: ";
+
+/**
+ * The fleet-lock line this tick raises, if any (#4405 item 2). A lock whose operation never ENDED and whose expiry has passed is
+ * a run that died still holding the fleet awake: `stale since` names the moment it stopped counting. A lock its operation
+ * ENDED lets go on its own after the grace, which is the design and not a fault, so it raises nothing. A lock that cannot be
+ * read is never quiet: the fleet may be held, and nobody can say. The unreadable line is constant, so the ledger posts it once.
+ */
+export function fleetLockLines(reading: FleetLockReading): Oddity[] {
+  if (reading.state === "unreadable") return [{ box: null, line: `${FLEET_LOCK_LINE_PREFIX}unreadable` }];
+  if (reading.state !== "stale" || reading.lock.endedAt !== undefined) return [];
+  const { operation, expiresAt } = reading.lock;
+  return [{ box: null, line: `${FLEET_LOCK_LINE_PREFIX}${operation} stale since ${new Date(expiresAt).toISOString()}` }];
+}
+
+/**
+ * The fleet-lock lines of this tick, and whether an absent reader means the last one stands. With no reader at all (a caller
+ * that did not ask) the line is carried the same way the patch line is: nothing is claimed about a lock that was not read.
+ */
+function fleetLockTick(read: ((now: number) => FleetLockReading) | undefined, now: number): { found: Oddity[], carry: boolean } {
+  if (!read) return { found: [], carry: true };
+  return { found: fleetLockLines(read(now)), carry: false };
+}
+
 /** The box a ledger line is about: `a11y-worker-3: build ...` and `edge-updater: a11y-worker-3 drift` name it in different places. */
 function boxOfLine(line: string): string {
   return line.startsWith(EDGE_UPDATER_PREFIX) ? line.slice(EDGE_UPDATER_PREFIX.length).split(" ")[0] : line.split(": ")[0];
 }
 
-/** Entries about a box that did not answer, or about a patch run or the control host's units that could not be read, are not cleared by silence. */
-function carriesEntry(rows: FleetRow[], carry: { patch: boolean, unitDrift: boolean }): (line: string) => boolean {
+/** Entries about a box that did not answer, or about a patch run, the control host's units or the fleet lock that could not be read, are not cleared by silence. */
+function carriesEntry(rows: FleetRow[], carry: { patch: boolean, unitDrift: boolean, fleetLock: boolean }): (line: string) => boolean {
   const asleep = new Set(rows.filter((row) => row.state === "unreachable").map((row) => workerKey(row.name)));
   return (line) => asleep.has(boxOfLine(line))
     || (carry.patch && line.startsWith(PATCH_LINE_PREFIX))
-    || (carry.unitDrift && line.startsWith(UNIT_DRIFT_LINE_PREFIX));
+    || (carry.unitDrift && line.startsWith(UNIT_DRIFT_LINE_PREFIX))
+    || (carry.fleetLock && line.startsWith(FLEET_LOCK_LINE_PREFIX));
 }
 
 /** What `readRefusalOrSay` answers: the refusal, `null` for a host that was read and refused nothing, or `UNREAD` (#4734). */
@@ -961,6 +997,7 @@ async function main() {
   let found;
   try {
     found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), lastPatchRunAt: readPatchRun, unitDrift: readUnitDrift,
+      fleetLock: (now) => readFleetLock(now, { log: (line) => console.error(line) }),
       buildIncident: (status) => fleetBuildIncidentTick(status, post ? ghIncidentDeps() : readOnlyIncidentDeps(ghIncidentDeps())),
       ...(post ? {} : { writeOffFleet: () => undefined }) });
   } catch (cause) {
