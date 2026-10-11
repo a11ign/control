@@ -67,6 +67,8 @@ import { postQualificationStatus } from "./post-qualification-status.ts";
 // #2803: the SAME two-read-plus-`/health` rule `doctor` and `worker:code` use (#2790), imported rather than
 // restated -- a second copy of "when is a neighbour-table address to be trusted" is the one that drifts.
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
+// #4405 (ruling, 2026-10-11): an OPEN fleet build incident stops every job that puts a box to work. The read lives beside the incident.
+import { openFleetBuildIncident, type OpenIncident } from "./fleet-build-incident.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
@@ -241,6 +243,14 @@ export function workerDemand(catalogueText: string, job: string): { fleet: boole
     named: /params:\s*\{[^}]*\bworker:/.test(block),
   };
   return demand.fleet || demand.selectable || demand.named ? demand : null;
+}
+
+/**
+ * Every catalogue job that puts a box to work, by the same `workerDemand` reading. The build-incident guard refuses this set,
+ * so it is derived here and never listed by hand: a job added to the catalogue is covered the day it is written.
+ */
+export function fleetDispatchingJobs(catalogueText: string): string[] {
+  return catalogueJobs(catalogueText).map(({ name }) => name).filter((job) => workerDemand(catalogueText, job) !== null);
 }
 
 /**
@@ -430,6 +440,7 @@ async function runOnce(argv: string[], {
   readFleet = readControlPlaneFleet,
   wake,
   resolvePool,
+  openIncident,
 }: {
         catalogueText?: string; workers?: string[]; expected?: string; sourceDir?: string;
         checkFleet?: (expected: string, workers: string[], options: { sourceDir: string; when?: string; allow?: boolean; bareMetalUrls?: string[]; }) => Promise<void>;
@@ -438,6 +449,7 @@ async function runOnce(argv: string[], {
         wake?: (needed: Worker[]) => Promise<{ name: string; host: string; state: string; detail?: string; }[]>;
         resolvePool?: typeof resolvePoolAtUseTime;
         qualify?: import("./qualification-run.ts").Poster;
+        openIncident?: () => OpenIncident | null;
     } = {}): Promise<number | void> {
   // Stripped before forwarding: `ansible-playbook` does not recognise this flag and would refuse the
   // whole command line with it still attached, and it is this file's own concern, not the playbook's.
@@ -454,6 +466,12 @@ async function runOnce(argv: string[], {
     const catalogue = catalogueText ?? readFileSync(CATALOGUE, "utf8");
     const demand = workerDemand(catalogue, job);
     if (demand) {
+      // #4405: before the pool is resolved or any box is woken, so a refused job wakes nothing.
+      const buildRefusal = fleetBuildRefusal(job, openIncident);
+      if (buildRefusal !== null) {
+        process.stderr.write(`${buildRefusal}\n`);
+        return process.exit(3);
+      }
       // #1356: the CONTROL PLANE's own inventory when `workers` was not given directly -- never a
       // checkout's `inventory.yml`, gitignored and absent here just as it was on the control plane's own
       // persistent checkout (#1670). Refused in ITS OWN words before anything is asked of a worker,
@@ -497,6 +515,25 @@ async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: W
   return { moved: placed.moved, leftOut };
 }
 
+/**
+ * The fleet build incident (a11ign#4405, chairman's ruling): OPEN means the fleet is stopped, and a read that cannot be made
+ * refuses too. "Could not ask" is not "may proceed". Returns the refusal, or `null` when the job may go on.
+ */
+export function fleetBuildRefusal(job: string, openIncident?: () => OpenIncident | null): string | null {
+  let incident: OpenIncident | null;
+  try {
+    if (!openIncident) throw new Error("lab:job was handed no reader for it");
+    incident = openIncident();
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    return `REFUSING ${job}: could not ask whether a fleet build incident is open (${reason}). Could not ask is not may proceed.`;
+  }
+  if (incident === null) return null;
+  const laggards = incident.laggards.map(({ box, build }) => `${box} on ${build}`).join(", ") || "none named";
+  return `REFUSING ${job}: a fleet build incident (a11ign#${incident.number}) is open -- ${laggards}. `
+    + `No lab job or corpus run until every box is on ${incident.target ?? "the newest build"}; fleet:patch --apply brings them there.`;
+}
+
 /** The fleet, then the part of it this run needs -- each refusal in its own words. */
 function neededFor(job: string, demand: { fleet: boolean; selectable: boolean; named: boolean; }, argv: string[], sources: { workers?: string[]; readFleet: () => { workers: Worker[]; refusal: string | null; }; }): { needed: Worker[]; selected: boolean; refusal: null; } | { refusal: string; } {
   const resolved = fleetFor(job, sources);
@@ -538,5 +575,5 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     readRecord: (query: { job: string; row: number; since: number; }) =>
       readRecordFrom(recordDir, query, (text) => process.stderr.write(text)),
   };
-  process.exit(await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify }) ?? 0);
+  process.exit(await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify, openIncident: openFleetBuildIncident }) ?? 0);
 }

@@ -21,13 +21,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { ansiblePlaybookArgs, captureBearingJobs, extraVars, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
+import { ansiblePlaybookArgs, captureBearingJobs, extraVars, fleetBuildRefusal, fleetDispatchingJobs, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
+import type { OpenIncident } from "./fleet-build-incident.ts";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
 import { postQualificationStatus } from "./post-qualification-status.ts";
 import { outcomeOf, qualificationRequest, readRecordFrom, withLayerRefs } from "./qualification-run.ts";
 
 /** Where the layer's source would be on a host that holds the checkout; a tree without one has none, and these tests swap the check that reads it. */
 const LAYER_SRC = "/layer-checkout/packages/nvda-worker/src/";
+// The reader every fleet-dispatching test hands `run()`: no incident open. Without one a test would reach GitHub, or refuse for want of a reader.
+const NO_OPEN_INCIDENT = () => null;
 
 const CATALOGUE = readFileSync(fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)), "utf8");
 
@@ -111,7 +114,7 @@ test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool i
   return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765", "http://203.0.113.59:8765"],
-    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     checkFleet: async (expected, workers, options) => {
       order.push("checked");
       seen.checked = [expected, workers, options];
@@ -161,7 +164,7 @@ test("#1356: with no `workers` given, a capture-bearing job's pool comes from th
   + "inventory, never a checkout's inventory.yml -- through run() itself", () => {
   const seen: { checked?: unknown[] } = {};
   return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
-    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
     checkFleet: async (expected, workers, options) => { seen.checked = [expected, workers, options]; },
     dispatch: () => {},
@@ -180,7 +183,7 @@ test("a refusing check stops the job from ever reaching dispatch", () => {
   return run(["-e", "job=capture"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
-    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     checkFleet: async () => { throw new Error("FLEET IS NOT RUNNING THIS CHECKOUT"); },
     dispatch: () => { dispatched = true; },
   }).then(
@@ -212,7 +215,7 @@ test("-e describe=1 skips the fleet check too — nothing is about to run", () =
   return run(["-e", "job=capture", "-e", "describe=1"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
-    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     checkFleet: async () => { checked = true; },
     dispatch: () => {},
   }).then(() => {
@@ -228,7 +231,7 @@ test("--allow-stale-workers reaches the check as `allow: true` and is stripped b
   return run(["-e", "job=capture", "--allow-stale-workers"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
-    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+    expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     checkFleet: async (_expected, _workers, options: { allow?: boolean }) => { allow = options.allow; },
     dispatch: (forwarded) => { dispatched = forwarded; },
   }).then(() => {
@@ -765,8 +768,9 @@ const sameMove = () => [new Map([["a11y-worker-b", MOVED_TO]]), new Map([["a11y-
 type Drive2803 = { events: string[]; woken: { name: string; url: string }[]; checkedPool: string[];
   dispatched: string[] | null; exited: number | undefined; stderr: string };
 
-async function drive2803(argv: string[], { workers = FLEET_2803, macReads = sameMove() } = {}): Promise<Drive2803> {
+async function drive2803(argv: string[], { workers = FLEET_2803, macReads = sameMove(), openIncident = NO_OPEN_INCIDENT }: { workers?: typeof FLEET_2803; macReads?: Array<Map<string, string>>; openIncident?: () => OpenIncident | null } = {}): Promise<Drive2803> {
   const seen: Drive2803 = { events: [], woken: [], checkedPool: [], dispatched: null, exited: undefined, stderr: "" };
+  // `openIncident` is what #4405 reads: passed here, so an incident-open test drives the same path a real launch does.
   const realExit = process.exit;
   const realOut = process.stdout.write.bind(process.stdout);
   const realErr = process.stderr.write.bind(process.stderr);
@@ -775,7 +779,7 @@ async function drive2803(argv: string[], { workers = FLEET_2803, macReads = same
   process.exit = ((code: number) => { seen.exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
   try {
     await run(argv, {
-      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident,
       readFleet: () => ({ refusal: null, workers }),
       resolvePool: (needed) => fixtureResolver(needed as typeof FLEET_2803, macReads)(),
       // A worker is up exactly where the fixture says something answers; `c` never is, so waking it fails.
@@ -796,6 +800,84 @@ async function drive2803(argv: string[], { workers = FLEET_2803, macReads = same
   }
   return seen;
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// #4405 (chairman's ruling): an OPEN fleet build incident stops every job that dispatches to the fleet, and a
+// read that cannot be made refuses too. The set is DERIVED from the catalogue, never listed here, so a fleet
+// job written tomorrow is covered the day it lands.
+// ---------------------------------------------------------------------------------------------------------
+
+const OPEN_INCIDENT: OpenIncident = {
+  number: 4405, createdAt: "2026-10-01T00:00:00Z", target: "build-42",
+  laggards: [{ box: "a11y-worker-b", build: "build-41" }],
+};
+const INCIDENT_OPEN = () => OPEN_INCIDENT;
+const INCIDENT_UNREADABLE = (): OpenIncident | null => { throw new Error("gh could not be reached"); };
+
+test("#4405: the positive control -- the derived set is non-empty and holds every capture-bearing job, so the refusal loop below cannot pass by finding nothing", () => {
+  const dispatching = fleetDispatchingJobs(CATALOGUE);
+  assert.ok(dispatching.length > 0, "an empty set would make every refusal test below pass vacuously");
+  for (const job of captureBearingJobs(CATALOGUE)) {
+    assert.ok(dispatching.includes(job), `${job} is capture-bearing, so it must count as fleet-dispatching`);
+  }
+});
+
+test("#4405: every catalogue job that dispatches to the fleet is refused while the incident is open -- before any box wakes, is checked or is dispatched", async () => {
+  for (const job of fleetDispatchingJobs(CATALOGUE)) {
+    const seen = await drive2803(["-e", `job=${job}`], { openIncident: INCIDENT_OPEN });
+    const prefix = `REFUSING ${job}: a fleet build incident (a11ign#4405) is open`;
+    assert.equal(seen.exited, 3, `${job} must exit 3`);
+    assert.deepEqual(seen.events, [], `${job} must not wake, check or dispatch`);
+    assert.equal(seen.dispatched, null, `${job} must not dispatch`);
+    assert.equal(seen.stderr.slice(0, prefix.length), prefix, `${job} must say why, in the file's own shape`);
+  }
+});
+
+test("#4405: the refusal names the incident, the box still behind, and the build it waits for", () => {
+  assert.equal(fleetBuildRefusal("capture", INCIDENT_OPEN),
+    "REFUSING capture: a fleet build incident (a11ign#4405) is open -- a11y-worker-b on build-41. "
+    + "No lab job or corpus run until every box is on build-42; fleet:patch --apply brings them there.");
+});
+
+test("#4405: an incident with no laggards named still refuses, and an unknown target says so rather than naming none", () => {
+  const message = fleetBuildRefusal("capture", () => ({ ...OPEN_INCIDENT, target: null, laggards: [] }));
+  assert.match(String(message), /is open -- none named\. No lab job or corpus run until every box is on the newest build;/);
+});
+
+test("#4405: no open incident is no refusal", () => {
+  assert.equal(fleetBuildRefusal("capture", () => null), null);
+});
+
+test("#4405: a read that cannot be made REFUSES in its own words -- could not ask is not may proceed", () => {
+  assert.equal(fleetBuildRefusal("capture", INCIDENT_UNREADABLE),
+    "REFUSING capture: could not ask whether a fleet build incident is open (gh could not be reached). Could not ask is not may proceed.");
+});
+
+test("#4405: a caller that hands over no reader refuses, rather than reading the absence of a reader as no incident", () => {
+  assert.equal(fleetBuildRefusal("capture"),
+    "REFUSING capture: could not ask whether a fleet build incident is open (lab:job was handed no reader for it). Could not ask is not may proceed.");
+});
+
+test("#4405: an unreadable incident refuses through run() before anything wakes, is checked or is dispatched", async () => {
+  const seen = await drive2803(["-e", "job=capture"], { openIncident: INCIDENT_UNREADABLE });
+  assert.equal(seen.exited, 3);
+  assert.deepEqual(seen.events, []);
+  assert.equal(seen.dispatched, null);
+  assert.match(seen.stderr, /could not ask whether a fleet build incident is open \(gh could not be reached\)\. Could not ask is not may proceed\./);
+});
+
+test("#4405: -e describe=1 and a job with no fleet demand are not refused while the incident is open", async () => {
+  const described = await drive2803(["-e", "job=capture", "-e", "describe=1"], { openIncident: INCIDENT_OPEN });
+  assert.equal(described.exited, undefined, "describe=1 runs nothing, so there is nothing to refuse");
+  assert.doesNotMatch(described.stderr, /REFUSING/);
+  assert.deepEqual(described.dispatched, ["-e", "job=capture", "-e", "describe=1"]);
+
+  assert.ok(!fleetDispatchingJobs(CATALOGUE).includes("train"), "train must have no fleet demand for this to mean anything");
+  const train = await drive2803(["-e", "job=train", "-e", "out=varied"], { openIncident: INCIDENT_OPEN });
+  assert.equal(train.exited, undefined);
+  assert.doesNotMatch(train.stderr, /REFUSING/);
+  assert.deepEqual(train.dispatched, ["-e", "job=train", "-e", "out=varied"]);
+});
 
 const passed = (dispatched: string[] | null) =>
   JSON.parse(String(dispatched?.at(-1) ?? "{}")) as Record<string, unknown>;
@@ -869,7 +951,7 @@ test("#2803: useTimeArgs renders nothing for an undisturbed fleet, and JSON for 
 
 test("#2803: the real entry hands run() the real resolver, and run() has no default for it (a test cannot reach a socket)", () => {
   const source = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
-  assert.match(source, /resolvePool: resolvePoolAtUseTime, qualify \}\)/);
+  assert.match(source, /resolvePool: resolvePoolAtUseTime, qualify, openIncident: openFleetBuildIncident \}\)/);
   assert.doesNotMatch(source, /resolvePool = /, "a default would let a test that leaves it out reach the real neighbour table");
 });
 
@@ -977,7 +1059,7 @@ function qualifiedHarness(runs: { status: number; record: QRecord }[], ghReplies
 
 async function driveQualified(argv: string[], h: ReturnType<typeof qualifiedHarness>) {
   return run(argv, {
-    catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }),
+    catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }), openIncident: NO_OPEN_INCIDENT,
     dispatch: h.dispatch, qualify: h.qualify,
   });
 }
@@ -1117,7 +1199,7 @@ test("#3289: a refusal BEFORE the dispatch leaves nothing standing on the sha (p
   process.stderr.write = (() => true) as typeof process.stderr.write;
   try {
     await run(QARGV, {
-      catalogueText: CATALOGUE, dispatch: h.dispatch, qualify: h.qualify,
+      catalogueText: CATALOGUE, dispatch: h.dispatch, qualify: h.qualify, openIncident: NO_OPEN_INCIDENT,
       readFleet: () => ({ refusal: "no inventory on this host", workers: [] }),
     });
   } catch (error) {
@@ -1165,7 +1247,7 @@ test("#3988: a launch with no -e worker= posts nothing and dispatches nothing; t
   process.exit = ((code: number) => { exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
   process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as typeof process.stderr.write;
   try {
-    await run(withoutWorker, { catalogueText: CATALOGUE, dispatch: refused.dispatch, qualify: refused.qualify, readFleet: () => ({ refusal: null, workers: QFLEET }) });
+    await run(withoutWorker, { catalogueText: CATALOGUE, dispatch: refused.dispatch, qualify: refused.qualify, readFleet: () => ({ refusal: null, workers: QFLEET }), openIncident: NO_OPEN_INCIDENT });
   } catch (error) {
     if (!/^exit \d$/.test((error as Error).message)) throw error;
   } finally {
@@ -1233,7 +1315,7 @@ const PNPM_FORM = ["--", "-e", "job=gate-stability", "-e", "worker=a11y-worker-2
 async function dispatchedFor(argv: string[]): Promise<string[][]> {
   const dispatched: string[][] = [];
   await run(argv, {
-    catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }),
+    catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: QFLEET }), openIncident: NO_OPEN_INCIDENT,
     dispatch: (forwarded: string[]) => { dispatched.push(forwarded); return 0; },
   });
   return dispatched;
