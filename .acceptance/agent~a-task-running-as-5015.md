@@ -7,10 +7,10 @@ platform: Windows Task Scheduler (`community.windows.win_scheduled_task`, alread
 Acceptance:
 
 ```bash
-bash -c 'cd /home/agent/repos/control && pnpm exec rstest run src/fleet-layer/edge-updater-guard.test.ts src/fleet-layer/edge-updater-before-install.test.ts src/fleet-layer/edge-pin-parity.test.ts src/fleet-layer/provision-stamp-inputs.test.ts'
+cd /home/agent/repos/wt-5015-control && bash -c 'L=$(mktemp -d) && mkdir -p "${L:?}/packages/control" && for d in /home/agent/repos/a11y-witness/packages/*; do [ "$(basename "$d")" = control ] || ln -s "$d" "${L:?}/packages/$(basename "$d")"; done && ln -s /home/agent/repos/a11y-witness/scripts "${L:?}/scripts" && cp -R src ansible layers.json package.json "${L:?}/packages/control/" && (cd "${L:?}/packages/control" && node --test src/fleet-layer/edge-updater-guard.test.ts src/fleet-layer/edge-updater-before-install.test.ts src/fleet-layer/edge-pin-parity.test.ts src/fleet-layer/provision-stamp-inputs.test.ts); exit $?'
 ```
 
-**As run (measured):** the row's command names the primary clone, which neither holds this branch nor has the core's sibling packages, and `edge-pin-parity` and `provision-stamp-inputs` fail there at baseline with `ENOENT`/`ERR_MODULE_NOT_FOUND` for the same reason. The four files were run with node's runner in a temp tree laying this branch's `src`, `ansible` as `packages/control` beside symlinks to the core's `packages/*` and `scripts`: `tests 23, pass 23, fail 0`. CI's `checks` job is the verdict under rstest.
+**As run (measured):** the row's own command (`cd /home/agent/repos/control && pnpm exec rstest run <the four files>`) cannot run: that clone is the primary checkout, does not hold this branch, has no `rstest` binary (`Command "rstest" not found`), and `edge-pin-parity` and `provision-stamp-inputs` fail there at baseline with `ENOENT`/`ERR_MODULE_NOT_FOUND` because they read the core's sibling packages. The command above runs the same four files with node's runner in a temp tree laying this branch's `src` and `ansible` as `packages/control` beside symlinks to the core's `packages/*` and `scripts`: `tests 23, pass 23, fail 0`. CI's `checks` job is the verdict under rstest.
 
 ## Policy was NOT added
 
