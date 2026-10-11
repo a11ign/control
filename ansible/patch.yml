@@ -59,6 +59,19 @@
 #     A window that moved nothing must not read as success (#4733). A box that needed a second pass (the new
 #     build's own cumulative) fails here and is re-run with `--limit`; `any_errors_fatal` halts the rest.
 #
+# ## A feature update must be SWITCHED, not just staged -- a11ign#4979, under #4405
+#
+# Worker 6 staged 25H2 to the end (`$WINDOWS.~BT` built, Setup's `DelayedSwitch: 1`, `win_updates` Succeeded with
+# RebootRequired) and three plain restarts came back on the same build: the switch was never committed. So a pass
+# that installed an `Upgrades` item and asked for a restart (`patch_switch_pending`; any other pass is untouched):
+#
+#   1. runs `UsoClient.exe StartInstall`, the Update Orchestrator's own install step, before the restart;
+#   2. reads `bcdedit /enum all` and waits up to three minutes for a SafeOS entry;
+#   3. FAILS the box, by worker number, `staged but not switched`, with the entries, and never restarts it.
+#
+# The restart stays this play's own `win_reboot`. Whether step 1 is what commits the switch is the live window's
+# to say: if the box still has no entry, that is the next row (the installer from the staged media), not this one.
+#
 # ## Not read here
 #
 # That `win_updates` works on this fleet's Windows edition has not been read: the first run is row E's, with
@@ -114,6 +127,21 @@
     patch_window_values: "{{ patch_lifted_values + patch_target_values }}"
     patch_base_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
     patch_categories: "{{ patch_base_categories + (['Upgrades'] if patch_target_set | bool else []) }}"
+    # True only for a pass whose install actually installed an `Upgrades` item and asked for a restart: the
+    # one pass whose restart must be a SWITCH (a11ign#4979). Everything else is the play as it was.
+    patch_switch_pending: >-
+      {{ (patch_updates.reboot_required | default(false) | bool)
+         and (patch_updates.updates | default({}) is mapping)
+         and ((patch_updates.updates | default({}) | dict2items
+               | selectattr('value.installed', 'defined') | selectattr('value.installed')
+               | selectattr('value.categories', 'defined')
+               | map(attribute='value.categories') | flatten
+               | select('equalto', 'Upgrades') | list | length) > 0) }}
+    # What a committed switch leaves in the BCD: Setup's "Add safe OS boot entry" writes a WinPE entry whose
+    # device is the staged media under `$WINDOWS.~BT`. Taken from Setup's own log text and the shape of a
+    # WinPE entry, NOT yet read off a box that committed one (the live window is the VERIFY row), so the
+    # three alternatives are deliberately broad and the evidence is printed whole when none matches.
+    patch_safeos_pattern: '\$WINDOWS\.~BT|SafeOS|winpe\s+Yes'
   tasks:
     - name: The deferrals to lift are declared and the target is given whole, or the window would do nothing
       # A lift that matches no entry "succeeds" and installs nothing -- a green result vouching for an inert
@@ -197,6 +225,54 @@
               installed {{ patch_updates.installed_update_count | default(0) }},
               failed {{ patch_updates.failed_update_count | default(0) }},
               reboot {{ 'required' if patch_updates.reboot_required | default(false) else 'not required' }}
+
+        - name: Commit the staged feature update's switch through the Update Orchestrator
+          # a11ign#4979: the module reported `Succeeded, RebootRequired` with the media built and Setup's
+          # `DelayedSwitch: 1` serialised, and three plain `shutdown.exe` restarts came back on the same build
+          # because nothing had committed the switch. Hypothesis (NOT established): a feature update wants the
+          # Update Orchestrator's own install step before the restart. `UsoClient.exe StartInstall` is that
+          # step; it is asynchronous and silent, and not Microsoft-documented (third-party guides list it), so
+          # the BCD read below is what says whether it worked. Only a pass that installed an `Upgrades` item
+          # runs it.
+          when:
+            - not ansible_check_mode
+            - patch_switch_pending | bool
+          become: true
+          ansible.windows.win_shell: UsoClient.exe StartInstall
+          register: patch_switch_commit
+
+        - name: Read the BCD, waiting for the staged switch to appear
+          # `until`, because StartInstall returns before it has written anything. `failed_when: false`: the
+          # verdict is the next task's, which names the box and prints the entries.
+          when:
+            - not ansible_check_mode
+            - patch_switch_pending | bool
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $false
+              bcdedit /enum all
+          register: patch_bcd
+          changed_when: false
+          failed_when: false
+          until: (patch_bcd.output | default([]) | join('\n')) is search(patch_safeos_pattern, ignorecase=true)
+          retries: 18
+          delay: 10
+
+        - name: A feature update staged but not switched fails the box, before any restart
+          # The restart below would otherwise come back on the same build and the pass would read as
+          # `installed`. Failing HERE sends the run through the `always` (deferral and target put back)
+          # and halts the rest (`any_errors_fatal`).
+          tags: [patch_switch_verdict]
+          when:
+            - not ansible_check_mode
+            - patch_switch_pending | bool
+            - not ((patch_bcd.output | default([]) | join('\n')) is search(patch_safeos_pattern, ignorecase=true))
+          ansible.builtin.fail:
+            msg: >-
+              {{ inventory_hostname }}: staged but not switched. The feature update was installed to the end
+              of staging and Windows asked for a restart, but the BCD has no SafeOS entry, so a restart would
+              come back on the same build. BCD entries: {{ patch_bcd.output | default([]) | map('trim') | reject('equalto', '') | join(' | ') }}
 
         - name: Reboot, only because updates were installed and Windows asked
           when:
