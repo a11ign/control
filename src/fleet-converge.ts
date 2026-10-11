@@ -34,6 +34,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
+import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
@@ -186,7 +187,7 @@ function pinOne({ layer, readLaidTag, commitOfTag, refs }: {
 
 /** The commit a tag names on `remote`: the peeled one for an annotated tag, else the tag's own; `undefined` is "no such tag", `{ failed }` is git not answering. */
 export function gitCommitOfTag({ remote, tag }: { remote: string; tag: string }): TagCommit {
-  const answer = spawnSync("git", ["ls-remote", "--tags", remote, `refs/tags/${tag}`, `refs/tags/${tag}^{}`], { encoding: "utf8" });
+  const answer = spawnSync("git", ["ls-remote", "--tags", remote, `refs/tags/${tag}`, `refs/tags/${tag}^{}`], { encoding: "utf8", env: sandboxGitEnv() });
   if (answer.status !== 0) return { failed: String(answer.stderr).trim() || `git ls-remote exited ${answer.status}` };
   const refs = new Map(String(answer.stdout).split("\n").filter(Boolean).map((line) => line.split("\t").reverse() as [string, string]));
   const commit = refs.get(`refs/tags/${tag}^{}`) ?? refs.get(`refs/tags/${tag}`);
