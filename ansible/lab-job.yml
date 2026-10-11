@@ -1621,6 +1621,118 @@
                  | ternary(lab_capture_hosts[:workers | default(0) | int],
                            workers | default('') | string | split(',') | map('trim') | select | list)) }}
 
+    # BALANCED DISPATCH: `-e workers=ready` and `-e workers=<N>` by LOAD (a11ign#5017, part of #4405 item 4).
+    # The chairman's direction is to use the whole fleet, and "the first N in inventory order" neither
+    # balances nor knows which boxes are up. The option is the inventory var `lab_dispatch_balance`, and it is
+    # OFF unless the inventory says `true`:
+    #
+    #   off  `workers=ready` is REFUSED, naming the option, and `workers=<N>` keeps its cap meaning (the
+    #        first N capturing hosts above), so a run that was valid yesterday is valid today and the
+    #        one-line revert is `lab_dispatch_balance: false`;
+    #   on   `workers=ready` is every ready box and `workers=<N>` the N with the fewest captures in the last
+    #        24 h (`src/fleet-dispatch.ts`, which also confirms the chosen awake with `fleet-wake`). A name
+    #        list is unchanged either way.
+    #
+    # THE ANSWER IS RE-ASSERTED, NOT TRUSTED. The resolver's names are intersected with the capture hosts in
+    # inventory order and the length compared, so a name that is not a capturing host cannot arrive as an
+    # address, and the assert below and the address pattern after it see the same shape as any other run.
+    # An EMPTY choice never gets here (`fleet-dispatch.ts` exits 3), because an empty `A11Y_WORKERS` sends a
+    # run to discovery and a guessed localhost:8765. A COUNT it could only part-fill is REFUSED, for #21's
+    # reason: "five boxes" and "however many were ready" are different measurements. `ready` has no count to
+    # fall short of and takes what is there.
+    #
+    # NOT COVERED: `capture-check` is not dispatched through this playbook (it is a scheduled task on one
+    # box, `worker_check_task_name`), so its one-worker shape is a separate change in a11ign/lab.
+    - name: The balance option is a literal true or false
+      ansible.builtin.assert:
+        that:
+          - lab_dispatch_balance | default(false) is boolean
+        fail_msg: >-
+          Refusing to run: lab_dispatch_balance is {{ lab_dispatch_balance | default(false) | to_json }}, not `true` or `false`.
+          A quoted "false" would read as set, and this option hands a run's pool to a resolver.
+
+    - name: "`-e workers=ready` needs the balance option"
+      when: workers is defined and (workers | string) == 'ready'
+      ansible.builtin.assert:
+        that:
+          - lab_dispatch_balance | default(false)
+        fail_msg: >-
+          Refusing to run: -e workers=ready is a balanced request and the option that allows one is off.
+          Set `lab_dispatch_balance: true` in the inventory (it is `false` by default), or name the boxes
+          (-e workers=a11y-worker-2,a11y-worker-5) or a count (-e workers=5).
+
+    - name: Is this request one the balance option governs
+      ansible.builtin.set_fact:
+        lab_balanced_request: >-
+          {{ workers is defined and (lab_dispatch_balance | default(false))
+             and ((workers | string) == 'ready' or (workers | string is match('^[0-9]+$'))) }}
+
+    # WHICH `node`: the control plane's TypeScript runs under the tsx loader installed beside the layer
+    # (`control_tsx_loader` in `control-host-install.yml`, which this literal is pinned equal to), because a
+    # `.ts` path handed to plain `node` runs only where node is 24 and dies at the first annotation on 22
+    # (`control-runs-under-tsx.test.ts`). Where the loader is absent -- a developer's machine -- plain `node`
+    # is what runs, and on a node that cannot strip types that is a loud failure, not a fall-back.
+    - name: Is the control plane's TypeScript loader here
+      when: lab_balanced_request | bool
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.stat:
+        path: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
+      register: lab_dispatch_loader
+
+    # `delegate_to: localhost`: the machine running ansible is the one that can reach the workers' `/health`
+    # and send the wake, and the lab this play runs on cannot. NAMES AND ADDRESSES FROM THE INVENTORY ONLY:
+    # the pool is built from `hostvars` below and `fleet-dispatch.ts` refuses anything that is not a worker
+    # name and an IPv4 address. A resolver that fails fails the play: there is no fall-back to the unbalanced
+    # selection, because a run that silently took "the first N" is the wrong population stated as the right one.
+    #
+    # THE POOL ARGUMENT IS A STRING THAT STARTS `--pool=`, never a bare list: Ansible turns a template whose
+    # result LOOKS like a list into one, and a list rendered into an argument is Python's repr, not JSON.
+    - name: Choose the least-loaded ready workers, and confirm them awake
+      when: lab_balanced_request | bool
+      delegate_to: localhost
+      run_once: true
+      changed_when: false
+      register: lab_balanced_choice
+      vars:
+        lab_balance_pool_arg: >-
+          --pool={%- set pool = namespace(boxes=[]) -%}
+          {%- for host in lab_capture_hosts -%}
+          {%- set _ = pool.boxes.append({'name': host, 'host': hostvars[host].ansible_host, 'mac': hostvars[host].mac | default('')}) -%}
+          {%- endfor -%}
+          {{ pool.boxes | to_json }}
+        lab_balance_loader: "{{ ['--import', lab_dispatch_loader.stat.path] if lab_dispatch_loader.stat.exists else [] }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['node'] + lab_balance_loader
+             + [playbook_dir ~ '/../src/fleet-dispatch.ts', '--request=' ~ workers, lab_balance_pool_arg] }}
+
+    - name: Take what it chose, in inventory order
+      when: lab_balanced_request | bool
+      ansible.builtin.set_fact:
+        lab_balanced_result: "{{ lab_balanced_choice.stdout | from_json }}"
+        lab_selected_hosts: >-
+          {{ lab_capture_hosts | select('in', (lab_balanced_choice.stdout | from_json).chosen) | list }}
+
+    - name: What it chose is what was taken, and a count is given in full
+      when: lab_balanced_request | bool
+      ansible.builtin.assert:
+        that:
+          - lab_selected_hosts | length == lab_balanced_result.chosen | length
+          - (workers | string == 'ready') or (not lab_balanced_result.short)
+        fail_msg: >-
+          Refusing to run: -e workers={{ workers }} resolved to {{ lab_balanced_result.chosen | join(', ') }}
+          and {{ lab_selected_hosts | join(', ') }} of those are capturing hosts in the inventory.
+          {{ lab_balanced_result.notes | join(' ') }}
+          A count is given in full or refused; a smaller pool is not the run that was asked for.
+
+    - name: Say how the balanced request was resolved
+      when: lab_balanced_request | bool
+      ansible.builtin.debug:
+        msg: >-
+          workers={{ workers }} by load: {{ lab_balanced_result.chosen | join(', ') }}.
+          {{ lab_balanced_result.notes | join(' ') }}
+
     # EVERY WAY OF NAMING A POOL THE FLEET CANNOT GIVE, refused by name. MEASURED against a five-host
     # fixture by RUNNING the expressions rather than reading them — `[:n]` on a shorter list is silently
     # the whole list, and a non-numeric or zero value renders an EMPTY `A11Y_WORKERS`, which is not a

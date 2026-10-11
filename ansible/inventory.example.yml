@@ -21,6 +21,14 @@
 # structurally (group names, host names, and the set of keys each host declares) whenever the real file is
 # present locally — it skips honestly, not silently, when it is not (a fresh clone or CI).
 all:
+  vars:
+    # BALANCED LAB DISPATCH (a11ign#5017, #4405 item 4), OFF by default. With `false`, `-e workers=ready` is
+    # refused naming this option and `-e workers=<N>` keeps its meaning of "the first N capturing hosts in
+    # inventory order". With `true`, `workers=ready` is every ready worker and `workers=<N>` the N with the
+    # fewest captures in the last 24 h, confirmed awake before the job starts (`src/fleet-dispatch.ts`).
+    # Only the literals `true` and `false` are read. The one-line revert is setting it back to `false`.
+    # An option, not a host key, so it is invisible to `inventory-example-parity.test.ts`' shape comparison.
+    lab_dispatch_balance: false
   children:
     a11y_workers:
       hosts:
