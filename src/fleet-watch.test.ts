@@ -802,7 +802,7 @@ test("postUseOnce: the commit is written only AFTER the post returned", () => {
   let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
   const read = (() => file) as never;
   const write = ((_p: string, data: string) => { file = data; }) as never;
-  let seenDuring: { usePostedOn?: string, useReservedAt?: number } = {};
+  let seenDuring: { usePostedOn?: string, useReservedAt?: number, useReservedBy?: number } = {};
   postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: () => { seenDuring = JSON.parse(file); } });
   assert.equal(seenDuring.usePostedOn, undefined);
   assert.equal(seenDuring.useReservedAt, USE_NOW);
