@@ -750,13 +750,34 @@ test("postUseOnce: the first tick of a UTC day posts, a second the same day post
   assert.equal(posted.length, 2);
 });
 
-test("postUseOnce: a post that THROWS does not mark the day, so the next tick tries again; an unreadable ledger posts nothing", () => {
-  const file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+test("postUseOnce: an unreadable ledger posts nothing and writes nothing", () => {
   let written = false;
   const write = (() => { written = true; }) as never;
-  assert.throws(() => postUseOnce({ path: "c.json", now: USE_NOW, post: () => { throw new Error("gh down"); }, read: (() => file) as never, write }));
-  assert.equal(written, false);
   assert.equal(postUseOnce({ path: "c.json", now: USE_NOW, post: () => assert.fail("posted"), read: (() => "nope") as never, write }), "unreadable");
+  assert.equal(written, false);
+});
+
+test("postUseOnce: a tick that lands WHILE the first is posting posts nothing (the day is reserved before the post, #53 review)", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  const posted: string[] = [];
+  let during: string | null = null;
+  const second = () => postUseOnce({ path: "c.json", now: USE_NOW + 60_000, post: (b) => posted.push(b), read, write });
+  const first = postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: (b) => { posted.push(b); during = second(); } });
+  assert.equal(first, "posted");
+  assert.equal(during, "already-posted", "the racing tick found the day already reserved");
+  assert.equal(posted.length, 1);
+});
+
+test("postUseOnce: a failed post RELEASES the reservation, so the race fix does not lose the day", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  assert.throws(() => postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: () => { throw new Error("gh down"); } }));
+  assert.equal(JSON.parse(file).usePostedOn, undefined);
+  const posted: string[] = [];
+  assert.equal(postUseOnce({ path: "c.json", now: USE_NOW + USE_HOUR, read, write, post: (b) => posted.push(b) }), "posted");
 });
 
 test("the post body rendered from a fixture state (the PR shows this)", () => {

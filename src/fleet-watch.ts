@@ -468,22 +468,36 @@ export function useBody(reading: UseReading, now: number): string {
 }
 
 /**
- * Post the use reading once per UTC day. The day is marked in the ledger only AFTER the post returned, so a
- * failed post is tried again on the next tick, and a second tick the same day posts nothing. A ledger nobody
- * could read posts nothing either: it would say "unknown" about a file, not about the fleet.
+ * Post the use reading once per UTC day. The check and the RESERVATION of the day happen in one locked
+ * read-modify-write, BEFORE the post: two ticks racing then see one reserved day and one of them posts. The post
+ * runs outside the lock (a `gh` call must not hold the ledger the 10 s probe writes), and a post that throws
+ * RELEASES the reservation so the next tick tries again. A ledger nobody could read posts nothing: it would say
+ * "unknown" about a file, not about the fleet.
  */
 export function postUseOnce({ path, now, post, read, write, lock = write ? unlocked : withFileLock }: {
         path: string; now: number; post: (body: string) => void; read?: typeof readFileSync; write?: typeof writeFileSync;
         lock?: typeof withFileLock;
     }): "posted" | "already-posted" | "unreadable" {
-  const state = readCapturesState(path, read);
-  if (!state) return "unreadable";
-  if (state.usePostedOn === utcDay(now)) return "already-posted";
-  post(useBody(useReading(state, now), now));
+  const day = utcDay(now);
+  let body: string | null = null;
+  let outcome: "already-posted" | "unreadable" | null = null;
   lock(path, () => {
-    const latest = readCapturesState(path, read) ?? state;
-    writeCapturesState(path, { ...latest, usePostedOn: utcDay(now) }, write);
+    const state = readCapturesState(path, read);
+    if (!state) { outcome = "unreadable"; return; }
+    if (state.usePostedOn === day) { outcome = "already-posted"; return; }
+    body = useBody(useReading(state, now), now);
+    writeCapturesState(path, { ...state, usePostedOn: day }, write);
   });
+  if (body === null) return outcome ?? "unreadable";
+  try {
+    post(body);
+  } catch (cause) {
+    lock(path, () => {
+      const latest = readCapturesState(path, read);
+      if (latest?.usePostedOn === day) writeCapturesState(path, { ...latest, usePostedOn: undefined }, write);
+    });
+    throw cause;
+  }
   return "posted";
 }
 
