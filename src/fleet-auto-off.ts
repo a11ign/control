@@ -68,13 +68,14 @@
  * THE CLOSURE REACHES INTO A LAYER THIS REPOSITORY DOES NOT TRACK (#3845). The files of `packages/worker-fleet` (the wake
  * proof's and the busy check's readers) are laid from `a11ign/screenreader-fleet` (#3504), so `git` has no opinion of them
  * and the comparison above refused on `main` itself for hours. Those files are held to the layer's PIN instead: the tag
- * `origin/main`'s lockfile names, which the laid tree's `.layer-ref` must equal (`judgeLaidLayer`). Same tag or refusal, naming
- * the layer; a layer that cannot be read is `cannot-tell`.
+ * `origin/main`'s `deploy-pins.json` names (control's own declaration, #5085), which the laid tree's `.layer-ref` must equal
+ * (`judgeLaidLayer`). Same tag or refusal, naming the layer; a layer that cannot be read is `cannot-tell`.
  *
- * THE CLOSURE'S OWN FILES ARE A LAYER TOO, once `layers.json` declares `pinned.control` (#3506, #3914): `packages/control` is then a laid,
- * untracked copy of `a11ign/control`, and every file of the closure would read as differing from `origin/main`, which no longer holds it.
- * Those files are judged by the same rule, against the tag `origin/main`'s `layers.json` pins for `control`. With no `pinned.control`
- * declared, which is every checkout until #3506 lands, nothing changes.
+ * THE CLOSURE'S OWN FILES ARE CONTROL'S, AND TRACKED. Control is deployed from its own checkout (ADR 0045, Consequence 5), so
+ * `git` holds every file of the closure and they are compared by content like any other. The judgement of a control LAID inside the
+ * core's checkout (#3914), against a tag the core's manifest pinned for it, is gone with the laid copy: control holds no copy of
+ * another repository's declaration (rule 3), and a laid control would now read as differing from `origin/main` and be refused,
+ * which is the direction this guard fails in.
  *
  * It fails CLOSED, the only direction auto-off may err in: a failed fetch, an unresolvable `origin/main`, an errored
  * diff or an empty closure each refuse (`CANNOT_TELL` is never `identical`). The fetch moves only the remote-tracking
@@ -128,7 +129,8 @@ import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { requestJson } from "../../worker-fleet/src/worker-http.ts";
-import { CONTROL_LAYER, laidControl, layerDeclaration, layerOwning, layerPinTag, pinnedLayerTag } from "./layer-checkouts.ts";
+import { layerDeclaration, layerOwning } from "./layer-checkouts.ts";
+import { parseDeployPins, pinnedTag } from "./layer-pins.ts";
 import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
 import { inventoryPathFor } from "./control-plane-fleet.ts";
@@ -528,8 +530,8 @@ export function staleCheckoutVerdict({ differing, fetchOk, why }: { differing: s
  * @returns {string[] | null} `null` when `git` could not say
  */
 function filesDifferingFromMain(paths: string[], git: Git): string[] | null {
-  // No pathspec makes `git diff` read the WHOLE tree: once control is laid (#3914) the closure holds no core file at all, and an
-  // unrelated difference anywhere in the repository would refuse a timer whose own files all match their pins.
+  // No pathspec makes `git diff` read the WHOLE tree: a closure that is all one layer's files names none of this repository's, and an
+  // unrelated difference anywhere in it would refuse a timer whose own files all match their pins.
   if (paths.length === 0) return [];
   const diff = git(["diff", "--name-only", "origin/main", "--", ...paths]);
   const tracked = git(["ls-files", "--", ...paths]);
@@ -539,18 +541,18 @@ function filesDifferingFromMain(paths: string[], git: Git): string[] | null {
   return [...new Set([...diff.stdout.split("\n").filter(Boolean), ...untracked])].sort();
 }
 
-/** a separate layer, where this host holds it, and the tag `origin/main`'s lockfile pins it at */
+/** a separate layer, where this host holds it, and the tag `origin/main`'s `deploy-pins.json` pins it at */
 export type LayerAtItsPin = { name: string, dir: string, path: string, tag: string };
 export type JudgeLayer = (layer: LayerAtItsPin) => { differing: string[] } | { cannotTell: string };
-/** where a layer lives: injectable, because the real `layers.json` declares no `pinned.control` until #3506 */
-export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof layerDeclaration, laidControl: typeof laidControl };
+/** where a layer lives: injectable, so a test stands a layer at a path of its own */
+export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof layerDeclaration };
 
 /**
  * A LAYER'S FILES ARE JUDGED AGAINST ITS PIN, NOT AGAINST `origin/main` (#3845). `packages/worker-fleet` is laid from
  * `a11ign/screenreader-fleet` and tracked by no ref here (#3504), so `git ls-files` lists none of it and every checkout, `main`
  * itself included, read as six files differing: the timer refused every tick for hours. Dropping those files from the
  * comparison would blind it to the wake proof and the busy check, which live in them (#3275). What `main` says about a layer is the
- * release its lockfile pins, so that is what the laid tree is held to: same tag or refusal, and a layer that cannot be read
+ * release its `deploy-pins.json` pins, so that is what the laid tree is held to: same tag or refusal, and a layer that cannot be read
  * is CANNOT_TELL, never "same". The laid copy is the tag's `src/` and nothing else (`scripts/lay-layer.ts`), so equal tags
  * are equal files.
  *
@@ -566,25 +568,21 @@ export function judgeLaidLayer({ name, dir, path, tag }: LayerAtItsPin): ReturnT
   return { differing: laid === tag ? [] : [`${path} (layer ${name} is laid at ${laid}, main pins ${tag})`] };
 }
 
-/**
- * The `layers.json` `origin/main` holds. At the repository root, where #3506 moves it: `packages/control`, which holds it today, is
- * the layer it will no longer track.
- */
-const MANIFEST_ON_MAIN = "layers.json";
+/** The declaration `origin/main` holds: control's own, at its root. */
+const PINS_ON_MAIN = "deploy-pins.json";
 
-/** The tag `origin/main` pins a layer at: a separate layer by its lockfile entry, the laid control by its declaration in `layers.json`. */
+/** The tag `origin/main` pins a layer at, from `deploy-pins.json` as `origin/main` holds it. */
 function pinOnMain({ name, git }: { name: string; git: Git; }): { tag: string; } | { why: string; } {
-  const control = name === CONTROL_LAYER;
-  const file = control ? MANIFEST_ON_MAIN : "pnpm-lock.yaml";
-  const shown = git(["show", `origin/main:${file}`]);
-  if (shown.status !== 0) return { why: `origin/main's ${file}, which pins ${control ? name : "the layers"}, could not be read` };
-  const pin = control ? pinnedLayerTag(shown.stdout, name) : layerPinTag(shown.stdout, name);
+  const shown = git(["show", `origin/main:${PINS_ON_MAIN}`]);
+  if (shown.status !== 0) return { why: `origin/main's ${PINS_ON_MAIN}, which pins the layers, could not be read` };
+  const read = parseDeployPins(shown.stdout);
+  if ("refusal" in read) return { why: `layer ${name} has no pin on main: ${read.refusal}` };
+  const pin = pinnedTag(read.pins, name);
   return "refusal" in pin ? { why: `layer ${name} has no pin on main: ${pin.refusal}` } : pin;
 }
 
 /**
- * The comparison with `origin/main`: the core's files by content, each layer's files (a separate layer's, and the control plane's own
- * once it is laid) by its pin.
+ * The comparison with `origin/main`: this checkout's own files by content, each separate layer's files by its pin.
  */
 function compareWithMain({ paths, git, judgeLayer, layers }: { paths: string[]; git: Git; judgeLayer: JudgeLayer; layers: Layers; }): { differing: string[] | null; why?: string; } {
   const ofLayer: Map<string, string[]> = new Map();
@@ -598,7 +596,7 @@ function compareWithMain({ paths, git, judgeLayer, layers }: { paths: string[]; 
   for (const name of ofLayer.keys()) {
     const pin = pinOnMain({ name, git });
     if ("why" in pin) return { differing: null, why: pin.why };
-    const { path, dir } = (name === CONTROL_LAYER ? layers.laidControl() : null) ?? layers.layerDeclaration(name);
+    const { path, dir } = layers.layerDeclaration(name);
     const judged = judgeLayer({ name, dir, path, tag: pin.tag });
     if ("cannotTell" in judged) return { differing: null, why: judged.cannotTell };
     differing.push(...judged.differing);
@@ -606,7 +604,7 @@ function compareWithMain({ paths, git, judgeLayer, layers }: { paths: string[]; 
   return { differing: differing.sort() };
 }
 
-const REAL_LAYERS: Layers = { layerOwning, layerDeclaration, laidControl };
+const REAL_LAYERS: Layers = { layerOwning, layerDeclaration };
 
 /** Is the checkout this program runs from the same, where it matters, as `origin/main`? */
 export function checkAgainstMain({ now, fetchedAt, git, readSource, judgeLayer = judgeLaidLayer, layers = REAL_LAYERS }: { now: number; fetchedAt: number | null; git: Git; readSource: (path: string) => string; judgeLayer?: JudgeLayer; layers?: Layers; }): { verdict: ReturnType<typeof staleCheckoutVerdict>; fetchedAt: number | null; } {

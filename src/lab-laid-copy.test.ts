@@ -21,12 +21,16 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { labLaidCopyRefusal } from "./lab-laid-copy.ts";
+import { parseDeployPins } from "./layer-pins.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const MODULE = join(HERE, "lab-laid-copy.ts");
-const REAL_MANIFEST = JSON.parse(readFileSync(join(HERE, "../layers.json"), "utf8"));
+const REAL_PINS_TEXT = readFileSync(join(HERE, "../deploy-pins.json"), "utf8");
+const REAL_PINS = parseDeployPins(REAL_PINS_TEXT);
 const RUN_JOB = readFileSync(join(HERE, "../ansible/tasks/run-job.yml"), "utf8");
-const { path: LAB_PATH, tag: PINNED, lays: LAYS } = REAL_MANIFEST.pinned.lab as { path: string, tag: string, lays: string[] };
+if ("refusal" in REAL_PINS || REAL_PINS.pins.lab === undefined) throw new Error("the real deploy-pins.json declares no lab: the fixtures below have nothing to lay");
+const REAL_LAB = REAL_PINS.pins.lab;
+const { path: LAB_PATH, tag: PINNED, lays: LAYS = [] } = REAL_LAB;
 
 /** The exit status the command refuses with. */
 const REFUSED = 4;
@@ -52,7 +56,7 @@ function layLab(root: string, { ref = PINNED, leaving = [] as string[] } = {}) {
   return dir;
 }
 
-const refusal = (root: string) => labLaidCopyRefusal({ manifest: REAL_MANIFEST, root });
+const refusal = (root: string) => labLaidCopyRefusal({ lab: REAL_LAB, root });
 
 test("positive control: a host whose packages/lab is laid at the pinned tag passes", () => {
   const root = newRoot();
@@ -100,16 +104,17 @@ test("a laid tree missing several `lays` names every one of them, separated", ()
   assert.match(refusal(root) ?? "", /holds no scripts, baselines:/);
 });
 
-test("a manifest that declares no pinned lab is refused, never read as 'nothing to check'", () => {
-  assert.match(labLaidCopyRefusal({ manifest: { pinned: {} }, root: newRoot() }) ?? "", /declares no `pinned\.lab`/);
+test("a declaration with no lab is refused, never read as 'nothing to check'", () => {
+  assert.match(labLaidCopyRefusal({ lab: undefined, root: newRoot() }) ?? "", /declares no `lab`/);
 });
 
-/** The real command's file, in a fixture checkout of its own: the module and the manifest where the module looks for them. */
+/** The real command's file, in a fixture checkout of its own: the module, the pins reader and the pins file where the module looks for them. */
 function commandFileIn(root: string) {
   const control = join(root, "packages/control");
   mkdirSync(join(control, "src"), { recursive: true });
   copyFileSync(MODULE, join(control, "src/lab-laid-copy.ts"));
-  writeFileSync(join(control, "layers.json"), JSON.stringify(REAL_MANIFEST));
+  copyFileSync(join(HERE, "layer-pins.ts"), join(control, "src/layer-pins.ts"));
+  writeFileSync(join(control, "deploy-pins.json"), REAL_PINS_TEXT);
   // The laid package carries its `package.json`, and a loader reads `"type": "module"` from it: without one a `.ts` file is
   // CommonJS and this module's `import.meta` is a syntax error, which the .mjs spelling never had to say.
   writeFileSync(join(control, "package.json"), JSON.stringify({ type: "module" }));

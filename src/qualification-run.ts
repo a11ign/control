@@ -26,23 +26,29 @@
  * The lab is pinned to the sha by construction (`-e ref=<sha>` is added; the playbook resolves a 40-character
  * ref), so the commit check is a second line and not the first.
  *
- * ## The layers are pinned to the sha too, by ITS lockfile (#3920)
+ * ## The layers are pinned by CONTROL'S OWN declaration, `deploy-pins.json` (#3920, rewritten by #5085)
  *
  * A layer that lives in its own repository is part of what the sha claims, and `lab-layer-checkouts.yml` refuses a job whose
- * `layer_refs` does not name every one. They are read here, by the poster, from the sha's OWN `pnpm-lock.yaml`
- * (`git show <sha>:pnpm-lock.yaml`), the pin `scripts/lay-layer.ts` lays from, so the release and the lab cannot name two builds.
- * Each pinned version becomes the tag `@a11ign/<package>@<version>`, which `git ls-remote` resolves on the layer's own `remote` to
- * a full commit (the peeled one for an annotated tag, as `run-job.yml` reads it). A tag the remote does not hold is a REFUSAL
- * naming the layer, the tag and the remote, BEFORE anything is posted or dispatched: never a guess, never `main`, and never an
- * operator-typed ref, which would be a second pin that can disagree with the one the release publishes.
+ * `layer_refs` does not name every one. Until #5085 they were read from the sha's OWN `pnpm-lock.yaml` and its manifest
+ * (`git show <sha>:...`): control reading another repository's declarations out of its history, at a commit its own checkout may not
+ * hold. They are read from `deploy-pins.json` now (`layer-pins.ts`): each pinned version becomes its release tag, which `git ls-remote`
+ * resolves on the layer's own `remote` to a full commit (the peeled one for an annotated tag, as `run-job.yml` reads it). A tag the
+ * remote does not hold is a REFUSAL naming the layer, the tag and the remote, BEFORE anything is posted or dispatched: never a guess,
+ * never `main`, and never an operator-typed ref, which would be a second pin that can disagree with the one control deploys.
+ *
+ * WHAT THIS GIVES UP, said once: the layers a qualified run pins are the ones control DEPLOYS, no longer the ones the sha's lockfile
+ * names, so a sha whose lockfile moved a layer is qualified against the fleet control actually runs. The sha is still what the lab runs
+ * (`-e ref=<sha>`) and what the status is posted on.
  *
  * ## The lab's pin is asked for the script the playbook runs, BEFORE `pending` (a11ign/a11ign#4863)
  *
- * The lab is not a `layer_refs` layer: the sha pins it in `layers.json`'s `pinned.lab`, and the playbook runs `packages/lab/scripts/<name>.ts`
- * from whatever that tag laid. A sha whose lab predates the script this copy of `lab-job.yml` names dies one second into the job with
+ * The lab is not a `layer_refs` layer: `deploy-pins.json`'s `lab` pins it, and the playbook runs `packages/lab/scripts/<name>.ts`
+ * from whatever that tag laid. A lab that predates the script this copy of `lab-job.yml` names dies one second into the job with
  * `ERR_MODULE_NOT_FOUND`, nothing reaches a worker, and the poster writes `failure` twice, which the release reads as a REGRESSION
- * (a11ign/a11ign#4860, #4862). It is the same skew as #4465 one level down, and it is a property of the sha's pin against THIS playbook,
- * so it is refused where the lockfile's layers are, before anything is posted.
+ * (a11ign/a11ign#4860, #4862). It is the same skew as #4465 one level down, and it is a property of the declared pin against THIS
+ * playbook, so it is refused where the layers are, before anything is posted. (Until #5085 the pin was the SHA's own, read from its
+ * manifest; the lab host is laid at the core's pin and `lab-laid-copy.ts` refuses a host that is not at this one, so a core that moved
+ * its lab and a control that did not is a refusal there, before the dispatch.)
  *
  * Imports the poster, the layer resolver and the sandboxed git. The poster holds the one named edge to the lab package; this file adds none.
  * Runs from a raw checkout with no install, so `node:` imports and relative paths only.
@@ -53,7 +59,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
-import { layerDeclaration, layerPinTag, pinnedLayerTag, separateLayers } from "./layer-checkouts.ts";
+import { commitOfTag, publishedCommits, readDeployPins, type DeployPins, type LabPin } from "./layer-pins.ts";
 import { renderResult, requireFullSha, EXIT, type Outcome } from "./post-qualification-status.ts";
 
 export const QUALIFY_FLAG = "--qualify-sha=";
@@ -66,8 +72,7 @@ const MAX_ATTEMPTS = 2;
 
 const RECORD_SCHEMA = 1;
 
-/** The lab's key in `layers.json`'s `pinned`, and where the playbook's argv names it (`packages/lab/scripts/...`). */
-const LAB_LAYER = "lab";
+/** Where the playbook's argv names the lab's scripts (`packages/lab/scripts/...`). */
 const LAB_PATH = "packages/lab";
 
 /** How much of a sha a refusal quotes: enough to find it, short enough to read. */
@@ -177,11 +182,11 @@ export function qualificationRequest(argv: string[], { job, row, ref, worker, de
  * here is read before the poster has said `pending` and before anything is dispatched.
  *
  * An operator-typed `layer_refs` is refused, not merged: ansible takes the later `-e` over the earlier, so a typed one would
- * silently replace the lockfile's, which is the second pin this exists to remove.
+ * silently replace the pins file's, which is the second pin this exists to remove.
  */
 export function withLayerRefs(request: { sha: string; row: number; argv: string[]; }, layerRefsAt: LayerRefsAt): { sha: string; row: number; argv: string[]; } | { refusal: string; } {
   if (request.argv.some((arg) => arg.includes("layer_refs"))) {
-    return { refusal: `REFUSING ${QUALIFY_FLAG}: layer_refs is set from the lockfile at ${request.sha.slice(0, ABBREVIATED_SHA)}, never typed. `
+    return { refusal: `REFUSING ${QUALIFY_FLAG}: layer_refs is set from deploy-pins.json, never typed. `
       + "A typed one would be a second pin that can disagree with the one the release publishes." };
   }
   const found = layerRefsAt(request.sha);
@@ -190,95 +195,24 @@ export function withLayerRefs(request: { sha: string; row: number; argv: string[
 }
 
 /**
- * What a tag the lab can ask `git ls-remote` for looks like, with no glob character in it: `@a11ign/<package>@<version>` before a
- * repository's first flat version, `v<version>` from it (`releaseTag`, #4363).
- */
-const RESOLVABLE_TAG = /^(?:@a11ign\/[a-z0-9-]+@|v)\d+\.\d+\.\d+[A-Za-z0-9.+-]*$/;
-
-/**
- * The package a layer's tags are named for: the `package` its declaration in `layers.json` carries, else the layer's KEY, the same
- * rule `scripts/lay-layer.ts` reads the pin by. A key is not always its package (the layer `nvda-worker` is
- * `@a11ign/screenreader-worker`), and `layers.json` is the one place that says so; nothing is inferred from the repository's name.
- * A declaration this copy of `layers.json` does not yet carry falls back to the key, which cannot resolve, and that is a refusal.
- *
- *
- * @returns {string} the package's name without its scope
- */
-export function packageOfLayer({ name, package: declared }: { name: string; package?: string; }): string {
-  return declared ?? name;
-}
-
-/**
- * The commit a tag names on `remote`: the peeled one for an annotated tag, else the tag's own. Read from the exact ref names, so a
- * different tag that merely ends the same way is not taken for it. `undefined` is "the remote holds no such tag", which is not an
- * error of git's; `{ failed }` is git not answering, which must never read as a missing tag.
- */
-function commitOfTag({ remote, tag, git }: { remote: string; tag: string; git: Git; }): string | undefined | { failed: string; } {
-  const answer = git(["ls-remote", "--tags", remote, `refs/tags/${tag}`, `refs/tags/${tag}^{}`]);
-  if (answer.status !== 0) return { failed: answer.stderr.trim() || `git ls-remote exited ${answer.status}` };
-  const refs = new Map(answer.stdout.split("\n").filter(Boolean).map((line) => {
-    const [sha, ref] = line.split("\t");
-    return ([ref, sha] as [string, string]);
-  }));
-  const commit = refs.get(`refs/tags/${tag}^{}`) ?? refs.get(`refs/tags/${tag}`);
-  return commit !== undefined && /^[0-9a-f]{40}$/.test(commit) ? commit : undefined;
-}
-
-/**
- * A file as it is AT `sha`. A sha this checkout has not fetched is fetched once, which writes only to `.git`; one that is still not there
- * is a refusal that says so rather than a file guessed from the working tree, which is whatever is checked out.
- */
-function fileAt({ sha, path, git }: { sha: string; path: string; git: Git; }): { text: string; } | { refusal: string; } {
-  let shown = git(["show", `${sha}:${path}`]);
-  if (shown.status !== 0) {
-    git(["fetch", "--quiet", "origin"]);
-    shown = git(["show", `${sha}:${path}`]);
-  }
-  if (shown.status !== 0) return { refusal: `${sha.slice(0, ABBREVIATED_SHA)}'s ${path} could not be read (${shown.stderr.trim() || `git exited ${shown.status}`}), so no layer can be pinned to it.` };
-  return { text: shown.stdout };
-}
-
-/** `pnpm-lock.yaml` as it is AT `sha`: the pin `scripts/lay-layer.ts` lays the separate layers from. */
-function lockfileAt({ sha, git }: { sha: string; git: Git; }): { lockfile: string; } | { refusal: string; } {
-  const read = fileAt({ sha, path: "pnpm-lock.yaml", git });
-  return "refusal" in read ? read : { lockfile: read.text };
-}
-
-/**
- * `layer_refs` for `sha`: every layer that lives in its own repository, at the commit its tag names on its remote, the tag being the
- * one the sha's own lockfile pins. Every problem is collected, so one refusal names every layer that could not be pinned, each with its
+ * `layer_refs`: every layer that lives in its own repository, at the commit its release tag names on its remote, the release being the
+ * one `deploy-pins.json` pins. Every problem is collected, so one refusal names every layer that could not be pinned, each with its
  * tag and its remote.
- *
- * @param {{ sha: string, git: Git, layers: { name: string, remote: string, package?: string }[] }} where `layers` are those with a repository of their own
  */
-export function layerRefsFor({ sha, git, layers }: { sha: string; git: Git; layers: { name: string; remote: string; package?: string; }[]; }): { layer_refs: Record<string, string>; } | { refusal: string; } {
-  const read = lockfileAt({ sha, git });
-  if ("refusal" in read) return read;
-  const layer_refs: Record<string, string> = {};
-  const unpinned: string[] = [];
-  for (const layer of layers) {
-    const pin = layerPinTag(read.lockfile, packageOfLayer(layer));
-    if ("refusal" in pin) {
-      unpinned.push(`layer ${layer.name} (${layer.remote}): ${pin.refusal}`);
-      continue;
-    }
-    const commit = RESOLVABLE_TAG.test(pin.tag) ? commitOfTag({ remote: layer.remote, tag: pin.tag, git }) : undefined;
-    if (typeof commit === "string") layer_refs[layer.name] = commit;
-    else if (commit === undefined) unpinned.push(`layer ${layer.name} is pinned at ${pin.tag} by the lockfile, and ${layer.remote} holds no such tag`);
-    else unpinned.push(`layer ${layer.name}: ${layer.remote} could not be asked for ${pin.tag} (${commit.failed})`);
+export function layerRefsFor({ pins, git }: { pins: DeployPins; git: Git; }): { layer_refs: Record<string, string>; } | { refusal: string; } {
+  const found = publishedCommits({ pins, git });
+  if ("refusal" in found) {
+    return { refusal: `${found.refusal}. Nothing was posted or dispatched: a layer ref is never guessed, so deploy-pins.json must pin a version whose tag exists.` };
   }
-  if (unpinned.length > 0) {
-    return { refusal: `${unpinned.join("; ")}. Nothing was posted or dispatched: a layer ref is never guessed, so the lockfile must pin a version whose tag exists.` };
-  }
-  return { layer_refs };
+  return { layer_refs: found.commits };
 }
 
 /** The `ansible/lab-job.yml` of THIS copy of the package: what the playbook the poster dispatches would run. */
 const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
 
 /**
- * Where a sha's `layers.json` may say the lab is cloned from: an https URL (what it declares), or an absolute path (a mirror on this
- * host). Nothing else is handed to `git fetch`, so a sha cannot name an `ext::` helper that runs a command, or a leading `-` that is an option.
+ * Where `deploy-pins.json` may say the lab is cloned from: an https URL (what it declares), or an absolute path (a mirror on this
+ * host). Nothing else is handed to `git fetch`, so a declaration cannot name an `ext::` helper that runs a command, or a leading `-` that is an option.
  */
 const CLONE_URL = /^(?:https:\/\/|\/)[^\s]+$/;
 
@@ -300,18 +234,6 @@ export function playbookLabScripts({ catalogueText, job, labPath }: { catalogueT
   return { scripts };
 }
 
-/** `pinned.lab` as a sha's own `layers.json` declares it: the tag it is laid at, where it is laid and where it is in its repository. */
-function labPinOf(manifestText: string): { tag: string; remote: string; path: string; source: string; } | { refusal: string; } {
-  const pin = pinnedLayerTag(manifestText, LAB_LAYER);
-  if ("refusal" in pin) return pin;
-  const declared = JSON.parse(manifestText).pinned[LAB_LAYER] as { path?: unknown; source?: unknown; remote?: unknown; };
-  const { path, source, remote } = declared;
-  if (typeof path !== "string" || typeof remote !== "string" || !CLONE_URL.test(remote)) {
-    return { refusal: `layers.json declares pinned.${LAB_LAYER} without a path and an https clone URL (or an absolute path), so its tag cannot be asked for a tree` };
-  }
-  return { tag: pin.tag, remote, path, source: typeof source === "string" ? source : path };
-}
-
 /**
  * Which of `paths` the commit a tag names does NOT hold, asked of its tree with the checkout's own git: the tag's commit is fetched one
  * commit deep (it writes only to `.git`, as the sha fetch above does) and `ls-tree` is read at that commit, so nothing is read from a
@@ -330,64 +252,59 @@ function pathsMissingAt({ commit, remote, tag, paths, git }: { commit: string; r
 }
 
 /**
- * The reason `sha` cannot be qualified by this copy of the playbook because of the lab it pins, or `undefined` when the pinned lab holds
- * every script the job runs. `scripts` are paths as the playbook runs them (`packages/lab/scripts/stability-gate.ts`); they are looked
- * for where the sha's own `layers.json` says the lab is in ITS repository (`source`), which is not always where it is laid (v0.1.12 held it
- * at `packages/lab`, v0.1.13 and later at the root). Every way of not knowing is a refusal that says so.
+ * The reason a run cannot be qualified by this copy of the playbook because of the lab `deploy-pins.json` pins, or `undefined` when the
+ * pinned lab holds every script the job runs. `scripts` are paths as the playbook runs them (`packages/lab/scripts/stability-gate.ts`);
+ * they are looked for where the declaration says the lab is in ITS repository (`source`), which is not always where it is laid (v0.1.12
+ * held it at `packages/lab`, v0.1.13 and later at the root). Every way of not knowing is a refusal that says so.
  */
-export function labPinRefusal({ sha, git, scripts }: { sha: string; git: Git; scripts: string[]; }): string | undefined {
-  const short = sha.slice(0, ABBREVIATED_SHA);
-  const manifest = fileAt({ sha, path: "layers.json", git });
-  if ("refusal" in manifest) return manifest.refusal;
-  const lab = labPinOf(manifest.text);
-  if ("refusal" in lab) return `${short}'s ${lab.refusal}.`;
+export function labPinRefusal({ lab, git, scripts }: { lab: LabPin | undefined; git: Git; scripts: string[]; }): string | undefined {
+  if (lab === undefined) return "deploy-pins.json declares no lab, so the script " + `${scripts.join(", ")} cannot be shown to exist in a lab release.`;
+  if (!CLONE_URL.test(lab.remote)) return `deploy-pins.json declares the lab at ${JSON.stringify(lab.remote)}, which is neither an https clone URL nor an absolute path, so its tag cannot be asked for a tree.`;
   const commit = commitOfTag({ remote: lab.remote, tag: lab.tag, git });
-  if (commit === undefined) return `${short} pins the lab at ${lab.tag}, and ${lab.remote} holds no such tag, so the script ${scripts.join(", ")} cannot be shown to exist there.`;
-  if (typeof commit !== "string") return `${lab.remote} could not be asked for ${lab.tag} (${commit.failed}), so ${short}'s lab pin cannot be read.`;
-  const wanted = scripts.map((script) => (lab.source === "." ? script.slice(LAB_PATH.length + 1) : `${lab.source}/${script.slice(LAB_PATH.length + 1)}`));
+  if (commit === undefined) return `deploy-pins.json pins the lab at ${lab.tag}, and ${lab.remote} holds no such tag, so the script ${scripts.join(", ")} cannot be shown to exist there.`;
+  if (typeof commit !== "string") return `${lab.remote} could not be asked for ${lab.tag} (${commit.failed}), so the lab pin cannot be read.`;
+  const source = lab.source ?? lab.path;
+  const wanted = scripts.map((script) => (source === "." ? script.slice(LAB_PATH.length + 1) : `${source}/${script.slice(LAB_PATH.length + 1)}`));
   const read = pathsMissingAt({ commit, remote: lab.remote, tag: lab.tag, paths: wanted, git });
-  if ("refusal" in read) return `${read.refusal}, so ${short}'s lab pin cannot be read.`;
+  if ("refusal" in read) return `${read.refusal}, so the lab pin cannot be read.`;
   if (read.missing.length === 0) return undefined;
-  return `${short} pins the lab at ${lab.tag} (${lab.remote}), which holds no ${read.missing.join(", ")}, and this copy of lab-job.yml runs ${QUALIFIED_JOB} from `
+  return `deploy-pins.json pins the lab at ${lab.tag} (${lab.remote}), which holds no ${read.missing.join(", ")}, and this copy of lab-job.yml runs ${QUALIFIED_JOB} from `
     + `${scripts.join(", ")}: the job would die a second after it started with ERR_MODULE_NOT_FOUND, reach no worker, and the poster would write \`failure\` twice, `
-    + "which the release reads as a regression. Nothing was posted or dispatched, and this is not a regression: a lab pin older than the playbook is superseded "
-    + "by the next release sha, which pins a lab that holds the script, and an older promotion row is not re-run.";
+    + "which the release reads as a regression. Nothing was posted or dispatched, and this is not a regression: move the lab pin in deploy-pins.json (and the core's) to a release that holds the script.";
 }
 
 /**
- * `layerRefsFor`, then the lab's pin asked for the scripts the playbook runs: one `LayerRefsAt` answer for everything about a sha that can
- * make a qualified run die before it measures anything, read BEFORE `pending`. The layers are read first, so a sha with a layer problem
+ * `layerRefsFor`, then the lab's pin asked for the scripts the playbook runs: one `LayerRefsAt` answer for everything that can
+ * make a qualified run die before it measures anything, read BEFORE `pending`. The layers are read first, so a layer problem
  * is refused with exactly the words it had before the lab was asked.
  *
  * @param {{ catalogueText: string }} where `catalogueText` is the raw `lab-job.yml` of this copy of the package
  */
-export function qualifiedPinsFor({ sha, git, layers, catalogueText }: { sha: string; git: Git; layers: { name: string; remote: string; package?: string; }[]; catalogueText: string; }): { layer_refs: Record<string, string>; } | { refusal: string; } {
-  const found = layerRefsFor({ sha, git, layers });
+export function qualifiedPinsFor({ pins, git, catalogueText }: { pins: DeployPins; git: Git; catalogueText: string; }): { layer_refs: Record<string, string>; } | { refusal: string; } {
+  const found = layerRefsFor({ pins, git });
   if ("refusal" in found) return found;
   const wanted = playbookLabScripts({ catalogueText, job: QUALIFIED_JOB, labPath: LAB_PATH });
   if ("refusal" in wanted) return wanted;
-  const refusal = labPinRefusal({ sha, git, scripts: wanted.scripts });
+  const refusal = labPinRefusal({ lab: pins.lab, git, scripts: wanted.scripts });
   return refusal === undefined ? found : { refusal };
 }
 
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+/** This package's own root: where `git` is asked, so the shallow fetch of a lab tag writes to the repository control is in and no other's `.git`. */
+const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const GIT_TIMEOUT_MS = 60_000;
 
 const gitInCheckout: Git = (args) => {
-  const result = spawnSync("git", ["-C", REPO_ROOT, ...args], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: sandboxGitEnv() });
+  const result = spawnSync("git", ["-C", PACKAGE_ROOT, ...args], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: sandboxGitEnv() });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 };
 
 /**
- * The real `layerRefs` of the poster: this checkout's git, the layers `layers.json` declares with a repository of their own, and the
- * playbook beside this file for the scripts the lab's pin must hold.
+ * The real `layerRefs` of the poster: this checkout's git, the layers `deploy-pins.json` declares, and the playbook beside this file for
+ * the scripts the lab's pin must hold. THE NAME IS THE OLD READING'S (the sha's lockfile) and is kept because `lab-job.ts` and its test
+ * import it by it and sit outside #5085's Region; it no longer reads a lockfile, and its argument (the sha) selects nothing.
  */
-export const layerRefsFromLockfile: LayerRefsAt = (sha) =>
-  qualifiedPinsFor({ sha, git: gitInCheckout, catalogueText: readFileSync(CATALOGUE, "utf8"), layers: separateLayers().map((name) => {
-    const { remote, package: declared } = layerDeclaration(name);
-    if (remote === undefined) throw new Error(`layer "${name}" declares no remote, so it is not a separate layer`);
-    return { name, remote, package: declared };
-  }) });
+export const layerRefsFromLockfile: LayerRefsAt = () =>
+  qualifiedPinsFor({ pins: readDeployPins(), git: gitInCheckout, catalogueText: readFileSync(CATALOGUE, "utf8") });
 
 /**
  * `dispatch`, wrapped so the run announces itself and says how it ended. The returned function is the

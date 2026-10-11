@@ -29,15 +29,41 @@
 // without the one thing it might be diagnosing the absence of is the wrong shape. So a refusal prints a
 // warning and falls through to the child's own existing default (a local inventory.yml, or empty) --
 // exactly today's behaviour, never a new hard failure.
+//
+// #5085: THE BIN CAN BE NAMED, AND THEN IT IS THE PINNED RELEASE'S. `doctor` and `worker-code` are the fleet's bins by name; the wrapper
+// fetches the fleet and the worker `deploy-pins.json` pins, compares each tarball with its integrity, unpacks them as a
+// `node_modules/@a11ign/...` pair in a directory of its own and runs the bin from there, so the fleet's own `@a11ign/screenreader-worker`
+// imports resolve and nothing is installed (ADR 0012). A pin that does not verify runs NOTHING: this is not the diagnostic whose
+// refusal may fall through, because what it would run is the one thing the pin exists to name. A path (what the core's scripts pass
+// until they are deleted) is run as given, which is today's behaviour.
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readControlPlaneFleet } from "./control-plane-fleet.ts";
+import { makeStage, readDeployPins, stagePublished } from "./layer-pins.ts";
 import { resolveMovedByMacLive, subnetOf } from "./fleet-status.ts";
 import { requestJson } from "../../worker-fleet/src/worker-http.ts";
 
 const HEALTH_TIMEOUT_MS = 5_000;
+
+/** The fleet's bins that can be named: where each is in the PUBLISHED package. A new bin is a line here, and a name that is not here is a path. */
+export const PUBLISHED_BINS: Record<string, string> = { doctor: "dist/doctor.mjs", "worker-code": "dist/check-worker-code.mjs" };
+const FLEET_LAYER = "screenreader-fleet";
+
+/** `bin` as a file to run: a named bin from the verified published fleet, or the path it already was. */
+export function resolveBin(bin: string, { stage = stagePublished, pins = readDeployPins }: { stage?: typeof stagePublished; pins?: typeof readDeployPins; } = {}): { path: string; } | { refusal: string; } {
+  if (!Object.hasOwn(PUBLISHED_BINS, bin)) return { path: bin };
+  const into = makeStage();
+  process.once("exit", () => rmSync(into, { recursive: true, force: true }));
+  const staged = stage({ pins: pins(), into });
+  if ("refusal" in staged) return { refusal: staged.refusal };
+  const dir = staged.dirs[FLEET_LAYER];
+  return dir === undefined ? { refusal: `deploy-pins.json declares no layer ${FLEET_LAYER}, so there is no published ${bin} to run` } : { path: join(dir, PUBLISHED_BINS[bin]) };
+}
 const NO_WORKER_LEFT_STATUS = 1;
+/** What a named bin whose pin did not verify exits with: the same 1, said in its own words so the refusal above does not read as an empty pool. */
+const PIN_REFUSED_STATUS = 1;
 
 export type PoolWorker = { name: string, url: string, mac?: string };
 export type MovedWorker = { name: string, from: string, to: string };
@@ -126,17 +152,23 @@ function reportLines({ moved, missing }: { moved: MovedWorker[]; missing: Missin
 }
 
 /**
- * @param {string} bin the worker-fleet script to run, relative to the repo root
+ * @param {string} bin the worker-fleet script to run, relative to the repo root, or the name of one of `PUBLISHED_BINS`
  * @param {string[]} argv forwarded to the child verbatim
  */
 export async function withControlPlaneFleet(bin: string, argv: string[], {
-  readFleet = readControlPlaneFleet, run = spawnSync, env = process.env, resolvePool = resolvePoolAtUseTime,
+  readFleet = readControlPlaneFleet, run = spawnSync, env = process.env, resolvePool = resolvePoolAtUseTime, resolve = resolveBin,
 }: {
         readFleet?: () => { workers: PoolWorker[]; refusal: string | null; };
         run?: typeof spawnSync; env?: NodeJS.ProcessEnv;
         resolvePool?: typeof resolvePoolAtUseTime;
+        resolve?: typeof resolveBin;
     } = {}): Promise<{ status: number | null; env: NodeJS.ProcessEnv; }> {
   const childEnv: NodeJS.ProcessEnv = { ...env };
+  const target = resolve(bin);
+  if ("refusal" in target) {
+    process.stderr.write(`with-control-plane-fleet: REFUSING ${bin}: ${target.refusal}. Nothing was run.\n`);
+    return { status: PIN_REFUSED_STATUS, env: childEnv };
+  }
   // Already named means managing them explicitly, which beats a fleet this wrapper would go fetch
   // instead -- so the control plane is not even asked.
   if (!childEnv.A11Y_WORKER && !childEnv.A11Y_WORKERS) {
@@ -154,14 +186,14 @@ export async function withControlPlaneFleet(bin: string, argv: string[], {
       childEnv.A11Y_WORKERS = resolved.pool.join(",");
     }
   }
-  const result = run(process.execPath, [bin, ...argv], { stdio: "inherit", env: childEnv });
+  const result = run(process.execPath, [target.path, ...argv], { stdio: "inherit", env: childEnv });
   return { status: result.status, env: childEnv };
 }
 
 async function main() {
   const [bin, ...argv] = process.argv.slice(2);
   if (!bin) {
-    process.stderr.write("usage: node packages/control/src/with-control-plane-fleet.ts <bin> [args...]\n");
+    process.stderr.write(`usage: node src/with-control-plane-fleet.ts <${Object.keys(PUBLISHED_BINS).join("|")}|path> [args...]\n`);
     process.exit(2);
   }
   const { status } = await withControlPlaneFleet(bin, argv);

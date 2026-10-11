@@ -45,20 +45,16 @@
  * invalidates the corpus, which is a decision for whoever owns the live recapture, not something a test
  * should decide unilaterally by asserting a bigger list into existence.
  */
-import { declareWalkScope } from "../../../guards/src/walk-scope.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { stampEnvironmentFiles } from "../../../../scripts/test-support/stamp-files.ts";
 
-// #929: THIS GUARD READS ONLY `packages/control`, `packages/nvda-worker`, `packages/worker-fleet`, so a diff that cannot reach it need not run this file.
-// Undeclared means unbounded, which is why the selector runs 173 always-run guards on every pull
-// request. The declaration is ENFORCED rather than trusted: `declareWalkScope` observes what this
-// file actually reads and fails it here if anything lands outside the scope -- so a scope that is
-// too narrow is loud, never a guard that silently stopped running.
-export const WALK_SCOPE = ["layers.json","packages/control","packages/worker-fleet","scripts/test-support"];
-await declareWalkScope(import.meta.url);
+// NO WALK-SCOPE DECLARATION HERE (a11ign/a11ign#929 asked a tree-walking guard in the core to declare one, so the core's selector could drop
+// it from the always-run set). This file is control's, and the selector is the core's: control's CI runs every test of the package, so the
+// declaration selected nothing here, and it named a file of the core's own root and imported the core's `guards/` by relative path, which
+// is another repository's tree (ADR 0045 rule 2).
 
 const ROLE = fileURLToPath(new URL("../../ansible/roles/worker/", import.meta.url));
 const MODULES = fileURLToPath(

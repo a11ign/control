@@ -39,8 +39,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
+import { parseDeployPins, playbookLayerListName } from "../layer-pins.ts";
 
-const LAYERS_PATH = fileURLToPath(new URL("../../layers.json", import.meta.url));
+const PINS_PATH = fileURLToPath(new URL("../../deploy-pins.json", import.meta.url));
+/** The file the layer tasks read their list from, as the task that reads it names it. */
+const LAYER_LIST_NAME = playbookLayerListName(readFileSync(new URL("../../ansible/tasks/read-layer-checkouts.yml", import.meta.url), "utf8"));
 /** Relative to the scratch dir the playbooks run from. */
 const WRAPPER = join("ansible", "wrapper.yml");
 const RUN_JOB_PATH = fileURLToPath(new URL("../../ansible/tasks/run-job.yml", import.meta.url));
@@ -195,14 +198,15 @@ function setupFixtureRepo(tmp: string): string {
 
 /** The wrapper play that includes the REAL, unmodified `run-job.yml` directly against `hosts: localhost`. */
 function writeWrapperPlaybook(tmp: string, repoDir: string, bin: string) {
-  // run-job.yml's layer include reads `playbook_dir/../layers.json` (#3396), as it does in the real tree where the playbook
-  // sits in `ansible/` beside `layers.json`'s directory. So the wrapper is one level down and the real manifest is one up.
+  // run-job.yml's layer include reads `playbook_dir/../<list>` (#3396), as it does in the real tree where the playbook
+  // sits in `ansible/` beside the list's directory. So the wrapper is one level down and the list is one up.
   mkdirSync(join(tmp, "ansible"));
-  // The real manifest, minus each layer's `remote` (#3447): a layer in its own repository makes `lab-layer-checkouts.yml` demand a
+  // The real layers, minus each one's `remote` (#3447): a layer in its own repository makes `lab-layer-checkouts.yml` demand a
   // `layer_refs` entry and a second checkout, and this harness is about the lock. The layer-checkout tasks have tests of their own.
-  const manifest = JSON.parse(readFileSync(LAYERS_PATH, "utf8")) as { layers: Record<string, { path: string, remote?: string }> };
-  for (const layer of Object.values(manifest.layers)) delete layer.remote;
-  writeFileSync(join(tmp, "layers.json"), JSON.stringify(manifest));
+  const read = parseDeployPins(readFileSync(PINS_PATH, "utf8"));
+  if ("refusal" in read) throw new Error(read.refusal);
+  const manifest = { layers: Object.fromEntries(Object.entries(read.pins.layers).map(([name, { path }]) => [name, { path }])) };
+  writeFileSync(join(tmp, LAYER_LIST_NAME), JSON.stringify(manifest));
   writeFileSync(join(tmp, WRAPPER), `---
 - name: exercise run-job.yml's lock directly
   hosts: localhost

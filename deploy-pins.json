@@ -1,0 +1,32 @@
+{
+  "//": "WHAT CONTROL DEPLOYS, DECLARED BY CONTROL (ADR 0045, cut 7, a11ign/a11ign#5085). `layers` are the PUBLISHED worker and fleet: the exact release and the `integrity` of that release's tarball, which `fleet:deploy` fetches with `npm pack`, compares and refuses on BEFORE anything is unpacked or shipped (`src/layer-pins.ts`). The commit a host's checkout is put on is the one the release's tag names on `remote`. `path` is where a host holds the layer, beside the core's checkout. `lab` is the release the lab host holds laid (the lab is private and no registry serves it); it is a second declaration of what the core lays and `lab-laid-copy.ts` refuses a lab host that does not match it, so a lab bump in the core is a change here too. Moving a pin is a pull request that changes the version and the integrity together: `npm view <package>@<version> dist.integrity` prints the second.",
+  "layers": {
+    "nvda-worker": {
+      "package": "@a11ign/screenreader-worker",
+      "version": "0.13.0",
+      "integrity": "sha512-hX62pfnZehLPUYmeQnR9nTTMtvtQ1tWioF1xFGg4Aet/1DKpUus2B369F1OlOyj1SIDwtqHy825TPZwK6rziig==",
+      "path": "packages/nvda-worker",
+      "remote": "https://github.com/a11ign/screenreader-worker.git"
+    },
+    "screenreader-fleet": {
+      "package": "@a11ign/screenreader-fleet",
+      "version": "0.9.0",
+      "integrity": "sha512-ie6tZtGwQa99/AJHAbJ2j5FHC6RmiORXdxHfVppCPRzrO3LfmuX2WX8Fof5roa7e0yxb3qaXkTs17oxTi54L3Q==",
+      "path": "packages/worker-fleet",
+      "remote": "https://github.com/a11ign/screenreader-fleet.git"
+    }
+  },
+  "lab": {
+    "path": "packages/lab",
+    "source": ".",
+    "remote": "https://github.com/a11ign/lab.git",
+    "tag": "v0.1.28",
+    "lays": [
+      "src",
+      "scripts",
+      "baselines",
+      "rule-ownership.json",
+      "CLAUDE.md"
+    ]
+  }
+}

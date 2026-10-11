@@ -18,10 +18,15 @@ import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { layerCommitsExtraVars, layerPinsFor, layerRefValues, layersFrom, separateLayers } from "./layer-checkouts.ts";
+import { playbookLayerListName } from "./layer-pins.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const ANSIBLE = resolve(REPO, "packages/control/ansible");
 const read = (rel: string) => readFileSync(resolve(ANSIBLE, rel), "utf8");
+
+/** The file the plays read their layer list from, as the task that reads it names it (control's own declaration is `deploy-pins.json`, #5085). */
+const LIST = playbookLayerListName(read("tasks/read-layer-checkouts.yml"));
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
 /** Comments out: a verb named in PROSE is not a verb that runs. */
 const codeText = (source: string) => source.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
@@ -147,23 +152,23 @@ test("the plays that rewrite origin take the layer's remote by name and never re
   }
 });
 
-test("no play names a layer: the list is read from layers.json, so a second copy cannot go stale", () => {
+test("no play names a layer: the list is read from the one file the plays share, so a second copy cannot go stale", () => {
   // The layer files, and the one task in the role that clones a layer. The plays themselves may name the worker
   // for other reasons (`deploy.yml` reads its code version through the resolver), so they are not scanned whole.
   for (const file of LAYER_FILES) assert.doesNotMatch(codeText(read(file)), /nvda-worker|nvda_worker/, file);
   const layerTask = codeText(read("roles/worker/tasks/packages.yml")).split("\n- name:").find((task) => /worker_layer_checkouts/.test(task));
   assert.doesNotMatch(layerTask ?? "", /nvda-worker|nvda_worker/);
   for (const file of LAYER_FILES.filter((name) => name === "tasks/read-layer-checkouts.yml")) {
-    assert.match(read(file), /lookup\('file', playbook_dir ~ '\/\.\.\/layers\.json'\)/);
+    assert.match(read(file), new RegExp(`lookup\\('file', playbook_dir ~ '\\/\\.\\.\\/${escaped(LIST)}'\\)`));
   }
-  assert.match(read("roles/worker/defaults/main.yml"), /lookup\('file', playbook_dir ~ '\/\.\.\/layers\.json'\)/);
+  assert.match(read("roles/worker/defaults/main.yml"), new RegExp(`lookup\\('file', playbook_dir ~ '\\/\\.\\.\\/${escaped(LIST)}'\\)`));
 });
 
 test("the bootstrap script reads the same manifest from its fresh clone", () => {
   const ps1 = readFileSync(resolve(REPO, "packages/worker-fleet/src/provisioning/bootstrap-windows-worker.ps1"), "utf8");
   const code = ps1.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
   const block = code.slice(code.indexOf("$layersManifest ="), code.indexOf("no separate layer to clone"));
-  assert.match(block, /packages\\control\\layers\.json/);
+  assert.match(block, new RegExp(`packages\\\\control\\\\${escaped(LIST)}`));
   assert.match(block, /if \(-not \$layer\.Value\.remote\) \{ continue \}/, "an in-repo layer needs no second clone");
   assert.match(block, /'clone', \$layer\.Value\.remote, \$layerPath/);
   assert.doesNotMatch(block, /nvda-worker/, "the list is the manifest's, not this script's");
