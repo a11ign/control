@@ -7,7 +7,8 @@ import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
-  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive } from "./fleet-status.ts";
+  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive, probeWorker } from "./fleet-status.ts";
+import type { requestJson } from "../../worker-fleet/src/worker-http.ts";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
   from "../../worker-fleet/src/fleet-consistency.ts";
 import { readFileSync } from "node:fs";
@@ -1325,4 +1326,47 @@ test("#3242: a switch that does not answer prints one unread line and does not h
   assert.equal(withSwitch.reachable, without.reachable);
   assert.equal(withSwitch.reachable, 2, "a control: the workers WERE reachable, so the equality above is not two empties");
   assert.equal(renderHead(withSwitch).filter((line) => /^\s*switch:/.test(line)).length, 1);
+});
+
+/** A `requestJson` stand-in that throws `failures[path]` times on each path before it answers, recording every call. */
+function flakyRequest(failures: Record<string, number>, calls: string[]): typeof requestJson {
+  const remaining = { ...failures };
+  return (async (url: string) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if ((remaining[path] ?? 0) > 0) {
+      remaining[path] -= 1;
+      throw new Error("socket hang up");
+    }
+    const json = path === "/health" ? { ready: true, busy: false } : { busy: false, capturing: null };
+    return { status: 200, ok: true, text: "", json };
+  }) as typeof requestJson;
+}
+
+const PROBE_URL = "http://REDACTED-INTERNAL-ADDRESS:8765";
+
+test("#4944: a box whose request fails ONCE and then answers is reachable, with both endpoints read", async () => {
+  for (const path of ["/health", "/progress"]) {
+    const probe = await probeWorker({ name: "a11y-worker-2", url: PROBE_URL }, { request: flakyRequest({ [path]: 1 }, []) });
+    assert.equal(probe.reachable, true, `one failed ${path} must be retried, not counted as off`);
+    assert.deepEqual(probe.health, { ready: true, busy: false }, `${path}: the health reading reaches the probe`);
+    assert.deepEqual(probe.progress, { busy: false, capturing: null }, `${path}: the progress reading reaches the probe`);
+    assert.equal(probe.error, undefined);
+  }
+});
+
+test("#4944: a box that fails TWICE is unreachable, with the error, after exactly two attempts per path", async () => {
+  const calls: string[] = [];
+  const probe = await probeWorker({ name: "a11y-worker-5", url: PROBE_URL }, { request: flakyRequest({ "/health": 2, "/progress": 2 }, calls) });
+  assert.equal(probe.reachable, false);
+  assert.equal(probe.error, "socket hang up");
+  assert.equal(calls.filter((path) => path === "/health").length, 2, "two attempts at /health, and no more: a retry loop would hang a gate on an off box");
+  assert.equal(calls.filter((path) => path === "/progress").length, 2, "two attempts at /progress, and no more");
+});
+
+test("#4944: a box that answers the first time is asked ONCE per path -- the retry is for a failure, not a habit", async () => {
+  const calls: string[] = [];
+  const probe = await probeWorker({ name: "a11y-worker-6", url: PROBE_URL }, { request: flakyRequest({}, calls) });
+  assert.equal(probe.reachable, true);
+  assert.deepEqual(calls.slice().sort(), ["/health", "/progress"], "each endpoint asked exactly once");
 });

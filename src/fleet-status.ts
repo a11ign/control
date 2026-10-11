@@ -117,23 +117,39 @@ export function fleetToProbe({ readFleet = readControlPlaneFleet }: { readFleet?
 }
 
 /**
+ * Runs an attempt, and once more if it throws. The second throw is the one that propagates.
+ *
+ * One failed request is not evidence the box is off: on 2026-10-11 the first request to each of two boxes
+ * that answer `/health` in 11 ms failed `socket hang up`, and the same probe a moment later succeeded (a11ign#4944).
+ * Refusing a patch on that one reading stopped a run the fleet could have taken. A box that is really off
+ * costs one more timeout, in parallel with the rest.
+ */
+async function retryOnce<T>(attempt: () => Promise<T>): Promise<T> {
+  try {
+    return await attempt();
+  } catch {
+    return attempt();
+  }
+}
+
+/**
  * One worker's state, from both endpoints.
  *
  * Unreachable is a RESULT, not a throw: a fleet report whose job is to say which box is missing must not
  * be taken down by the box that is missing.
  */
-export async function probeWorker({ name, url }: { name: string; url: string; }): Promise<{
+export async function probeWorker({ name, url }: { name: string; url: string; }, { request = requestJson }: { request?: typeof requestJson; } = {}): Promise<{
     name: string; url: string; reachable: boolean;
     health?: WorkerHealth; progress?: WorkerProgress; error?: string;
 }> {
   const ask = async (path: string) => {
-    const response = await requestJson(`${url}${path}`, { timeoutMs: PROBE_TIMEOUT_MS });
+    const response = await request(`${url}${path}`, { timeoutMs: PROBE_TIMEOUT_MS });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json ?? {};
   };
   try {
     // Both at once. Twelve workers probed serially at a 5 s timeout is a minute of staring at nothing.
-    const [health, progress] = await Promise.all([ask("/health"), ask("/progress")]);
+    const [health, progress] = await retryOnce(() => Promise.all([ask("/health"), ask("/progress")]));
     return { name, url, reachable: true, health, progress };
   } catch (error) {
     return { name, url, reachable: false, error: (error as Error).message ?? String(error) };
@@ -1085,7 +1101,9 @@ export async function fleetStatus(deps?: {
             import("./fleet-switch.ts").SwitchReport | Promise<import("./fleet-switch.ts").SwitchReport>;
     }) {
   const workers = (deps?.workers ?? fleetToProbe)();
-  const probes = await Promise.all(workers.map(deps?.probe ?? probeWorker));
+  const probe = deps?.probe ?? probeWorker;
+  // Called with the worker alone: `map` would pass its index as probeWorker's options (#4944).
+  const probes = await Promise.all(workers.map((worker) => probe(worker)));
   const rows = summarise(probes);
   // #2752: the inventory NAME (not the `name  address` row shape) is the key both sides agree on --
   // `linkLayerFor` strips the same way via `inventoryName` before it looks a box up here.
