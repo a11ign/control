@@ -1,6 +1,6 @@
 Row a11ign/a11ign#4939 (from #4732, under #4405 outcome 1). The fleet's Edge pin follows forward from `152.0.4191.66` to `155.0.4283.45`, the build workers 7, 8 and 9 are on, and `edge-version.yml` stops and disables the Edge updater BEFORE it fetches, refuses or installs, so a box that stops at the Edge step has no live updater.
 
-Closes: none -- a11ign/a11ign#4939 cannot be closed from this repository; `product-manager` closes it at merge.
+Closes a11ign/a11ign#4939
 
 Acceptance:
 
