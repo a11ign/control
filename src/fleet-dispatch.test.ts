@@ -1,3 +1,4 @@
+// no-token: captureTimes -- every test drives pure functions or `cli`/`resolveDispatch` with an injected probe, ledger reader, wake and clock; the only `captureTimes` call is `loadByWorker` over a literal ledger, and nothing here reaches `fleet-watch.ts`'s `gh issue comment`.
 /**
  * `fleet-dispatch.ts` and its wiring in `lab-job.yml` (a11ign#5017, part of #4405 item 4).
  *
