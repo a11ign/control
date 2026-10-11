@@ -29,10 +29,15 @@
  * not answer, or answered the `unknown` placeholder, may be the one on another build, so the incident stays open. And two
  * boxes on different builds are mixed whatever the third did, so filing needs no such completeness.
  *
- * The reading is `fleetStatus`' own drift: when nobody disagrees there is NO `windowsBuild` entry and no values to show,
- * so a fleet that agrees reads as every reachable box read with no build named. `compared` (how many guests the drift is
- * about) says whether a reachable box was dropped from that comparison for carrying no environment; if it was, nothing
- * is claimed read.
+ * The reading is `fleetStatus`' `windowsBuilds`: the build each reachable box reported, keyed by URL, whether or not they
+ * agree (#5106). It used to be the drift, which carries a `windowsBuild` entry only where somebody disagrees, so a fleet
+ * that agreed on the `unknown` placeholder (a fleet-wide restart before the first sample) had no entry and read as every
+ * box read: the incident closed while the fleet could still be mixed. A box is READ when it reported a real build, so the
+ * placeholder, a box that answered without one, a box with no `environment` and a box that did not answer are all
+ * unread, whether the rest agree or not.
+ *
+ * A status with no `windowsBuilds` (a reader that predates it) claims nothing read and falls back to the drift's values,
+ * which can still show a mix: absence of the field is never "everybody agreed".
  *
  * ## Every `gh` call is behind `IncidentDeps`, and a failing one THROWS
  *
@@ -41,7 +46,7 @@
  * run files nothing.
  */
 import { execFileSync } from "node:child_process";
-import { boxValues, workerKey, type Drift, type FleetRow } from "./fleet-watch.ts";
+import { boxValues, workerKey, type BoxValue, type Drift, type FleetRow } from "./fleet-watch.ts";
 
 export const FLEET_BUILD_INCIDENT_ID = "incident:fleet-build-mixed";
 /** The one line that makes an issue THE incident. Dispatch and patch-start import this; nobody retypes it. */
@@ -56,30 +61,25 @@ const GH_TIMEOUT_MS = 60_000;
 const TARGET_PREFIX = "Target: ";
 const NOT_READ_PREFIX = "Not read: ";
 
-export type BuildStatus = { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[], compared?: number };
+export type BuildStatus = { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[], windowsBuilds?: Record<string, string | null> };
 export type BoxBuild = { box: string, build: string };
 
 /**
  * `read` and `unread` are box NAMES (the inventory name, without its address); together they are every row. `target` is the
- * highest build read, `null` when nothing named one (a fleet that agrees names none). `laggards` is empty unless `mixed`.
+ * highest build read, `null` when no box reported a real one. `laggards` is empty unless `mixed`.
  */
 export type BuildSpread = { mixed: boolean, target: string | null, laggards: BoxBuild[], read: string[], unread: string[] };
 
 const compareNumeric = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
 
-type Reading = { box: string, build: string | null };
-
 function windowsBuildDrift(status: BuildStatus): Drift | undefined {
   return [...(status.mismatches ?? []), ...(status.reportedOnly ?? [])].find((drift) => drift.field === WINDOWS_BUILD_FIELD);
 }
 
-/** `build: null` is a box that agreed with the rest: the drift carries values only when somebody disagrees. */
-function readingsOf(status: BuildStatus): Reading[] {
-  const drift = windowsBuildDrift(status);
-  if (drift) return boxValues(drift, status.rows).map(({ box, value }) => ({ box, build: value }));
-  const answered = status.rows.filter((row) => row.url && row.state !== "unreachable");
-  const dropped = status.compared !== undefined && status.compared < answered.length;
-  return dropped ? [] : answered.map((row) => ({ box: workerKey(row.name), build: null }));
+/** Reachable boxes that reported a real build; `boxValues` drops the placeholder, an empty value and an unreachable box. */
+function readingsOf(status: BuildStatus): BoxValue[] {
+  const values = status.windowsBuilds ?? windowsBuildDrift(status)?.values ?? {};
+  return boxValues({ field: WINDOWS_BUILD_FIELD, values }, status.rows);
 }
 
 /** The spread of the Windows build across one reading. Pure: a fleet on one build, or one nobody reports on, is not mixed. */
@@ -88,11 +88,11 @@ export function buildSpread(status: BuildStatus): BuildSpread {
   const read = readings.map(({ box }) => box).sort(compareNumeric);
   const seen = new Set(read);
   const unread = status.rows.map((row) => workerKey(row.name)).filter((box) => !seen.has(box)).sort(compareNumeric);
-  const builds = [...new Set(readings.flatMap(({ build }) => (build === null ? [] : [build])))].sort(compareNumeric);
+  const builds = [...new Set(readings.map(({ value }) => value))].sort(compareNumeric);
   const target = builds.at(-1) ?? null;
   const mixed = builds.length > 1;
   const laggards = !mixed ? [] : readings
-    .flatMap(({ box, build }) => (build !== null && build !== target ? [{ box, build }] : []))
+    .flatMap(({ box, value }) => (value !== target ? [{ box, build: value }] : []))
     .sort((a, b) => compareNumeric(a.box, b.box));
   return { mixed, target, laggards, read, unread };
 }

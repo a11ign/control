@@ -1042,6 +1042,50 @@ test("#2063: the channel reaches the JSON, so a caller can act on WHICH field an
   assert.deepEqual(agreed.reportedOnly, []);
 });
 
+const windowsBuildDrift = (status: { mismatches: { field: string }[], reportedOnly: { field: string }[] }) =>
+  [...status.mismatches, ...status.reportedOnly].filter((drift) => drift.field === "windowsBuild");
+
+test("#5106: a fleet that AGREES on a build still names it, keyed by URL, with no `windowsBuild` drift entry", async () => {
+  // `fleetConsistency` names a value only where somebody disagrees, so an agreeing fleet had no build anywhere on the
+  // status, and "one real build" could not be told from "every box on the placeholder". The reportedOnly contract is
+  // unchanged: agreement is still no drift entry.
+  const agreed = await driveFleet(["ready", "ready", "ready"], { ...ENVIRONMENT, windowsBuild: "26100.4946" });
+  assert.deepEqual(agreed.windowsBuilds, {
+    "http://a11y-worker-2:8765": "26100.4946", "http://a11y-worker-3:8765": "26100.4946", "http://a11y-worker-4:8765": "26100.4946",
+  });
+  assert.deepEqual(windowsBuildDrift(agreed), [], "the existing contract: no entry for a fleet that agrees");
+
+  // THE CONTROL: a split fleet names each box's build in BOTH places, and they say the same thing.
+  const split = await driveFleet(["ready", "ready"], (index) => ({ ...ENVIRONMENT, windowsBuild: index === 0 ? "26100.4946" : "26100.5000" }));
+  assert.deepEqual(Object.values(split.windowsBuilds), ["26100.4946", "26100.5000"]);
+  assert.equal(windowsBuildDrift(split).length, 1, "and the drift entry exists where boxes differ");
+});
+
+test("#5106: the placeholder is passed through as the worker sent it, so a fleet on `unknown` is told apart from one on a build", async () => {
+  // `unknown` is what `/health.environment.windowsBuild` reads from a worker's start until its first sample
+  // (`let windowsBuild = "unknown"` in the worker's server.ts), and again when the registry read fails.
+  const restarted = await driveFleet(["ready", "ready"], { ...ENVIRONMENT, windowsBuild: "unknown" });
+  assert.deepEqual(Object.values(restarted.windowsBuilds), ["unknown", "unknown"]);
+  assert.deepEqual(windowsBuildDrift(restarted), [], "premise: nothing in the drift distinguishes this from the agreeing fleet above");
+});
+
+test("#5106: a box that answered without a build is null, and an unreachable box is not named", async () => {
+  const withoutBuild = Object.fromEntries(Object.entries(ENVIRONMENT).filter(([key]) => key !== "windowsBuild"));
+  const workers = [2, 3, 4].map((n) => ({ name: `a11y-worker-${n}`, url: `http://a11y-worker-${n}:8765` }));
+  const status = await fleetStatus({
+    workers: () => workers,
+    probe: async (w) => {
+      const probe = fakeProbe(w.name, w.name === "a11y-worker-4" ? "unreachable" : "ready");
+      const environment = w.name === "a11y-worker-2" ? { ...ENVIRONMENT, windowsBuild: "26100.4946" } : withoutBuild;
+      return probe.health ? { ...probe, health: { ...probe.health, environment } } : probe;
+    },
+    linkRead: () => new Map(),
+    macRead: () => new Map(),
+  });
+  assert.deepEqual(status.windowsBuilds, { "http://a11y-worker-2:8765": "26100.4946", "http://a11y-worker-3:8765": null },
+    "reported, not reported, and absent: three different claims");
+});
+
 test("#2063: an INCONSISTENT verdict keeps its own sentence and gains the drift as a clause", async () => {
   // The two findings must not be folded: INCONSISTENT says a run must not start, the drift clause says
   // the fleet is not identical and a run may proceed anyway. Appended rather than substituted here

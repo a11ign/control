@@ -1086,6 +1086,21 @@ export function renderHead(status: { rows: WorkerRow[]; linkLayer: { lines: stri
 }
 
 /**
+ * The Windows build each reachable box reported, keyed by the guest's URL, whether or not they agree (#5106).
+ *
+ * `fleetConsistency` names a `windowsBuild` value only where two boxes differ or one did not report, so a fleet that
+ * agrees has NO drift entry and its build is not on the status at all. That made "every box on one real build" and
+ * "every box on the `unknown` placeholder" the same silence, and `fleet-build-incident.ts` closed an open incident on
+ * the second. The value is passed through as the worker sent it, placeholder included: whether `unknown` is a build is
+ * the reader's question, not this one's. `null` is a box that answered without reporting one, which is not the same
+ * claim as the placeholder (an older worker, or no `environment` at all), and an unreachable box is not here.
+ */
+export function windowsBuildsOf(guests: { worker: string, environment?: { windowsBuild?: unknown } | null }[]): Record<string, string | null> {
+  const reported = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
+  return Object.fromEntries(guests.map((guest) => [guest.worker, reported(guest.environment?.windowsBuild)]));
+}
+
+/**
  *   injectable ONLY so a
  *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
  *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
@@ -1146,7 +1161,7 @@ export async function fleetStatus(deps?: {
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
     fields, reportedOnly });
   return { rows, linkLayer, switch: switchReading, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
-    reportedOnly, reachable: guests.length, total: workers.length,
+    reportedOnly, windowsBuilds: windowsBuildsOf(guests), reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
     // Removing it outright fails SILENTLY: `undefined` is falsy, so `if (status.consistent)` would read
