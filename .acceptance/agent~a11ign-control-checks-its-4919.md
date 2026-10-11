@@ -19,13 +19,15 @@ bash -c 'cd /home/agent/repos/wt-4919-control && grep -q "ansible-playbook" .git
 
 The core's loop skipped any file lacking a top-level `hosts:` (`grep -q "^- hosts:\|^  hosts:" "$playbook" || continue`). **That skips a playbook whose `hosts:` is MISTYPED**, which is the exact mutation the row's Done-when 3 names. Measured below: `hosts:` -> `host:` in `sleep.yml` leaves the core's job GREEN although `ansible-playbook` rejects it (`'host' is not a valid attribute for a Play`, exit 4). So this job names the two files that are not playbooks (`inventory.example.yml`, `requirements.yml`; the only two of 31 top-level files the old filter skipped, measured) and checks every other file. A new top-level non-playbook then fails by name, which is the prompt to add it to the list. **The core's own job still has the hole until it is deleted**, which is the plan.
 
-## Mutation (job level: the job's own `run:` blocks extracted from `ci.yml` and run on a copy of `ansible/`; unmutated: 29 playbooks, 462 invocations, 0 problems, GREEN)
+## Mutation
+
+### The job itself (the job's own `run:` blocks extracted from `ci.yml` and run on a copy of `ansible/`; unmutated: 29 playbooks, 462 invocations, 0 problems, GREEN)
 
 - `hosts:` -> `host:` in `sleep.yml`, **the core's filter**: syntax-check step exit 0, check-modules exit 0, job GREEN (the hole). **This job's filter**: syntax-check step exit 1, job RED.
 - unknown play keyword (`hostz_typo: x`, `hosts:` kept): syntax-check step exit 1, `'hostz_typo' is not a valid attribute for a Play`, RED.
 - invented module option (`reboot_timeout` -> `reboot_timeoutt` on `win_reboot` in `patch.yml`): check-modules exit 1, `undocumented option(s): ['reboot_timeoutt']`, `462 module invocation(s) checked, 1 problem(s)`; **the syntax-check step on the same file exits 0**, which is why both steps exist.
 
-## Mutation (the test's guards; each against `.github/workflows/ci.yml`, restored by `cp` from a copy and `diff`ed identical; each broke exactly one test and no other)
+### The test's guards (each against `.github/workflows/ci.yml`, restored by `cp` from a copy and `diff`ed identical; each broke exactly one test and no other)
 
 - `gate` no longer needs `ansible`: fails the `gate waits for changeset, checks and ansible` test.
 - the core's content filter put back: fails the new `playbooks are checked in this repository's own CI` test.
