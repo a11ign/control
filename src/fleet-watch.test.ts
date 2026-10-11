@@ -13,7 +13,7 @@ import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
-  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, type CapturesState,
+  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MS, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
@@ -766,8 +766,34 @@ test("postUseOnce: a tick that lands WHILE the first is posting posts nothing (t
   const second = () => postUseOnce({ path: "c.json", now: USE_NOW + 60_000, post: (b) => posted.push(b), read, write });
   const first = postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: (b) => { posted.push(b); during = second(); } });
   assert.equal(first, "posted");
-  assert.equal(during, "already-posted", "the racing tick found the day already reserved");
+  assert.equal(during, "in-progress", "the racing tick found the day reserved");
   assert.equal(posted.length, 1);
+});
+
+test("postUseOnce: a process killed after the reservation and before the post does NOT lose the day (the lease expires)", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  // what a run killed inside the post leaves: the reservation, with neither the commit nor the release
+  file = JSON.stringify({ ...JSON.parse(file), useReservedAt: USE_NOW });
+  const posted: string[] = [];
+  const run = (now: number) => postUseOnce({ path: "c.json", now, read, write, post: (b) => posted.push(b) });
+  assert.equal(run(USE_NOW + USE_RESERVATION_MS - 1), "in-progress", "inside the lease a live peer is assumed");
+  assert.equal(run(USE_NOW + USE_RESERVATION_MS), "posted", "past the lease the day is retried");
+  assert.equal(JSON.parse(file).usePostedOn, "2026-10-11");
+  assert.equal(JSON.parse(file).useReservedAt, undefined);
+  assert.equal(run(USE_NOW + USE_RESERVATION_MS + 1), "already-posted");
+  assert.equal(posted.length, 1);
+});
+
+test("postUseOnce: the commit is written only AFTER the post returned", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  let seenDuring: { usePostedOn?: string, useReservedAt?: number } = {};
+  postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: () => { seenDuring = JSON.parse(file); } });
+  assert.equal(seenDuring.usePostedOn, undefined);
+  assert.equal(seenDuring.useReservedAt, USE_NOW);
 });
 
 test("postUseOnce: a failed post RELEASES the reservation, so the race fix does not lose the day", () => {

@@ -172,7 +172,7 @@ export type WorkerCaptures = {captures: number, seenAt: number, lastRoseAt: numb
 /** One hourly tick's sampling (#5016): which boxes answered, and which of those did work since the tick before. */
 export type UseTick = {at: number, awake: string[], worked: string[]};
 /** `ticks` and `usePostedOn` are absent from a file written before the use reading existed, and that file still reads. */
-export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>, ticks?: UseTick[], usePostedOn?: string};
+export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>, ticks?: UseTick[], usePostedOn?: string, useReservedAt?: number};
 export type CaptureTimes = {captures24h: number, lastCaptureAt: number|null, observedSince: number};
 /**
  * ## When did the fleet last capture? (#2979, found by #2937)
@@ -467,37 +467,47 @@ export function useBody(reading: UseReading, now: number): string {
   ].join("\n");
 }
 
+/** How long an in-progress reservation holds off another tick. A killed process leaves one behind; after this the next tick retries. */
+export const USE_RESERVATION_MS = 10 * MS_PER_MINUTE;
+
 /**
- * Post the use reading once per UTC day. The check and the RESERVATION of the day happen in one locked
- * read-modify-write, BEFORE the post: two ticks racing then see one reserved day and one of them posts. The post
- * runs outside the lock (a `gh` call must not hold the ledger the 10 s probe writes), and a post that throws
- * RELEASES the reservation so the next tick tries again. A ledger nobody could read posts nothing: it would say
- * "unknown" about a file, not about the fleet.
+ * Post the use reading once per UTC day, at least once and at most once at a time.
+ *
+ * The check and a RESERVATION (`useReservedAt`, a lease) happen in one locked read-modify-write before the post, so two
+ * racing ticks see one reservation and one posts. The COMMIT (`usePostedOn`) is written only after the post returned,
+ * so a process killed in between leaves a reservation that EXPIRES: the next tick past the lease retries, and the day's
+ * report is not lost. The cost is the opposite window: a kill after the post but before the commit posts again after
+ * the lease, which is a repeated report and not a missing one. A post that throws releases the reservation at once.
+ * The post runs outside the lock (a `gh` call must not hold the ledger the 10 s probe writes). A ledger nobody could
+ * read posts nothing: it would say "unknown" about a file, not about the fleet.
  */
 export function postUseOnce({ path, now, post, read, write, lock = write ? unlocked : withFileLock }: {
         path: string; now: number; post: (body: string) => void; read?: typeof readFileSync; write?: typeof writeFileSync;
         lock?: typeof withFileLock;
-    }): "posted" | "already-posted" | "unreadable" {
+    }): "posted" | "already-posted" | "in-progress" | "unreadable" {
   const day = utcDay(now);
   let body: string | null = null;
-  let outcome: "already-posted" | "unreadable" | null = null;
-  lock(path, () => {
+  let outcome: "already-posted" | "in-progress" | "unreadable" = "unreadable";
+  const update = (change: (state: CapturesState) => CapturesState | null) => lock(path, () => {
     const state = readCapturesState(path, read);
-    if (!state) { outcome = "unreadable"; return; }
-    if (state.usePostedOn === day) { outcome = "already-posted"; return; }
-    body = useBody(useReading(state, now), now);
-    writeCapturesState(path, { ...state, usePostedOn: day }, write);
+    const next = state && change(state);
+    if (next) writeCapturesState(path, next, write);
   });
-  if (body === null) return outcome ?? "unreadable";
+  update((state) => {
+    if (state.usePostedOn === day) { outcome = "already-posted"; return null; }
+    const held = state.useReservedAt !== undefined && now - state.useReservedAt < USE_RESERVATION_MS && state.useReservedAt <= now;
+    if (held) { outcome = "in-progress"; return null; }
+    body = useBody(useReading(state, now), now);
+    return { ...state, useReservedAt: now };
+  });
+  if (body === null) return outcome;
   try {
     post(body);
   } catch (cause) {
-    lock(path, () => {
-      const latest = readCapturesState(path, read);
-      if (latest?.usePostedOn === day) writeCapturesState(path, { ...latest, usePostedOn: undefined }, write);
-    });
+    update((state) => ({ ...state, useReservedAt: undefined }));
     throw cause;
   }
+  update((state) => ({ ...state, usePostedOn: day, useReservedAt: undefined }));
   return "posted";
 }
 
