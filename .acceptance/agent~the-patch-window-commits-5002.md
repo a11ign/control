@@ -3,10 +3,10 @@ Row a11ign/a11ign#5002 (parent #4405, serves #4979's reading). Names no workflow
 Acceptance:
 
 ```bash
-cd /home/agent/repos/wt-5002-control && pnpm exec rstest run src/fleet-layer/patch-playbook.test.ts src/fleet-patch.test.ts
+cd /home/agent/repos/wt-5002-control && pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include 'src/fleet-layer/patch-playbook.test.ts' --include 'src/fleet-patch.test.ts'
 ```
 
-**As run (measured, 2026-10-11):** every test in both files passes, including the three new `a11ign#4979` tests; `pnpm run typecheck` is clean. The row's command was run with `cd` pointed at this worktree, the control repository's checkout for this branch.
+**As run (measured, 2026-10-11):** `VERDICT pass: 47 tests in 2 files`, including the three new `a11ign#4979` tests; `pnpm run typecheck` is clean. The row's command as written (no `--config`) prints `No test suites found in file` for `fleet-patch.test.ts` and exits 1, the same fact earlier PRs here recorded: control's default rstest run lacks the `node:test` shim that only the toolchain config carries, so the `--config`/`--include` form above is the same two files.
 
 ## What changed
 
