@@ -1,0 +1,5 @@
+---
+"@a11ign/control": minor
+---
+
+`fleet:patch` and the scheduled patch window hand `patch.yml` the fleet's target (a11ign/a11ign#4905, the caller half of #4897 under #4405): a box below the fleet's highest build is brought up to it, a feature update included, and no longer left behind. The wrapper names the boxes on the fleet's highest `/health` build, reads `CurrentBuild.UBR` and `DisplayVersion` from them in one read-only ad hoc `win_shell`, and passes `-e patch_target_release=<NNHn> -e patch_target_build=<build>.<UBR>`. `/health` carries only `<major>.<minor>.<CurrentBuild>`, so the UBR and the release name cannot come from it; there is no build-to-release table. Where no target can be read it passes neither and the plan says why: the play as it was. The dry run prints the target it would pass. With a target, the time the command watches the unit is the larger of four hours and 2.5 hours (the play's 7200 s reboot ceiling plus 1800 s, derived, not measured) per box under the top build, because the next scheduled attempt stops a unit still running.
