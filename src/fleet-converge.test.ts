@@ -1,3 +1,4 @@
+// no-token: ATTEMPTS_PER_BOX -- every effect is injected (`Effects`): `notify` and `post` are recorders, so the `agent-org` and `gh` calls in `main` are never reached.
 // a11ign#5023: the scripted run that wakes, deploys and provisions with bounded retries of the known causes.
 // Every effect is injected: no box, no control plane, no playbook. The lock tests run the REAL lock command against a
 // directory of this machine's (as `fleet-lock.test.ts` does), because "the run's own deploy would refuse it" is a claim
