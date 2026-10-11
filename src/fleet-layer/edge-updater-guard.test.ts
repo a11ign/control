@@ -58,48 +58,75 @@ function guardRegistration(text: string): string {
   return block.slice(at);
 }
 
-/** Everything the guard must be, as a list of what is wrong. Empty means the guard holds. */
-function guardViolations(text: string): string[] {
-  const bad: string[] = [];
+const ORDER_AFTER_INSTALL = "the guard is registered before the install";
+const NOT_FOUND = "guard block or closing assertion not found";
+
+/** Where the guard sits among the file's top-level tasks. */
+function placementViolations(text: string): string[] {
   const heads = [...text.matchAll(/^- name: (.+)$/gm)].map((m) => m[1].trim());
   const guardAt = heads.indexOf(GUARD_BLOCK);
   const closingAt = heads.indexOf(CLOSING_ASSERTION);
-  if (guardAt < 0 || closingAt < 0) return ["guard block or closing assertion not found"];
-  if (guardAt > closingAt) bad.push("the guard is registered AFTER the closing assertion that requires it");
-  if (guardAt < heads.indexOf("Install it")) bad.push("the guard is registered before the install");
+  if (guardAt < 0 || closingAt < 0) return [NOT_FOUND];
+  return [
+    guardAt > closingAt ? "the guard is registered AFTER the closing assertion that requires it" : "",
+    guardAt < heads.indexOf("Install it") ? ORDER_AFTER_INSTALL : "",
+  ].filter(Boolean);
+}
 
+/** [what is wrong, whether it is wrong] for the registration: who it runs as and when. */
+function registrationChecks(text: string): Array<[string, boolean]> {
   const reg = guardRegistration(text);
-  if (!/^\s+username: SYSTEM$/m.test(reg)) bad.push("the guard does not run as SYSTEM");
-  if (!/^\s+run_level: highest$/m.test(reg)) bad.push("the guard does not run at the highest run level");
-  if (!/^\s+- type: boot$/m.test(reg)) bad.push("no startup trigger");
-  if (!/^\s+repetition:$/m.test(reg) || !/^\s+- interval: "PT\{\{ edge_guard_interval_minutes \}\}M"$/m.test(reg)) {
-    bad.push("no repeating trigger");
-  }
-  if (!/^\s+enabled: true$/m.test(reg)) bad.push("the guard task is not enabled");
-  if (!reg.includes(`name: "{{ edge_guard_task }}"`) || !text.includes(`edge_guard_task: ${GUARD_TASK_NAME}`)) {
-    bad.push("the guard task's name is not pinned");
-  }
+  const has = (re: RegExp) => re.test(reg);
+  return [
+    ["the guard does not run as SYSTEM", !has(/^\s+username: SYSTEM$/m)],
+    ["the guard does not run at the highest run level", !has(/^\s+run_level: highest$/m)],
+    ["no startup trigger", !has(/^\s+- type: boot$/m)],
+    ["no repeating trigger", !has(/^\s+repetition:$/m)
+      || !has(/^\s+- interval: "PT\{\{ edge_guard_interval_minutes \}\}M"$/m)],
+    ["the guard task is not enabled", !has(/^\s+enabled: true$/m)],
+    ["the guard task's name is not pinned",
+      !reg.includes(`name: "{{ edge_guard_task }}"`) || !text.includes(`edge_guard_task: ${GUARD_TASK_NAME}`)],
+  ];
+}
 
+/** [what is wrong, whether it is wrong] for the script: what it matches, in what order, and what it writes. */
+function scriptChecks(text: string): Array<[string, boolean]> {
   const script = guardScript(text);
-  if (!script.includes("Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*'")) bad.push("tasks are not matched by prefix");
-  if (/MicrosoftEdgeUpdateTask(MachineCore|MachineUA)/.test(script)) bad.push("the script names tasks instead of matching them");
-  if (script.indexOf("Stop-ScheduledTask") < 0 || script.indexOf("Stop-ScheduledTask") > script.indexOf("Disable-ScheduledTask")) {
-    bad.push("a task is disabled before it is stopped");
-  }
-  if (script.indexOf("Stop-Service") < 0 || script.indexOf("Stop-Service") > script.indexOf("Set-Service")) {
-    bad.push("a service is disabled before it is stopped");
-  }
-  if (!script.includes("-StartupType Disabled")) bad.push("services are not set Disabled");
-  if (!script.includes(RECORD) || !script.includes("checkedAt") || !script.includes("reenabled")) {
-    bad.push("the record is not written with checkedAt and reenabled");
-  }
-  if (!script.includes("Move-Item")) bad.push("the record is not written atomically");
+  const before = (first: string, second: string) => script.indexOf(first) < 0 || script.indexOf(first) > script.indexOf(second);
+  return [
+    ["tasks are not matched by prefix", !script.includes("Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*'")],
+    ["the script names tasks instead of matching them", /MicrosoftEdgeUpdateTask(MachineCore|MachineUA)/.test(script)],
+    ["a task is disabled before it is stopped", before("Stop-ScheduledTask", "Disable-ScheduledTask")],
+    ["a service is disabled before it is stopped", before("Stop-Service", "Set-Service")],
+    ["services are not set Disabled", !script.includes("-StartupType Disabled")],
+    ["the record is not written with checkedAt and reenabled",
+      !script.includes(RECORD) || !script.includes("checkedAt") || !script.includes("reenabled")],
+    ["the record is not written atomically", !script.includes("Move-Item")],
+  ];
+}
 
+function closingAssertionChecks(text: string): Array<[string, boolean]> {
   const closing = taskBlock(text, CLOSING_ASSERTION);
-  if (!closing.includes(`Guard: ${GUARD_TASK_NAME}`) || !/Get-ScheduledTask -TaskName \$Guard/.test(closing)) {
-    bad.push("the closing assertion does not require the guard task");
-  }
-  return bad;
+  return [["the closing assertion does not require the guard task",
+    !closing.includes(`Guard: ${GUARD_TASK_NAME}`) || !/Get-ScheduledTask -TaskName \$Guard/.test(closing)]];
+}
+
+/** Everything the guard must be, as a list of what is wrong. Empty means the guard holds. */
+function guardViolations(text: string): string[] {
+  const placed = placementViolations(text);
+  if (placed.includes(NOT_FOUND)) return placed;
+  const checks = [...registrationChecks(text), ...scriptChecks(text), ...closingAssertionChecks(text)];
+  return [...placed, ...checks.filter(([, wrong]) => wrong).map(([message]) => message)];
+}
+
+/** TASKS with substitutions made inside the guard block only, each asserted to have changed it. */
+function mutatedGuard(...edits: Array<[string, string]>): string {
+  const block = taskBlock(TASKS, GUARD_BLOCK);
+  const mutated = edits.reduce((text, [from, to]) => {
+    assert.ok(text.includes(from), `"${from}" is not in the guard block, so the control mutates nothing`);
+    return text.replace(from, to);
+  }, block);
+  return TASKS.replace(block, mutated);
 }
 
 test("the guard holds: SYSTEM, startup and repeating triggers, prefix match, stop before disable, a record", () => {
@@ -113,16 +140,6 @@ test("the interval is a variable at the top of the block, not a new defaults key
     fileURLToPath(new URL("../../ansible/roles/worker/defaults/main.yml", import.meta.url)), "utf8"),
     /edge_guard/);
 });
-
-/** TASKS with substitutions made inside the guard block only, each asserted to have changed it. */
-function mutatedGuard(...edits: Array<[string, string]>): string {
-  const block = taskBlock(TASKS, GUARD_BLOCK);
-  const mutated = edits.reduce((text, [from, to]) => {
-    assert.ok(text.includes(from), `"${from}" is not in the guard block, so the control mutates nothing`);
-    return text.replace(from, to);
-  }, block);
-  return TASKS.replace(block, mutated);
-}
 
 test("control: prefix replaced by a two-name list FAILS", () => {
   const v = guardViolations(mutatedGuard(["Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*'",
@@ -168,5 +185,5 @@ test("control: not SYSTEM, no startup trigger, no repetition, no record, not req
 
 test("control: a file with no guard is refused, not passed", () => {
   const v = guardViolations(TASKS.replace(taskBlock(TASKS, GUARD_BLOCK), ""));
-  assert.deepEqual(v, ["guard block or closing assertion not found"]);
+  assert.deepEqual(v, [NOT_FOUND]);
 });
