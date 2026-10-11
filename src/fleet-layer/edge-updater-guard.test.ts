@@ -1,0 +1,172 @@
+/**
+ * THE EDGE UPDATER STAYS OFF BECAUSE SOMETHING RE-ASSERTS IT (a11ign#5015, part of #4405).
+ *
+ * `edge-version.yml` disabled the updater's tasks and services once per provision. Between provisions
+ * nothing kept them off, and Edge puts a task back: 12 boxes ended a11ign#4948's first run at the closing
+ * assertion with `MicrosoftEdgeUpdateBrowserReplacementTask` `Ready`. The role now registers a SYSTEM task that
+ * repeats the same two levers at startup and on an interval, and writes down what it had to undo.
+ *
+ * What this pins, read off the file's text (this package has no dependencies, ADR 0012, so no YAML parser):
+ * the guard runs as SYSTEM with a startup trigger and a repeating one; it matches the updater's tasks by
+ * the `MicrosoftEdgeUpdate*` PREFIX, because the set grew once already; it STOPS before it disables (the
+ * 2026-08-25 lesson in the same file); it writes the record; and the closing assertion requires the guard.
+ *
+ * Policy was NOT added: the header of `edge-version.yml` records that the EdgeUpdate policies are stored and
+ * never honoured on these standalone boxes, so there is no policy assertion here and none is wanted.
+ *
+ * EACH CONTROL RUNS THE SAME ASSERTION on the same file with ONE property mutated, so the check is shown to
+ * fail on the defect rather than pass on a file that cannot contain it. The positive control is the first test.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const TASKS = readFileSync(
+  fileURLToPath(new URL("../../ansible/roles/worker/tasks/edge-version.yml", import.meta.url)), "utf8");
+
+const GUARD_BLOCK = "Register the guard that re-asserts the Edge updater, because disabling it once is not keeping it off";
+const CLOSING_ASSERTION = "Refuse to call this provisioned unless Edge is the pinned build and the updater is off";
+const GUARD_TASK_NAME = "a11y-edge-updater-guard";
+const RECORD = "edge-updater-guard.json";
+
+/** The text of one top-level task: from its `- name:` line to the next top-level task, or to the end. */
+function taskBlock(text: string, name: string): string {
+  const start = text.indexOf(`- name: ${name}\n`);
+  assert.ok(start >= 0, `edge-version.yml has no task named "${name}": this test examines nothing`);
+  const next = text.indexOf("\n- name: ", start + 1);
+  return text.slice(start, next < 0 ? text.length : next + 1);
+}
+
+/** The guard's script: the `content: |` of "Lay the guard script", up to the next nested task. */
+function guardScript(text: string): string {
+  const block = taskBlock(text, GUARD_BLOCK);
+  const at = block.indexOf("content: |\n");
+  assert.ok(at >= 0, "the guard block lays no script");
+  const rest = block.slice(at);
+  const next = rest.indexOf("\n    - name: ");
+  // Comments name the very cmdlets under test ("Disable-ScheduledTask does not terminate ..."), so an order
+  // read off the raw text would find them there.
+  return (next < 0 ? rest : rest.slice(0, next)).replace(/^\s*#.*$/gm, "");
+}
+
+/** The registration: the nested "Register the guard task" task. */
+function guardRegistration(text: string): string {
+  const block = taskBlock(text, GUARD_BLOCK);
+  const at = block.indexOf("    - name: Register the guard task");
+  assert.ok(at >= 0, "the guard block registers no task");
+  return block.slice(at);
+}
+
+/** Everything the guard must be, as a list of what is wrong. Empty means the guard holds. */
+function guardViolations(text: string): string[] {
+  const bad: string[] = [];
+  const heads = [...text.matchAll(/^- name: (.+)$/gm)].map((m) => m[1].trim());
+  const guardAt = heads.indexOf(GUARD_BLOCK);
+  const closingAt = heads.indexOf(CLOSING_ASSERTION);
+  if (guardAt < 0 || closingAt < 0) return ["guard block or closing assertion not found"];
+  if (guardAt > closingAt) bad.push("the guard is registered AFTER the closing assertion that requires it");
+  if (guardAt < heads.indexOf("Install it")) bad.push("the guard is registered before the install");
+
+  const reg = guardRegistration(text);
+  if (!/^\s+username: SYSTEM$/m.test(reg)) bad.push("the guard does not run as SYSTEM");
+  if (!/^\s+run_level: highest$/m.test(reg)) bad.push("the guard does not run at the highest run level");
+  if (!/^\s+- type: boot$/m.test(reg)) bad.push("no startup trigger");
+  if (!/^\s+repetition:$/m.test(reg) || !/^\s+- interval: "PT\{\{ edge_guard_interval_minutes \}\}M"$/m.test(reg)) {
+    bad.push("no repeating trigger");
+  }
+  if (!/^\s+enabled: true$/m.test(reg)) bad.push("the guard task is not enabled");
+  if (!reg.includes(`name: "{{ edge_guard_task }}"`) || !text.includes(`edge_guard_task: ${GUARD_TASK_NAME}`)) {
+    bad.push("the guard task's name is not pinned");
+  }
+
+  const script = guardScript(text);
+  if (!script.includes("Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*'")) bad.push("tasks are not matched by prefix");
+  if (/MicrosoftEdgeUpdateTask(MachineCore|MachineUA)/.test(script)) bad.push("the script names tasks instead of matching them");
+  if (script.indexOf("Stop-ScheduledTask") < 0 || script.indexOf("Stop-ScheduledTask") > script.indexOf("Disable-ScheduledTask")) {
+    bad.push("a task is disabled before it is stopped");
+  }
+  if (script.indexOf("Stop-Service") < 0 || script.indexOf("Stop-Service") > script.indexOf("Set-Service")) {
+    bad.push("a service is disabled before it is stopped");
+  }
+  if (!script.includes("-StartupType Disabled")) bad.push("services are not set Disabled");
+  if (!script.includes(RECORD) || !script.includes("checkedAt") || !script.includes("reenabled")) {
+    bad.push("the record is not written with checkedAt and reenabled");
+  }
+  if (!script.includes("Move-Item")) bad.push("the record is not written atomically");
+
+  const closing = taskBlock(text, CLOSING_ASSERTION);
+  if (!closing.includes(`Guard: ${GUARD_TASK_NAME}`) || !/Get-ScheduledTask -TaskName \$Guard/.test(closing)) {
+    bad.push("the closing assertion does not require the guard task");
+  }
+  return bad;
+}
+
+test("the guard holds: SYSTEM, startup and repeating triggers, prefix match, stop before disable, a record", () => {
+  assert.deepEqual(guardViolations(TASKS), [],
+    "without these, Edge puts a task back between provisions and the updater moves the pin (a11ign#5015)");
+});
+
+test("the interval is a variable at the top of the block, not a new defaults key", () => {
+  assert.match(TASKS, /edge_guard_interval_minutes: 15\n/);
+  assert.doesNotMatch(readFileSync(
+    fileURLToPath(new URL("../../ansible/roles/worker/defaults/main.yml", import.meta.url)), "utf8"),
+    /edge_guard/);
+});
+
+/** TASKS with substitutions made inside the guard block only, each asserted to have changed it. */
+function mutatedGuard(...edits: Array<[string, string]>): string {
+  const block = taskBlock(TASKS, GUARD_BLOCK);
+  const mutated = edits.reduce((text, [from, to]) => {
+    assert.ok(text.includes(from), `"${from}" is not in the guard block, so the control mutates nothing`);
+    return text.replace(from, to);
+  }, block);
+  return TASKS.replace(block, mutated);
+}
+
+test("control: prefix replaced by a two-name list FAILS", () => {
+  const v = guardViolations(mutatedGuard(["Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*'",
+    "Get-ScheduledTask -TaskName @('MicrosoftEdgeUpdateTaskMachineCore','MicrosoftEdgeUpdateTaskMachineUA')"]));
+  assert.ok(v.includes("tasks are not matched by prefix") && v.includes("the script names tasks instead of matching them"), v.join("|"));
+});
+
+const STOP_TASK = "if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath; $changed = $true }\n";
+const DISABLE_TASK = "            if ($t.State -ne 'Disabled') {";
+const STOP_SERVICE = "if ($svc.Status -ne 'Stopped') { Stop-Service -Name $name -Force; $changed = $true }\n";
+const DISABLE_SERVICE = "            if ($svc.StartType -ne 'Disabled') {";
+
+test("control: disabling a task before stopping it FAILS", () => {
+  const stop = "            " + STOP_TASK;
+  const v = guardViolations(mutatedGuard([stop, ""], [DISABLE_TASK, DISABLE_TASK + " Disable-ScheduledTask -TaskName $t.TaskName }\n"
+    + "            if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName }\n            if (0) {"]));
+  assert.ok(v.includes("a task is disabled before it is stopped"), v.join("|"));
+});
+
+test("control: disabling a service before stopping it FAILS", () => {
+  const stop = "            " + STOP_SERVICE;
+  const v = guardViolations(mutatedGuard([stop, ""], [DISABLE_SERVICE, DISABLE_SERVICE + " Set-Service -Name $name -StartupType Disabled }\n"
+    + "            if ($svc.Status -ne 'Stopped') { Stop-Service -Name $name }\n            if (0) {"]));
+  assert.ok(v.includes("a service is disabled before it is stopped"), v.join("|"));
+});
+
+test("control: not SYSTEM, no startup trigger, no repetition, no record, not required by the closing assertion each FAIL", () => {
+  const cases: Array<[string, string]> = [
+    ["username: SYSTEM", "username: {{ ansible_user }}"],
+    ["- type: boot", "- type: logon"],
+    ["repetition:", "repeat_not:"],
+    [RECORD, "something-else.json"],
+    [`Guard: ${GUARD_TASK_NAME}`, "Guard: nothing"],
+  ];
+  const expected = ["does not run as SYSTEM", "no startup trigger", "no repeating trigger", "the record is not written",
+    "does not require the guard task"];
+  cases.forEach(([from, to], i) => {
+    const out = TASKS.split(from).join(to);
+    assert.notEqual(out, TASKS, `mutation ${i} changed nothing`);
+    assert.match(guardViolations(out).join("|"), new RegExp(expected[i]), `mutation ${i} was not noticed`);
+  });
+});
+
+test("control: a file with no guard is refused, not passed", () => {
+  const v = guardViolations(TASKS.replace(taskBlock(TASKS, GUARD_BLOCK), ""));
+  assert.deepEqual(v, ["guard block or closing assertion not found"]);
+});
