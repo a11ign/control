@@ -406,6 +406,41 @@ test("off-fleet: FEWER THAN THREE boxes reporting raise fleet-split, never a 'fl
   assert.deepEqual(lines(offFleetLines(reading(three, { reportedOnly: [driftOf("windowsBuild", { 2: "1", 3: "2", 4: "3" })] }))), ["fleet-split: build 1, 2, 3"]);
 });
 
+// #5022, under #4405: a box whose Edge updater came back. The worker reports `edgeUpdaterGuard` per box; `drift` and `stale`
+// are odd, `ok` and `absent` (a worker that does not report it yet) are not.
+const EDGE = "edgeUpdaterGuard";
+
+test("off-fleet edge updater: a box reporting drift or stale raises one line, named without its address", () => {
+  const rows = [2, 3, 4].map((n) => boxRow(n));
+  const found = offFleetLines(reading(rows, { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "drift", 4: "stale" })] }));
+  assert.deepEqual(lines(found), ["edge-updater: a11y-worker-3 drift", "edge-updater: a11y-worker-4 stale"]);
+  assert.equal(found[0].box, "a11y-worker-3", "the box is named without its address, as the ledger keys workers");
+});
+
+test("off-fleet edge updater: two boxes in drift are two lines, one per box, in box order", () => {
+  const rows = [2, 3, 4].map((n) => boxRow(n));
+  assert.deepEqual(lines(offFleetLines(reading(rows, { reportedOnly: [driftOf(EDGE, { 4: "drift", 2: "drift", 3: "ok" })] }))),
+    ["edge-updater: a11y-worker-2 drift", "edge-updater: a11y-worker-4 drift"]);
+});
+
+test("off-fleet edge updater: NEGATIVE CONTROL -- `ok`, `absent` and the `unknown` placeholder raise nothing", () => {
+  const rows = [2, 3, 4].map((n) => boxRow(n));
+  assert.deepEqual(offFleetLines(reading(rows, {})), [], "no drift entry at all: no box reports the field");
+  assert.deepEqual(offFleetLines(reading(rows, { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "ok", 4: "ok" })] })), []);
+  assert.deepEqual(offFleetLines(reading(rows, { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "absent", 4: "absent" })] })), [],
+    "a worker that does not report the field yet reads `absent`, and is not raised");
+  assert.deepEqual(offFleetLines(reading(rows, { reportedOnly: [driftOf(EDGE, { 2: "unknown", 3: "ok", 4: "ok" })] })), [],
+    "a box that has not sampled yet reports the placeholder `unknown`, which is no reading");
+});
+
+test("off-fleet edge updater: an ASLEEP box raises nothing -- and the same box awake and in drift does (positive control)", () => {
+  const drift = { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "drift" })] };
+  const awake = [boxRow(2), boxRow(3)];
+  assert.deepEqual(lines(offFleetLines(reading(awake, drift))), ["edge-updater: a11y-worker-3 drift"], "positive control: box 3 awake and in drift is named");
+  const asleep = [boxRow(2), boxRow(3, "unreachable")];
+  assert.deepEqual(offFleetLines(reading(asleep, drift)), [], "box 3 unreachable: it is the resting state and is not counted");
+});
+
 test("patch-window-missed: fires at 29 days, not at 27 (and not at exactly 28)", () => {
   const DAY = 24 * 60 * 60 * 1000;
   const lastRun = Date.UTC(2026, 8, 1, 3, 0, 0);
@@ -475,6 +510,22 @@ test("watchFleet(): an odd box that sleeps and wakes still odd is NOT announced 
   // Negative control: an AWAKE box that returns to the fleet value does clear, so carrying is only for the unreachable.
   await run(reading([2, 3, 4, 5].map((n) => boxRow(n)), {}), 4_000);
   assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {});
+});
+
+test("watchFleet(): an edge-updater line is posted once, CARRIED through a box's sleep, and dropped when the box reads ok", async () => {
+  const store = memoryStore();
+  const run = offFleetRun(store);
+  const rows = [2, 3, 4].map((n) => boxRow(n));
+  const drifting = reading(rows, { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "drift", 4: "ok" })] });
+  assert.deepEqual((await run(drifting, 1_000)).offFleet, ["edge-updater: a11y-worker-3 drift"], "first tick: raised");
+  assert.deepEqual((await run(drifting, 2_000)).offFleet, [], "the next tick, unchanged: not raised twice");
+  const asleep = [boxRow(2), boxRow(3, "unreachable"), boxRow(4)];
+  assert.deepEqual((await run(reading(asleep, { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "drift", 4: "ok" })] }), 3_000)).offFleet, [],
+    "box 3 asleep: nothing raised");
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), { "edge-updater: a11y-worker-3 drift": 1_000 },
+    "an unreachable box is no answer, so its entry is CARRIED with its first-seen time and not dropped");
+  assert.deepEqual((await run(reading(rows, { reportedOnly: [driftOf(EDGE, { 2: "ok", 3: "ok", 4: "ok" })] }), 4_000)).offFleet, []);
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "awake and reading `ok`: DROPPED from the ledger");
 });
 
 test("watchFleet(): the off-fleet ledger is NOT the worker ledger -- agent-org reads every key of that one as a worker name", async () => {

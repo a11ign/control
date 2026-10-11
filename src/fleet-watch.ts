@@ -605,8 +605,13 @@ function fleetValue(readings: BoxValue[]): string | null {
   return second && first[1] === second[1] ? null : first[0];
 }
 
+/** The drift this reading carries for one field, whichever of the two lists `fleetStatus` put it in. */
+function driftNamed(field: string, status: { mismatches?: Drift[], reportedOnly?: Drift[] }): Drift | undefined {
+  return [...(status.mismatches ?? []), ...(status.reportedOnly ?? [])].find((candidate) => candidate.field === field);
+}
+
 function oddBoxes({ field, label }: { field: string, label: string }, status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }): Oddity[] {
-  const drift = [...(status.mismatches ?? []), ...(status.reportedOnly ?? [])].find((candidate) => candidate.field === field);
+  const drift = driftNamed(field, status);
   const readings = drift ? boxValues(drift, status.rows) : [];
   const distinct = [...new Set(readings.map(({ value }) => value))].sort();
   if (distinct.length < 2) return [];
@@ -617,11 +622,28 @@ function oddBoxes({ field, label }: { field: string, label: string }, status: { 
 }
 
 /**
- * Every box off the fleet's Windows build or display mode in this reading, one line per box. Pure: the drift it reads is
- * what `fleetStatus` returns, so a fleet that agrees (or a field nobody reports) draws nothing.
+ * The Edge updater the worker's guard found back on (#5022, under #4405). Unlike build and display there is no fleet value to be
+ * off from: each box's own reading is the answer, so `drift` and `stale` are odd, and `ok`, `absent` (a worker that does not
+ * report the field yet) and the `unknown` placeholder are not. The line is `edge-updater: <box> <state>`, not the `<box>: <label>`
+ * of the build and display lines, so `boxOfLine` must read both shapes or an asleep box's entry is not carried.
+ */
+const EDGE_UPDATER_FIELD = "edgeUpdaterGuard";
+const EDGE_UPDATER_ODD = new Set(["drift", "stale"]);
+const EDGE_UPDATER_PREFIX = "edge-updater: ";
+
+function edgeUpdaterLines(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }): Oddity[] {
+  const drift = driftNamed(EDGE_UPDATER_FIELD, status);
+  const odd = drift ? boxValues(drift, status.rows).filter(({ value }) => EDGE_UPDATER_ODD.has(value)) : [];
+  return odd.sort((a, b) => a.box.localeCompare(b.box))
+    .map(({ box, value }) => ({ box, line: `${EDGE_UPDATER_PREFIX}${box} ${value}` }));
+}
+
+/**
+ * Every box off the fleet's Windows build or display mode, or with its Edge updater back on, in this reading: one line per box.
+ * Pure: the drift it reads is what `fleetStatus` returns, so a fleet that agrees (or a field nobody reports) draws nothing.
  */
 export function offFleetLines(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }): Oddity[] {
-  return OFF_FLEET_FIELDS.flatMap((spec) => oddBoxes(spec, status));
+  return [...OFF_FLEET_FIELDS.flatMap((spec) => oddBoxes(spec, status)), ...edgeUpdaterLines(status)];
 }
 
 /**
@@ -659,7 +681,7 @@ export function advanceOffFleet(found: Oddity[], previous: SinceState, { now, ke
 /** The comment body for lines not posted before. */
 export function offFleetBody(lines: string[]): string {
   return [
-    `**${lines.length} off the fleet's build or display mode, ahead of capture** (#4447).`,
+    `**${lines.length} off the fleet's build or display mode, or with the Edge updater back on, ahead of capture** (#4447, #5022).`,
     ...lines.map((line) => `- ${line}`),
     "`npm run fleet:status` for the live reading.",
   ].join("\n");
@@ -781,7 +803,7 @@ export type WatchDeps = {
 
 /**
  * Read the live fleet, advance and persist the non-ready-since state and the capture times, and report who
- * is overdue and which boxes are newly off the fleet's build or display mode (#4447).
+ * is overdue and which boxes are newly off the fleet's build or display mode, or with the Edge updater back on (#4447, #5022).
  * Everything above this function is pure; this is the one place I/O and the clock meet, and every piece
  * of it is a parameter with a real default -- the shape `runLabStatus`'s `run` parameter already
  * established for the identical reason: a test drives this without a fleet, a fleet, or a clock.
@@ -872,10 +894,15 @@ function unitDriftReading(read: (() => Reading) | undefined): { tick: UnitDriftT
   return { tick, carry: tick.cannotTell !== null };
 }
 
+/** The box a ledger line is about: `a11y-worker-3: build ...` and `edge-updater: a11y-worker-3 drift` name it in different places. */
+function boxOfLine(line: string): string {
+  return line.startsWith(EDGE_UPDATER_PREFIX) ? line.slice(EDGE_UPDATER_PREFIX.length).split(" ")[0] : line.split(": ")[0];
+}
+
 /** Entries about a box that did not answer, or about a patch run or the control host's units that could not be read, are not cleared by silence. */
 function carriesEntry(rows: FleetRow[], carry: { patch: boolean, unitDrift: boolean }): (line: string) => boolean {
   const asleep = new Set(rows.filter((row) => row.state === "unreachable").map((row) => workerKey(row.name)));
-  return (line) => asleep.has(line.split(": ")[0])
+  return (line) => asleep.has(boxOfLine(line))
     || (carry.patch && line.startsWith(PATCH_LINE_PREFIX))
     || (carry.unitDrift && line.startsWith(UNIT_DRIFT_LINE_PREFIX));
 }
