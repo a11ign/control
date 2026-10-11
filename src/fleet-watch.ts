@@ -67,6 +67,9 @@ import { fleetStatus } from "./fleet-status.ts";
 import { sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
 import {
+  fleetBuildIncidentTick, ghIncidentDeps, readOnlyIncidentDeps, incidentFiledBody, NO_INCIDENT_TICK, type BuildIncidentTick, type BuildStatus,
+} from "./fleet-build-incident.ts";
+import {
   ATTENTION_KINDS, KIND, VERDICT, checkoutSource, controlUnitDrift, readControlHost, type Reading,
 } from "./control-unit-drift.ts";
 
@@ -289,7 +292,7 @@ export function writeCapturesState(path: string, state: CapturesState, write: (p
  * worker woken by `wake.yml` can come back at a new address -- keyed whole it was a NEW worker and started at
  * a baseline again, losing what it did first (#3205). A worker the inventory does not name is its address.
  */
-function workerKey(name: string) {
+export function workerKey(name: string) {
   return name.split("  ")[0];
 }
 
@@ -567,7 +570,7 @@ export function watchBody(entries: OverdueEntry[]): string {
 
 /** What this watch has to say about the fleet itself: a line to post, and the box it names (`null` for a fleet-wide line). */
 export type Oddity = {line: string, box: string | null};
-type BoxValue = {box: string, value: string};
+export type BoxValue = {box: string, value: string};
 
 const DAYS_PER_PATCH_WINDOW = 28;
 const PATCH_WINDOW_MS = DAYS_PER_PATCH_WINDOW * HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
@@ -581,7 +584,7 @@ const OFF_FLEET_FIELDS = [
 ];
 
 /** Reachable boxes only, by name: `values` is keyed by URL, and a placeholder or an unreachable box is no reading. */
-function boxValues(drift: Drift, rows: FleetRow[]): BoxValue[] {
+export function boxValues(drift: Drift, rows: FleetRow[]): BoxValue[] {
   const reachable = new Map(rows.flatMap((row) => (row.url && row.state !== "unreachable" ? [[row.url, workerKey(row.name)] as const] : [])));
   return Object.entries(drift.values).flatMap(([url, value]) => {
     const box = reachable.get(url);
@@ -770,6 +773,8 @@ export type WatchDeps = {
     lastPatchRunAt?: () => number | null;
     /** The control host's installed units against the shipped ones. Absent: not read this tick, and the ledger's drift lines stand. */
     unitDrift?: () => Reading;
+    /** The Windows build spread and its one stop-the-line incident (#5026). Absent: not read this tick, and nothing is claimed. */
+    buildIncident?: (status: BuildStatus) => BuildIncidentTick;
     /** Where the off-fleet ledger is written when it is not `write`: a dry run must not use up the lines a posting run will say. */
     writeOffFleet?: (path: string, data: string) => void;
 };
@@ -793,11 +798,12 @@ export async function watchFleet(deps: WatchDeps = {}): Promise<WatchFound> {
   writeState(statePath, next, deps.write);
   recordFleetTick(status.rows, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at, read: deps.read, write: deps.write });
   const { offFleet, unitDrift } = recordOffFleet(status, at, deps);
-  return { overdue: overdue(status.rows, next, at, thresholdMs), offFleet, unitDrift };
+  const buildIncident = deps.buildIncident ? deps.buildIncident(status) : NO_INCIDENT_TICK;
+  return { overdue: overdue(status.rows, next, at, thresholdMs), offFleet, unitDrift, buildIncident };
 }
 
 /** What one tick found: stuck workers, new off-fleet lines, and the control-plane unit-drift reading (#4714). */
-export type WatchFound = { overdue: OverdueEntry[], offFleet: string[], unitDrift: { fresh: string[], notShipped: string[], cannotTell: string | null } };
+export type WatchFound = { overdue: OverdueEntry[], offFleet: string[], unitDrift: { fresh: string[], notShipped: string[], cannotTell: string | null }, buildIncident: BuildIncidentTick };
 
 /** The off-fleet and unit-drift lines this tick that were not posted before; the one ledger is read and rewritten here. */
 function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }, at: number, deps: WatchDeps) {
@@ -901,9 +907,9 @@ export function readRefusalOrSay({ readState, path, now = Date.now }: { readStat
  */
 export function exitCodeFor(found: WatchFound, refusal: AutoOffReading): number {
   const refused = refusal !== null && refusal !== UNREAD;
-  const attention = found.overdue.length > 0 || found.offFleet.length > 0 || found.unitDrift.fresh.length > 0 || refused;
+  const attention = found.overdue.length > 0 || found.offFleet.length > 0 || found.unitDrift.fresh.length > 0 || found.buildIncident.fresh.length > 0 || refused;
   if (attention) return EXIT.ATTENTION;
-  const unread = found.unitDrift.cannotTell !== null || refusal === UNREAD;
+  const unread = found.unitDrift.cannotTell !== null || found.buildIncident.cannotAsk !== null || refusal === UNREAD;
   return unread ? EXIT.CANNOT_ASK : EXIT.QUIET;
 }
 
@@ -928,6 +934,7 @@ async function main() {
   let found;
   try {
     found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), lastPatchRunAt: readPatchRun, unitDrift: readUnitDrift,
+      buildIncident: (status) => fleetBuildIncidentTick(status, post ? ghIncidentDeps() : readOnlyIncidentDeps(ghIncidentDeps())),
       ...(post ? {} : { writeOffFleet: () => undefined }) });
   } catch (cause) {
     console.error(`CANNOT ASK: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -946,7 +953,8 @@ async function main() {
     return;
   }
   const body = [found.overdue.length ? watchBody(found.overdue) : null, found.offFleet.length ? offFleetBody(found.offFleet) : null,
-    fresh.length ? unitDriftBody(fresh) : null, refusal !== null && refusal !== UNREAD ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
+    fresh.length ? unitDriftBody(fresh) : null, found.buildIncident.fresh.length ? incidentFiledBody(found.buildIncident.fresh) : null,
+    refusal !== null && refusal !== UNREAD ? refusalBody(refusal, Date.now()) : null].filter(Boolean).join("\n\n");
   console.log(body);
   if (post) {
     execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });

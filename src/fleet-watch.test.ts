@@ -18,6 +18,7 @@ import {
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
 import { controlUnitDrift } from "./control-unit-drift.ts";
+import { NO_INCIDENT_TICK } from "./fleet-build-incident.ts";
 
 export type FleetRow = {name: string, state: string, readiness?: {reason?: string|null}|null};
 
@@ -575,7 +576,7 @@ test("unit drift: a host that cannot be read is CANNOT_TELL with its reason, and
 
 test("exitCodeFor: an unread host is CANNOT_ASK and never QUIET; a clean read is QUIET; any finding is ATTENTION and outranks it", () => {
   const found = (unitDrift: Partial<Parameters<typeof exitCodeFor>[0]["unitDrift"]>, rest: Partial<Parameters<typeof exitCodeFor>[0]> = {}) =>
-    ({ overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null, ...unitDrift }, ...rest });
+    ({ overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null, ...unitDrift }, buildIncident: NO_INCIDENT_TICK, ...rest });
   assert.equal(exitCodeFor(found({}), null), EXIT.QUIET, "positive control: nothing to say, host read");
   assert.equal(exitCodeFor(found({ cannotTell: "ssh refused" }), null), EXIT.CANNOT_ASK);
   assert.equal(exitCodeFor(found({ notShipped: ["a11y-bootstrap.service"] }), null), EXIT.QUIET, "not-shipped alone");
@@ -585,7 +586,7 @@ test("exitCodeFor: an unread host is CANNOT_ASK and never QUIET; a clean read is
 });
 
 test("exitCodeFor: an unread auto-off refusal is CANNOT_ASK and never QUIET; a read {} is QUIET; a read refusal is ATTENTION (#4734)", () => {
-  const nothing = { overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null } };
+  const nothing = { overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null }, buildIncident: NO_INCIDENT_TICK };
   const refusal = { reason: "stale-checkout", detail: "behind main", at: 1 };
   assert.equal(exitCodeFor(nothing, null), EXIT.QUIET, "positive control: the host was read and refused nothing");
   assert.equal(exitCodeFor(nothing, UNREAD), EXIT.CANNOT_ASK);
@@ -831,4 +832,32 @@ test("pidAlive: a signal that lands is alive, EPERM is alive (exists, not ours),
 test("the post body rendered from a fixture state (the PR shows this)", () => {
   const state = ledgerOfTicks(MIN_USE_TICKS, (i) => [withCount("a11y-worker-2", i % 2 ? "busy" : "ready", 0), withCount("a11y-worker-3", "ready", 0), withCount("a11y-worker-4", "unreachable", 0)]);
   console.log(useBody(useReading(state, USE_NOW), USE_NOW));
+});
+
+// a11ign#5026: the Windows build spread files ONE stop-the-line incident, behind `WatchDeps.buildIncident`.
+
+test("watchFleet(): the build-incident seam is handed the status of THIS reading and its tick comes back on the finding", async () => {
+  const rows = [2, 3, 4].map((n) => boxRow(n));
+  const status = reading(rows, { reportedOnly: [driftOf("windowsBuild", { 2: BUILD, 3: BUILD, 4: "26100.4651" })] });
+  const asked: unknown[] = [];
+  const run = offFleetRun(memoryStore(), { buildIncident: (seen) => { asked.push(seen); return { fresh: ["filed #9001"], closed: [], cannotAsk: null }; } });
+  const found = await run(status, 1_000);
+  assert.deepEqual(found.buildIncident.fresh, ["filed #9001"]);
+  assert.equal(asked.length, 1, "one call per reading");
+  assert.deepEqual((asked[0] as { rows: unknown }).rows, rows);
+});
+
+test("watchFleet(): with no build-incident seam nothing is claimed (NEGATIVE CONTROL: a caller that did not ask)", async () => {
+  const found = await offFleetRun(memoryStore())(reading([boxRow(2)], {}), 1_000);
+  assert.deepEqual(found.buildIncident, NO_INCIDENT_TICK);
+});
+
+test("exitCodeFor: a filed build incident is ATTENTION; one that could not be asked is CANNOT_ASK and never QUIET; ATTENTION outranks it", () => {
+  const base = { overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null } };
+  const incident = (tick: Partial<typeof NO_INCIDENT_TICK>) => ({ ...base, buildIncident: { ...NO_INCIDENT_TICK, ...tick } });
+  assert.equal(exitCodeFor(incident({}), null), EXIT.QUIET, "positive control: a clean tick is QUIET");
+  assert.equal(exitCodeFor(incident({ fresh: ["filed #9001"] }), null), EXIT.ATTENTION);
+  assert.equal(exitCodeFor(incident({ cannotAsk: "gh: HTTP 502" }), null), EXIT.CANNOT_ASK);
+  assert.equal(exitCodeFor(incident({ cannotAsk: "gh: HTTP 502", fresh: ["filed #9001"] }), null), EXIT.ATTENTION);
+  assert.equal(exitCodeFor(incident({ closed: [5100] }), null), EXIT.QUIET, "a close is the line lifting, not a finding");
 });
