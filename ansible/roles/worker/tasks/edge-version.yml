@@ -285,9 +285,26 @@
             if ($svc.StartType -ne 'Disabled') { Set-Service -Name $name -StartupType Disabled; $changed = $true }
             if ($changed) { $reenabled += "service:$name" }
           }
-          # Written to a sibling and moved over, so a reader never sees half a record.
           $record = '{{ edge_guard_dir }}\edge-updater-guard.json'
-          $json = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($reenabled) } | ConvertTo-Json -Depth 3
+          # READ THE PREVIOUS RECORD BEFORE WRITING THIS ONE (a11ign#5048). `reenabled` is THIS run's, so a clean run
+          # writes `[]` and a drift outlives the run that found it by one interval: a fleet poll between two runs
+          # read `ok` for an updater that had come back. `lastReenabledAt` and `lastReenabled` are the carry.
+          # An unreadable record is no record: the guard's job is to disable, and it must still do that.
+          $previous = $null
+          if (Test-Path -LiteralPath $record) {
+            try { $previous = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json } catch { $previous = $null }
+          }
+          $entry = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($reenabled) }
+          if ($reenabled.Count -gt 0) {
+            $entry.lastReenabledAt = $entry.checkedAt
+            $entry.lastReenabled = @($reenabled)
+          } elseif ($previous -and $previous.lastReenabledAt) {
+            # Absent on a box that has never re-enabled: nothing is invented for it.
+            $entry.lastReenabledAt = $previous.lastReenabledAt
+            $entry.lastReenabled = @($previous.lastReenabled)
+          }
+          # Written to a sibling and moved over, so a reader never sees half a record.
+          $json = $entry | ConvertTo-Json -Depth 3
           Set-Content -LiteralPath "$record.tmp" -Value $json -Encoding UTF8
           Move-Item -LiteralPath "$record.tmp" -Destination $record -Force
 

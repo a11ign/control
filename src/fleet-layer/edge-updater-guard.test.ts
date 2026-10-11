@@ -102,6 +102,15 @@ function scriptChecks(text: string): Array<[string, boolean]> {
     ["the record is not written with checkedAt and reenabled",
       !script.includes(RECORD) || !script.includes("checkedAt") || !script.includes("reenabled")],
     ["the record is not written atomically", !script.includes("Move-Item")],
+    ["the previous record is not read before the new one is written",
+      script.indexOf("Get-Content -LiteralPath $record") < 0
+      || script.indexOf("Get-Content -LiteralPath $record") > script.indexOf("Set-Content")],
+    ["a run that changed something does not set lastReenabledAt and lastReenabled from itself",
+      !/if \(\$reenabled\.Count -gt 0\) \{\s+\$entry\.lastReenabledAt = \$entry\.checkedAt\s+\$entry\.lastReenabled = @\(\$reenabled\)/.test(script)],
+    ["a run that changed nothing does not carry the previous lastReenabledAt and lastReenabled forward",
+      !/elseif \(\$previous -and \$previous\.lastReenabledAt\) \{\s+\$entry\.lastReenabledAt = \$previous\.lastReenabledAt\s+\$entry\.lastReenabled = @\(\$previous\.lastReenabled\)/.test(script)],
+    ["a run that changed nothing invents lastReenabledAt for a box that never re-enabled",
+      /^\s*\$entry\.lastReenabledAt = (Get-Date|\$entry\.checkedAt)/m.test(script.replace(/if \(\$reenabled\.Count -gt 0\) \{[^}]*\}/, ""))],
   ];
 }
 
@@ -186,4 +195,31 @@ test("control: not SYSTEM, no startup trigger, no repetition, no record, not req
 test("control: a file with no guard is refused, not passed", () => {
   const v = guardViolations(TASKS.replace(taskBlock(TASKS, GUARD_BLOCK), ""));
   assert.deepEqual(v, [NOT_FOUND]);
+});
+
+test("the record keeps the last re-enable across clean runs (a11ign#5048)", () => {
+  const script = guardScript(TASKS);
+  assert.match(script, /\$previous\.lastReenabledAt/);
+  assert.match(script, /\$entry\.lastReenabled = @\(\$reenabled\)/);
+});
+
+test("control: a record rewritten fresh every run, with no read of the previous one, FAILS", () => {
+  const v = guardViolations(mutatedGuard(["Get-Content -LiteralPath $record", "Get-Content -LiteralPath $other"]));
+  assert.ok(v.includes("the previous record is not read before the new one is written"), v.join("|"));
+});
+
+test("control: a clean run that does not carry the previous last re-enable FAILS", () => {
+  const v = guardViolations(mutatedGuard(["$entry.lastReenabledAt = $previous.lastReenabledAt", "$entry.lastSeen = $previous.lastReenabledAt"]));
+  assert.ok(v.includes("a run that changed nothing does not carry the previous lastReenabledAt and lastReenabled forward"), v.join("|"));
+});
+
+test("control: a run that changed something and does not set its own last re-enable FAILS", () => {
+  const v = guardViolations(mutatedGuard(["$entry.lastReenabledAt = $entry.checkedAt", "$entry.lastSeen = $entry.checkedAt"]));
+  assert.ok(v.includes("a run that changed something does not set lastReenabledAt and lastReenabled from itself"), v.join("|"));
+});
+
+test("control: a clean run that stamps lastReenabledAt for itself (a drift invented) FAILS", () => {
+  const v = guardViolations(mutatedGuard(["$entry.lastReenabledAt = $previous.lastReenabledAt", "$entry.lastReenabledAt = $entry.checkedAt"]));
+  assert.ok(v.includes("a run that changed nothing invents lastReenabledAt for a box that never re-enabled")
+    || v.includes("a run that changed nothing does not carry the previous lastReenabledAt and lastReenabled forward"), v.join("|"));
 });
