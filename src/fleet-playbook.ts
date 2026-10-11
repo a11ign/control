@@ -816,11 +816,12 @@ function runBootstrapFromHere(chosen: string): void {
  * @returns {string} the unit name
  */
 function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-  displayMode, layerCommits, aim }: {
+  displayMode, layerCommits, aim, patchTarget }: {
         chosen: string; ref: string; expected: string; limitFlag: string | undefined;
         serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean;
         displayMode: string | undefined; layerCommits: Record<string, string>;
         aim: { addresses: Record<string, string>; workers: string[]; };
+        patchTarget: PatchTarget | null;
     }): string {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
@@ -890,7 +891,10 @@ try {
     // typed here is not forwarded. This one is a dict rather than a scalar, so it goes as JSON --
     // `displayModeExtraVars` holds the quoting and the why.
     + displayModeExtraVars(displayMode)
-    + (apply && chosen === "os-rollback.yml" ? " -e a11y_os_rollback_apply=true" : ""),
+    + (apply && chosen === "os-rollback.yml" ? " -e a11y_os_rollback_apply=true" : "")
+    // #4905: the fleet's target build and release, read by the gate. Named flags are not the way in -- `-e patch_target_*` typed
+    // on this command is not forwarded either -- so the wrapper passes what IT read, or nothing (the play as it was).
+    + patchTargetExtraVars(patchTarget),
   { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
 } catch (cause) {
   // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
@@ -1178,6 +1182,9 @@ export function linkGate({ chosen, gate, allowOffline }: {
 
 /** A `cat` of one or two small files; minutes would mean the control plane is not answering. */
 const INVENTORY_READ_TIMEOUT_MS = 60_000;
+
+/** One ad hoc `win_shell` over the boxes on the top build, WinRM to each; a box that hangs is `unreachable` by ansible's own timeout. */
+const PATCH_TARGET_READ_TIMEOUT_MS = 3 * 60 * 1000;
 
 // #1356: `inventorySources`, `inventoryReadScript`, `parseInventoryReads` and the pure fleet-resolution
 // logic MOVED to `control-plane-fleet.ts`, imported above -- every operator-host reader needs the exact
@@ -1816,7 +1823,9 @@ export function patchOutcome({ apply, refusal }: { apply: boolean; refusal: stri
 }
 
 /** The plan, one line per box in the order `serial: 1` takes them -- what a dry run prints and `--apply` is about to do. */
-export function patchPlan({ boxes, limitFlag, apply }: { boxes: PatchBox[]; limitFlag: string | undefined; apply: boolean; }): string[] {
+export function patchPlan({ boxes, limitFlag, apply, target }: {
+  boxes: PatchBox[]; limitFlag: string | undefined; apply: boolean; target: PatchTargetReading;
+}): string[] {
   const verb = apply ? "will patch" : "would patch";
   const lines = boxes.map((box) => {
     const build = box.build ?? "build unreadable";
@@ -1825,7 +1834,124 @@ export function patchPlan({ boxes, limitFlag, apply }: { boxes: PatchBox[]; limi
     return `  ${box.name}  ${verb}${box.busy ? ": BUSY" : ""}  [${build}]`;
   });
   return [`  patch.yml ${apply ? "--apply" : "(dry: nothing is changed; pass --apply)"} -- ${boxes.length} box(es), one at a time:`,
-    ...lines];
+    ...lines, `  ${patchTargetLine(target)}`];
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// #4905: THE TARGET THE WINDOW BRINGS A BOX UP TO, read from the fleet at run time and never written into a file.
+//
+// `/health` `windowsVersion` is `Win32_OperatingSystem.Version` -- `<major>.<minor>.<CurrentBuild>`, no UBR and no
+// release name -- so it names WHICH boxes are on the fleet's highest build and nothing `patch.yml` can be given.
+// Those boxes are asked for the registry's own `CurrentBuild.UBR` and `DisplayVersion` in ONE read of ONE key, so the
+// two variables cannot disagree. A table (build -> release) was refused: it needs a person to add a row before each
+// feature release, and a fleet on a build the table lacks would silently pass nothing.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** What `patch.yml` takes as `-e patch_target_release=` and `-e patch_target_build=`: `25H2` shape and `<CurrentBuild>.<UBR>`. */
+export type PatchTarget = { release: string; build: string };
+
+/** The target, or none and why. `why` is always a sentence the plan can print. */
+export type PatchTargetReading = { target: PatchTarget | null; why: string };
+
+const PATCH_RELEASE_NAME = /^[0-9]{2}H[12]$/;
+const HOST_NAME = /^[A-Za-z0-9._-]+$/;
+/** The key `patch.yml`'s own last task reads, as one `<CurrentBuild>.<UBR> <DisplayVersion>` line. Double quotes only: it goes in single quotes. */
+const PATCH_TARGET_SCRIPT = '$v = Get-ItemProperty -LiteralPath "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"; '
+  + '"$($v.CurrentBuild).$($v.UBR) $($v.DisplayVersion)"';
+/** `ansible`'s minimal callback, per host: `<name> | CHANGED | rc=0 >>` and then the script's one line. */
+const PATCH_TARGET_READING = /^(\S+) \| (?:CHANGED|SUCCESS) \| rc=0 >>\s*\n\s*([0-9]+\.[0-9]+) ([0-9]{2}H[12])\s*$/gm;
+
+/** Build strings as numbers, part by part -- never as text, where '9457' sorts above '10000'. */
+export function compareBuilds(a: string, b: string): number {
+  const left = a.split(".").map(Number);
+  const right = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const difference = (left[i] ?? 0) - (right[i] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+/** The highest build an ANSWERING box reports (`/health`), and the boxes on it; null when no box reported a readable one. */
+export function fleetTopBuild(boxes: PatchBox[]): { build: string; names: string[] } | null {
+  const readable = boxes.filter((box): box is PatchBox & { build: string } => box.reachable && box.build !== null);
+  if (readable.length === 0) return null;
+  const build = readable.reduce((best, box) => (compareBuilds(box.build, best) > 0 ? box.build : best), readable[0].build);
+  return { build, names: readable.filter((box) => box.build === build).map(({ name }) => name) };
+}
+
+/** The read-only ad hoc call that asks those boxes for their registry build and release, from the control plane's `ansible` directory. */
+export function patchTargetReadCommand(names: string[]): string {
+  return `cd ${CHECKOUT}/packages/control/ansible && ANSIBLE_CONFIG=ansible.cfg ansible ${names.join(",")} `
+    + `-m ansible.windows.win_shell -a '${PATCH_TARGET_SCRIPT}'`;
+}
+
+/**
+ * The target out of what that call printed, for the boxes it was asked about. The highest `<CurrentBuild>.<UBR>` wins (as
+ * numbers); a box on `fleetBuild`'s `CurrentBuild` that answered with another is skipped, because the fleet moved while it was
+ * read. **A box that did not answer is named, not fatal**: the install is whatever Windows Update offers, so a target one UBR
+ * low weakens the closing verdict and never the install -- and none at all would be the window as it was, silently.
+ */
+export function parsePatchTargetRead({ output, asked, fleetBuild }: { output: string; asked: string[]; fleetBuild: string; }): PatchTargetReading {
+  const currentBuild = fleetBuild.split(".").pop() ?? "";
+  const readings = [...output.matchAll(PATCH_TARGET_READING)]
+    .map(([, name, build, release]) => ({ name, build, release }))
+    .filter((reading) => asked.includes(reading.name) && reading.build.split(".")[0] === currentBuild);
+  const unread = asked.filter((name) => !readings.some((reading) => reading.name === name));
+  if (readings.length === 0) return { target: null, why: `none of ${asked.join(", ")} returned a build and release` };
+  const top = readings.reduce((best, reading) => (compareBuilds(reading.build, best.build) > 0 ? reading : best));
+  const releases = [...new Set(readings.filter((reading) => reading.build.split(".")[0] === top.build.split(".")[0]).map((r) => r.release))];
+  if (releases.length !== 1 || !PATCH_RELEASE_NAME.test(releases[0])) {
+    return { target: null, why: `boxes on build ${currentBuild} name more than one release (${releases.join(", ")})` };
+  }
+  const from = readings.length === asked.length ? `${asked.length} box(es)` : `${readings.length} of ${asked.length} box(es), ${unread.join(", ")} did not answer`;
+  return { target: { release: releases[0], build: top.build }, why: `read from ${from}; highest on ${top.name}` };
+}
+
+/**
+ * THE TARGET, with the read injected (the `linkGateFor` split): `read` runs one command on the control plane and returns its
+ * stdout, and a throw is "could not ask" -- a reason in the plan, and no target, never a guess.
+ */
+export function patchTargetOf({ boxes, read }: { boxes: PatchBox[]; read: (command: string) => string }): PatchTargetReading {
+  const top = fleetTopBuild(boxes);
+  if (top === null) return { target: null, why: "no box that answered reported a readable build" };
+  if (!top.names.every((name) => HOST_NAME.test(name))) return { target: null, why: "a box name is not a plain host name" };
+  try {
+    return parsePatchTargetRead({ output: read(patchTargetReadCommand(top.names)), asked: top.names, fleetBuild: top.build });
+  } catch (cause) {
+    return { target: null, why: `the read of ${top.names.join(", ")} failed: ${String((cause as Error).message ?? cause).split("\n")[0]}` };
+  }
+}
+
+/** The plan's line, and the log's: the target `patch.yml` is given, or that it is given none and why. */
+export function patchTargetLine({ target, why }: PatchTargetReading): string {
+  if (target === null) return `target: NONE (${why}) -- patch.yml runs without one: cumulative updates only, no box is brought across a feature release`;
+  return `target: ${target.release} ${target.build} (${why}) -- passed as -e patch_target_release/-e patch_target_build`;
+}
+
+/** The `-e` pair for the playbook's argv, or nothing: a null target is the play exactly as it was before #4897. */
+export function patchTargetExtraVars(target: PatchTarget | null): string {
+  return target === null ? "" : ` -e patch_target_release=${target.release} -e patch_target_build=${target.build}`;
+}
+
+/**
+ * `patch.yml`'s own ceiling per box with a target: the 7200 s `win_reboot` and 1800 s for the install and margin. **Derived
+ * from the play's ceilings, not measured** -- no feature-update run has been timed (a11ign#4897 calls 7200 s "a guess"); the
+ * VERIFY row of #4897 replaces it with a reading.
+ */
+const PATCH_UPGRADE_BOX_MS = (7200 + 1800) * 1000;
+
+/**
+ * How long this command watches the unit. `followUnit` giving up does NOT stop the play, and the next day's attempt stops the
+ * unit before it starts one, so a budget below the run is a run killed in flight. With a target every box under the fleet's
+ * top build may need a feature update; without one it is the cumulative-update budget, unchanged.
+ */
+export function patchFollowBudgetMs({ boxes, limitFlag, target }: { boxes: PatchBox[]; limitFlag: string | undefined; target: PatchTarget | null; }): number {
+  const cumulative = PLAYBOOK_TIMEOUT_MS["patch.yml"];
+  const top = fleetTopBuild(boxes);
+  if (target === null || top === null) return cumulative;
+  const below = boxes.filter((box) => limitTouches(box.name, limitFlag) && (box.build === null || compareBuilds(box.build, top.build) < 0));
+  return Math.max(cumulative, below.length * PATCH_UPGRADE_BOX_MS);
 }
 
 /** The command that records a completed run on the control plane, for `fleet-watch`'s `patch-window-missed` to read. */
@@ -1966,22 +2092,29 @@ function runScheduled(schedule: PatchSchedule): never {
   return process.exit(exit);
 }
 
+/** What the patch gate leaves for `main`: whether the command is done (a dry run), the target to pass, and how long to watch. */
+type PatchGate = { dryRun: boolean; target: PatchTarget | null; followBudgetMs: number };
+
 /**
  * The patch gate and, without `--apply`, the plan -- BEFORE the control plane is asked to move or anything is written.
- * Returns `true` when this was a dry run and the command is done.
+ * `dryRun` is `true` when this was a dry run and the command is done. The target is read here, in a dry run too: it is a
+ * read, and the plan is what says the target the run would pass (#4905).
  */
-async function enforcePatchGate({ chosen, limitFlag, apply }: { chosen: string; limitFlag: string | undefined; apply: boolean }): Promise<boolean> {
-  if (chosen !== "patch.yml") return false;
+async function enforcePatchGate({ chosen, limitFlag, apply }: { chosen: string; limitFlag: string | undefined; apply: boolean }): Promise<PatchGate> {
+  const ordinary = { dryRun: false, target: null, followBudgetMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS };
+  if (chosen !== "patch.yml") return ordinary;
   const sources = inventorySources(readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"));
   const fleet = gateFleet({ chosen, reads: readControlPlaneInventories(sources), sources,
     groupVarsText: readFileSync(resolve(ANSIBLE_DIR, "group_vars/a11y_workers.yml"), "utf8") });
   if (fleet.refusal) { process.stderr.write(`${fleet.refusal}\n`); process.exit(2); }
   const boxes = (await Promise.all(fleet.workers.map((worker) => probeWorker(worker)))).map(patchBoxOf);
-  process.stdout.write(`${patchPlan({ boxes, limitFlag, apply }).join("\n")}\n\n`);
+  const reading = patchTargetOf({ boxes, read: (command) => ssh(command, { capture: true, timeoutMs: PATCH_TARGET_READ_TIMEOUT_MS }) });
+  process.stdout.write(`${patchPlan({ boxes, limitFlag, apply, target: reading }).join("\n")}\n\n`);
   const refusal = patchRefusal({ apply, limitFlag, boxes, allowOffline: allowOfflineNames(process.argv.slice(2)) });
   const outcome = patchOutcome({ apply, refusal });
   if (refusal) { process.stderr.write(`${refusal}\n`); process.exit(2); }
-  return outcome === "plan";
+  return { dryRun: outcome === "plan", target: reading.target,
+    followBudgetMs: patchFollowBudgetMs({ boxes, limitFlag, target: reading.target }) };
 }
 
 async function main() {
@@ -1994,7 +2127,8 @@ async function main() {
   const { moved } = await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen, { limitFlag });
   // #4446: AFTER the gates that ask least of the control plane, BEFORE anything is written to it. A dry run ends HERE.
-  if (await enforcePatchGate({ chosen, limitFlag, apply })) return;
+  const patchGate = await enforcePatchGate({ chosen, limitFlag, apply });
+  if (patchGate.dryRun) return;
   // #2832: AFTER every gate that can refuse cheaply, BEFORE the control plane moves: a moved worker is aimed
   // at its new address only once its host key, recorded under its NAME, has been verified strictly.
   const aim = await enforceWriteIdentity(chosen, { moved, limitFlag });
@@ -2044,12 +2178,12 @@ async function main() {
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
   const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-    displayMode, layerCommits, aim });
+    displayMode, layerCommits, patchTarget: patchGate.target, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
     + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`
     + `    ssh root@${CONTROL_PLANE} 'systemctl status ${unit}'\n\n`);
-  const outcome = await followUnit(unit, PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS);
+  const outcome = await followUnit(unit, patchGate.followBudgetMs);
 
   if (outcome.status !== 0) {
     process.stderr.write(`\n  ${chosen} FAILED (ansible exit ${outcome.status}). The PLAY RECAP above `
