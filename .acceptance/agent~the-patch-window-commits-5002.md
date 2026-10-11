@@ -27,4 +27,4 @@ cd /home/agent/repos/wt-5002-control && pnpm exec rstest run src/fleet-layer/pat
 
 Fail task's refusal `when` replaced by `false` (the SafeOS check removed): exactly one test fails, `a11ign#4979 POSITIVE`. Restored from a `cp` backup, `diff` identical.
 
-Closes: none -- a11ign/a11ign#5002 is tracked in another repository; `product-manager` closes it at merge.
+Closes a11ign/a11ign#5002
