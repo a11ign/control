@@ -93,6 +93,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 // that cannot exist there.
 import { layerDeclaration } from "./layer-checkouts.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
+import { FLEET_LOCK_PLAYBOOKS, LOCK_GRACE_MINUTES, takeFleetLock, expireFleetLock, fleetLockRefusal } from "./fleet-lock.ts";
 // #2832: WHAT PROVES A MOVED WORKER'S IDENTITY BEFORE A WRITE LANDS. A sibling and builtin-only, so ADR 0012's
 // no-`npm install` property is unchanged.
 import { overrideInventory, overridePath, installOverrideCommand, inventoryEnvironment, knownHostsReadScript,
@@ -799,6 +800,69 @@ function runBootstrapFromHere(chosen: string): void {
 }
 
 /**
+ * THE FLEET LOCK STEPS (a11ign#5014, #4405 item 2). `deploy.yml`, `provision-role.yml` and `patch.yml` -- the plays that walk
+ * the whole fleet and are re-run in sequence when one box fails -- take `fleet-lock.ts`'s lock before their unit starts,
+ * so auto-off keeps every box between attempts, which the unit alone cannot: a run that FAILS is `finished` to it.
+ *
+ * `longestRunMs` is the budget this command itself watches the unit for (`followBudgetMs`: `PLAYBOOK_TIMEOUT_MS[chosen]`,
+ * the default for a play without one, and for `patch.yml` the larger per-box feature-update budget), so no run length is
+ * copied here: a lock that expired under a run still being watched would be the lock failing at its one job.
+ *
+ * Returns the refusal, when a different operation's lock is fresh and not ended, and a notice for the operator otherwise.
+ * `take` is injectable so a test supplies the control plane.
+ */
+export function lockTakeStep({ chosen, followBudgetMs, now, take = takeFleetLock }: {
+  chosen: string; followBudgetMs: number; now: number; take?: typeof takeFleetLock;
+}): { refusal: string | null; notice: string | null } {
+  if (!FLEET_LOCK_PLAYBOOKS.includes(chosen)) return { refusal: null, notice: null };
+  const outcome = take({ operation: chosen, longestRunMs: followBudgetMs, now });
+  if (!outcome.taken) return { refusal: fleetLockRefusal({ held: outcome.held, wanted: chosen, now }), notice: null };
+  const replaced = outcome.replacedUnreadable ? " (it replaced a fleet lock file that could not be read)" : "";
+  return { refusal: null, notice: `  fleet lock taken for ${chosen}${replaced}: auto-off keeps every box until `
+    + `${new Date(outcome.lock.expiresAt).toISOString()}, or ${LOCK_GRACE_MINUTES} min after this unit ends.\n` };
+}
+
+/**
+ * The unit ended, on any exit: shorten the lock to its grace and mark it ended, never clear it, so the next attempt meets
+ * awake boxes. It never turns a finished run into a failed one: a control plane that cannot be asked leaves the lock to
+ * expire on its own, and says so (`failed`), because bookkeeping that cannot be written must not read as written.
+ */
+export function lockEndStep({ chosen, now, end = expireFleetLock }: {
+  chosen: string; now: number; end?: typeof expireFleetLock;
+}): { notice: string | null; failed: boolean } {
+  if (!FLEET_LOCK_PLAYBOOKS.includes(chosen)) return { notice: null, failed: false };
+  try {
+    const ended = end({ operation: chosen, now });
+    return ended.ended
+      ? { notice: `  fleet lock for ${chosen} shortened: auto-off keeps every box for ${LOCK_GRACE_MINUTES} min more, then lets go.\n`, failed: false }
+      : { notice: `  fleet lock: not shortened, it is no longer this run's (gone, or taken by another run of ${chosen}).\n`, failed: false };
+  } catch (cause) {
+    return { notice: `  fleet lock for ${chosen} NOT shortened (${cause instanceof Error ? cause.message : String(cause)}): `
+      + "it expires on its own at its operation's longest run.\n", failed: true };
+  }
+}
+
+function takeFleetLockOrExit({ chosen, followBudgetMs }: { chosen: string; followBudgetMs: number; }) {
+  try {
+    const step = lockTakeStep({ chosen, followBudgetMs, now: Date.now() });
+    if (step.refusal) {
+      process.stderr.write(`${step.refusal}\n`);
+      process.exit(2);
+    }
+    if (step.notice) process.stdout.write(step.notice);
+  } catch (cause) {
+    process.stderr.write(`\n  ${chosen} NOT STARTED: the fleet lock could not be taken (${cause instanceof Error ? cause.message : String(cause)}), `
+      + "and a run that auto-off may power the boxes out from under is not started.\n");
+    process.exit(1);
+  }
+}
+
+function endFleetLock(chosen: string) {
+  const { notice, failed } = lockEndStep({ chosen, now: Date.now() });
+  if (notice) (failed ? process.stderr : process.stdout).write(notice);
+}
+
+/**
  * Start the playbook on the control plane as a named systemd unit, and return that unit's name.
  *
  * A PHASE, not a name restating its code: "get it running somewhere it will survive me" is a distinct
@@ -816,12 +880,12 @@ function runBootstrapFromHere(chosen: string): void {
  * @returns {string} the unit name
  */
 function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-  displayMode, layerCommits, aim, patchTarget }: {
+  displayMode, layerCommits, aim, patchTarget, followBudgetMs }: {
         chosen: string; ref: string; expected: string; limitFlag: string | undefined;
         serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean;
         displayMode: string | undefined; layerCommits: Record<string, string>;
         aim: { addresses: Record<string, string>; workers: string[]; };
-        patchTarget: PatchTarget | null;
+        patchTarget: PatchTarget | null; followBudgetMs: number;
     }): string {
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
@@ -841,6 +905,7 @@ function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allow
 // `systemd-run` refuses a name that is still loaded — a SUCCEEDED run keeps its name just as a failed
 // one does.
 const unit = `a11y-fleet-${chosen.replace(/\.yml$/, "")}`;
+takeFleetLockOrExit({ chosen, followBudgetMs }); // #5014: before the unit exists; exits 2 on a refusal and 1 if it cannot be written
 // #2832: THE ADDRESS OVERRIDE, if any worker moved and was identified. `install` makes the per-unit file hold
 // exactly this run's override or nothing, and a failure to write it ENDS the command (`|| exit 1`): a `;`
 // after an `&&` chain would carry on and start the unit without the override it was meant to have.
@@ -897,13 +962,21 @@ try {
     + patchTargetExtraVars(patchTarget),
   { timeoutMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS });
 } catch (cause) {
-  // `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe.
-  // The status is what this block exists to surface AND to exit with, so it is load-bearing.
-  const failure = (cause as { status?: number });
-  process.stderr.write(`\n  ${chosen} FAILED TO START (exit ${failure.status ?? "?"}).\n`);
-  process.exit(failure.status ?? 1);
+  exitUnitFailedToStart(chosen, cause);
 }
   return unit;
+}
+
+/**
+ * `execFileSync` throws an Error carrying the child's exit status, which node's types do not describe. The status is what
+ * this exists to surface AND to exit with, so it is load-bearing. A unit that never started holds nobody awake (#5014), so
+ * the lock its start took is shortened to the grace first.
+ */
+function exitUnitFailedToStart(chosen: string, cause: unknown): never {
+  const failure = (cause as { status?: number });
+  process.stderr.write(`\n  ${chosen} FAILED TO START (exit ${failure.status ?? "?"}).\n`);
+  endFleetLock(chosen);
+  return process.exit(failure.status ?? 1);
 }
 
 /**
@@ -2178,12 +2251,14 @@ async function main() {
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
   const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
-    displayMode, layerCommits, patchTarget: patchGate.target, aim });
+    displayMode, layerCommits, patchTarget: patchGate.target, followBudgetMs: patchGate.followBudgetMs, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`
     + `  if this command dies, the deploy does not — follow it again with the same command, or:\n`
     + `    ssh root@${CONTROL_PLANE} 'systemctl status ${unit}'\n\n`);
   const outcome = await followUnit(unit, patchGate.followBudgetMs);
+  // #5014: the unit is done whatever it said, so the lock is shortened BEFORE any exit below; a failed run is the case it is for.
+  endFleetLock(chosen);
 
   if (outcome.status !== 0) {
     process.stderr.write(`\n  ${chosen} FAILED (ansible exit ${outcome.status}). The PLAY RECAP above `
