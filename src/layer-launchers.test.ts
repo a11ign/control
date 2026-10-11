@@ -24,6 +24,13 @@ const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
 const STAMP = read("packages/worker-fleet/src/provisioning/stamp-provision-revision.ps1");
 
+/**
+ * The file the core's stamp helper resolves a layer's path against, named by the helper that reads it. It is the CORE's declaration and
+ * this file only stands a copy of it in a fixture checkout for that helper (control holds none of its own, ADR 0045 rule 3), so the
+ * name is learned from the reader and not typed here.
+ */
+const CORE_LAYER_LIST = /readFileSync\(join\(root, "([^"]+)"\)/.exec(read("scripts/test-support/stamp-files.ts"))?.[1] ?? "";
+
 /** What the declaration NAMES in core: the foreground-lock script and the capture harness. */
 const REACHED = ["FLT", "CAPTURE_CHECK"] as const;
 
@@ -45,7 +52,8 @@ function fixtureCheckout(present: readonly (typeof REACHED)[number][]): string {
     writeFileSync(join(root, rel), text);
   };
   const declaration = readFileSync(reachFile(), "utf8");
-  put("layers.json", read("packages/control/layers.json"));
+  assert.notEqual(CORE_LAYER_LIST, "", "positive control: the helper's reading was found, so the fixture holds what it needs");
+  put(CORE_LAYER_LIST, read(CORE_LAYER_LIST));
   put("scripts/test-support/launcher-reach.stand-in.cmd", declaration);
   for (const name of present) put(declaredReach(declaration, name) as string, "// present\n");
   return root;

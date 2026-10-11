@@ -161,7 +161,7 @@ export function resolveLayerRefs({ layers, readLaidTag, commitOfTag }: {
     const problem = pinOne({ layer, readLaidTag, commitOfTag, refs });
     if (problem) problems.push(problem);
   }
-  if (layers.length === 0) problems.push("layers.json declares no layer with a repository of its own, so there is nothing to pin: refusing rather than passing an empty pair");
+  if (layers.length === 0) problems.push("deploy-pins.json declares no layer with a repository of its own, so there is nothing to pin: refusing rather than passing an empty pair");
   return problems.length ? { refusal: `${problems.join("; ")}. Nothing was woken, deployed or provisioned: a layer ref is never guessed.` } : { refs };
 }
 

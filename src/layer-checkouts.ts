@@ -6,7 +6,7 @@
  * used to find the worker by a relative path into its source directory. Control runs from a raw checkout
  * with no `node_modules` (ADR 0012), so it cannot use the package name; and once the layer leaves this
  * repository, a reader that guessed the monorepo path would compare the fleet against the WRONG tree and
- * still print a hash. `layers.json` declares each layer and its path, and this module is the only reader.
+ * still print a hash. `deploy-pins.json` declares each layer and its path, and this module is the only reader of it (`layer-pins.ts`).
  *
  * REFUSES rather than falls back. An undeclared layer, or a declared one whose directory is not there, throws
  * naming the layer and the path: answering with the monorepo path instead is the silent wrong answer this
@@ -19,15 +19,15 @@
  * A layer that lives in its OWN repository declares a `remote`, and a guest then holds a second checkout of it
  * pinned to its own commit (ADR 0039 item 6, row 6b, #3395): `separateLayers` names those, and `layerPins`
  * turns the operator's `--layer-ref=<name>=<sha>` flags into the pair's second half, refusing a missing pin, a
- * short sha and a layer that has no repository of its own. The guest plays read the SAME manifest themselves
- * (`ansible/tasks/read-layer-checkouts.yml`), so the two cannot name different layers.
+ * short sha and a layer that has no repository of its own. The guest plays read their own list
+ * (`ansible/tasks/read-layer-checkouts.yml`); `layer-guests.test.ts` holds the two to the same layers, so they cannot name different ones.
  *
  * THE CONTROL PLANE AND THE LAB MOVE THE LAYER'S CHECKOUT BESIDE THE CORE'S (row 6c, #3396). `layerCheckoutMove`
  * is the control plane's half: the shell that puts each separate layer's checkout on its pinned commit and reads
  * the commit back, REFUSING (exit 4) where the checkout is not there rather than leaving the core's tree to
  * answer for it. The lab's half is `ansible/tasks/run-job.yml` and `lab-reset.yml`, which read the same
- * manifest and validate a layer's ref with `LAYER_REF`, which is `lab_ref`'s own pattern. With no layer that
- * declares a `remote`, every one of them is a no-op, which is the state today.
+ * list and validate a layer's ref with `LAYER_REF`, which is `lab_ref`'s own pattern. With no layer that
+ * declares a `remote`, every one of them is a no-op.
  *
  * A HOST THAT HAS INSTALLED HOLDS A SEPARATE LAYER LAID, NOT CLONED (#3819): `scripts/lay-layer.ts` replaces the clone with `src/`
  * and `.layer-ref`. The lab's and the guests' tasks accept that shape, and so does `layerCheckoutMove` (#4150): the control plane's
@@ -38,11 +38,18 @@
  *
  * `worker-fleet` does NOT use this: it is published and `control` never is
  * (`worker-fleet-does-not-read-control.test.ts`), so its readers ask the worker package by name instead.
+ *
+ * THE DECLARATION IS CONTROL'S OWN (ADR 0045 rule 3, #5085): `deploy-pins.json`, read lazily so that importing this module never
+ * fails for a checkout that lacks it, and every use of a layer then refuses naming the file. There is no laid control to judge and no
+ * `pinned.control`: control is deployed from its own checkout, and a layer's version is `layer-pins.ts`'s `pinnedTag`.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
+import { readDeployPins, releaseTag, type DeployPins } from "./layer-pins.ts";
+
+export { releaseTag };
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -58,16 +65,14 @@ function layerHasherFile(dir: string): string {
   const [current] = LAYER_HASHER_FILES;
   return join(dir, LAYER_HASHER_FILES.find((file) => existsSync(join(dir, file))) ?? current);
 }
-const MANIFEST = JSON.parse(readFileSync(new URL("../layers.json", import.meta.url), "utf8"));
 
-/**
- * Where the control plane's own code is laid, when `layers.json` declares `pinned.control` (#3914): `packages/control` is then a laid
- * copy of `a11ign/control` at a tag and no part of this repository's tree (#3506). Null while it declares none, which is every
- * checkout until that lands, so nothing that reads it changes before then.
- */
-function laidControlOf({ manifest, root }: { manifest: { pinned?: Record<string, { path: string; }>; }; root: string; }): { name: string; path: string; dir: string; } | null {
-  const declared = manifest.pinned && Object.hasOwn(manifest.pinned, CONTROL_LAYER) ? manifest.pinned[CONTROL_LAYER] : undefined;
-  return declared ? { name: CONTROL_LAYER, path: declared.path, dir: resolve(root, declared.path) } : null;
+/** The shape the resolver below reads: the pins file's layers by name. (The lab is not a layer a host holds a checkout of: `lab-laid-copy.ts` reads its pin.) */
+export type Manifest = { layers: Record<string, { path: string; remote?: string; branch?: string; package?: string; version?: string; }>; };
+
+/** `deploy-pins.json` as the resolver reads it. */
+export function manifestOf(pins: DeployPins): Manifest {
+  const layers = Object.fromEntries(Object.entries(pins.layers).map(([name, { path, remote, package: pkg, version }]) => [name, { path, remote, package: pkg, version }]));
+  return { layers };
 }
 
 /**
@@ -85,15 +90,15 @@ function owningLayer(path: string, layers: ({ name: string; path: string; } | nu
  * The resolver over one manifest and one repository root. The exports below close over the real ones; a test
  * closes over a fixture, which is how "a declared layer whose path is absent" is reachable at all.
  */
-export function layersFrom({ manifest, root }: { manifest: { layers: Record<string, { path: string; remote?: string; branch?: string; package?: string; }>; pinned?: Record<string, { path: string; tag?: string; }>; }; root: string; }) {
+export function layersFrom({ manifest, root }: { manifest: Manifest; root: string; }) {
   /**
-   * What `layers.json` declares for a layer, WITHOUT asking whether its directory is there: the refusal for a
+   * What `deploy-pins.json` declares for a layer, WITHOUT asking whether its directory is there: the refusal for a
    * missing clone has to name where the clone goes, and `layerRoot` throws before it can.
    */
   function layerDeclaration(name: string): { name: string; path: string; remote: string | undefined; package: string | undefined; dir: string; } {
     const layer = Object.hasOwn(manifest.layers, name) ? manifest.layers[name] : undefined;
     if (!layer) {
-      throw new Error(`layer "${name}" is not declared in packages/control/layers.json `
+      throw new Error(`layer "${name}" is not declared in deploy-pins.json `
         + `(declared: ${Object.keys(manifest.layers).join(", ") || "none"})`);
     }
     return { name, path: layer.path, remote: layer.remote, package: layer.package, dir: resolve(root, layer.path) };
@@ -104,7 +109,7 @@ export function layersFrom({ manifest, root }: { manifest: { layers: Record<stri
     const { path, dir } = layerDeclaration(name);
     if (!existsSync(dir)) {
       throw new Error(`layer "${name}" is declared at ${path}, and ${dir} does not exist: `
-        + "check it out there, or correct its path in packages/control/layers.json");
+        + "check it out there, or correct its path in deploy-pins.json");
     }
     return dir;
   }
@@ -154,86 +159,16 @@ export function layersFrom({ manifest, root }: { manifest: { layers: Record<stri
   /** @param {Record<string, string>} pins a value that has passed `layerPins` */
   const layerCheckoutMove = (pins: Record<string, string>) => checkoutMoveFor(manifest, pins);
 
-  /** The laid control, or null while `layers.json` declares none (`laidControlOf`). */
-  const laidControl = () => laidControlOf({ manifest, root });
-
   /**
-   * The layer whose directory holds `path` (repo-relative): a separate layer, or the laid control, or null when it is the core's.
+   * The layer whose directory holds `path` (repo-relative): a separate layer, or null when it is the core's.
    * A file of a layer's is not tracked by this repository, so "does `git ls-files` list it" cannot be the question asked of it (#3845).
    */
   function layerOwning(path: string): string | null {
     const separate = separateLayers().map((name) => ({ name, path: manifest.layers[name].path }));
-    return owningLayer(path, [...separate, laidControl()]);
+    return owningLayer(path, separate);
   }
 
-  return { layerDeclaration, layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove, layerOwning, laidControl };
-}
-
-/** The key of the control plane's own code in `layers.json`'s `pinned` section: the one pinned layer the closure of `fleet:auto-off` runs from (#3914). */
-export const CONTROL_LAYER = "control";
-
-/** What a declared tag looks like: `scripts/lay-layer.ts`'s `DECLARED_TAG`, which this directory cannot import (ADR 0012). A branch or a sha is not a pin. */
-const DECLARED_TAG = /^v\d+\.\d+\.\d+$/;
-
-/**
- * The tag a `pinned` layer is laid at, read from the text of a `layers.json` (`origin/main`'s, for the stale-checkout guard): the
- * declaration's own `tag`, which is what `scripts/lay-layer.ts`'s `tagToLay` lays. A manifest that is not JSON, a layer it does
- * not pin, or a tag that is not `v<semver>` is a refusal, never a default.
- *
- *
- * @param {string} layer a key of `layers.json`'s `pinned`
- */
-export function pinnedLayerTag(manifestText: string, layer: string): { tag: string; } | { refusal: string; } {
-  let manifest;
-  try {
-    manifest = JSON.parse(manifestText);
-  } catch (cause) {
-    return { refusal: `layers.json is not JSON (${cause instanceof Error ? cause.message : cause})` };
-  }
-  const pinned = manifest?.pinned;
-  const declared = pinned && typeof pinned === "object" && Object.hasOwn(pinned, layer) ? pinned[layer] : undefined;
-  if (declared === undefined) return { refusal: `layers.json declares no pinned layer ${layer}` };
-  if (typeof declared.tag !== "string" || !DECLARED_TAG.test(declared.tag)) {
-    return { refusal: `layers.json pins ${layer} at ${JSON.stringify(declared.tag)}, which is not a v<semver> tag: a branch or a sha is not a pin` };
-  }
-  return { tag: declared.tag };
-}
-
-/**
- * THE FIRST VERSION AT WHICH A LAYER'S REPOSITORY TAGS `v<semver>` rather than `<package>@<version>`: a SECOND COPY of `BARE_TAGS_FROM` in
- * `scripts/lay-layer.ts`, because `control` imports nothing outside its own directory (ADR 0012). `layer-checkouts.test.ts` fails when
- * the two disagree, wherever the core's file is reachable. The table is the REPOSITORY's, not the version's: `screenreader-worker` moved
- * to `v<semver>` at 0.3.0 and `screenreader-fleet` at 0.5.3, so a rule on the version alone would break one of them (#4363).
- */
-const BARE_TAGS_FROM: Record<string, [number, number, number]> = { "@a11ign/screenreader-worker": [0, 3, 0], "@a11ign/screenreader-fleet": [0, 5, 3] };
-
-/** `scripts/lay-layer.ts`'s `releaseTag` over again: `v<version>` once the package's repository tags that way, `<package>@<version>` before. */
-export function releaseTag(name: string, version: string): string {
-  const from = Object.hasOwn(BARE_TAGS_FROM, name) ? BARE_TAGS_FROM[name] : undefined;
-  if (from === undefined) return `${name}@${version}`;
-  const [major, minor, patch] = version.split(".").slice(0, 3).map(Number);
-  const atOrAfter = major !== from[0] ? major > from[0] : minor !== from[1] ? minor > from[1] : patch >= from[2];
-  return atOrAfter ? `v${version}` : `${name}@${version}`;
-}
-
-/**
- * The tag a layer is laid at, read from the text of the core's `pnpm-lock.yaml`: `scripts/lay-layer.ts`'s `pinnedVersion` and
- * `layingPlan` over again, because `control` imports nothing outside its own directory (ADR 0012) and that script imports the guards.
- * `fleet-auto-off.test.ts` holds the two readings equal on the real lockfile, so they cannot name two builds (#3845).
- * The tag is the one the layer's repository really made (`releaseTag`), not always `<package>@<version>` (#4363).
- * A lockfile with no registry entry for the layer is a refusal, never a default.
- *
- *
- * @param {string} layer a key of `layers.json`
- */
-export function layerPinTag(lockfile: string, layer: string): { tag: string; } | { refusal: string; } {
-  const name = `@a11ign/${layer}`;
-  const entry = new RegExp(`^ {6}'${name.replace(/[/.]/g, "\\$&")}':\\r?\\n {8}specifier: [^\\r\\n]+\\r?\\n {8}version: ([^\\r\\n]+)$`, "m");
-  const block = lockfile.match(entry);
-  if (!block) return { refusal: `pnpm-lock.yaml has no importer entry for ${name}` };
-  const version = block[1].replace(/\(.*$/, "");
-  if (!/^\d+\.\d+\.\d+/.test(version)) return { refusal: `${name} is "${version}" in pnpm-lock.yaml, not a registry release: there is no tag to lay` };
-  return { tag: releaseTag(name, version) };
+  return { layerDeclaration, layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove, layerOwning };
 }
 
 /**
@@ -250,7 +185,7 @@ export function layerPinTag(lockfile: string, layer: string): { tag: string; } |
  * @param {Record<string, string>} pins a value that has passed `layerPins`
  * @returns {string} the argv fragment, leading space included, or "" when nothing is pinned
  */
-function checkoutMoveFor(manifest: { layers: Record<string, { path: string; remote?: string; branch?: string; }>; }, pins: Record<string, string>): string {
+function checkoutMoveFor(manifest: Manifest, pins: Record<string, string>): string {
   return Object.entries(pins).map(([name, sha]) => {
     const layer = Object.hasOwn(manifest.layers, name) ? manifest.layers[name] : undefined;
     if (!layer?.remote) throw new Error(`layer "${name}" has no repository of its own to move`);
@@ -264,7 +199,7 @@ function checkoutMoveFor(manifest: { layers: Record<string, { path: string; remo
 
 /**
  * What a layer's `remote` may look like once it is inside the single quotes of `git ls-remote`: no quote, space, `$` or backtick, and
- * not an option. `layers.json` declares an https URL; a path is let through so a test can stand a local repository in for it.
+ * not an option. `deploy-pins.json` declares an https URL; a path is let through so a test can stand a local repository in for it.
  */
 const REMOTE_URL = /^[A-Za-z0-9/][A-Za-z0-9._:/@-]*$/;
 
@@ -318,16 +253,21 @@ function refused(refusal: string): { pins: Record<string, string>; refusal: stri
  */
 export const LAYER_REF = /^[A-Za-z0-9._/-]{1,100}$/;
 
-const declared = layersFrom({ manifest: MANIFEST, root: REPO_ROOT });
-export const layerDeclaration = declared.layerDeclaration;
-export const layerRoot = declared.layerRoot;
-export const layerSourceDir = declared.layerSourceDir;
-export const layerCodeVersion = declared.layerCodeVersion;
-export const separateLayers = declared.separateLayers;
-export const layerPins = declared.layerPins;
-export const layerCheckoutMove = declared.layerCheckoutMove;
-export const layerOwning = declared.layerOwning;
-export const laidControl = declared.laidControl;
+/**
+ * The resolver over the real `deploy-pins.json`, built at first use and not at import: a checkout without the file still loads every
+ * module that imports this one, and the first thing that asks a layer a question gets the refusal naming the file.
+ */
+let real: ReturnType<typeof layersFrom> | undefined;
+const declared = () => (real ??= layersFrom({ manifest: manifestOf(readDeployPins()), root: REPO_ROOT }));
+
+export const layerDeclaration: ReturnType<typeof layersFrom>["layerDeclaration"] = (name) => declared().layerDeclaration(name);
+export const layerRoot: ReturnType<typeof layersFrom>["layerRoot"] = (name) => declared().layerRoot(name);
+export const layerSourceDir: ReturnType<typeof layersFrom>["layerSourceDir"] = (name) => declared().layerSourceDir(name);
+export const layerCodeVersion: ReturnType<typeof layersFrom>["layerCodeVersion"] = (name) => declared().layerCodeVersion(name);
+export const separateLayers: ReturnType<typeof layersFrom>["separateLayers"] = () => declared().separateLayers();
+export const layerPins: ReturnType<typeof layersFrom>["layerPins"] = (given) => declared().layerPins(given);
+export const layerCheckoutMove: ReturnType<typeof layersFrom>["layerCheckoutMove"] = (pins) => declared().layerCheckoutMove(pins);
+export const layerOwning: ReturnType<typeof layersFrom>["layerOwning"] = (path) => declared().layerOwning(path);
 
 /**
  * Every `--layer-ref=<name>=<sha>`, in order. REPEATABLE, which `flagValue` (first match only) is not: one
@@ -339,7 +279,7 @@ export function layerRefValues(argv: string[]): string[] {
 }
 
 /** The playbooks that move a guest's checkout and so hold a layer's second half of the pair (#3395). */
-const LAYER_PINNED = ["deploy.yml", "provision-role.yml"];
+export const LAYER_PINNED = ["deploy.yml", "provision-role.yml"];
 
 /**
  * The refusal for `--layer-ref` on a playbook that pins no layer, or for a layer left unpinned on one that does;

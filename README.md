@@ -20,7 +20,8 @@ src/                   fleet-playbook.mjs   drives Ansible against the fleet: pr
                        fleet-wake.mjs       power the fleet on (Wake-on-LAN) or check it answered
 ansible/               the playbooks themselves, and ansible/README.md is the map:
                        why SSH and not WinRM, why the fleet is defined once in inventory.yml
-layers.json            where each layer's code lives (read through src/layer-checkouts.mjs)
+deploy-pins.json       what control deploys: the published worker and fleet (version and tarball integrity) and the lab's tag (read through src/layer-pins.ts)
+layers.json            the list the playbooks' own layer tasks still read, until the host row; no file of src/ reads it
 scripts/               this repository's own tests: the workflows, the arming filter, the manifest
 ```
 
@@ -64,7 +65,7 @@ control plane (`/root/a11y-witness/packages/control`) and in CI. Every `packages
 ```bash
 git clone https://github.com/a11ign/a11ign core && git -C core checkout <CORE_REF>
 rm -rf core/packages/control && mkdir core/packages/control
-cp -R src ansible layers.json CLAUDE.md README.md core/packages/control/
+cp -R src ansible layers.json deploy-pins.json CLAUDE.md README.md core/packages/control/
 jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' package.json > core/packages/control/package.json
 printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"] }\n' > core/tsconfig.control.json
 cd core && pnpm install --frozen-lockfile

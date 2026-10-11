@@ -29,7 +29,7 @@ import { layerSourceDir } from "../layer-checkouts.ts";
 import { parse } from "yaml";
 // THROUGH THE LAYER RESOLVER (#4516): `browsers.ts` is not in the package's `exports` map, and adding an export to the layer's public surface for a
 // test is a decision for the layer. From screenreader-worker v0.9.0 the PACKAGE ships `dist/` alone (and `dist/` has no `browsers`), so the file is
-// read where a host holds it: in the layer's checkout, which `layers.json` declares and `layerSourceDir` answers for.
+// read where a host holds it: in the layer's checkout, which `deploy-pins.json` declares and `layerSourceDir` answers for.
 // Dynamic, because a path is not a specifier. The source itself is imported (not scraped): `browsers.ts` is safe to load,
 // unlike `server.ts`, which constructs a guidepup ScreenReader at module scope.
 const { BROWSERS, browserProfileDir } = await import(

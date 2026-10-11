@@ -15,7 +15,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layerPinTag, layersFrom, releaseTag } from "./layer-checkouts.ts";
+import { layersFrom, manifestOf, releaseTag } from "./layer-checkouts.ts";
+import { parseDeployPins, pinnedTag, readDeployPins } from "./layer-pins.ts";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.ts";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
@@ -25,11 +26,11 @@ const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
 
 /**
  * THE LAYER IS NOT IN THIS TREE (#3447): it lives in `a11ign/screenreader-worker`, and a host holds a checkout of it. A copy of the
- * LAID layer stands in for that checkout, placed at the path `layers.json` declares in a root of its own, so these tests run the real
- * resolver over the real manifest and the real worker files. It is the laid layer and no longer the published package because, from
+ * LAID layer stands in for that checkout, placed at the path `deploy-pins.json` declares in a root of its own, so these tests run the real
+ * resolver over the real declaration and the real worker files. It is the laid layer and no longer the published package because, from
  * v0.9.0 (#4516), the package ships `dist/` alone and a host's checkout holds `src/*.ts`: the shape the resolver reads is the laid one.
  */
-const MANIFEST = JSON.parse(read("packages/control/layers.json"));
+const MANIFEST = manifestOf(readDeployPins());
 const LAID = resolve(REPO, MANIFEST.layers["nvda-worker"].path);
 const CHECKOUT = mkdtempSync(join(tmpdir(), "layer-checkout-"));
 cpSync(LAID, join(CHECKOUT, MANIFEST.layers["nvda-worker"].path), { recursive: true });
@@ -71,10 +72,11 @@ async function fixtureRepo(body: string): Promise<string> {
   return root;
 }
 
-test("layers.json declares nvda-worker and screenreader-fleet and NOTHING else, listed by hand", () => {
-  const manifest = JSON.parse(read("packages/control/layers.json"));
-  assert.deepEqual(Object.keys(manifest.layers), ["nvda-worker", "screenreader-fleet"]);
-  assert.equal(typeof manifest.layers["nvda-worker"].path, "string");
+test("deploy-pins.json declares nvda-worker and screenreader-fleet and NOTHING else, listed by hand", () => {
+  const parsed = parseDeployPins(read("packages/control/deploy-pins.json"));
+  assert.ok("pins" in parsed, "the real declaration parses");
+  assert.deepEqual(Object.keys(parsed.pins.layers), ["nvda-worker", "screenreader-fleet"]);
+  assert.equal(typeof parsed.pins.layers["nvda-worker"].path, "string");
 });
 
 test("layerSourceDir(\"nvda-worker\") is the directory workerSourceDir() names (today, the same one)", async () => {
@@ -361,10 +363,10 @@ test("a remote that could close the quotes it is placed in is refused before any
 // #4363: the tag a layer's repository made, `v<semver>` from the package's first flat version
 // ---------------------------------------------------------------------------------------------------------
 
-const pinnedAt = (layer: string, version: string) =>
-  layerPinTag(`importers:\n\n  .:\n    dependencies:\n      '@a11ign/${layer}':\n        specifier: ^${version}\n        version: ${version}\n`, layer);
+const pinnedAt = (layer: string, version: string) => pinnedTag(
+  { layers: { [layer]: { package: `@a11ign/${layer}`, version, integrity: "sha512-x", path: `packages/${layer}`, remote: "https://example.invalid/x.git" } } }, layer);
 
-test("#4363 layerPinTag names the tag the layer's repository made: v<semver> from its first flat version, <package>@<version> before it", () => {
+test("#4363 pinnedTag names the tag the layer's repository made: v<semver> from its first flat version, <package>@<version> before it", () => {
   assert.deepEqual(pinnedAt("screenreader-worker", "0.5.0"), { tag: "v0.5.0" }, "the pin the lockfile holds today: the remote has v0.5.0 and no @a11ign/screenreader-worker@0.5.0");
   assert.deepEqual(pinnedAt("screenreader-worker", "0.3.0"), { tag: "v0.3.0" }, "the first flat version is itself flat");
   assert.deepEqual(pinnedAt("screenreader-worker", "0.2.0"), { tag: "@a11ign/screenreader-worker@0.2.0" }, "the one older tag the remote holds");

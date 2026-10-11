@@ -28,7 +28,7 @@ test("this repository's package replaces the core's own after the core's install
   assert.ok(lay < ci.indexOf("pnpm exec rstest run"), "laid before the tests");
   assert.match(ci, /pnpm exec eslint --no-ignore packages\/control/);
   assert.match(ci, /tsc --noEmit -p tsconfig\.control\.json/);
-  assert.match(ci, /cp -R control\/src control\/ansible control\/layers\.json control\/CLAUDE\.md control\/README\.md core\/packages\/control\//, "the package is the root's files, not a directory of it");
+  assert.match(ci, /cp -R control\/src control\/ansible control\/layers\.json control\/deploy-pins\.json control\/CLAUDE\.md control\/README\.md core\/packages\/control\//, "the package is the root's files, not a directory of it");
   assert.match(ci, /control\/package\.json > core\/packages\/control\/package\.json/, "the laid manifest is cut from the root's");
   assert.match(ci, /> core\/tsconfig\.control\.json/, "the laid typecheck config is written, not tracked: this repository holds one tsconfig");
   assert.doesNotMatch(ci, /control\/packages\/control/, "nothing reads a `packages/control` of THIS repository");

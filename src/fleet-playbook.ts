@@ -63,7 +63,7 @@ const PROTOCOL_REFUSAL_EXIT_CODE = 3;
  * during one afternoon".
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -75,7 +75,8 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
 import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.ts";
-import { layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
+import { LAYER_PINNED, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
+import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
 import type { WorkerHealth } from "./fleet-status.ts";
@@ -570,7 +571,7 @@ const argOf = (name: string) => flagValue(process.argv, name);
 function parseArgs(): {
     chosen: string; limitFlag: string | undefined; serialFlag: string | undefined; ref: string;
     allowEdgeDowngrade: boolean; apply: boolean; displayMode: string | undefined;
-    layerCommits: Record<string, string>; schedule: PatchSchedule | null;
+    layerCommits: Record<string, string>; publishedWorkerDir: string | null; schedule: PatchSchedule | null;
 } {
   const refuse = (message: string) => {
     process.stderr.write(`${message}\n`);
@@ -615,11 +616,11 @@ function parseArgs(): {
   if (displayModeIssue) refuse(displayModeIssue);
   const ref = argOf("ref") ?? localBranch();
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
-  const layerCommits = layerCommitsOrRefuse({ chosen, refuse });
+  const { layerCommits, publishedWorkerDir } = layerCommitsOrRefuse({ chosen, refuse });
 
   const schedule = scheduleOrRefuse({ chosen, apply, argv: process.argv, refuse });
 
-  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, schedule };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir, schedule };
 }
 
 /**
@@ -678,10 +679,12 @@ function readFirstPresent(readFile: (path: string, encoding: "utf8") => string, 
  * @param {{ readFile?: (path: string, encoding: "utf8") => string,
  *           declaration?: typeof layerDeclaration }} [deps] injectable, like `guardProtocolChange`'s `readFleet`
  */
-export function readLocalProtocol({ readFile = readFileSync, declaration = layerDeclaration }: {
+export function readLocalProtocol({ readFile = readFileSync, declaration = layerDeclaration, publishedDir = null }: {
     readFile?: (path: string, encoding: "utf8") => string;
     declaration?: typeof layerDeclaration;
+    publishedDir?: string | null;
 } = {}): { local: string | null; refusal: string | null; } {
+  if (publishedDir !== null) return readPublishedProtocol({ readFile, publishedDir });
   const { name, path, remote, dir } = declaration("nvda-worker");
   try {
     const text = readFirstPresent(readFile, PROTOCOL_VERSION_FILES.map((file) => resolve(dir, "src", file)));
@@ -690,9 +693,30 @@ export function readLocalProtocol({ readFile = readFileSync, declaration = layer
     if ((cause as NodeJS.ErrnoException)?.code !== "ENOENT") throw cause;
     return { local: null, refusal: `the worker layer "${name}" is not checked out at ${path}, so this checkout `
       + `cannot say which protocol the deploy would put on the workers (${dir}/src/ holds none of ${PROTOCOL_VERSION_FILES.join(", ")}`
-      + `). Its repository is ${remote ?? "inside this checkout (layers.json declares no remote)"}; `
+      + `). Its repository is ${remote ?? "inside this checkout (deploy-pins.json declares no remote)"}; `
       + "git refuses a non-empty destination, so move aside anything left at that path first (a primary checkout "
       + `keeps a node_modules there); then create the clone with: git clone ${remote ?? "<its repository>"} ${dir}` };
+  }
+}
+
+/** Where the published worker keeps the protocol version: `dist/`, built from the `src` file `PROTOCOL_VERSION_FILE` names. */
+const PUBLISHED_PROTOCOL_FILE = "dist/protocol-version.mjs";
+
+/**
+ * THE PROTOCOL THE PUBLISHED WORKER WOULD PUT ON THE FLEET (#5085): read as text from the package `stagePublished` unpacked after its
+ * tarball matched the pin, so the answer is the pinned release's and no clone's. A package that does not hold the file, or whose
+ * file says no version, is a REFUSAL: "could not read" is never "no change".
+ */
+function readPublishedProtocol({ readFile, publishedDir }: { readFile: (path: string, encoding: "utf8") => string; publishedDir: string; }): { local: string | null; refusal: string | null; } {
+  const file = resolve(publishedDir, PUBLISHED_PROTOCOL_FILE);
+  try {
+    const local = /CAPTURE_PROTOCOL_VERSION = (\d+)/.exec(readFile(file, "utf8"))?.[1] ?? null;
+    return local === null
+      ? { local, refusal: `${file} names no CAPTURE_PROTOCOL_VERSION, so the published worker cannot say which protocol the deploy would put on the workers` }
+      : { local, refusal: null };
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException)?.code !== "ENOENT") throw cause;
+    return { local: null, refusal: `the published worker holds no ${PUBLISHED_PROTOCOL_FILE} (${file}), so it cannot say which protocol the deploy would put on the workers` };
   }
 }
 
@@ -1204,11 +1228,39 @@ export function allowOfflineNames(argv: string[]): string[] {
   return argv.filter((argument) => argument.startsWith(prefix)).map((argument) => argument.slice(prefix.length));
 }
 
-/** `--layer-ref`, read off argv and refused or accepted, so `parseArgs` stays under its complexity budget. */
-function layerCommitsOrRefuse({ chosen, refuse }: { chosen: string; refuse: (message: string) => void; }): Record<string, string> {
-  const { pins, refusal } = layerPinsFor({ chosen, given: layerRefValues(process.argv) });
+/** `git`, sandboxed, as `layer-pins.ts` is handed it: what `ls-remote` asks a layer's repository for a release's commit. */
+const sandboxedGit: GitRun = (args) => {
+  const result = spawnSync("git", args, { encoding: "utf8", env: sandboxGitEnv() });
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+};
+
+/**
+ * THE PAIR'S SECOND HALF, AND THE PATH A HOST TAKES (#5085). Two ways in, and which one is the operator's to say:
+ *
+ *   - `--layer-ref=<layer>=<sha>` for every layer: the commits the operator typed, put on the guests as before (the old path, which
+ *     deploys whatever those commits hold and checks nothing about a registry artifact).
+ *   - NO `--layer-ref` on a playbook that pins layers: `deploy-pins.json`'s releases. Each tarball is fetched and compared with its
+ *     pinned `integrity` and the run is REFUSED, naming the layer, before the control plane or a box is touched; the commits are the
+ *     ones the releases' tags name. The unpacked worker is where the protocol guard reads its version.
+ *
+ * `--layer-ref` on a playbook that pins none stays the refusal it was. The unpacked packages live in a directory of this process's
+ * own and go with it.
+ */
+function layerCommitsOrRefuse({ chosen, refuse }: { chosen: string; refuse: (message: string) => void; }): { layerCommits: Record<string, string>; publishedWorkerDir: string | null; } {
+  const given = layerRefValues(process.argv);
+  if (given.length === 0 && LAYER_PINNED.includes(chosen)) {
+    const stage = makeStage();
+    process.once("exit", () => rmSync(stage, { recursive: true, force: true }));
+    const resolved = resolvePublished({ pins: readDeployPins(), into: stage, git: sandboxedGit });
+    if ("refusal" in resolved) {
+      refuse(`REFUSING ${chosen}: ${resolved.refusal}`);
+      return { layerCommits: {}, publishedWorkerDir: null };
+    }
+    return { layerCommits: resolved.commits, publishedWorkerDir: resolved.dirs["nvda-worker"] ?? null };
+  }
+  const { pins, refusal } = layerPinsFor({ chosen, given });
   if (refusal) refuse(refusal);
-  return pins;
+  return { layerCommits: pins, publishedWorkerDir: null };
 }
 
 /**
@@ -2214,9 +2266,9 @@ async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
-  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, schedule } = parseArgs();
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir, schedule } = parseArgs();
   if (schedule) runScheduled(schedule);
-  await guardProtocolChange(chosen);
+  await guardProtocolChange(chosen, { readLocal: () => readLocalProtocol({ publishedDir: publishedWorkerDir }) });
   const { moved } = await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen, { limitFlag });
   // #4446: AFTER the gates that ask least of the control plane, BEFORE anything is written to it. A dry run ends HERE.

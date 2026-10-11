@@ -30,10 +30,17 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT, CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { controlPlaneCheckout } from "./fleet-playbook.ts";
 import { LAYER_REF, layerCheckoutMove, layersFrom } from "./layer-checkouts.ts";
+import { playbookLayerListName } from "./layer-pins.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const ANSIBLE = resolve(REPO, "packages/control/ansible");
 const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
+/**
+ * The file the playbooks read their layer list from, as the task that reads it names it. Control's own declaration is `deploy-pins.json`
+ * (#5085); these tests play the PLAYBOOKS, which still read a list of their own beside `ansible/` (the old path, until the host row),
+ * so the fixtures stand one there under the name the task asks for rather than naming it a second time.
+ */
+const LIST = playbookLayerListName(read("packages/control/ansible/tasks/read-layer-checkouts.yml"));
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const ABSENT_PIN = "0".repeat(40);
 const REFUSED = 4;
@@ -169,7 +176,7 @@ test("the lab's fetch and reset read the layers from the manifest, run in the LA
   for (const file of LAB_FILES) {
     const code = codeText(readFileSync(resolve(ANSIBLE, file), "utf8"));
     assert.ok(code.includes(labRefPattern[1]), `${file} validates a ref with a different pattern from lab_ref's`);
-    assert.match(code, /include_tasks: read-layer-checkouts\.yml/, `${file} must read the layers from layers.json`);
+    assert.match(code, /include_tasks: read-layer-checkouts\.yml/, `${file} must read the layers from the list the plays share`);
     assert.ok(!code.includes(LAYER) && !code.includes("nvda-worker"), `${file} names a layer instead of reading it`);
     const chdirs = [...code.matchAll(/chdir: "([^"]+)"/g)].map((match) => match[1]);
     assert.ok(chdirs.length > 0, `${file} runs nothing in a directory`);
@@ -188,7 +195,7 @@ function playLabFile({ file, manifest, labDir, extra, env }: { file: string, man
   const play = newDir();
   mkdirSync(join(play, "ansible/tasks"), { recursive: true });
   for (const name of [file, "tasks/read-layer-checkouts.yml"]) copyFileSync(resolve(ANSIBLE, name), join(play, "ansible", name));
-  writeFileSync(join(play, "layers.json"), JSON.stringify(manifest));
+  writeFileSync(join(play, LIST), JSON.stringify(manifest));
   writeFileSync(join(play, "ansible/play.yml"), [
     "- hosts: localhost", "  gather_facts: false", "  vars:", `    lab_repo_path: ${labDir}`, "  tasks:",
     "    - ansible.builtin.set_fact:", "        lab_should_pull: \"{{ pull | default(true) | bool }}\"",
@@ -436,12 +443,12 @@ function tasksNamed(file: string, ...names: string[]) {
   }).join("\n\n");
 }
 
-/** Tasks that run `win_shell`, played on localhost against a fixture core checkout, with `layers.json` beside them as in the repository. */
+/** Tasks that run `win_shell`, played on localhost against a fixture core checkout, with the layer list beside them as in the repository. */
 function playGuestTasks({ tasks, vars, extra = [], env }: { tasks: string, vars: object, extra?: string[], env?: Record<string, string> }) {
   const play = newDir();
   mkdirSync(join(play, "ansible/tasks"), { recursive: true });
   copyFileSync(resolve(ANSIBLE, "tasks/read-layer-checkouts.yml"), join(play, "ansible/tasks/read-layer-checkouts.yml"));
-  writeFileSync(join(play, "layers.json"), JSON.stringify(SEPARATE));
+  writeFileSync(join(play, LIST), JSON.stringify(SEPARATE));
   writeFileSync(join(play, "ansible/tasks/under-test.yml"), `${tasks}\n`);
   writeFileSync(join(play, "ansible/play.yml"), [
     "- hosts: localhost", "  gather_facts: false", `  vars: ${JSON.stringify(vars)}`, "  tasks:",
@@ -672,10 +679,10 @@ test("the lab's reset discards a layer's tracked changes that origin already car
 const BOOTSTRAP = read("packages/worker-fleet/src/provisioning/bootstrap-control-plane.sh");
 const LAYER_BLOCK = BOOTSTRAP.slice(BOOTSTRAP.indexOf("LAYER_ROWS="), BOOTSTRAP.indexOf('done <<< "$LAYER_ROWS"') + 'done <<< "$LAYER_ROWS"'.length);
 
-/** The bootstrap's layer block, run under bash against a core checkout whose layers.json is `manifest`. */
+/** The bootstrap's layer block, run under bash against a core checkout whose layer list is `manifest`. */
 function bootstrapLayers({ core, origin, manifest }: { core: string, origin: string, manifest: object }) {
   mkdirSync(join(core, "packages/control"), { recursive: true });
-  writeFileSync(join(core, "packages/control/layers.json"), JSON.stringify(manifest));
+  writeFileSync(join(core, "packages/control", LIST), JSON.stringify(manifest));
   const script = `set -euo pipefail\nok() { echo "OK $1"; }\nREPO_PATH=${JSON.stringify(core)}\n${LAYER_BLOCK}\n`;
   return spawnSync("bash", ["-c", script], {
     encoding: "utf8",
@@ -686,7 +693,7 @@ function bootstrapLayers({ core, origin, manifest }: { core: string, origin: str
 
 test("the bootstrap block was found, and names the manifest, not a layer", () => {
   assert.ok(LAYER_BLOCK.startsWith("LAYER_ROWS="), "the block this test extracts has moved");
-  assert.ok(LAYER_BLOCK.includes("layers.json") && !LAYER_BLOCK.includes("nvda-worker"));
+  assert.ok(LAYER_BLOCK.includes(LIST) && !LAYER_BLOCK.includes("nvda-worker"));
 });
 
 test("the bootstrap clones a layer that is absent, fetches one that is there, and keeps it out of the core's git status", () => {
