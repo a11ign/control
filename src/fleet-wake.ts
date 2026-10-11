@@ -39,6 +39,7 @@ import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 // is neither's dependent, so it is the shared home.
 import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
+import { LOCK_GRACE_MS, takeFleetLock } from "./fleet-lock.ts";
 // #3401: where a silent worker is by MAC is asked the way the lab jobs ask it (two reads that agree, then
 // `/health`), never restated here.
 import { resolveMovedByMacLive } from "./fleet-status.ts";
@@ -474,6 +475,39 @@ function proofClause(r: { state: string; }) {
   return wakeFailed(r) ? " -- wake proof dropped: auto-off keeps it on until a wake proves it" : "";
 }
 
+/**
+ * THE FLEET LOCK A WAKE TAKES (a11ign#5030, #4405 item 2), under this name. `fleet-playbook.ts`'s `lockTakeStep` reads it:
+ * a fresh lock of this operation is a KEEP and not a claim, so `fleet:deploy`, `fleet:provision` and `fleet:patch` take it
+ * over where they would refuse a different operation's.
+ */
+export const WAKE_LOCK_OPERATION = "wake";
+
+/** Ended ready, so auto-off's idle clock is the next thing to reach it (`busy` is up and taken, and was not woken for us). */
+const wakeReady = (r: { state: string; }) => ["already-up", "woken", "came-up"].includes(r.state);
+
+/**
+ * Keep the boxes this wake left ready awake for `LOCK_GRACE_MS`, by taking the fleet lock `fleet-auto-off.ts` reads
+ * (`fleet-lock.ts`). Without it the auto-off timer, which runs every 10 s, powers an idle box off within a minute of the
+ * wake, before the provision or patch typed next has started: five of eight attempts of a11ign#4948.
+ *
+ * ONLY THE COMMAND LINE TAKES IT, and `wakeFleet` does not: `lab:job` and the scripted run call that, from inside an
+ * operation that already holds the lock. No box ready, no lock. Like the proof ledger, it is bookkeeping that never
+ * takes a wake down, so a control plane that cannot be asked, or a lock another operation holds, is said and not thrown.
+ */
+export function keepWokenBoxes(results: { name: string; state: string; }[], { now, take = takeFleetLock, log = () => {} }: {
+  now: number; take?: typeof takeFleetLock; log?: (line: string) => void;
+}): void {
+  if (!results.some(wakeReady)) return;
+  try {
+    const outcome = take({ operation: WAKE_LOCK_OPERATION, longestRunMs: LOCK_GRACE_MS, now });
+    log(outcome.taken
+      ? `  fleet lock taken for the boxes woken: auto-off keeps every box until ${new Date(outcome.lock.expiresAt).toISOString()}`
+      : `  fleet lock not taken: ${outcome.held.operation} holds it, and that operation keeps the boxes`);
+  } catch (cause) {
+    log(`  the fleet lock was not taken, so auto-off may power a woken box off again: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
 /** Did this worker end somewhere a capture cannot use? (`busy` is a worker that is fine and taken.) */
 export const wakeFailed = (r: { state: string; }) =>
   !["already-up", "busy", "woken", "came-up"].includes(r.state);
@@ -504,6 +538,7 @@ async function main() {
   const results = await wakeFleet(workers, { log: (l) => process.stdout.write(`${l}\n`) });
   process.stdout.write("\n");
   for (const r of results) process.stdout.write(`${wakeReportLine(r)}\n`);
+  keepWokenBoxes(results, { now: Date.now(), log: (l) => process.stdout.write(`${l}\n`) });
   // Non-zero only when a worker we were ASKED to wake did not come back. Nothing here can shut a box
   // down, so the worst case is a run that finds fewer workers than it hoped -- which the dispatcher
   // already handles by using the ones that answered.

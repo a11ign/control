@@ -94,6 +94,7 @@ import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protoco
 import { layerDeclaration } from "./layer-checkouts.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
 import { FLEET_LOCK_PLAYBOOKS, LOCK_GRACE_MINUTES, takeFleetLock, expireFleetLock, fleetLockRefusal } from "./fleet-lock.ts";
+import { WAKE_LOCK_OPERATION } from "./fleet-wake.ts";
 // #2832: WHAT PROVES A MOVED WORKER'S IDENTITY BEFORE A WRITE LANDS. A sibling and builtin-only, so ADR 0012's
 // no-`npm install` property is unchanged.
 import { overrideInventory, overridePath, installOverrideCommand, inventoryEnvironment, knownHostsReadScript,
@@ -809,18 +810,37 @@ function runBootstrapFromHere(chosen: string): void {
  * copied here: a lock that expired under a run still being watched would be the lock failing at its one job.
  *
  * Returns the refusal, when a different operation's lock is fresh and not ended, and a notice for the operator otherwise.
- * `take` is injectable so a test supplies the control plane.
+ * `take` and `end` are injectable so a test supplies the control plane.
+ *
+ * A `wake` LOCK IS A KEEP, NOT A CLAIM (a11ign#5030, #4405 item 2). `fleet:wake` takes the lock for the boxes it woke so
+ * the provision or patch typed next meets them awake; refusing that provision for the very lock that was taken to serve it
+ * would defeat the lock. So a fresh `wake` lock is ENDED by its own holder's name and the take is made again: an ended
+ * lock refuses nobody (`fleet-lock.ts`), and the second take is the one that decides, atomically, so two operations
+ * starting together still have one winner. This stays here, and `fleet-lock.ts`'s take is not taught `wake`, because the
+ * lock's refusal rule is the same for every operation and the exception belongs to the plays that may override a keep.
  */
-export function lockTakeStep({ chosen, followBudgetMs, now, take = takeFleetLock }: {
-  chosen: string; followBudgetMs: number; now: number; take?: typeof takeFleetLock;
+export function lockTakeStep({ chosen, followBudgetMs, now, take = takeFleetLock, end = expireFleetLock }: {
+  chosen: string; followBudgetMs: number; now: number; take?: typeof takeFleetLock; end?: typeof expireFleetLock;
 }): { refusal: string | null; notice: string | null } {
   if (!FLEET_LOCK_PLAYBOOKS.includes(chosen)) return { refusal: null, notice: null };
-  const outcome = take({ operation: chosen, longestRunMs: followBudgetMs, now });
+  const takeAgain = () => take({ operation: chosen, longestRunMs: followBudgetMs, now });
+  let outcome = takeAgain();
+  let tookOver = false;
+  // Bounded: a second wake landing between our end and our take is met by one more pass, and no more than that.
+  for (let pass = 0; !outcome.taken && outcome.held.operation === WAKE_LOCK_OPERATION && pass < WAKE_TAKE_OVER_PASSES; pass += 1) {
+    // `ended: false` (the lock is gone, or another wake's) needs no handling: the take below is what says who holds the fleet.
+    end({ operation: outcome.held.operation, holder: outcome.held.holder, now });
+    tookOver = true;
+    outcome = takeAgain();
+  }
   if (!outcome.taken) return { refusal: fleetLockRefusal({ held: outcome.held, wanted: chosen, now }), notice: null };
   const replaced = outcome.replacedUnreadable ? " (it replaced a fleet lock file that could not be read)" : "";
-  return { refusal: null, notice: `  fleet lock taken for ${chosen}${replaced}: auto-off keeps every box until `
+  const over = tookOver ? " (it took over the lock fleet:wake held for the boxes it woke)" : "";
+  return { refusal: null, notice: `  fleet lock taken for ${chosen}${replaced}${over}: auto-off keeps every box until `
     + `${new Date(outcome.lock.expiresAt).toISOString()}, or ${LOCK_GRACE_MINUTES} min after this unit ends.\n` };
 }
+
+const WAKE_TAKE_OVER_PASSES = 2;
 
 /**
  * The unit ended, on any exit: shorten the lock to its grace and mark it ended, never clear it, so the next attempt meets

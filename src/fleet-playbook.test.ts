@@ -14,8 +14,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
@@ -28,7 +30,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange,
   lockTakeStep, lockEndStep }
   from "./fleet-playbook.ts";
-import { FLEET_LOCK_PLAYBOOKS, LOCK_GRACE_MINUTES } from "./fleet-lock.ts";
+import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.ts";
@@ -1731,4 +1733,96 @@ test("#5014 the wiring: the lock is taken before the unit starts, from the budge
   assert.match(start.slice(0, start.indexOf("return unit;")), /catch \(cause\) \{\s*exitUnitFailedToStart\(chosen, cause\);/);
   assert.match(source, /function exitUnitFailedToStart[\s\S]*?FAILED TO START[\s\S]*?endFleetLock\(chosen\);\s*return process\.exit\(failure\.status/,
     "a unit that never started holds nobody awake");
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// a11ign#5030 -- a `wake` lock is a KEEP, not a claim: the three lock plays take it over.
+// ---------------------------------------------------------------------------------------------------------
+
+/** The control plane's `runs/fleet-lock.json` as a directory of this machine's, under the REAL `flock` and `node`. */
+function lockPlane() {
+  const root = mkdtempSync(join(tmpdir(), "fleet-lock-"));
+  const transport = (command: string) =>
+    execFileSync("sh", ["-c", command.replaceAll(CONTROL_PLANE_CHECKOUT_PATH, root)], { encoding: "utf8" });
+  const file = FLEET_LOCK_PATH.replace(CONTROL_PLANE_CHECKOUT_PATH, root);
+  const calls = { end: [] as { operation: string; holder?: string }[], take: 0 };
+  return {
+    file, calls, transport,
+    held: () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null),
+    seed: (operation: string, holder: string, { at = NOW, endedAt }: { at?: number; endedAt?: boolean } = {}) => {
+      takeFleetLock({ operation, holder, longestRunMs: LOCK_GRACE_MS, now: at, transport });
+      if (endedAt) expireFleetLock({ operation, holder, now: at, transport });
+    },
+    take: ((call: Parameters<typeof takeFleetLock>[0]) => {
+      calls.take += 1;
+      return takeFleetLock({ ...call, holder: "agents:9", transport });
+    }) as typeof takeFleetLock,
+    end: ((call: Parameters<typeof expireFleetLock>[0]) => {
+      calls.end.push({ operation: call.operation, holder: call.holder });
+      return expireFleetLock({ ...call, transport });
+    }) as typeof expireFleetLock,
+    dispose: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+test("#5030 2: deploy.yml, provision-role.yml and patch.yml each TAKE OVER a fresh `wake` lock instead of refusing", () => {
+  for (const chosen of FLEET_LOCK_PLAYBOOKS) {
+    const plane = lockPlane();
+    try {
+      plane.seed("wake", "laptop:7");
+      const control = takeFleetLock({ operation: chosen, longestRunMs: 1000, now: NOW, holder: "agents:9", transport: plane.transport });
+      assert.equal(control.taken, false, `${chosen}: the control: the bare take DOES refuse a fresh wake lock, so the take-over below is the step's doing`);
+      const step = lockTakeStep({ chosen, followBudgetMs: 1000, now: NOW, take: plane.take, end: plane.end });
+      assert.equal(step.refusal, null, chosen);
+      assert.match(step.notice ?? "", new RegExp(`fleet lock taken for ${chosen.replace(".", "\\.")} \\(it took over the lock fleet:wake held`));
+      assert.deepEqual(plane.held(), { operation: chosen, holder: "agents:9", takenAt: NOW, expiresAt: NOW + 1000 },
+        `${chosen}: the lock on disk is now its own, not the wake's`);
+      assert.deepEqual(plane.calls.end, [{ operation: "wake", holder: "laptop:7" }], "ended by the wake's own holder, and only that");
+    } finally { plane.dispose(); }
+  }
+});
+
+test("#5030 2: a fresh `provision-role.yml` lock still REFUSES patch.yml and deploy.yml, and nothing is ended", () => {
+  const plane = lockPlane();
+  try {
+    plane.seed("provision-role.yml", "agents:1");
+    const before = plane.held();
+    for (const chosen of ["patch.yml", "deploy.yml"]) {
+      const step = lockTakeStep({ chosen, followBudgetMs: 1000, now: NOW + 1, take: plane.take, end: plane.end });
+      assert.match(step.refusal ?? "", new RegExp(`^REFUSING ${chosen.replace(".", "\\.")}: the fleet lock is held by provision-role\\.yml`));
+    }
+    assert.deepEqual(plane.held(), before, "the lock is untouched");
+    assert.deepEqual(plane.calls.end, [], "a lock that is not a wake's is never ended on its behalf");
+    // the positive control: the same lock, once its operation has ended, refuses nobody (fleet-lock.ts) and nothing is taken over
+    const endedPlane = lockPlane();
+    try {
+      endedPlane.seed("provision-role.yml", "agents:1", { endedAt: true });
+      assert.equal(lockTakeStep({ chosen: "patch.yml", followBudgetMs: 1000, now: NOW + 1, take: endedPlane.take, end: endedPlane.end }).refusal, null);
+      assert.deepEqual(endedPlane.calls.end, []);
+    } finally { endedPlane.dispose(); }
+  } finally { plane.dispose(); }
+});
+
+test("#5030 2: an EXPIRED wake lock is just taken: nothing is ended, and the notice does not claim a take-over", () => {
+  const plane = lockPlane();
+  try {
+    plane.seed("wake", "laptop:7", { at: NOW - LOCK_GRACE_MS - 1 });
+    const step = lockTakeStep({ chosen: "provision-role.yml", followBudgetMs: 1000, now: NOW, take: plane.take, end: plane.end });
+    assert.equal(step.refusal, null);
+    assert.doesNotMatch(step.notice ?? "", /took over/);
+    assert.deepEqual(plane.calls.end, []);
+    assert.equal(plane.held().operation, "provision-role.yml");
+  } finally { plane.dispose(); }
+});
+
+test("#5030 2: the take-over is BOUNDED: a wake lock that is somehow always fresh is a refusal after two passes, not a loop", () => {
+  const held = { operation: "wake", holder: "laptop:7", takenAt: NOW, expiresAt: NOW + LOCK_GRACE_MS };
+  const ended: unknown[] = [];
+  let takes = 0;
+  const step = lockTakeStep({ chosen: "patch.yml", followBudgetMs: 1000, now: NOW,
+    take: (() => { takes += 1; return { taken: false, held }; }) as never,
+    end: ((call: unknown) => { ended.push(call); return { ended: false }; }) as never });
+  assert.match(step.refusal ?? "", /^REFUSING patch\.yml: the fleet lock is held by wake/);
+  assert.equal(ended.length, 2);
+  assert.equal(takes, 3, "one take, then one after each end");
 });
