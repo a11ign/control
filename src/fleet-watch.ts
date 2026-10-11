@@ -172,7 +172,7 @@ export type WorkerCaptures = {captures: number, seenAt: number, lastRoseAt: numb
 /** One hourly tick's sampling (#5016): which boxes answered, and which of those did work since the tick before. */
 export type UseTick = {at: number, awake: string[], worked: string[]};
 /** `ticks` and `usePostedOn` are absent from a file written before the use reading existed, and that file still reads. */
-export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>, ticks?: UseTick[], usePostedOn?: string, useReservedAt?: number};
+export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>, ticks?: UseTick[], usePostedOn?: string, useReservedAt?: number, useReservedBy?: number};
 export type CaptureTimes = {captures24h: number, lastCaptureAt: number|null, observedSince: number};
 /**
  * ## When did the fleet last capture? (#2979, found by #2937)
@@ -467,23 +467,39 @@ export function useBody(reading: UseReading, now: number): string {
   ].join("\n");
 }
 
-/** How long an in-progress reservation holds off another tick. A killed process leaves one behind; after this the next tick retries. */
-export const USE_RESERVATION_MS = 10 * MS_PER_MINUTE;
+/**
+ * The longest a reservation can be believed. A live owner holds it for as long as its post runs, so this is no lease
+ * on the post: it only bounds a recycled pid that now names some other process. It is far above the post's own timeout.
+ */
+export const USE_RESERVATION_MAX_MS = 60 * MS_PER_MINUTE;
+/** The post's own bound, so a live owner cannot hold the reservation for ever. */
+export const USE_POST_TIMEOUT_MS = 5 * MS_PER_MINUTE;
+
+/** Signal 0 probes without sending: EPERM still means the process exists. */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 /**
- * Post the use reading once per UTC day, at least once and at most once at a time.
+ * Post the use reading once per UTC day, at most one post in flight, and a killed run does not lose the day.
  *
- * The check and a RESERVATION (`useReservedAt`, a lease) happen in one locked read-modify-write before the post, so two
- * racing ticks see one reservation and one posts. The COMMIT (`usePostedOn`) is written only after the post returned,
- * so a process killed in between leaves a reservation that EXPIRES: the next tick past the lease retries, and the day's
- * report is not lost. The cost is the opposite window: a kill after the post but before the commit posts again after
- * the lease, which is a repeated report and not a missing one. A post that throws releases the reservation at once.
- * The post runs outside the lock (a `gh` call must not hold the ledger the 10 s probe writes). A ledger nobody could
- * read posts nothing: it would say "unknown" about a file, not about the fleet.
+ * The check and a RESERVATION (`useReservedAt`, `useReservedBy` the owner's pid) happen in one locked
+ * read-modify-write before the post, so two racing ticks see one reservation and one posts. The reservation is held
+ * for as long as its OWNER IS ALIVE, however slow the post: an elapsed time cannot tell a slow owner from a dead one
+ * (a lease did not, #53), a pid can. A reservation whose owner is gone -- killed between the reservation and the
+ * commit -- is taken over, so the day is not lost. The COMMIT (`usePostedOn`) is written only after the post
+ * returned. A kill after the post but before the commit posts again at the takeover: a repeat, never a gap.
+ * A post that throws releases the reservation at once. The post runs outside the lock (a `gh` call must not hold the
+ * ledger the 10 s probe writes). A ledger nobody could read posts nothing: it would say "unknown" about a file, not the fleet.
  */
-export function postUseOnce({ path, now, post, read, write, lock = write ? unlocked : withFileLock }: {
+export function postUseOnce({ path, now, post, read, write, lock = write ? unlocked : withFileLock, pid = process.pid, alive = pidAlive }: {
         path: string; now: number; post: (body: string) => void; read?: typeof readFileSync; write?: typeof writeFileSync;
-        lock?: typeof withFileLock;
+        lock?: typeof withFileLock; pid?: number; alive?: (pid: number) => boolean;
     }): "posted" | "already-posted" | "in-progress" | "unreadable" {
   const day = utcDay(now);
   let body: string | null = null;
@@ -493,21 +509,22 @@ export function postUseOnce({ path, now, post, read, write, lock = write ? unloc
     const next = state && change(state);
     if (next) writeCapturesState(path, next, write);
   });
+  const held = (state: CapturesState) => state.useReservedAt !== undefined && state.useReservedBy !== undefined
+    && state.useReservedAt <= now && now - state.useReservedAt < USE_RESERVATION_MAX_MS && alive(state.useReservedBy);
   update((state) => {
     if (state.usePostedOn === day) { outcome = "already-posted"; return null; }
-    const held = state.useReservedAt !== undefined && now - state.useReservedAt < USE_RESERVATION_MS && state.useReservedAt <= now;
-    if (held) { outcome = "in-progress"; return null; }
+    if (held(state)) { outcome = "in-progress"; return null; }
     body = useBody(useReading(state, now), now);
-    return { ...state, useReservedAt: now };
+    return { ...state, useReservedAt: now, useReservedBy: pid };
   });
   if (body === null) return outcome;
   try {
     post(body);
   } catch (cause) {
-    update((state) => ({ ...state, useReservedAt: undefined }));
+    update((state) => ({ ...state, useReservedAt: undefined, useReservedBy: undefined }));
     throw cause;
   }
-  update((state) => ({ ...state, usePostedOn: day, useReservedAt: undefined }));
+  update((state) => ({ ...state, usePostedOn: day, useReservedAt: undefined, useReservedBy: undefined }));
   return "posted";
 }
 
@@ -895,7 +912,7 @@ const readUnitDrift = () => controlUnitDrift({ readHost: readControlHost, ...che
 
 /** The once-a-day use reading. Without `--post` it is only printed: the day is never marked by a dry run. */
 function postDailyUse(post: boolean) {
-  const post_ = (body: string) => execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });
+  const post_ = (body: string) => execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit", timeout: USE_POST_TIMEOUT_MS });
   if (post) {
     postUseOnce({ path: DEFAULT_CAPTURES_STATE_PATH, now: Date.now(), post: post_ });
     return;

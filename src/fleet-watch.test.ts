@@ -13,7 +13,7 @@ import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
-  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MS, type CapturesState,
+  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
@@ -770,20 +770,32 @@ test("postUseOnce: a tick that lands WHILE the first is posting posts nothing (t
   assert.equal(posted.length, 1);
 });
 
-test("postUseOnce: a process killed after the reservation and before the post does NOT lose the day (the lease expires)", () => {
+test("postUseOnce: a SLOW live owner keeps the day however long its post runs; a DEAD owner's reservation is taken over", () => {
   let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
   const read = (() => file) as never;
   const write = ((_p: string, data: string) => { file = data; }) as never;
-  // what a run killed inside the post leaves: the reservation, with neither the commit nor the release
-  file = JSON.stringify({ ...JSON.parse(file), useReservedAt: USE_NOW });
+  const live = new Set([111]);
+  const alive = (pid: number) => live.has(pid);
+  // run A (pid 111) is still posting, an hour less a minute on: its reservation stands
+  file = JSON.stringify({ ...JSON.parse(file), useReservedAt: USE_NOW, useReservedBy: 111 });
   const posted: string[] = [];
-  const run = (now: number) => postUseOnce({ path: "c.json", now, read, write, post: (b) => posted.push(b) });
-  assert.equal(run(USE_NOW + USE_RESERVATION_MS - 1), "in-progress", "inside the lease a live peer is assumed");
-  assert.equal(run(USE_NOW + USE_RESERVATION_MS), "posted", "past the lease the day is retried");
+  const run = (now: number, pid: number) => postUseOnce({ path: "c.json", now, read, write, pid, alive, post: (b) => posted.push(b) });
+  assert.equal(run(USE_NOW + USE_RESERVATION_MAX_MS - 1, 222), "in-progress", "a slow owner is not mistaken for a dead one");
+  live.delete(111);
+  assert.equal(run(USE_NOW + 1_000, 222), "posted", "the owner is gone, so the day is not lost");
   assert.equal(JSON.parse(file).usePostedOn, "2026-10-11");
-  assert.equal(JSON.parse(file).useReservedAt, undefined);
-  assert.equal(run(USE_NOW + USE_RESERVATION_MS + 1), "already-posted");
+  assert.equal(JSON.parse(file).useReservedBy, undefined);
+  assert.equal(run(USE_NOW + 2_000, 333), "already-posted");
   assert.equal(posted.length, 1);
+});
+
+test("postUseOnce: a reservation older than the cap is not believed even if its pid is alive (a recycled pid)", () => {
+  let file = JSON.stringify({ ...ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]), useReservedAt: USE_NOW, useReservedBy: 111 });
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  const posted: string[] = [];
+  const out = postUseOnce({ path: "c.json", now: USE_NOW + USE_RESERVATION_MAX_MS, read, write, pid: 222, alive: () => true, post: (b) => posted.push(b) });
+  assert.equal(out, "posted");
 });
 
 test("postUseOnce: the commit is written only AFTER the post returned", () => {
@@ -794,6 +806,7 @@ test("postUseOnce: the commit is written only AFTER the post returned", () => {
   postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: () => { seenDuring = JSON.parse(file); } });
   assert.equal(seenDuring.usePostedOn, undefined);
   assert.equal(seenDuring.useReservedAt, USE_NOW);
+  assert.equal(seenDuring.useReservedBy, process.pid);
 });
 
 test("postUseOnce: a failed post RELEASES the reservation, so the race fix does not lose the day", () => {
