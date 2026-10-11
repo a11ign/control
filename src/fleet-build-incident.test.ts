@@ -100,11 +100,11 @@ test("a reachable box that carries no environment is UNREAD, and only that box i
 });
 
 test("a status with no `windowsBuilds` claims nothing read, and still shows a mix from the drift (absence is never agreement)", () => {
-  const { windowsBuilds: _dropped, ...legacyAgreeing } = oneBuild;
+  const legacyAgreeing: BuildStatus = { ...oneBuild, windowsBuilds: undefined };
   const agreeing = buildSpread(legacyAgreeing);
   assert.equal(agreeing.read.length, 0, "no field and no drift entry: nothing says anybody agreed");
   assert.equal(agreeing.unread.length, 15);
-  const { windowsBuilds: _unused, ...legacyMixed } = rulingMap;
+  const legacyMixed: BuildStatus = { ...rulingMap, windowsBuilds: undefined };
   assert.equal(buildSpread(legacyMixed).mixed, true, "NEGATIVE CONTROL: the drift alone still names a mix");
 });
 

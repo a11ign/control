@@ -1070,7 +1070,7 @@ test("#5106: the placeholder is passed through as the worker sent it, so a fleet
 });
 
 test("#5106: a box that answered without a build is null, and an unreachable box is not named", async () => {
-  const { windowsBuild: _omitted, ...withoutBuild } = ENVIRONMENT;
+  const withoutBuild = Object.fromEntries(Object.entries(ENVIRONMENT).filter(([key]) => key !== "windowsBuild"));
   const workers = [2, 3, 4].map((n) => ({ name: `a11y-worker-${n}`, url: `http://a11y-worker-${n}:8765` }));
   const status = await fleetStatus({
     workers: () => workers,
