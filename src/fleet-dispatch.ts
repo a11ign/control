@@ -21,6 +21,7 @@
  * a ledger nobody could read) sorts AFTER every box with a reading and is named, because reading "no entry" as
  * "no captures" would make the newest and least-known box win every request.
  */
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
@@ -177,7 +178,7 @@ export async function cli(argv: string[], deps: DispatchDeps = {}): Promise<CliR
   return { code: EXIT.OK, stdout: `${JSON.stringify({ request, chosen, short, notes })}\n`, stderr };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) {
   const result = await cli(process.argv.slice(2));
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);

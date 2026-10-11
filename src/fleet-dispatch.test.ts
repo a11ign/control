@@ -10,9 +10,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   chooseWorkers, cli, loadByWorker, parsePool, parseRequest, resolveDispatch, stateOfProbe,
@@ -391,3 +392,25 @@ test("the loader the playbook looks for is the one `control-host-install.yml` as
   const looked = /name: Is the control plane's TypeScript loader here[\s\S]*?path: (\S+)/.exec(CATALOGUE)?.[1];
   assert.equal(looked, installed);
 });
+
+// #1086: reached through a symlink (npm's .bin, a staged tmpdir), the file must still RUN. The symlink-blind
+// guard skipped `cli` and exited 0 with no output, which `lab-job.yml` would read as an empty choice.
+const NODE_RUNS_TS = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "dispatch-ts-"));
+  try {
+    writeFileSync(join(dir, "probe.ts"), "const n: number = 1;\nprocess.exit(n - 1);\n");
+    return spawnSync(process.execPath, [join(dir, "probe.ts")]).status === 0;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+})();
+
+test("run through a symlink the CLI still runs: a bad request is a usage error, not a silent exit 0",
+  { skip: NODE_RUNS_TS ? false : "this node cannot run a .ts file directly -- an honest skip, not a pass" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-link-"));
+    try {
+      const link = join(dir, "fleet-dispatch.ts");
+      symlinkSync(fileURLToPath(new URL("./fleet-dispatch.ts", import.meta.url)), link);
+      const run = spawnSync(process.execPath, [link, "--request=nonsense", "--pool=[]"], { encoding: "utf8" });
+      assert.equal(run.status, 2, run.stderr);
+      assert.match(run.stderr, /--request is `ready` or a whole number/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });

@@ -6,7 +6,7 @@ Acceptance:
 cd /home/agent/repos/wt-5017-control && pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include 'src/fleet-dispatch.test.ts' --include 'src/inventory-example-parity.test.ts' --include 'src/group-vars-state-their-connection.test.ts'
 ```
 
-**As run (measured, 2026-10-11):** `VERDICT pass: 37 tests in 3 files` (28 in `fleet-dispatch.test.ts`, of which 9 render the real playbook tasks under `ansible-playbook`; `inventory-example-parity` prints its honest `SKIPPED: inventory.yml is absent` for the real-file comparison, and its example-shape tests pass with the new `all: vars:` block). `pnpm run typecheck` is clean. The row's command as written (no `--config`, `cd` swapped to this worktree) prints `No test suites found in file` for all three files and exits 1: the same fact #5002's acceptance recorded, since control's default rstest run lacks the `node:test` shim only the toolchain config carries.
+**As run (measured, 2026-10-11):** `VERDICT pass: 38 tests in 3 files` (29 in `fleet-dispatch.test.ts`, of which 9 render the real playbook tasks under `ansible-playbook`; `inventory-example-parity` prints its honest `SKIPPED: inventory.yml is absent` for the real-file comparison, and its example-shape tests pass with the new `all: vars:` block). `pnpm run typecheck` is clean. The row's command as written (no `--config`, `cd` swapped to this worktree) prints `No test suites found in file` for all three files and exits 1: the same fact #5002's acceptance recorded, since control's default rstest run lacks the `node:test` shim only the toolchain config carries.
 
 ## What changed
 
@@ -43,5 +43,6 @@ cd /home/agent/repos/wt-5017-control && pnpm exec rstest run --config scripts/rs
 | playbook: the `workers=ready` refusal's assertion made `true` | exactly 1: `OFF ... workers=ready is refused naming the option` |
 | playbook: the option ignored (always on) | exactly 1: `OFF: workers=<N> is still the first N ...` |
 | playbook: the part-filled-count refusal made `true` | exactly 1: `ON: a count the resolver could only part-fill is refused` |
+| entry guard back to the symlink-blind form (#1086 ratchet, which failed CI on `be68acad`) | exactly 1: `run through a symlink the CLI still runs...` |
 
 Closes a11ign/a11ign#5017
