@@ -27,4 +27,4 @@ cd /home/agent/repos/wt-5027-control && pnpm exec rstest run --config scripts/rs
 - **Revert in one line:** delete the late pair from `edge-version.yml` (the two `again, after the install` tasks) and the test's late-pair assertion with it. The role then reads as it does on `origin/main`.
 - **The live proof is not in this row.** A box that installs Edge this run should end with the updater off; that is seen only on a real Windows worker, at the next Edge pin change or a rollback. It is filed as a VERIFY row by the orchestrator.
 
-Closes: none -- the row lives in a11ign/a11ign, and a PR in this repository cannot close it; `product-manager` closes it at merge.
+Closes a11ign/a11ign#5027
