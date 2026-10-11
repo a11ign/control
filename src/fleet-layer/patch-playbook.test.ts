@@ -201,7 +201,7 @@ const NO_TARGET = {};
 type Extra = Record<string, string>;
 
 /** Run `ansible-playbook` on `playbook` in a scratch directory over the given hosts' local connections. */
-function runLocal(opts: { playbook: string, hosts: Record<string, Record<string, string>>, extra: Extra, tags?: string }):
+function runLocal(opts: { playbook: string, hosts: Record<string, Record<string, unknown>>, extra: Extra, tags?: string }):
   { status: number | null, out: string, dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "patch-target-"));
   const inventory = join(dir, "inventory.json");
@@ -324,4 +324,68 @@ test("#4897: a target is given whole and well-formed, or not at all", { skip: HA
   assert.notEqual(targetInputs({ patch_target_build: "26200.9457" }), 0, "a build with no release would change nothing");
   assert.notEqual(targetInputs({ patch_target_release: "Windows 11", patch_target_build: "26200.9457" }), 0, "a release is NNHn");
   assert.notEqual(targetInputs({ patch_target_release: "25H2", patch_target_build: "26200" }), 0, "a build is <build>.<UBR>");
+});
+
+// --- a11ign#4979: a staged feature update is SWITCHED, and a box that staged without switching fails --------
+
+const SWITCH_BLOCK = (play: Play): Task[] => play.tasks.find((task: Task) => Array.isArray(task.block))?.block ?? [];
+const indexWhere = (tasks: Task[], pick: (task: Task) => boolean): number => tasks.findIndex(pick);
+const isCommit = (task: Task): boolean => /UsoClient\.exe\s+StartInstall/i.test(String(task["ansible.windows.win_shell"] ?? ""));
+const readsBcd = (task: Task): boolean => /bcdedit\s+\/enum\s+all/.test(JSON.stringify(task["ansible.windows.win_powershell"] ?? ""));
+const failsStaged = (task: Task): boolean => "ansible.builtin.fail" in task && /staged but not switched/.test(JSON.stringify(task));
+const isReboot = (task: Task): boolean => "ansible.windows.win_reboot" in task;
+
+/** Commit, then read the BCD, then fail on no entry, ALL before the restart, each only for a pending switch. */
+function switchesBeforeRestarting(play: Play): boolean {
+  const block = SWITCH_BLOCK(play);
+  const [commit, read, fail, reboot] = [isCommit, readsBcd, failsStaged, isReboot].map((pick) => indexWhere(block, pick));
+  const ordered = commit > -1 && commit < read && read < fail && fail < reboot;
+  const gated = [commit, read, fail].every((at) => at > -1 && /patch_switch_pending/.test(JSON.stringify(block[at].when)));
+  return ordered && gated;
+}
+
+test("a11ign#4979: the Orchestrator commit, the BCD read and the staged-but-not-switched refusal all precede the restart", () => {
+  assert.ok(switchesBeforeRestarting(PATCH_PLAY));
+  const withoutCommit = clone(PATCH_PLAY);
+  withoutCommit.tasks.find((task: Task) => task.block).block = SWITCH_BLOCK(PATCH_PLAY).filter((task) => !isCommit(task));
+  assert.ok(!switchesBeforeRestarting(withoutCommit), "no commit must be caught");
+  const withoutRefusal = clone(PATCH_PLAY);
+  withoutRefusal.tasks.find((task: Task) => task.block).block = SWITCH_BLOCK(PATCH_PLAY).filter((task) => !failsStaged(task));
+  assert.ok(!switchesBeforeRestarting(withoutRefusal), "no refusal must be caught");
+  const ungated = clone(PATCH_PLAY);
+  delete SWITCH_BLOCK(ungated).find(isCommit)?.when;
+  assert.ok(!switchesBeforeRestarting(ungated), "a commit that runs for every pass must be caught");
+  // The restart is still the play's own win_reboot, and the restore still sits in the `always`.
+  assert.ok(rebootsOnlyItself(PATCH_PLAY));
+  assert.ok(restoresFromRolesList(PATCH_PLAY));
+  assert.ok(removesTargetThenReadsBack(PATCH_PLAY));
+  assert.ok(!SWITCH_BLOCK(PATCH_PLAY).some((task) => /RestartDevice/i.test(JSON.stringify(task))), "the restart is win_reboot, never UsoClient's");
+});
+
+const UPGRADE = { "KB5129195": { title: "Windows 11, version 25H2", categories: ["Upgrades"], installed: true } };
+const CUMULATIVE = { "KB5000001": { title: "Cumulative", categories: ["SecurityUpdates", "UpdateRollups"], installed: true } };
+const BCD_WITH_SAFEOS = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Setup", "identifier {a1}", "device ramdisk=[C:]\\$WINDOWS.~BT\\Sources\\boot.wim"];
+const BCD_WITHOUT = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Boot Loader", "identifier {current}", "description Windows 11"];
+
+/** The refusal alone, over an invented install result and an invented BCD reading. */
+function switchVerdict(host: { updates: object, reboot: boolean, bcd: string[] }): { status: number | null, out: string } {
+  return runLocal({ playbook: PATCH, tags: "patch_switch_verdict", extra: NO_TARGET, hosts: { "a11y-worker-6": {
+    patch_updates: { reboot_required: host.reboot, updates: host.updates, installed_update_count: Object.keys(host.updates).length },
+    patch_bcd: { output: host.bcd } } } });
+}
+
+test("a11ign#4979 POSITIVE: an Upgrades item staged with no SafeOS entry fails the box, by worker number, with the entries", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const staged = switchVerdict({ updates: UPGRADE, reboot: true, bcd: BCD_WITHOUT });
+  assert.notEqual(staged.status, 0, staged.out);
+  assert.match(staged.out, /a11y-worker-6: staged but not switched/);
+  assert.match(staged.out, /Windows Boot Loader/, "the evidence is the entry list");
+  assert.equal(switchVerdict({ updates: UPGRADE, reboot: true, bcd: BCD_WITH_SAFEOS }).status, 0, "a committed switch passes");
+});
+
+test("a11ign#4979 NEGATIVE: a pass with no Upgrades item is not refused, however the BCD reads", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  assert.equal(switchVerdict({ updates: CUMULATIVE, reboot: true, bcd: BCD_WITHOUT }).status, 0, "a cumulative needs no SafeOS entry");
+  assert.equal(switchVerdict({ updates: {}, reboot: false, bcd: BCD_WITHOUT }).status, 0, "nothing installed, nothing to switch");
+  assert.equal(switchVerdict({ updates: UPGRADE, reboot: false, bcd: BCD_WITHOUT }).status, 0, "no restart asked, no switch owed");
+  // the other half of the controls: the window's own variables are those of a pass with no Upgrades item
+  assert.deepEqual(evaluatedVars(NO_TARGET).categories, BASE_CATEGORIES);
 });
