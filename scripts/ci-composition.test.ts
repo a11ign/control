@@ -58,13 +58,39 @@ test("`tsc --noEmit` is a step of the job the ruleset requires, and runs before 
   assert.ok(ci.indexOf("  checks:") < typecheck, "in the `checks` job, which `gate` waits for");
 });
 
-test("`gate` waits for `changeset`, `checks` and `ansible` and accepts success only, so a red or skipped need cannot read as a pass (a11ign/a11ign#4127, #4135, #4919)", () => {
+test("`gate` waits for `changeset`, `checks`, `ansible` and `release-dry-run` and accepts success only, so a red or skipped need cannot read as a pass (a11ign/a11ign#4127, #4135, #4919, #5066)", () => {
   const gate = ci.slice(ci.indexOf("  gate:"));
   assert.ok(gate.startsWith("  gate:"), "positive control: the gate job is found");
-  assert.match(gate, /needs: \[changeset, checks, ansible\]/);
+  assert.match(gate, /needs: \[changeset, checks, ansible, release-dry-run\]/);
   assert.match(gate, /if: always\(\) && !cancelled\(\)/, "a skipped required check counts as passed, so gate must run when a need fails");
-  for (const need of ["changeset", "checks", "ansible"]) assert.ok(gate.includes(`needs.${need}.result`), `${need}'s result is read`);
+  for (const need of ["changeset", "checks", "ansible", "release-dry-run"]) assert.ok(gate.includes(`needs.${need}.result`), `${need}'s result is read`);
   assert.doesNotMatch(gate, /skipped/, "no skipped allowance");
+});
+
+test("a pull request touching the install dry-runs the release's version step, with the release's own toolchain and no way to write (a11ign/a11ign#5066, a11ign/agent-org#888)", () => {
+  const job = /^ {2}release-dry-run:\n([\s\S]*?)\n\n/m.exec(ci)?.[1];
+  assert.ok(job, "positive control: the release-dry-run job is found");
+  assert.doesNotMatch(job, /^ {4}if:/m, "no job condition: `gate` accepts success only, so a skipped job would read red; the steps carry the condition instead");
+  assert.match(job, /^ {4}permissions:\n {6}contents: read$/m, "read only, and nothing below pushes");
+  assert.match(job, /persist-credentials: false/);
+  assert.match(job, /fetch-depth: 0/, "`changeset version` deepens a shallow clone and hangs on a --depth=1 one");
+  assert.doesNotMatch(job, /--depth=1|git push|secrets\./);
+  assert.match(job, /\^\(package\\\.json\|pnpm-lock\\\.yaml\|\\\.npmrc\)\$\|\^\\\.github\/workflows\//, "the four paths the row names");
+  assert.match(job, /pnpm install --frozen-lockfile\n\s+pnpm exec changeset version\n\s+pnpm install --lockfile-only/, "the release's three commands, in order");
+  const gated = job.split(/^ {6}- /m).filter((step) => /pnpm\/action-setup|setup-node|release's version step/.test(step));
+  assert.equal(gated.length, 3, "positive control: the three steps that do the work are found");
+  for (const step of gated) assert.match(step, /if: steps\.touched\.outputs\.touched == 'true'/);
+});
+
+test("the dry run uses the toolchain `release.yml` gives the shared workflow, so it is never a pass on a toolchain the release does not use (a11ign/a11ign#5066)", () => {
+  const release = workflowCode("release.yml");
+  const job = /^ {2}release-dry-run:\n([\s\S]*?)\n\n/m.exec(ci)?.[1] ?? "";
+  assert.match(job, /pnpm\/action-setup@v6\n\s+if: [^\n]+\n(?! {8}with:)/, "no `version`: pnpm comes from `packageManager`");
+  assert.doesNotMatch(release, /^ {6}(pnpm-version|changesets-version|node-version):/m,
+    "release.yml sets none of the three, so the shared workflow's defaults apply and the job repeats them; if it sets one, the job must follow it");
+  assert.match(job, /node-version: 22$/m, "the shared workflow's default");
+  assert.match(job, /CHANGESETS_VERSION: 3\.0\.3$/m, "the shared workflow's default `changesets-version`");
+  assert.match(readFileSync(new URL("../package.json", import.meta.url), "utf8"), /"packageManager": "pnpm@/);
 });
 
 test("the changeset check is the shared workflow at a full sha, with this repository's releasable paths and the permission it needs (a11ign/a11ign#4127, #4135)", () => {
