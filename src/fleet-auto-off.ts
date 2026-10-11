@@ -134,6 +134,8 @@ import { inventoryHosts } from "./fleet-discover.ts";
 import { inventoryPathFor } from "./control-plane-fleet.ts";
 import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.ts";
+import { readFleetLock } from "./fleet-lock.ts";
+import type { FleetLockState } from "./fleet-lock.ts";
 export type ProofTransport = import("./fleet-wake.ts").ProofTransport;
 
 refuseUnknownFlags(["--apply"], { entry: import.meta.url, command: "npm run fleet:auto-off" });
@@ -307,7 +309,7 @@ export function advanceShutdownRequested(probes: { name: string; outcome: string
   return next;
 }
 
-export type DecisionInput = { name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer", idleSince: number | null, shutdownRequestedAt: number | null, wakeProvenAt: number | null, batchQueued: boolean, leasePending: boolean, playInFlight?: PlayReading, };
+export type DecisionInput = { name: string, hasMac: boolean, probe: "idle" | "busy" | "no-answer", idleSince: number | null, shutdownRequestedAt: number | null, wakeProvenAt: number | null, batchQueued: boolean, leasePending: boolean, playInFlight?: PlayReading, fleetLock?: FleetLockState, };
 export type Decision = { action: "off" | "keep", reason: string };
 export type ProofReading = { standing: ReturnType<typeof proofStanding>, provenAt: number | null };
 
@@ -317,6 +319,20 @@ export type PlayReading = "none" | "running" | "unreadable";
 /**
  * Is a play running on the control plane? `unreadable` is its own answer and never "none" (#3543). Absent on a
  * `DecisionInput` means the caller did not ask: `tick` always supplies it, and `main` supplies the real reader.
+ */
+
+/**
+ * ## A held fleet lock is not idle either (#5014, #4405 item 2)
+ *
+ * `play-in-flight` is the unit's state, and a run that FAILS is `finished` to it: five idle minutes later the boxes are
+ * off before the next attempt of the same operation. `fleet:deploy`, `fleet:provision` and `fleet:patch` therefore take
+ * the fleet lock (`fleet-lock.ts`, `runs/fleet-lock.json` on the control plane) and, when their unit ends, shorten it to
+ * a grace rather than clear it. This file KEEPS every box (`fleet-lock-held`) while it is held, and IGNORES one past its
+ * `expiresAt` -- the operation's longest run -- so a crashed run cannot keep the fleet awake for ever. An unreadable one
+ * keeps (`fleet-lock-unreadable`), as `play-unreadable` does. It narrows #2737 and does not reverse it: this file still
+ * does not read `Fleet-hold-until:`, because the lock is written by the operation itself and a hold is a sentence.
+ * Like the play signal, `tick`'s default is `none` and `main()` passes the real reader (`fleet-auto-off.test.ts` pins it).
+ * **To revert:** drop `fleetLock: readFleetLock` from `main()`'s `tick` call; the decision then reads as it did.
  */
 
 /**
@@ -405,6 +421,9 @@ export function autoOffDecision(input: DecisionInput, now: number, idleThreshold
   if (input.shutdownRequestedAt !== null) return { action: "keep", reason: "already-off" };
   if (input.playInFlight === "running") return { action: "keep", reason: "play-in-flight" };
   if (input.playInFlight === "unreadable") return { action: "keep", reason: "play-unreadable" };
+  // #5014: a `stale` lock is IGNORED -- its operation's longest run has passed, and a crashed run must not keep the fleet awake for ever.
+  if (input.fleetLock === "held") return { action: "keep", reason: "fleet-lock-held" };
+  if (input.fleetLock === "unreadable") return { action: "keep", reason: "fleet-lock-unreadable" };
   if (input.probe === "no-answer") return { action: "keep", reason: "no-answer" };
   if (input.probe === "busy") return { action: "keep", reason: "busy" };
   if (input.batchQueued) return { action: "keep", reason: "batch-queued" };
@@ -694,7 +713,7 @@ function recordProbedCaptures(probes: (IdleProbe & { name: string; host: string;
  */
 function decisionInput(w: { name: string; mac: string | null; }, outcome: string, known: {
         idleSince: SinceState; shutdownRequestedAt: SinceState; wakeProof: Record<string, number>;
-        batchQueued: () => boolean; leasePending: () => boolean; play: PlayReading;
+        batchQueued: () => boolean; leasePending: () => boolean; play: PlayReading; fleetLock: FleetLockState;
     }): DecisionInput {
   return {
     name: w.name,
@@ -706,6 +725,7 @@ function decisionInput(w: { name: string; mac: string | null; }, outcome: string
     batchQueued: known.batchQueued(),
     leasePending: known.leasePending(),
     playInFlight: known.play,
+    fleetLock: known.fleetLock,
   };
 }
 
@@ -765,6 +785,15 @@ function askForPlays(read: typeof readPlaysInFlight | undefined): PlayReading {
 }
 
 /**
+ * The fleet lock for this tick, read once for the whole fleet (#5014). Absent reads `none`, as the play signal does; an
+ * unreadable one keeps every box and says why on stderr (`readFleetLock`'s `log`), for the same reason.
+ */
+function askForFleetLock(read: typeof readFleetLock | undefined, now: number): FleetLockState {
+  if (!read) return "none";
+  return read(now, { log: (line) => process.stderr.write(`fleet-auto-off: ${line}; every box kept\n`) }).state;
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.ts`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
@@ -773,7 +802,7 @@ export async function tick(deps: {
     workers?: { name: string; host: string; mac: string | null; }[];
     probe?: typeof probeIdle; now?: () => number; statePath?: string; capturesPath?: string; proofPath?: string;
     proofTransport?: ProofTransport; read?: typeof readFileSync; write?: typeof writeFileSync;
-    batchQueued?: () => boolean; leasePending?: () => boolean; playsInFlight?: typeof readPlaysInFlight;
+    batchQueued?: () => boolean; leasePending?: () => boolean; playsInFlight?: typeof readPlaysInFlight; fleetLock?: typeof readFleetLock;
     apply?: boolean; dispatch?: typeof dispatchShutdown;
     checkout?: (where: { now: number; fetchedAt: number | null; }) => ReturnType<typeof checkAgainstMain>;
 } = {}) {
@@ -807,7 +836,8 @@ export async function tick(deps: {
   const idleSince = advance(probes, previous.idleSince, now);
   const shutdownRequestedAt = advanceShutdownRequested(probes, previous.shutdownRequestedAt);
 
-  const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending, play: askForPlays(deps.playsInFlight) };
+  const known = { idleSince, shutdownRequestedAt, wakeProof, batchQueued, leasePending, play: askForPlays(deps.playsInFlight),
+    fleetLock: askForFleetLock(deps.fleetLock, now) };
   const decided = workers.map((w) => {
     const p = probes.find((probed) => probed.name === w.name);
     const provenAt = wakeProof[w.name] ?? null;
@@ -850,7 +880,7 @@ async function main() {
     return;
   }
 
-  const { out, failed } = renderReport(await tick({ workers: declared, apply, playsInFlight: readPlaysInFlight }), apply);
+  const { out, failed } = renderReport(await tick({ workers: declared, apply, playsInFlight: readPlaysInFlight, fleetLock: readFleetLock }), apply);
   process.stdout.write(out);
   if (failed) process.exitCode = 1;
 }

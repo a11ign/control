@@ -25,8 +25,10 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
-  writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange }
+  writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange,
+  lockTakeStep, lockEndStep }
   from "./fleet-playbook.ts";
+import { FLEET_LOCK_PLAYBOOKS, LOCK_GRACE_MINUTES } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.ts";
@@ -1658,4 +1660,75 @@ test("#2832: an unreadable keys file REFUSES deploy and provision (which already
     assert.equal(failure.refuse, false, `${chosen} must still run when the keys cannot be read: recover.yml exists for a box that is wedged`);
     assert.match(failure.message, /^WARNING /);
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// a11ign#5014 -- the fleet lock: which plays take it, with what longest run, and where the unit's end hooks in.
+// ---------------------------------------------------------------------------------------------------------
+
+type TakeCall = Parameters<typeof import("./fleet-lock.ts").takeFleetLock>[0];
+const lockOf = (operation: string, expiresAt: number) => ({ operation, holder: "agents:1", takenAt: 0, expiresAt });
+const NOW = 1_760_000_000_000;
+
+test("#5014 the lock is taken for deploy.yml, provision-role.yml and patch.yml and for no other play (sleep.yml among them)", () => {
+  const taking: string[] = [];
+  const notTaking: string[] = [];
+  for (const chosen of PLAYBOOKS) {
+    let called: TakeCall | null = null;
+    const step = lockTakeStep({ chosen, followBudgetMs: 1234, now: NOW, take: ((call: TakeCall) => {
+      called = call;
+      return { taken: true, replacedUnreadable: false, lock: lockOf(call.operation, call.now + call.longestRunMs) };
+    }) as never });
+    (called ? taking : notTaking).push(chosen);
+    if (called) {
+      assert.deepEqual({ operation: (called as TakeCall).operation, longestRunMs: (called as TakeCall).longestRunMs, now: (called as TakeCall).now },
+        { operation: chosen, longestRunMs: 1234, now: NOW }, "the operation is the play, and its longest run is the budget this command watches it for");
+      assert.match(step.notice ?? "", /fleet lock taken for /);
+    } else {
+      assert.deepEqual(step, { refusal: null, notice: null }, `${chosen}: no lock, no notice`);
+    }
+  }
+  assert.deepEqual(taking.sort(), ["deploy.yml", "patch.yml", "provision-role.yml"], "positive control: the three do take it");
+  assert.ok(notTaking.includes("sleep.yml") && notTaking.includes("recover.yml"), "negative control: sleep.yml (auto-off's own dispatch) and recover.yml do not");
+  assert.deepEqual([...FLEET_LOCK_PLAYBOOKS].sort(), taking.sort(), "the list names only plays the launcher can start, so no entry is vacuous");
+});
+
+test("#5014 a different operation's fresh lock REFUSES the start, in words naming it; no take means no refusal", () => {
+  const held = lockOf("provision-role.yml", NOW + 3_600_000);
+  const step = lockTakeStep({ chosen: "deploy.yml", followBudgetMs: 1_800_000, now: NOW, take: (() => ({ taken: false, held })) as never });
+  assert.match(step.refusal ?? "", /^REFUSING deploy\.yml: the fleet lock is held by provision-role\.yml/);
+  assert.equal(step.notice, null);
+  const sleep = lockTakeStep({ chosen: "sleep.yml", followBudgetMs: 1, now: NOW, take: (() => ({ taken: false, held })) as never });
+  assert.equal(sleep.refusal, null, "negative control: a play that takes no lock is never refused by one");
+});
+
+test("#5014 the unit's end shortens the lock by its own operation, for the lock plays only, and a control plane that cannot be asked is said and not thrown", () => {
+  const ended: string[] = [];
+  const end = ((call: { operation: string; now: number }) => { ended.push(`${call.operation}@${call.now}`); return { ended: true, lock: lockOf(call.operation, 0) }; }) as never;
+  for (const chosen of PLAYBOOKS) lockEndStep({ chosen, now: NOW, end });
+  assert.deepEqual(ended.sort(), ["deploy.yml", "patch.yml", "provision-role.yml"].map((name) => `${name}@${NOW}`));
+  const failed = lockEndStep({ chosen: "patch.yml", now: NOW, end: (() => { throw new Error("ssh: no route to host"); }) as never });
+  assert.equal(failed.failed, true);
+  assert.match(failed.notice ?? "", /NOT shortened \(ssh: no route to host\).*expires on its own/s);
+  assert.match(lockEndStep({ chosen: "patch.yml", now: NOW, end: (() => ({ ended: true, lock: lockOf("patch.yml", 0) })) as never }).notice ?? "",
+    new RegExp(`${LOCK_GRACE_MINUTES} min`));
+});
+
+test("#5014 the wiring: the lock is taken before the unit starts, from the budget this command watches, and shortened after the follow on every exit", () => {
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const start = source.slice(source.indexOf("function startPlaybookUnit("));
+  assert.ok(start.indexOf("takeFleetLockOrExit({ chosen, followBudgetMs })") > 0
+    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("systemd-run --unit="), "taken before `systemd-run` exists");
+  assert.match(source, /function takeFleetLockOrExit[\s\S]*?lockTakeStep\(\{ chosen, followBudgetMs, now: Date\.now\(\) \}\)[\s\S]*?process\.exit\(2\)/,
+    "a refusal exits 2, as every other gate here does");
+  assert.match(source, /followBudgetMs: patchGate\.followBudgetMs, aim \}\)/, "main hands it the SAME budget followUnit is given: no run length is copied");
+  const main = source.slice(source.indexOf("async function main() {"));
+  const follow = main.indexOf("const outcome = await followUnit(unit, patchGate.followBudgetMs)");
+  const end = main.indexOf("endFleetLock(chosen)", follow);
+  assert.ok(follow > 0 && end > follow, "the end follows the follow");
+  assert.ok(end < main.indexOf("process.exit(outcome.status)", follow), "and precedes the exit a FAILED run takes, which is the case the lock is for");
+  assert.match(start.slice(0, start.indexOf("return unit;")), /catch \(cause\) \{\s*exitUnitFailedToStart\(chosen, cause\);/);
+  assert.match(source, /function exitUnitFailedToStart[\s\S]*?FAILED TO START[\s\S]*?endFleetLock\(chosen\);\s*return process\.exit\(failure\.status/,
+    "a unit that never started holds nobody awake");
 });

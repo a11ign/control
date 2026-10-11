@@ -31,6 +31,7 @@ import {
   importClosure, staleCheckoutVerdict, checkAgainstMain, judgeLaidLayer, FETCH_THROTTLE_MS,
   LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight, LAUNCHABLE_PLAYBOOK_NAMES,
 } from "./fleet-auto-off.ts";
+import { readFleetLock, FLEET_LOCK_PATH } from "./fleet-lock.ts";
 
 // ---------------------------------------------------------------------------------------------------------
 // hasWakeableMac -- "has a MAC" means magicPacket() accepts it, not merely a non-empty field.
@@ -1689,5 +1690,79 @@ test("#3543 4 the play ending releases the box, and the idle clock is NOT restar
 
 test("#3543 main passes the real reader: tick's default is `no play`, so only this wiring makes the signal live", () => {
   const source = readFileSync(fileURLToPath(new URL("./fleet-auto-off.ts", import.meta.url)), "utf8");
-  assert.match(source, /await tick\(\{ workers: declared, apply, playsInFlight: readPlaysInFlight \}\)/);
+  assert.match(source, /await tick\(\{ workers: declared, apply, playsInFlight: readPlaysInFlight, fleetLock: readFleetLock \}\)/);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// a11ign#5014 -- a held fleet lock is not idle either. A run that FAILS is `finished` to the unit reading, so five
+// idle minutes later the boxes were off before the next attempt of the same operation (#4405 item 2).
+// ---------------------------------------------------------------------------------------------------------
+
+type LockFile = { operation: string; holder: string; takenAt: number; expiresAt: number; endedAt?: number };
+/** The lock file as the control plane would print it, read through the REAL `readFleetLock` so the whole chain is exercised. */
+const lockFile = (lock: LockFile | string | null) => (now: number, options?: { log?: (line: string) => void }) => readFleetLock(now, {
+  ...options,
+  transport: (command: string) => {
+    assert.ok(command.includes(FLEET_LOCK_PATH), "the read names the fleet lock's one address on the control plane");
+    return lock === null ? "" : typeof lock === "string" ? lock : JSON.stringify(lock);
+  },
+});
+const aLock = (expiresAt: number): LockFile => ({ operation: "provision-role.yml", holder: "agents:1", takenAt: 0, expiresAt });
+
+test("#5014 1 an idle-past-threshold box under a HELD lock is kept (`fleet-lock-held`); the same box with no lock is put off", async () => {
+  const held = await idleBoxTick(playIs("none"), { fleetLock: lockFile(aLock(IDLE_THRESHOLD_MS + 1)) });
+  assert.deepEqual(held.decisions[0].decision, { action: "keep", reason: "fleet-lock-held" });
+  const control = await idleBoxTick(playIs("none"), { fleetLock: lockFile(null) });
+  assert.deepEqual(control.decisions[0].decision, { action: "off", reason: "idle-five-minutes" },
+    "the control: without the lock this box is decided off, so the keep above is the lock's doing");
+});
+
+test("#5014 2 the same lock at and past its expiresAt is IGNORED: the box is decided off", async () => {
+  const atExpiry = await idleBoxTick(playIs("none"), { fleetLock: lockFile(aLock(IDLE_THRESHOLD_MS)) });
+  assert.deepEqual(atExpiry.decisions[0].decision, { action: "off", reason: "idle-five-minutes" }, "`expiresAt` has passed at `now`");
+  const past = await idleBoxTick(playIs("none"), { fleetLock: lockFile(aLock(1)) });
+  assert.deepEqual(past.decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
+});
+
+test("#5014 3 a lock that cannot be read keeps the box with its own reason, and stderr says why", async () => {
+  const written: string[] = [];
+  const realWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string) => { written.push(String(chunk)); return true; }) as never;
+  try {
+    const result = await idleBoxTick(playIs("none"), { fleetLock: lockFile("{ half a file") });
+    assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "fleet-lock-unreadable" });
+    const unreachable = await idleBoxTick(playIs("none"), { fleetLock: (now: number, options?: { log?: (line: string) => void }) => readFleetLock(now,
+      { ...options, transport: () => { throw new Error("ssh: no route to host"); } }) });
+    assert.deepEqual(unreachable.decisions[0].decision, { action: "keep", reason: "fleet-lock-unreadable" },
+      "a control plane that cannot be asked is not a fleet nobody holds");
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  assert.match(written.join(""), /fleet-auto-off: the fleet lock is unreadable .*not JSON.*every box kept/s);
+  assert.match(written.join(""), /no route to host/);
+});
+
+test("#5014 4 the decision's order: the unit outranks the lock in the report, and the lock is no excuse for a box the earlier keeps already name", () => {
+  const base = { name: "a11y-worker-2", hasMac: true, probe: "idle" as const, idleSince: 0, shutdownRequestedAt: null, wakeProvenAt: 0,
+    batchQueued: false, leasePending: false };
+  const at = IDLE_THRESHOLD_MS;
+  assert.deepEqual(autoOffDecision({ ...base, playInFlight: "running", fleetLock: "held" }, at), { action: "keep", reason: "play-in-flight" });
+  assert.deepEqual(autoOffDecision({ ...base, fleetLock: "held" }, at), { action: "keep", reason: "fleet-lock-held" });
+  assert.deepEqual(autoOffDecision({ ...base, fleetLock: "unreadable" }, at), { action: "keep", reason: "fleet-lock-unreadable" });
+  assert.deepEqual(autoOffDecision({ ...base, wakeProvenAt: null, fleetLock: "held" }, at), { action: "keep", reason: "wake-unproven" });
+  for (const reading of ["none", "stale", undefined] as const) {
+    assert.deepEqual(autoOffDecision({ ...base, fleetLock: reading }, at), { action: "off", reason: "idle-five-minutes" }, `${reading}: no keep from the lock`);
+  }
+});
+
+test("#5014 5 the lock is read ONCE per tick for the whole fleet, and `tick`'s default is no lock (a test needs no ssh)", async () => {
+  let reads = 0;
+  const counted = (now: number) => { reads += 1; return lockFile(aLock(now + 1))(now); };
+  const three = [...WORKERS, { name: "a11y-worker-3", host: "192.0.2.13", mac: "aa:bb:cc:dd:ee:00" },
+    { name: "a11y-worker-4", host: "192.0.2.14", mac: "aa:bb:cc:dd:ee:01" }];
+  await tick({ workers: three, probe: async () => ({ outcome: "idle" }), now: () => IDLE_THRESHOLD_MS, statePath: "x.json",
+    read: alreadyIdleSince0, proofTransport: provenAt0, write: () => {}, fleetLock: counted as never });
+  assert.equal(reads, 1, "three workers, one read");
+  const defaulted = await idleBoxTick(playIs("none"));
+  assert.deepEqual(defaulted.decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
 });
