@@ -147,9 +147,25 @@ worker_edge_policy:
 # the 2026-09-04 recapture reads `browserVersion: ABSENT`, so its key already resolves to `.../unknown`
 # and already fails to match any live guest. The corpus was cache-invalid before this change and is no
 # more invalid after it -- the same reason the 151 bump cost nothing.
-worker_edge_version: "152.0.4191.66"
-worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/2757513f-2ec6-4bb1-b23a-5738a92d7a56/MicrosoftEdgeEnterpriseX64.msi"
-worker_edge_msi_sha256: "5bcf8cd57351ddaa94419f800f8d90b8cbaf2b485b49d9ddb07d055b76a518df"
+# FOLLOWED FORWARD to 155.0.4283.45 on 2026-10-11 (a11ign#4732), again the pin's documented behaviour: following a
+# fleet that drifted is one download per box, and rolling back is `worker_edge_allow_downgrade`, which stays false.
+#
+# WHY IT DRIFTED, measured 2026-10-11T04:44Z: on a11y-worker-7, -8 and -9 the updater was never disabled, so Edge
+# moved to 154 and then to 155 on its own while the pin read 152.0.4191.66. Chromium's MSI declines to install a
+# build older than the one present and still LOGS SUCCESS; `--rename-chrome-exe` then threw, and the role stopped at
+# the Edge step -- before the tasks that disable the updater, which sat AFTER the install. A box that stops there
+# has a live updater by construction, so the order is now the other way round (`edge-version.yml`, pinned by
+# `edge-updater-before-install.test.ts`). a11y-worker-11, whose updater was off, still read 152.0.4191.66.
+#
+# 155.0.4283.45 is the highest Stable x64 MSI `edgeupdates.microsoft.com` publishes (2026-10-08T18:58Z). Microsoft
+# also published 152.0.4191.122 a few hours later, which is an older-branch patch, not a newer build, and the
+# three boxes on 155 cannot be brought to it without ALLOWDOWNGRADE.
+#
+# THE BOOTSTRAP CARRIES THE SAME PIN and is not in this repository (`bootstrap-windows-worker.ps1`, in
+# screenreader-fleet). `edge-pin-parity.test.ts` holds the two equal, so this value and that script move together.
+worker_edge_version: "155.0.4283.45"
+worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/2e772119-b856-4562-ad9a-8422e4224d42/MicrosoftEdgeEnterpriseX64.msi"
+worker_edge_msi_sha256: "46db09d14b85a0df8bca87fbe9c3224ccf54f97d776bedc2eebf4b0c2ccbf5b4"
 # The binary is the source of truth for "which Edge is installed", not the registry's recorded version.
 # Same rule the worker itself now follows: it reported a version it was not running for five days because
 # the value was read once and cached, and the file on disk had moved underneath it.
