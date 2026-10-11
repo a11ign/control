@@ -7,7 +7,7 @@ Closes: none -- a throwaway that proves a11ign/control#59's job goes red; it mer
 Acceptance:
 
 ```bash
-! grep -q "'@changesets/cli':" pnpm-lock.yaml
+grep -q "^lockfileVersion" pnpm-lock.yaml
 ```
 
 Outside-Region: pnpm-lock.yaml — the throwaway's whole content
