@@ -238,6 +238,36 @@
     if ($p.ExitCode -ne 0) { throw "rename-chrome-exe exited $($p.ExitCode)" }
   changed_when: true
 
+- name: Stop and disable EVERY Edge-updater scheduled task again, after the install
+  # THE SAME PAIR, REPEATED AFTER THE INSTALL (a11ign#4948, #4405). The early pair above stops the updater before
+  # the install, which is what a box that stops at the Edge step needs (a11ign#4732). It is not enough on its own:
+  # the installer re-registers the updater as it runs, so a box that installed Edge in this run came out of the
+  # install with a live updater, and the closing assertion refused it. Twelve boxes failed that way on 2026-10-11
+  # with `MicrosoftEdgeUpdateTaskMachineCore` and `MicrosoftEdgeUpdateTaskMachineUA` Ready, expected Disabled.
+  #
+  # UNCONDITIONAL, not gated on an install having run: an installer an earlier attempt already ran has
+  # registered the updater too, and a box that skipped the install this time can still hold one. Same rules as
+  # the early pair: BY PREFIX, and STOP BEFORE DISABLE. `edge-updater-before-install.test.ts` pins this position.
+  become: true
+  ansible.windows.win_shell: |
+    $tasks = Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue
+    if (-not $tasks) { "none found"; exit 0 }
+    foreach ($t in $tasks) {
+      if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
+      if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
+      "$($t.TaskName) -> $((Get-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath).State)"
+    }
+  changed_when: true
+
+- name: Stop and disable the updater's services again, after the install
+  become: true
+  ansible.windows.win_service:
+    name: "{{ item }}"
+    state: stopped
+    start_mode: disabled
+  loop: "{{ worker_edge_updater_services }}"
+  failed_when: false
+
 - name: Register the guard that re-asserts the Edge updater, because disabling it once is not keeping it off
   # THE UPDATER STAYS OFF BECAUSE SOMETHING RE-ASSERTS IT, not because it was off once (a11ign#5015).
   # 2026-10-11, a11ign#4948 run 1: 12 boxes ended `failed=1` at the closing assertion below with
