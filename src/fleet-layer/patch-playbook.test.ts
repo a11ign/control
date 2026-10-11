@@ -365,7 +365,9 @@ test("a11ign#4979: the Orchestrator commit, the BCD read and the staged-but-not-
 const UPGRADE = { "KB5129195": { title: "Windows 11, version 25H2", categories: ["Upgrades"], installed: true } };
 const CUMULATIVE = { "KB5000001": { title: "Cumulative", categories: ["SecurityUpdates", "UpdateRollups"], installed: true } };
 const BCD_WITH_SAFEOS = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Setup", "identifier {a1}", "device ramdisk=[C:]\\$WINDOWS.~BT\\Sources\\boot.wim"];
-const BCD_WITHOUT = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Boot Loader", "identifier {current}", "description Windows 11"];
+// Every Windows 11 BCD carries the recovery entry, `winpe Yes` included (a11ign#5052, read off a11y-worker-6).
+const RECOVERY_ENTRY = ["Windows Boot Loader", "identifier {rec}", "description Windows Recovery Environment", "device ramdisk=[C:]\\Recovery\\WindowsRE\\Winre.wim", "winpe Yes"];
+const BCD_WITHOUT = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Boot Loader", "identifier {current}", "description Windows 11", ...RECOVERY_ENTRY];
 
 /** The refusal alone, over an invented install result and an invented BCD reading. */
 function switchVerdict(host: { updates: object, reboot: boolean, bcd: string[] }): { status: number | null, out: string } {
@@ -380,6 +382,7 @@ test("a11ign#4979 POSITIVE: an Upgrades item staged with no SafeOS entry fails t
   assert.match(staged.out, /a11y-worker-6: staged but not switched/);
   assert.match(staged.out, /Windows Boot Loader/, "the evidence is the entry list");
   assert.equal(switchVerdict({ updates: UPGRADE, reboot: true, bcd: BCD_WITH_SAFEOS }).status, 0, "a committed switch passes");
+  assert.equal(switchVerdict({ updates: UPGRADE, reboot: true, bcd: [...BCD_WITHOUT, ...BCD_WITH_SAFEOS] }).status, 0, "the recovery entry plus a Setup entry on the staged media passes");
 });
 
 test("a11ign#4979 NEGATIVE: a pass with no Upgrades item is not refused, however the BCD reads", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
