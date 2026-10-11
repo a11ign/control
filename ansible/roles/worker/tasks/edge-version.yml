@@ -238,6 +238,79 @@
     if ($p.ExitCode -ne 0) { throw "rename-chrome-exe exited $($p.ExitCode)" }
   changed_when: true
 
+- name: Register the guard that re-asserts the Edge updater, because disabling it once is not keeping it off
+  # THE UPDATER STAYS OFF BECAUSE SOMETHING RE-ASSERTS IT, not because it was off once (a11ign#5015).
+  # 2026-10-11, a11ign#4948 run 1: 12 boxes ended `failed=1` at the closing assertion below with
+  # `MicrosoftEdgeUpdateBrowserReplacementTask` `Ready`, expected `Disabled`. Everything above disables the
+  # tasks and services once per provision; nothing re-asserted them between provisions, and Edge puts a task
+  # back. So a SYSTEM task does the same two things at startup and every few minutes, and writes down what it
+  # had to undo, because the worker runs unelevated and CANNOT read these tasks -- the elevated task is the
+  # only reader that can answer "did the updater come back?".
+  #
+  # POLICY WAS NOT ADDED, and that is a decision, not an omission: see the header of this file. The EdgeUpdate
+  # policies are stored and never honoured on these standalone boxes. UNREGISTERING the tasks is not durable
+  # either, since the updater re-registers them. The pair this role already uses -- disable the tasks, disable
+  # the services -- is what works; what was missing is repetition.
+  #
+  # The script is a FILE the task runs with `-File`, not an inline `-Command`: a script with quotes in it
+  # survives neither YAML nor the Windows command line, and a guard that fails to parse is a guard that never
+  # runs. Same two rules as the tasks above: BY PREFIX not by name, and STOP BEFORE DISABLE.
+  become: true
+  vars:
+    edge_guard_interval_minutes: 15
+    edge_guard_task: a11y-edge-updater-guard
+    edge_guard_dir: 'C:\ProgramData\a11ign'
+  block:
+    - name: Lay the guard script
+      ansible.windows.win_copy:
+        dest: "{{ edge_guard_dir }}\\edge-updater-guard.ps1"
+        content: |
+          $ErrorActionPreference = 'Stop'
+          $services = @('{{ worker_edge_updater_services | to_json }}' | ConvertFrom-Json)
+          $reenabled = @()
+          # By prefix: the set of tasks grew once already (BrowserReplacementTask).
+          foreach ($t in @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
+            $changed = $false
+            # Stop BEFORE disable: Disable-ScheduledTask does not terminate an instance already running
+            # (a11y-worker-5, 2026-08-25).
+            if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath; $changed = $true }
+            if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null; $changed = $true }
+            if ($changed) { $reenabled += "task:$($t.TaskName)" }
+          }
+          foreach ($name in $services) {
+            $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if (-not $svc) { continue }
+            $changed = $false
+            if ($svc.Status -ne 'Stopped') { Stop-Service -Name $name -Force; $changed = $true }
+            if ($svc.StartType -ne 'Disabled') { Set-Service -Name $name -StartupType Disabled; $changed = $true }
+            if ($changed) { $reenabled += "service:$name" }
+          }
+          # Written to a sibling and moved over, so a reader never sees half a record.
+          $record = '{{ edge_guard_dir }}\edge-updater-guard.json'
+          $json = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($reenabled) } | ConvertTo-Json -Depth 3
+          Set-Content -LiteralPath "$record.tmp" -Value $json -Encoding UTF8
+          Move-Item -LiteralPath "$record.tmp" -Destination $record -Force
+
+    - name: Register the guard task, as SYSTEM, at startup and on a repeat
+      community.windows.win_scheduled_task:
+        name: "{{ edge_guard_task }}"
+        description: a11ign Edge updater guard (a11ign#5015), re-disables the updater and records what had come back
+        username: SYSTEM
+        logon_type: service_account
+        run_level: highest
+        actions:
+          - path: powershell.exe
+            arguments: -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{{ edge_guard_dir }}\edge-updater-guard.ps1"
+        triggers:
+          - type: boot
+          - type: daily
+            start_boundary: '2026-01-01T00:00:00'
+            repetition:
+              - interval: "PT{{ edge_guard_interval_minutes }}M"
+                duration: P1D
+        state: present
+        enabled: true
+
 - name: Refuse to call this provisioned unless Edge is the pinned build and the updater is off
   # The "prove it" half, matching every other concern in this role. Read back from the binary and from the
   # live task/service state -- never from the variables we just wrote, which would assert our own intent.
@@ -248,8 +321,9 @@
       Want: "{{ worker_edge_version }}"
       Tasks: "{{ worker_edge_updater_tasks }}"
       Services: "{{ worker_edge_updater_services }}"
+      Guard: a11y-edge-updater-guard
     script: |
-      param($Exe, $Want, $Tasks, $Services)
+      param($Exe, $Want, $Tasks, $Services, $Guard)
       $Ansible.Changed = $false
       $wrong = @()
       $have = if (Test-Path -LiteralPath $Exe) { (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion } else { "(absent)" }
@@ -267,6 +341,10 @@
           if ($svc.StartType -ne 'Disabled') { $wrong += "service $s start type is $($svc.StartType), expected Disabled" }
         }
       }
+      # The guard is what keeps the updater off after this run ends, so a box without it is not provisioned.
+      $g = Get-ScheduledTask -TaskName $Guard -ErrorAction SilentlyContinue
+      if (-not $g) { $wrong += "guard task $Guard is absent" }
+      elseif ($g.State -eq 'Disabled') { $wrong += "guard task $Guard is Disabled, expected enabled" }
       if ($wrong.Count) { throw ($wrong -join '; ') }
       "Edge $have, updater disabled"
   register: edge_proof
