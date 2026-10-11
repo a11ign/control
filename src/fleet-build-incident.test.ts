@@ -12,6 +12,7 @@ import {
   type BuildStatus, type IncidentDeps, type OpenIncident,
 } from "./fleet-build-incident.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
+import { windowsBuildsOf } from "./fleet-status.ts";
 
 const OLD = "10.0.22631";
 const MID = "10.0.26100";
@@ -21,18 +22,27 @@ const urlOf = (n: number) => `http://10.0.0.${n}:8765`;
 const nameOf = (n: number) => `a11y-worker-${n}`;
 const rowOf = (n: number, state = "ready") => ({ name: `${nameOf(n)}  10.0.0.${n}`, url: urlOf(n), state });
 
-/** A box's build: a string, `null` for a box that answered without reporting one, `"down"` for one that did not answer. */
-type Build = string | null | "down";
+/**
+ * A box's build: a string, `null` for a box that answered without reporting one, `"down"` for one that did not answer,
+ * `"no-environment"` for one that answered with no `environment` block at all.
+ */
+type Build = string | null | "down" | "no-environment";
 
 function fleet(builds: Record<number, Build>): BuildStatus {
   const boxes = Object.entries(builds).map(([n, build]) => ({ n: Number(n), build }));
   const rows = boxes.map(({ n, build }) => rowOf(n, build === "down" ? "unreachable" : "ready"));
   const guests = boxes.filter(({ build }) => build !== "down").map(({ n, build }) => ({
-    worker: urlOf(n), environment: build === null ? { displayMode: "1024x768" } : { displayMode: "1024x768", windowsBuild: build },
+    worker: urlOf(n),
+    environment: build === "no-environment" ? undefined
+      : build === null ? { displayMode: "1024x768" } : { displayMode: "1024x768", windowsBuild: build },
   }));
-  const { mismatches, reportedOnly, compared } = fleetConsistency(guests);
-  return { rows, mismatches, reportedOnly, compared };
+  const { mismatches, reportedOnly } = fleetConsistency(guests);
+  // `windowsBuilds` comes out of the REAL `windowsBuildsOf`, the helper `fleetStatus` calls, so a fixture cannot invent it.
+  return { rows, mismatches, reportedOnly, windowsBuilds: windowsBuildsOf(guests) };
 }
+
+const windowsBuildDrift = (status: BuildStatus) =>
+  [...status.mismatches ?? [], ...status.reportedOnly ?? []].filter((drift) => drift.field === "windowsBuild");
 
 /** `count` boxes numbered from `from` on one build. */
 const on = (build: Build, from: number, count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [from + i, build]));
@@ -55,8 +65,10 @@ test("one build across the fleet is not mixed (NEGATIVE CONTROL for the map abov
   const spread = buildSpread(oneBuild);
   assert.equal(spread.mixed, false);
   assert.deepEqual(spread.laggards, []);
+  assert.equal(spread.target, NEW, "a fleet that agrees names the build: `windowsBuilds` carries it though no drift entry exists");
   assert.equal(spread.read.length, 15, "no `windowsBuild` drift entry exists when everybody agrees, and every box still reads as read");
   assert.deepEqual(spread.unread, []);
+  assert.deepEqual(windowsBuildDrift(oneBuild), [], "positive control: the fixture really has no `windowsBuild` drift entry");
 });
 
 test("the target is the NEWEST build, not the common one: ten boxes on the older build and five on the newer still target the newer", () => {
@@ -80,11 +92,20 @@ test("a box that did not answer, did not report, or reported the placeholder is 
   assert.deepEqual(spread.unread, [nameOf(4), nameOf(5), nameOf(6)]);
 });
 
-test("a reachable box dropped from the comparison for carrying no environment is not claimed read", () => {
-  const status = { ...oneBuild, compared: 14 };
-  const spread = buildSpread(status);
-  assert.equal(spread.read.length, 0, "14 compared of 15 reachable: which one agreed is not known, so none is claimed");
-  assert.equal(spread.unread.length, 15);
+test("a reachable box that carries no environment is UNREAD, and only that box is (the others still read)", () => {
+  const spread = buildSpread(fleet({ ...on(NEW, 2, 14), 16: "no-environment" }));
+  assert.equal(spread.mixed, false);
+  assert.deepEqual(spread.unread, [nameOf(16)]);
+  assert.equal(spread.read.length, 14, "positive control: the fourteen that reported a build are read");
+});
+
+test("a status with no `windowsBuilds` claims nothing read, and still shows a mix from the drift (absence is never agreement)", () => {
+  const { windowsBuilds: _dropped, ...legacyAgreeing } = oneBuild;
+  const agreeing = buildSpread(legacyAgreeing);
+  assert.equal(agreeing.read.length, 0, "no field and no drift entry: nothing says anybody agreed");
+  assert.equal(agreeing.unread.length, 15);
+  const { windowsBuilds: _unused, ...legacyMixed } = rulingMap;
+  assert.equal(buildSpread(legacyMixed).mixed, true, "NEGATIVE CONTROL: the drift alone still names a mix");
 });
 
 test("two boxes on different builds are mixed whatever the rest did, so filing needs no completeness", () => {
@@ -166,14 +187,28 @@ test("one build with a box UNREAD leaves the incident open and names the box; th
   assert.match(read.closed[0].comment, /15 boxes read/);
 });
 
-test("KNOWN LIMIT: every box on the SAME placeholder leaves no drift entry, so it reads as read (a fleet-wide restart before first sample)", () => {
-  // `fleetConsistency` names a `windowsBuild` value only when somebody disagrees or somebody did not report, so a fleet
-  // that agrees on `unknown` is indistinguishable from one that agrees on a build at this seam. The one place that could
-  // tell them apart is `fleetStatus`, outside this row's Region. This pins the limit so the follow-up that exposes the
-  // value has a test to turn around. One placeholder among real builds IS caught: see the UNREAD test above.
+test("a fleet where EVERY box reports the same placeholder is not read: the open incident stays open (a11ign#5106)", () => {
+  // The case a11ign#5026 pinned as a known limit: a fleet-wide restart before the first sample leaves every box on
+  // `unknown`, `fleetConsistency` names no `windowsBuild` value for a fleet that agrees, and the incident closed. The
+  // build now comes from `windowsBuilds`, so the placeholder is unread whether or not the boxes agree.
+  const placeholder = fleet(on("unknown", 2, 4));
+  assert.deepEqual(windowsBuildDrift(placeholder), [], "premise: the drift has no `windowsBuild` entry for this fleet, which is what hid it");
+  const spread = buildSpread(placeholder);
+  assert.equal(spread.mixed, false);
+  assert.equal(spread.target, null);
+  assert.deepEqual(spread.read, []);
+  assert.equal(spread.unread.length, 4);
   const { deps, effects } = seam([incident(5100)]);
-  reconcileIncident(buildSpread(fleet(on("unknown", 2, 4))), deps);
+  const outcome = reconcileIncident(spread, deps);
+  assert.deepEqual(effects, [], "nothing is closed");
+  assert.deepEqual(outcome.heldOpen?.unread, spread.unread, "and it is said to be held open, naming the boxes");
+});
+
+test("the same four boxes on ONE real build are read and close the incident (POSITIVE CONTROL for the placeholder fleet above)", () => {
+  const { deps, effects } = seam([incident(5100)]);
+  const outcome = reconcileIncident(buildSpread(fleet(on(NEW, 2, 4))), deps);
   assert.deepEqual(effects, ["close #5100"]);
+  assert.deepEqual(outcome.closed, [5100]);
 });
 
 test("a failing `gh` is CANNOT_ASK in the tick and never a clean reading, whichever call failed", () => {
