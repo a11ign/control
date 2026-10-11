@@ -1,6 +1,6 @@
 Row a11ign/a11ign#5015 (part of a11ign/a11ign#4405, item 3). Nothing re-asserted the Edge updater's tasks between provisions, and Edge puts one back: 12 boxes ended a11ign#4948 run 1 with `MicrosoftEdgeUpdateBrowserReplacementTask` `Ready`. `edge-version.yml` now registers a SYSTEM guard that repeats the disable and records what it undid.
 
-Closes: none -- a11ign/a11ign#5015 cannot be closed from this repository; `product-manager` closes it at merge.
+Closes a11ign/a11ign#5015
 
 platform: Windows Task Scheduler (`community.windows.win_scheduled_task`, already used by `tasks.yml`) is the repetition; nothing new is built.
 
