@@ -476,9 +476,9 @@ export const USE_RESERVATION_MAX_MS = 60 * MS_PER_MINUTE;
 export const USE_POST_TIMEOUT_MS = 5 * MS_PER_MINUTE;
 
 /** Signal 0 probes without sending: EPERM still means the process exists. */
-export function pidAlive(pid: number): boolean {
+export function pidAlive(pid: number, kill: (pid: number, signal: 0) => unknown = process.kill.bind(process)): boolean {
   try {
-    process.kill(pid, 0);
+    kill(pid, 0);
     return true;
   } catch (cause) {
     return (cause as NodeJS.ErrnoException).code === "EPERM";

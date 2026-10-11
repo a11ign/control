@@ -13,7 +13,7 @@ import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
-  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, type CapturesState,
+  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, pidAlive, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
@@ -763,8 +763,10 @@ test("postUseOnce: a tick that lands WHILE the first is posting posts nothing (t
   const write = ((_p: string, data: string) => { file = data; }) as never;
   const posted: string[] = [];
   let during: string | null = null;
-  const second = () => postUseOnce({ path: "c.json", now: USE_NOW + 60_000, post: (b) => posted.push(b), read, write });
-  const first = postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: (b) => { posted.push(b); during = second(); } });
+  // pid and liveness are injected: the test must not depend on what `process.pid` or `process.kill` are inside a runner's worker
+  const owner = { pid: 111, alive: (pid: number) => pid === 111 };
+  const second = () => postUseOnce({ path: "c.json", now: USE_NOW + 60_000, post: (b) => posted.push(b), read, write, ...owner, pid: 222 });
+  const first = postUseOnce({ path: "c.json", now: USE_NOW, read, write, ...owner, post: (b) => { posted.push(b); during = second(); } });
   assert.equal(first, "posted");
   assert.equal(during, "in-progress", "the racing tick found the day reserved");
   assert.equal(posted.length, 1);
@@ -803,10 +805,10 @@ test("postUseOnce: the commit is written only AFTER the post returned", () => {
   const read = (() => file) as never;
   const write = ((_p: string, data: string) => { file = data; }) as never;
   let seenDuring: { usePostedOn?: string, useReservedAt?: number, useReservedBy?: number } = {};
-  postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: () => { seenDuring = JSON.parse(file); } });
+  postUseOnce({ path: "c.json", now: USE_NOW, read, write, pid: 111, post: () => { seenDuring = JSON.parse(file); } });
   assert.equal(seenDuring.usePostedOn, undefined);
   assert.equal(seenDuring.useReservedAt, USE_NOW);
-  assert.equal(seenDuring.useReservedBy, process.pid);
+  assert.equal(seenDuring.useReservedBy, 111);
 });
 
 test("postUseOnce: a failed post RELEASES the reservation, so the race fix does not lose the day", () => {
@@ -817,6 +819,13 @@ test("postUseOnce: a failed post RELEASES the reservation, so the race fix does 
   assert.equal(JSON.parse(file).usePostedOn, undefined);
   const posted: string[] = [];
   assert.equal(postUseOnce({ path: "c.json", now: USE_NOW + USE_HOUR, read, write, post: (b) => posted.push(b) }), "posted");
+});
+
+test("pidAlive: a signal that lands is alive, EPERM is alive (exists, not ours), ESRCH is dead", () => {
+  const raising = (code: string) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(pidAlive(1, () => true), true);
+  assert.equal(pidAlive(1, raising("EPERM")), true);
+  assert.equal(pidAlive(1, raising("ESRCH")), false);
 });
 
 test("the post body rendered from a fixture state (the PR shows this)", () => {
