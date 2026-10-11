@@ -43,6 +43,50 @@
       {{ '— already the pinned build' if (edge_installed.output | default([]) | first | default('', true)) == worker_edge_version
          else '— would install ' ~ worker_edge_version }}
 
+- name: Stop and disable EVERY Edge-updater scheduled task
+  # THESE TWO TASKS COME BEFORE ANY TASK THAT CAN STOP THE ROLE AT THE EDGE STEP, and the order is the fix
+  # (a11ign#4732). They used to sit after "Install it", so a box that stopped at the Edge step -- the download,
+  # the downgrade refusal, the install, the rename -- never reached them and kept a live updater. a11y-worker-7,
+  # -8 and -9 were exactly that: Edge moved to 154 and then 155 on its own, Chromium's MSI declined the 152 pin
+  # while logging success, `--rename-chrome-exe` threw, and the role stopped with the updater still running.
+  # Worker 11, whose updater was off, held the pin. `edge-updater-before-install.test.ts` pins the order.
+  #
+  # BY PREFIX, NOT BY NAME. The first version named the two tasks that were known -- Core and UA -- and a
+  # freshly installed guest turned out to carry a third, `MicrosoftEdgeUpdateBrowserReplacementTask`, sitting
+  # `Ready` while the other two were correctly disabled. A task called "browser replacement" is precisely the
+  # thing this concern exists to stop, and an enumerated list could not see it.
+  #
+  # Same shape as `edgePolicy` reporting two policy values, and as the probe flags that had to be forwarded
+  # by prefix rather than by name. When the set can grow underneath you, match the set.
+  become: true
+  ansible.windows.win_shell: |
+    $tasks = Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue
+    if (-not $tasks) { "none found"; exit 0 }
+    foreach ($t in $tasks) {
+      # STOP BEFORE DISABLE, and this is the step that was missing. `Disable-ScheduledTask` marks a task
+      # so it will not START again; it does not terminate an instance already RUNNING. Measured on
+      # a11y-worker-5, 2026-08-25: the final verify refused with "scheduled task
+      # MicrosoftEdgeUpdateTaskMachineCore is Running, expected Disabled" — on the one guest in the fleet
+      # that had updated itself past the pin.
+      #
+      # So this is not a tidy-up, it is the mechanism. A run that disables a live updater and walks away
+      # leaves it to finish the update it was already performing, which is precisely the drift the pin
+      # exists to prevent, arriving in the window between disabling and believing it.
+      if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
+      if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
+      "$($t.TaskName) -> $((Get-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath).State)"
+    }
+  changed_when: true
+
+- name: Stop and disable the updater's services
+  become: true
+  ansible.windows.win_service:
+    name: "{{ item }}"
+    state: stopped
+    start_mode: disabled
+  loop: "{{ worker_edge_updater_services }}"
+  failed_when: false
+
 - name: Fetch the pinned installer
   # Only when it would change something: this is a ~150 MB download onto a box that may be mid-corpus.
   when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
@@ -193,43 +237,6 @@
     $p = Start-Process -FilePath $setup -ArgumentList "--rename-chrome-exe","--system-level" -Wait -PassThru -NoNewWindow
     if ($p.ExitCode -ne 0) { throw "rename-chrome-exe exited $($p.ExitCode)" }
   changed_when: true
-
-- name: Stop and disable EVERY Edge-updater scheduled task
-  # BY PREFIX, NOT BY NAME. The first version named the two tasks that were known -- Core and UA -- and a
-  # freshly installed guest turned out to carry a third, `MicrosoftEdgeUpdateBrowserReplacementTask`, sitting
-  # `Ready` while the other two were correctly disabled. A task called "browser replacement" is precisely the
-  # thing this concern exists to stop, and an enumerated list could not see it.
-  #
-  # Same shape as `edgePolicy` reporting two policy values, and as the probe flags that had to be forwarded
-  # by prefix rather than by name. When the set can grow underneath you, match the set.
-  become: true
-  ansible.windows.win_shell: |
-    $tasks = Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue
-    if (-not $tasks) { "none found"; exit 0 }
-    foreach ($t in $tasks) {
-      # STOP BEFORE DISABLE, and this is the step that was missing. `Disable-ScheduledTask` marks a task
-      # so it will not START again; it does not terminate an instance already RUNNING. Measured on
-      # a11y-worker-5, 2026-08-25: the final verify refused with "scheduled task
-      # MicrosoftEdgeUpdateTaskMachineCore is Running, expected Disabled" — on the one guest in the fleet
-      # that had updated itself past the pin.
-      #
-      # So this is not a tidy-up, it is the mechanism. A run that disables a live updater and walks away
-      # leaves it to finish the update it was already performing, which is precisely the drift the pin
-      # exists to prevent, arriving in the window between disabling and believing it.
-      if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
-      if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
-      "$($t.TaskName) -> $((Get-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath).State)"
-    }
-  changed_when: true
-
-- name: Stop and disable the updater's services
-  become: true
-  ansible.windows.win_service:
-    name: "{{ item }}"
-    state: stopped
-    start_mode: disabled
-  loop: "{{ worker_edge_updater_services }}"
-  failed_when: false
 
 - name: Refuse to call this provisioned unless Edge is the pinned build and the updater is off
   # The "prove it" half, matching every other concern in this role. Read back from the binary and from the
