@@ -169,7 +169,10 @@ export function advance(rows: FleetRow[], previous: SinceState, now: number): Si
 
 export type Rise = {at: number, by: number};
 export type WorkerCaptures = {captures: number, seenAt: number, lastRoseAt: number|null, rises: Rise[]};
-export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>};
+/** One hourly tick's sampling (#5016): which boxes answered, and which of those did work since the tick before. */
+export type UseTick = {at: number, awake: string[], worked: string[]};
+/** `ticks` and `usePostedOn` are absent from a file written before the use reading existed, and that file still reads. */
+export type CapturesState = {since: number, workers: Record<string, WorkerCaptures>, ticks?: UseTick[], usePostedOn?: string};
 export type CaptureTimes = {captures24h: number, lastCaptureAt: number|null, observedSince: number};
 /**
  * ## When did the fleet last capture? (#2979, found by #2937)
@@ -365,7 +368,7 @@ export function advanceCaptures(rows: FleetRow[], previous: CapturesState | null
     const key = workerKey(row.name);
     workers[key] = advanceWorker(known[key], reading, { now, since: base.since });
   }
-  return { since: base.since, workers };
+  return { ...base, workers };
 }
 
 /**
@@ -386,6 +389,102 @@ export function captureTimes(state: CapturesState | null, now: number): CaptureT
 
 export function readCaptureTimes(path: string, now: number, read: (path: string, encoding: "utf8") => string = readFileSync): CaptureTimes | null {
   return captureTimes(readCapturesState(path, read), now);
+}
+
+const USE_TICK_KEEP_MS = 2 * CAPTURE_WINDOW_MS;
+/** Under this many ticks in 24 h a share would be a number about a gap in the watching, so none is given. */
+export const MIN_USE_TICKS = 20;
+
+const isUseTick = (tick: Partial<UseTick> | null | undefined): tick is UseTick =>
+  Boolean(tick) && isNumber(tick?.at) && Array.isArray(tick?.awake) && Array.isArray(tick?.worked);
+
+/** The ticks a file holds; a malformed entry is dropped rather than refusing the ledger (the rises are still good). */
+const ticksOf = (state: CapturesState | null): UseTick[] => (Array.isArray(state?.ticks) ? state.ticks.filter(isUseTick) : []);
+
+/**
+ * Record this tick's sampling. AWAKE is a box that answered (`state` is not `unreachable`, the resting state,
+ * #3023); WORKED is an awake box that reads `busy` or whose capture count rose since the previous tick. A rise
+ * is read from the ledger's own rises, so one `fleet-auto-off.ts` saw between two ticks still counts. Only the
+ * hourly tick calls this, which is why the share is an hourly sampling.
+ */
+export function withUseTick(state: CapturesState, rows: FleetRow[], now: number): CapturesState {
+  const kept = ticksOf(state).filter((tick) => now - tick.at < USE_TICK_KEEP_MS && tick.at < now);
+  const since = kept.length ? kept[kept.length - 1].at : now - 1;
+  const rose = (key: string) => (state.workers[key]?.rises ?? []).some((rise) => rise.at > since && rise.at <= now);
+  const awakeRows = rows.filter((row) => row.state !== "unreachable");
+  const worked = awakeRows.filter((row) => row.state === "busy" || rose(workerKey(row.name)));
+  const tick: UseTick = { at: now, awake: awakeRows.map((row) => workerKey(row.name)), worked: worked.map((row) => workerKey(row.name)) };
+  return { ...state, ticks: [...kept, tick] };
+}
+
+/** `advanceCaptures` plus this tick's sampling, under the same lock `recordCaptures` takes. */
+export function recordFleetTick(rows: FleetRow[], { path, at, read, write, lock = write ? unlocked : withFileLock }: {
+        path: string; at: number; read?: typeof readFileSync; write?: typeof writeFileSync; lock?: typeof withFileLock;
+    }) {
+  lock(path, () => writeCapturesState(path, withUseTick(advanceCaptures(rows, readCapturesState(path, read), at), rows, at), write));
+}
+
+export type UseRow = {box: string, captures: number, awakeTicks: number, workedTicks: number};
+export type UseReading =
+  | {kind: "reading", boxes: UseRow[], observedTicks: number, awakeTicks: number, workedTicks: number, share: number | null}
+  | {kind: "unknown", observedTicks: number, since: number};
+
+/**
+ * The fleet's use over the 24 h before `now`: captures per box (from the ledger's rises), box-ticks awake,
+ * box-ticks worked, and worked/awake. Fewer than `MIN_USE_TICKS` observed ticks is `unknown`, never a share,
+ * and a share with no awake box-tick is `null`: nothing was awake to be used, which is not 0% of something.
+ */
+export function useReading(state: CapturesState | null, now: number): UseReading {
+  const ticks = ticksOf(state).filter((tick) => now - tick.at < CAPTURE_WINDOW_MS && tick.at <= now);
+  if (!state || ticks.length < MIN_USE_TICKS) {
+    return { kind: "unknown", observedTicks: ticks.length, since: ticks.length ? Math.min(...ticks.map((tick) => tick.at)) : (state?.since ?? now) };
+  }
+  const captures = (box: string) => (state.workers[box]?.rises ?? [])
+    .filter((rise) => now - rise.at < CAPTURE_WINDOW_MS).reduce((sum, rise) => sum + rise.by, 0);
+  const count = (field: "awake" | "worked", box: string) => ticks.filter((tick) => tick[field].includes(box)).length;
+  const names = [...new Set([...Object.keys(state.workers), ...ticks.flatMap((tick) => tick.awake)])].sort();
+  const boxes = names.map((box) => ({ box, captures: captures(box), awakeTicks: count("awake", box), workedTicks: count("worked", box) }));
+  const awakeTicks = boxes.reduce((sum, row) => sum + row.awakeTicks, 0);
+  const workedTicks = boxes.reduce((sum, row) => sum + row.workedTicks, 0);
+  return { kind: "reading", boxes, observedTicks: ticks.length, awakeTicks, workedTicks, share: awakeTicks ? workedTicks / awakeTicks : null };
+}
+
+const utcDay = (at: number) => new Date(at).toISOString().slice(0, "YYYY-MM-DD".length);
+const PERCENT = 100;
+
+/** The `### Fleet use, <date>` comment: one table and one summary line, with the sampling said (hourly, not continuous). */
+export function useBody(reading: UseReading, now: number): string {
+  const head = `### Fleet use, ${utcDay(now)}`;
+  if (reading.kind === "unknown") {
+    return `${head}\n\nunknown: observed ${reading.observedTicks} ticks since ${new Date(reading.since).toISOString()} (a share needs ${MIN_USE_TICKS} in 24 h).`;
+  }
+  const rows = reading.boxes.map((row) => `| ${row.box} | ${row.captures} | ${row.awakeTicks} | ${row.workedTicks} |`);
+  const share = reading.share === null ? "no box answered at any tick, so there is no share" : `${(reading.share * PERCENT).toFixed(0)}% of awake box-hours did work`;
+  const total = reading.boxes.reduce((sum, row) => sum + row.captures, 0);
+  return [head, "", "| box | captures | awake ticks | worked ticks |", "|---|---|---|---|", ...rows, "",
+    `**${total} captures; ${share}** (${reading.workedTicks} of ${reading.awakeTicks} awake box-ticks).`,
+    `Sampled at the hourly tick, ${reading.observedTicks} ticks in the last 24 h: awake = answered; worked = busy or its count rose since the last tick.`,
+  ].join("\n");
+}
+
+/**
+ * Post the use reading once per UTC day. The day is marked in the ledger only AFTER the post returned, so a
+ * failed post is tried again on the next tick, and a second tick the same day posts nothing. A ledger nobody
+ * could read posts nothing either: it would say "unknown" about a file, not about the fleet.
+ */
+export function postUseOnce({ path, now, post, read, write, lock = write ? unlocked : withFileLock }: {
+        path: string; now: number; post: (body: string) => void; read?: typeof readFileSync; write?: typeof writeFileSync;
+        lock?: typeof withFileLock;
+    }): "posted" | "already-posted" | "unreadable" {
+  const state = readCapturesState(path, read);
+  if (!state) return "unreadable";
+  if (state.usePostedOn === utcDay(now)) return "already-posted";
+  post(useBody(useReading(state, now), now));
+  lock(path, () => {
+    const latest = readCapturesState(path, read) ?? state;
+    writeCapturesState(path, { ...latest, usePostedOn: utcDay(now) }, write);
+  });
+  return "posted";
 }
 
 export type OverdueEntry = {name: string, state: string, ageMs: number, reason: string|null};
@@ -651,7 +750,7 @@ export async function watchFleet(deps: WatchDeps = {}): Promise<WatchFound> {
   const previous = readState(statePath, deps.read);
   const next = advance(status.rows, previous, at);
   writeState(statePath, next, deps.write);
-  recordCaptures(status.rows, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at, read: deps.read, write: deps.write });
+  recordFleetTick(status.rows, { path: deps.capturesPath ?? DEFAULT_CAPTURES_STATE_PATH, at, read: deps.read, write: deps.write });
   const { offFleet, unitDrift } = recordOffFleet(status, at, deps);
   return { overdue: overdue(status.rows, next, at, thresholdMs), offFleet, unitDrift };
 }
@@ -770,6 +869,17 @@ export function exitCodeFor(found: WatchFound, refusal: AutoOffReading): number 
 /** The tick's own reader of the control host's units: the host through ssh, the playbooks and unit files from this checkout. */
 const readUnitDrift = () => controlUnitDrift({ readHost: readControlHost, ...checkoutSource });
 
+/** The once-a-day use reading. Without `--post` it is only printed: the day is never marked by a dry run. */
+function postDailyUse(post: boolean) {
+  const post_ = (body: string) => execFileSync("gh", ["issue", "comment", String(ORG_READING_ISSUE), "--body", body], { stdio: "inherit" });
+  if (post) {
+    postUseOnce({ path: DEFAULT_CAPTURES_STATE_PATH, now: Date.now(), post: post_ });
+    return;
+  }
+  const state = readCapturesState(DEFAULT_CAPTURES_STATE_PATH);
+  if (state) console.log(useBody(useReading(state, Date.now()), Date.now()));
+}
+
 async function main() {
   const post = process.argv.includes("--post");
   const thresholdArg = process.argv.find((a) => a.startsWith("--threshold-ms="));
@@ -783,6 +893,7 @@ async function main() {
     process.exitCode = EXIT.CANNOT_ASK;
     return;
   }
+  postDailyUse(post);
   const refusal = readRefusalOrSay();
   if (found.unitDrift.notShipped.length) {
     console.log(`unit-drift, reported and not raised: ${found.unitDrift.notShipped.join(", ")} installed on the control host and shipped by no playbook`);
