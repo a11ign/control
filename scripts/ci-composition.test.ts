@@ -97,7 +97,7 @@ test("the changeset check is the shared workflow at a full sha, with this reposi
   const call = /^ {2}changeset:\n([\s\S]*?)\n\n/m.exec(ci)?.[1];
   assert.ok(call, "positive control: the changeset job is found");
   assert.match(call, /uses: a11ign\/toolchain\/\.github\/workflows\/changeset-required\.yml@[0-9a-f]{40}$/m);
-  assert.match(call, /releasable-paths: src\/ ansible\/ layers\.json$/m, "this repository's releasable paths; the core's dora entry follows in the row after a11ign/a11ign#4217");
+  assert.match(call, /releasable-paths: src\/ ansible\/ layers\.json deploy-pins\.json$/m, "this repository's releasable paths, `deploy-pins.json` among them: a pin move is a change to that file alone and lands on a host only through a release (ceo, control#69); the core's dora entry follows in the row after a11ign/a11ign#4217");
   assert.match(call, /pull-requests: read/, "without it the whole run is a startup_failure");
   assert.match(ci, /^ {4}types: \[opened, synchronize, reopened, edited\]$/m, "`edited`: the no-release line is added by editing the body");
 });
