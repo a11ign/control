@@ -140,8 +140,10 @@
     # What a committed switch leaves in the BCD: Setup's "Add safe OS boot entry" writes a WinPE entry whose
     # device is the staged media under `$WINDOWS.~BT`. Taken from Setup's own log text and the shape of a
     # WinPE entry, NOT yet read off a box that committed one (the live window is the VERIFY row), so the
-    # three alternatives are deliberately broad and the evidence is printed whole when none matches.
-    patch_safeos_pattern: '\$WINDOWS\.~BT|SafeOS|winpe\s+Yes'
+    # pattern stays narrow and the evidence is printed whole when it does not match. ONLY the staged media's
+    # path counts: `winpe Yes` is on the Windows Recovery Environment entry EVERY Windows 11 BCD carries, and
+    # a pattern with it passed a box that never staged a switch (a11ign#5052, found at a11ign#4405).
+    patch_safeos_pattern: '\$WINDOWS\.~BT'
   tasks:
     - name: The deferrals to lift are declared and the target is given whole, or the window would do nothing
       # A lift that matches no entry "succeeds" and installs nothing -- a green result vouching for an inert
