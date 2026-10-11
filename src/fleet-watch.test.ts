@@ -13,6 +13,7 @@ import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
+  withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, pidAlive, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
@@ -643,4 +644,191 @@ test("unitDriftBody names the count, every unit and kind, and the live-reading c
   assert.match(body, /\*\*2 control-plane unit\(s\) not running the text this repository ships/);
   assert.match(body, new RegExp(`^- ${UNIT} differs$`, "m"));
   assert.match(body, /control-unit-drift\.ts/);
+});
+
+// ---- the fleet's daily use reading (#5016) ----
+
+const USE_NOW = Date.UTC(2026, 9, 11, 12, 0, 0);
+const USE_HOUR = 3_600_000;
+const withCount = (name: string, state: string, captures: number) => ({ name, state, captures } as unknown as WatchRow);
+
+/** `ticks` hourly ticks ending at USE_NOW, each fed `rowsAt(i)` through the same functions the watch runs. */
+function ledgerOfTicks(ticks: number, rowsAt: (i: number) => WatchRow[]): CapturesState {
+  let state: CapturesState | null = null;
+  for (let i = 0; i < ticks; i++) {
+    const at = USE_NOW - (ticks - 1 - i) * USE_HOUR;
+    const rows = rowsAt(i);
+    state = withUseTick(advanceCaptures(rows, state, at), rows, at);
+  }
+  return state as CapturesState;
+}
+
+const lastTick = (state: CapturesState) => state.ticks![state.ticks!.length - 1];
+
+test("use tick: a box whose count ROSE is worked and one awake and idle is not; unreachable is neither (#3023)", () => {
+  const before = advanceCaptures([withCount("w2", "ready", 4), withCount("w3", "ready", 7), withCount("w4", "unreachable", 0)], null, USE_NOW - USE_HOUR);
+  const rows = [withCount("w2", "ready", 6), withCount("w3", "ready", 7), withCount("w4", "unreachable", 0)];
+  const after = withUseTick(advanceCaptures(rows, before, USE_NOW), rows, USE_NOW);
+  assert.deepEqual(lastTick(after).awake, ["w2", "w3"], "the unreachable box is not awake");
+  assert.deepEqual(lastTick(after).worked, ["w2"], "w3 was awake and idle; w4 was not awake, so it cannot have worked");
+});
+
+test("use tick: a `busy` box is worked even when its count did not move", () => {
+  const rows = [withCount("w2", "busy", 4)];
+  const first = advanceCaptures(rows, null, USE_NOW);
+  assert.deepEqual(lastTick(withUseTick(first, rows, USE_NOW)).worked, ["w2"]);
+});
+
+test("use tick: a rise the 10 s auto-off probe saw between two ticks still makes that tick's box worked", () => {
+  const rows = [withCount("w2", "ready", 4)];
+  const t0 = withUseTick(advanceCaptures(rows, null, USE_NOW - USE_HOUR), rows, USE_NOW - USE_HOUR);
+  const probed = advanceCaptures([withCount("w2", "ready", 5)], t0, USE_NOW - USE_HOUR / 2);
+  const rowsNow = [withCount("w2", "ready", 5)];
+  const after = withUseTick(advanceCaptures(rowsNow, probed, USE_NOW), rowsNow, USE_NOW);
+  assert.deepEqual(lastTick(after).worked, ["w2"]);
+});
+
+test("use tick: ticks are bounded to 48 h", () => {
+  const state = ledgerOfTicks(60, () => [withCount("w2", "ready", 1)]);
+  assert.ok(state.ticks!.every((tick) => USE_NOW - tick.at < 48 * USE_HOUR));
+  assert.equal(state.ticks!.length, 48);
+});
+
+test("useReading: fewer than 20 ticks is `unknown`, naming the count and the start -- not a share", () => {
+  const reading = useReading(ledgerOfTicks(MIN_USE_TICKS - 1, () => [withCount("w2", "busy", 1)]), USE_NOW);
+  assert.equal(reading.kind, "unknown");
+  assert.equal(reading.kind === "unknown" && reading.observedTicks, MIN_USE_TICKS - 1);
+  assert.match(useBody(reading, USE_NOW), /^### Fleet use, 2026-10-11\n\nunknown: observed 19 ticks since 2026-10-10T/);
+});
+
+test("useReading: at 20 ticks the share is worked over awake, per box and in total", () => {
+  // w2 is busy every tick; w3 awake and idle every tick; w4 never answers.
+  const state = ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 3), withCount("w3", "ready", 0), withCount("w4", "unreachable", 0)]);
+  const reading = useReading(state, USE_NOW);
+  assert.equal(reading.kind, "reading");
+  if (reading.kind !== "reading") return;
+  assert.equal(reading.awakeTicks, 40);
+  assert.equal(reading.workedTicks, 20);
+  assert.equal(reading.share, 0.5);
+  assert.deepEqual(reading.boxes.map((r) => [r.box, r.awakeTicks, r.workedTicks]), [["w2", 20, 20], ["w3", 20, 0], ["w4", 0, 0]]);
+  assert.match(useBody(reading, USE_NOW), /\| w3 \| 0 \| 20 \| 0 \|[\s\S]*50% of awake box-hours did work/);
+});
+
+test("useReading: a fleet where nothing ever answered has NO share, rather than 0%", () => {
+  const state = ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "unreachable", 0)]);
+  const reading = useReading(state, USE_NOW);
+  assert.equal(reading.kind === "reading" && reading.share, null);
+});
+
+test("readCapturesState: a file written before the use reading (no `ticks`) is READ, and reads as unknown", () => {
+  const old = JSON.stringify({ since: USE_NOW - USE_HOUR, workers: { w2: { captures: 3, seenAt: USE_NOW, lastRoseAt: null, rises: [] } } });
+  const state = readCapturesState("x", (() => old) as never);
+  assert.notEqual(state, null);
+  assert.deepEqual(useReading(state, USE_NOW), { kind: "unknown", observedTicks: 0, since: USE_NOW - USE_HOUR });
+  const after = withUseTick(advanceCaptures([withCount("w2", "ready", 3)], state, USE_NOW), [withCount("w2", "ready", 3)], USE_NOW);
+  assert.equal(after.ticks!.length, 1, "the next tick starts the field on the old ledger");
+});
+
+test("advanceCaptures from the auto-off probe keeps the ticks and the posted day it did not write", () => {
+  const state = { ...ledgerOfTicks(3, () => [withCount("w2", "ready", 1)]), usePostedOn: "2026-10-11" };
+  const after = advanceCaptures([withCount("w2", "ready", 2)], state, USE_NOW + 10_000);
+  assert.equal(after.ticks!.length, 3);
+  assert.equal(after.usePostedOn, "2026-10-11");
+});
+
+test("postUseOnce: the first tick of a UTC day posts, a second the same day posts NOTHING, the next day posts again", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  const posted: string[] = [];
+  const run = (now: number) => postUseOnce({ path: "c.json", now, post: (b) => posted.push(b), read, write });
+  assert.equal(run(USE_NOW), "posted");
+  assert.equal(run(USE_NOW + USE_HOUR), "already-posted");
+  assert.equal(posted.length, 1);
+  assert.match(posted[0], /^### Fleet use, 2026-10-11/);
+  assert.equal(run(USE_NOW + 24 * USE_HOUR), "posted", "positive control: the guard is the day, not a latch");
+  assert.equal(posted.length, 2);
+});
+
+test("postUseOnce: an unreadable ledger posts nothing and writes nothing", () => {
+  let written = false;
+  const write = (() => { written = true; }) as never;
+  assert.equal(postUseOnce({ path: "c.json", now: USE_NOW, post: () => assert.fail("posted"), read: (() => "nope") as never, write }), "unreadable");
+  assert.equal(written, false);
+});
+
+test("postUseOnce: a tick that lands WHILE the first is posting posts nothing (the day is reserved before the post, #53 review)", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  const posted: string[] = [];
+  let during: string | null = null;
+  // pid and liveness are injected: the test must not depend on what `process.pid` or `process.kill` are inside a runner's worker
+  const owner = { pid: 111, alive: (pid: number) => pid === 111 };
+  const second = () => postUseOnce({ path: "c.json", now: USE_NOW + 60_000, post: (b) => posted.push(b), read, write, ...owner, pid: 222 });
+  const first = postUseOnce({ path: "c.json", now: USE_NOW, read, write, ...owner, post: (b) => { posted.push(b); during = second(); } });
+  assert.equal(first, "posted");
+  assert.equal(during, "in-progress", "the racing tick found the day reserved");
+  assert.equal(posted.length, 1);
+});
+
+test("postUseOnce: a SLOW live owner keeps the day however long its post runs; a DEAD owner's reservation is taken over", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  const live = new Set([111]);
+  const alive = (pid: number) => live.has(pid);
+  // run A (pid 111) is still posting, an hour less a minute on: its reservation stands
+  file = JSON.stringify({ ...JSON.parse(file), useReservedAt: USE_NOW, useReservedBy: 111 });
+  const posted: string[] = [];
+  const run = (now: number, pid: number) => postUseOnce({ path: "c.json", now, read, write, pid, alive, post: (b) => posted.push(b) });
+  assert.equal(run(USE_NOW + USE_RESERVATION_MAX_MS - 1, 222), "in-progress", "a slow owner is not mistaken for a dead one");
+  live.delete(111);
+  assert.equal(run(USE_NOW + 1_000, 222), "posted", "the owner is gone, so the day is not lost");
+  assert.equal(JSON.parse(file).usePostedOn, "2026-10-11");
+  assert.equal(JSON.parse(file).useReservedBy, undefined);
+  assert.equal(run(USE_NOW + 2_000, 333), "already-posted");
+  assert.equal(posted.length, 1);
+});
+
+test("postUseOnce: a reservation older than the cap is not believed even if its pid is alive (a recycled pid)", () => {
+  let file = JSON.stringify({ ...ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]), useReservedAt: USE_NOW, useReservedBy: 111 });
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  const posted: string[] = [];
+  const out = postUseOnce({ path: "c.json", now: USE_NOW + USE_RESERVATION_MAX_MS, read, write, pid: 222, alive: () => true, post: (b) => posted.push(b) });
+  assert.equal(out, "posted");
+});
+
+test("postUseOnce: the commit is written only AFTER the post returned", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  let seenDuring: { usePostedOn?: string, useReservedAt?: number, useReservedBy?: number } = {};
+  postUseOnce({ path: "c.json", now: USE_NOW, read, write, pid: 111, post: () => { seenDuring = JSON.parse(file); } });
+  assert.equal(seenDuring.usePostedOn, undefined);
+  assert.equal(seenDuring.useReservedAt, USE_NOW);
+  assert.equal(seenDuring.useReservedBy, 111);
+});
+
+test("postUseOnce: a failed post RELEASES the reservation, so the race fix does not lose the day", () => {
+  let file = JSON.stringify(ledgerOfTicks(MIN_USE_TICKS, () => [withCount("w2", "busy", 1)]));
+  const read = (() => file) as never;
+  const write = ((_p: string, data: string) => { file = data; }) as never;
+  assert.throws(() => postUseOnce({ path: "c.json", now: USE_NOW, read, write, post: () => { throw new Error("gh down"); } }));
+  assert.equal(JSON.parse(file).usePostedOn, undefined);
+  const posted: string[] = [];
+  assert.equal(postUseOnce({ path: "c.json", now: USE_NOW + USE_HOUR, read, write, post: (b) => posted.push(b) }), "posted");
+});
+
+test("pidAlive: a signal that lands is alive, EPERM is alive (exists, not ours), ESRCH is dead", () => {
+  const raising = (code: string) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(pidAlive(1, () => true), true);
+  assert.equal(pidAlive(1, raising("EPERM")), true);
+  assert.equal(pidAlive(1, raising("ESRCH")), false);
+});
+
+test("the post body rendered from a fixture state (the PR shows this)", () => {
+  const state = ledgerOfTicks(MIN_USE_TICKS, (i) => [withCount("a11y-worker-2", i % 2 ? "busy" : "ready", 0), withCount("a11y-worker-3", "ready", 0), withCount("a11y-worker-4", "unreachable", 0)]);
+  console.log(useBody(useReading(state, USE_NOW), USE_NOW));
 });
