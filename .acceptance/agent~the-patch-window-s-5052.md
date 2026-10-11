@@ -3,10 +3,10 @@ Closes a11ign/a11ign#5052's Done-when 1 on merge; `.layer-ref` is not moved (a11
 Acceptance:
 
 ```bash
-cd /home/agent/repos/wt-5052-control && pnpm exec rstest run src/fleet-layer/patch-playbook.test.ts
+cd /home/agent/repos/wt-5052-control && pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include 'src/fleet-layer/patch-playbook.test.ts'
 ```
 
-**As run (2026-10-11):** 17 tests in the file print `✔`, none `✖` (the trailing rstest summary reports 0 suites for this `node:test` file, as it does for the row's own command). Both controls are in `a11ign#4979 POSITIVE`.
+**As run (2026-10-11):** the toolchain config carries the `node:test` shim; the row's command without `--config` finds no suites for this file (exit 1), as PR #28 recorded. Both controls are in `a11ign#4979 POSITIVE`.
 
 ## What changed
 
