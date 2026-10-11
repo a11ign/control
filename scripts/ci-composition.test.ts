@@ -58,12 +58,12 @@ test("`tsc --noEmit` is a step of the job the ruleset requires, and runs before 
   assert.ok(ci.indexOf("  checks:") < typecheck, "in the `checks` job, which `gate` waits for");
 });
 
-test("`gate` waits for `changeset` and `checks` and accepts success only, so a red or skipped need cannot read as a pass (a11ign/a11ign#4127, #4135)", () => {
+test("`gate` waits for `changeset`, `checks` and `ansible` and accepts success only, so a red or skipped need cannot read as a pass (a11ign/a11ign#4127, #4135, #4919)", () => {
   const gate = ci.slice(ci.indexOf("  gate:"));
   assert.ok(gate.startsWith("  gate:"), "positive control: the gate job is found");
-  assert.match(gate, /needs: \[changeset, checks\]/);
+  assert.match(gate, /needs: \[changeset, checks, ansible\]/);
   assert.match(gate, /if: always\(\) && !cancelled\(\)/, "a skipped required check counts as passed, so gate must run when a need fails");
-  for (const need of ["changeset", "checks"]) assert.ok(gate.includes(`needs.${need}.result`), `${need}'s result is read`);
+  for (const need of ["changeset", "checks", "ansible"]) assert.ok(gate.includes(`needs.${need}.result`), `${need}'s result is read`);
   assert.doesNotMatch(gate, /skipped/, "no skipped allowance");
 });
 
@@ -74,4 +74,16 @@ test("the changeset check is the shared workflow at a full sha, with this reposi
   assert.match(call, /releasable-paths: src\/ ansible\/ layers\.json$/m, "this repository's releasable paths; the core's dora entry follows in the row after a11ign/a11ign#4217");
   assert.match(call, /pull-requests: read/, "without it the whole run is a startup_failure");
   assert.match(ci, /^ {4}types: \[opened, synchronize, reopened, edited\]$/m, "`edited`: the no-release line is added by editing the body");
+});
+
+test("the playbooks are checked in this repository's own CI, on every pull request, and a mistyped `hosts:` is not skipped (a11ign/a11ign#4919, #4425)", () => {
+  const job = /^ {2}ansible:\n([\s\S]*?)\n\n/m.exec(ci)?.[1];
+  assert.ok(job, "positive control: the ansible job is found");
+  assert.doesNotMatch(job, /^ {4}if:/m, "no condition: `gate` accepts success only, so a job a path filter skipped would read red");
+  assert.match(job, /ansible-galaxy collection install -r ansible\/requirements\.yml/);
+  assert.match(job, /ansible-playbook -i ansible\/inventory\.example\.yml --syntax-check/);
+  assert.match(job, /working-directory: ansible\n\s+run: python3 check-modules\.py/, "check-modules.py globs from its own directory");
+  assert.doesNotMatch(job, /lay-layer|packages\/control/, "it reads this repository's root and needs no core");
+  assert.match(job, /case "\$playbook" in ansible\/inventory\.example\.yml\|ansible\/requirements\.yml\) continue ;; esac/, "the files that are not playbooks are named");
+  assert.doesNotMatch(job, /grep -q "[^"]*hosts:/, "a content filter on `hosts:` skips a playbook whose `hosts:` is mistyped");
 });
