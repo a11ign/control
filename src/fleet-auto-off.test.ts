@@ -1169,11 +1169,15 @@ test("#3845 judgeLaidLayer on real directories: laid at the pin passes; another 
   }
 });
 
-test("#3845 the REAL checkout: the laid layer is at the tag deploy-pins.json pins, so the guard no longer refuses a current tree", () => {
-  const pin = pinnedTag(readDeployPins(), LAYER) as { tag: string };
+test("#3845 the REAL checkout: the laid layer is a laid tree at the tag it was laid at, so the guard reads a current tree and refuses nothing", () => {
+  // Not compared with deploy-pins.json: the tree laid HERE is the core's (CI lays control over a core at `CORE_REF`, whose lockfile moves on its own
+  // schedule), and control's pins are a different declaration by design (ADR 0045 rule 3). What this test pins is #3845's own regression: the guard
+  // judged a fixture and refused the real tree. The pin side is the fixture test above ("at-pin" passes, "behind" names both tags).
   const { path, dir } = layerDeclaration(LAYER);
-  const judged = judgeLaidLayer({ name: LAYER, dir, path, tag: pin.tag });
-  assert.deepEqual(judged, { differing: [] }, "the layer this tree holds is the one control's own pins name: a core that moved its fleet pin and a control that did not is this test failing, naming the drift");
+  const laidAt = readFileSync(join(dir, ".layer-ref"), "utf8").trim();
+  assert.ok(laidAt.length > 0, "the real tree carries a `.layer-ref` naming the tag it was laid at");
+  const judged = judgeLaidLayer({ name: LAYER, dir, path, tag: laidAt });
+  assert.deepEqual(judged, { differing: [] }, "the layer this tree holds is a laid tree (marker beside src/, no .git) at the tag its marker names");
   const closure = importClosure(THIS, (file) => readFileSync(join(REPO, file), "utf8"));
   assert.ok(closure.some((file) => layerOwning(file) === LAYER), "positive control: the real program still imports the layer, so the judgment above is the one that matters");
 });
