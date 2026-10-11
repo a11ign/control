@@ -22,4 +22,4 @@ cd /home/agent/repos/wt-5052-control && pnpm exec rstest run src/fleet-layer/pat
 
 - Nothing live was read (resource ban). Making the box switch is a11ign#5051.
 
-Closes: none -- a PR in this repository cannot close a row in `a11ign/a11ign`; `product-manager` closes it at merge.
+Closes a11ign/a11ign#5052
