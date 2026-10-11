@@ -1101,7 +1101,9 @@ export async function fleetStatus(deps?: {
             import("./fleet-switch.ts").SwitchReport | Promise<import("./fleet-switch.ts").SwitchReport>;
     }) {
   const workers = (deps?.workers ?? fleetToProbe)();
-  const probes = await Promise.all(workers.map(deps?.probe ?? probeWorker));
+  const probe = deps?.probe ?? probeWorker;
+  // Called with the worker alone: `map` would pass its index as probeWorker's options (#4944).
+  const probes = await Promise.all(workers.map((worker) => probe(worker)));
   const rows = summarise(probes);
   // #2752: the inventory NAME (not the `name  address` row shape) is the key both sides agree on --
   // `linkLayerFor` strips the same way via `inventoryName` before it looks a box up here.
