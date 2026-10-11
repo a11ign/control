@@ -11,7 +11,10 @@ import { join } from "node:path";
 import {
   HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, PROOF_WINDOW_MS, DEFAULT_PROOF_PATH, magicPacket, probeWorker, wakeFleet,
   wakeReportLine, readWakeProof, advanceWakeProof, recordWakeProof, proofWriteCommand, wakeFailed,
+  keepWokenBoxes, WAKE_LOCK_OPERATION,
 } from "./fleet-wake.ts";
+import { FLEET_LOCK_PATH, LOCK_GRACE_MS, takeFleetLock, readFleetLock } from "./fleet-lock.ts";
+import { autoOffDecision } from "./fleet-auto-off.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
 test("a magic packet is 6 x 0xFF then the MAC sixteen times", () => {
@@ -561,4 +564,106 @@ test("#3401 2: the MAC reader the wake defaults to is the live one -- but an inj
     ...world.options, request: fakeHealth({ "192.0.2.1": [SILENT] }).request, deadlineMs: 5_000,
   });
   assert.equal(r.state, "no-answer", "no `macRead` given with an injected socket: nothing is found, and nothing is run over ssh");
+});
+
+// ---- a11ign#5030: the command line takes the fleet lock for the boxes it woke ----
+
+const LOCK_NOW = 1_760_000_000_000;
+const lockFileOf = (plane: { root: string }) => FLEET_LOCK_PATH.replace(CONTROL_PLANE_CHECKOUT_PATH, plane.root);
+const writtenLock = (plane: { root: string }) => {
+  const file = lockFileOf(plane);
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+};
+/** `keepWokenBoxes` with the REAL take (real `flock`, real `node`) over the sandboxed control plane. */
+const keepOn = (plane: ReturnType<typeof controlPlane>, results: { name: string; state: string }[], now = LOCK_NOW) => {
+  const lines: string[] = [];
+  const taken: unknown[] = [];
+  keepWokenBoxes(results, {
+    now, log: (l) => lines.push(l),
+    take: ((call: Parameters<typeof takeFleetLock>[0]) => {
+      taken.push(call);
+      return takeFleetLock({ ...call, holder: "laptop:7", transport: plane.transport });
+    }) as never,
+  });
+  return { lines, taken };
+};
+
+test("#5030 1: a wake that left a box ready writes a `wake` lock that runs to now + LOCK_GRACE_MS, for the command's holder", () => {
+  for (const state of ["woken", "already-up", "came-up"]) {
+    const plane = controlPlane();
+    try {
+      const { lines } = keepOn(plane, [{ name: "w1", state }, { name: "w2", state: "no-answer" }]);
+      assert.deepEqual(writtenLock(plane),
+        { operation: WAKE_LOCK_OPERATION, holder: "laptop:7", takenAt: LOCK_NOW, expiresAt: LOCK_NOW + LOCK_GRACE_MS }, state);
+      assert.equal(WAKE_LOCK_OPERATION, "wake");
+      assert.match(lines.join("\n"), /fleet lock taken for the boxes woken/);
+    } finally { plane.dispose(); }
+  }
+});
+
+test("#5030 1: NO box ended ready means no lock, and the control plane is not asked at all", () => {
+  const plane = controlPlane();
+  try {
+    const states = ["busy", "no-answer", "no-mac", "moved", "never-ready", "not-listening"];
+    const { taken } = keepOn(plane, states.map((state, i) => ({ name: `w${i}`, state })));
+    assert.deepEqual(taken, []);
+    assert.equal(writtenLock(plane), null);
+    assert.equal(plane.commands.length, 0);
+    assert.equal(keepOn(plane, []).taken.length, 0, "an empty wake is none either");
+    assert.equal(keepOn(plane, [{ name: "w1", state: "woken" }]).taken.length, 1, "positive control: one ready box asks, once");
+  } finally { plane.dispose(); }
+});
+
+test("#5030 1: a take that is refused or cannot be written is SAID and never thrown: a wake is not failed by its bookkeeping", () => {
+  const results = [{ name: "w1", state: "woken" }];
+  const said: string[] = [];
+  const held = { operation: "provision-role.yml", holder: "agents:1", takenAt: 0, expiresAt: 1 };
+  keepWokenBoxes(results, { now: 1, log: (l) => said.push(l), take: (() => ({ taken: false, held })) as never });
+  assert.match(said.join("\n"), /not taken: provision-role\.yml holds it/);
+  keepWokenBoxes(results, { now: 1, log: (l) => said.push(l), take: (() => { throw new Error("ssh: no route to host"); }) as never });
+  assert.match(said.join("\n"), /was not taken, so auto-off may power a woken box off again: ssh: no route to host/);
+});
+
+test("#5030 1: `wakeFleet`, the library call, writes NO lock, though every box it woke is ready: its callers hold one already", async () => {
+  const world = fakeWorld();
+  const plane = controlPlane();
+  try {
+    const results = await wakeFleet(workers("w1", "w2", "w3", "w4"), {
+      ...world.options, ...plane.options, request: fakeHealth(ONE_OF_EACH).request,
+    });
+    assert.deepEqual(results.map((r) => r.state), ["woken", "already-up", "busy", "came-up"], "positive control: three boxes ended ready");
+    assert.equal(writtenLock(plane), null);
+    assert.ok(plane.commands.length > 0 && plane.commands.every((c) => !c.includes("fleet-lock")),
+      "the only command it sent is the proof ledger's, and none names the lock");
+  } finally { plane.dispose(); }
+});
+
+test("#5030 1: the wiring: `main` takes it after the wake and its report, before the exit; `wakeFleet` never names it", () => {
+  const source = readFileSync(new URL("./fleet-wake.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const main = source.slice(source.indexOf("async function main() {"));
+  const woke = main.indexOf("await wakeFleet(");
+  const keep = main.indexOf("keepWokenBoxes(results,");
+  assert.ok(woke > 0 && keep > woke, "taken after the wake");
+  assert.ok(keep < main.indexOf("process.exit(results.some(wakeFailed)"), "and before the exit, which a failed wake takes too");
+  const library = source.slice(source.indexOf("export async function wakeFleet("), source.indexOf("export type WakeProof"));
+  assert.ok(library.length > 100 && !/keepWokenBoxes|takeFleetLock/.test(library), "the library function takes none");
+});
+
+test("#5030 2: auto-off KEEPS a box under the wake lock, and powers it off once the lock has expired", () => {
+  const plane = controlPlane();
+  try {
+    keepOn(plane, [{ name: "w1", state: "woken" }]);
+    const box = { name: "w1", hasMac: true, probe: "idle" as const, idleSince: 0, shutdownRequestedAt: null,
+      wakeProvenAt: LOCK_NOW, batchQueued: false, leasePending: false };
+    const decide = (now: number) => autoOffDecision({ ...box, fleetLock: readFleetLock(now, { transport: plane.transport }).state }, now);
+    assert.deepEqual(decide(LOCK_NOW + LOCK_GRACE_MS - 1), { action: "keep", reason: "fleet-lock-held" });
+    assert.deepEqual(decide(LOCK_NOW + LOCK_GRACE_MS), { action: "off", reason: "idle-five-minutes" },
+      "the control: at expiresAt the same box, read through the same file, is decided off");
+    const other = controlPlane();
+    try {
+      assert.deepEqual(autoOffDecision({ ...box, fleetLock: readFleetLock(LOCK_NOW, { transport: other.transport }).state }, LOCK_NOW),
+        { action: "off", reason: "idle-five-minutes" }, "and with no wake lock at all, that box is off: the keep is the lock's");
+    } finally { other.dispose(); }
+  } finally { plane.dispose(); }
 });
