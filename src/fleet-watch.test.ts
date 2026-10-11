@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
-  offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH,
+  offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH, fleetLockLines,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
   withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, pidAlive, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
@@ -19,6 +19,7 @@ import {
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
 import { controlUnitDrift } from "./control-unit-drift.ts";
 import { NO_INCIDENT_TICK } from "./fleet-build-incident.ts";
+import { parseFleetLock } from "./fleet-lock.ts";
 
 export type FleetRow = {name: string, state: string, readiness?: {reason?: string|null}|null};
 
@@ -462,7 +463,7 @@ test("patch-window-missed: no run on record is not a miss, and a file that is no
 
 test("offFleetBody names the count, every line, and the live-reading command", () => {
   const body = offFleetBody(["a11y-worker-5: build 26100.4651 (fleet 26100.4652)", "fleet-split: display 1024x768, 640x480"]);
-  assert.match(body, /\*\*2 off the fleet's build or display mode/);
+  assert.match(body, /\*\*2 new on the fleet watch, ahead of capture/);
   assert.match(body, /^- a11y-worker-5: build 26100\.4651 \(fleet 26100\.4652\)$/m);
   assert.match(body, /fleet:status/);
 });
@@ -560,6 +561,69 @@ test("watchFleet(): the patch window is read from the control host, posted once,
   answer = () => lastRun + 31 * DAY;
   await run(quiet, lastRun + 33 * DAY);
   assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "a completed patch run clears the line");
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// #4405 item 2 (#5019): a fleet lock that died holding the fleet awake. The readings go through the REAL
+// `parseFleetLock`, so a fixture cannot invent a state the parser does not produce.
+// ---------------------------------------------------------------------------------------------------------------
+const LOCK_TAKEN = 1_790_000_000_000;
+const LOCK_EXPIRES = LOCK_TAKEN + 4 * 60 * 60_000;
+const LOCK_STALE_LINE = `fleet-lock: deploy.yml stale since ${new Date(LOCK_EXPIRES).toISOString()}`;
+const lockText = (fields: object) => JSON.stringify({ operation: "deploy.yml", holder: "control:4242", takenAt: LOCK_TAKEN, expiresAt: LOCK_EXPIRES, ...fields });
+
+test("fleet lock: a lock whose operation never ended, past its expiry, raises ONE line naming the operation and when it went stale", () => {
+  assert.deepEqual(lines(fleetLockLines(parseFleetLock(lockText({}), LOCK_EXPIRES + 1))), [LOCK_STALE_LINE]);
+});
+
+test("fleet lock: NEGATIVE CONTROL -- a held lock, no lock, and a lock whose operation ENDED raise nothing", () => {
+  assert.deepEqual(fleetLockLines(parseFleetLock(lockText({}), LOCK_EXPIRES - 1)), [], "held: a fresh lock is nothing to say");
+  assert.deepEqual(fleetLockLines(parseFleetLock("", LOCK_EXPIRES)), [], "none: the file is empty");
+  const ended = parseFleetLock(lockText({ endedAt: LOCK_TAKEN + 60_000 }), LOCK_EXPIRES + 1);
+  assert.equal(ended.state, "stale", "the reading IS stale: its expiry has passed");
+  assert.deepEqual(fleetLockLines(ended), [], "an ENDED operation lets go on its own after the grace, which is by design");
+});
+
+test("fleet lock: an unreadable lock is never quiet -- one constant line, so the ledger posts it once", () => {
+  assert.deepEqual(lines(fleetLockLines(parseFleetLock("{not json", LOCK_EXPIRES))), ["fleet-lock: unreadable"]);
+  assert.deepEqual(lines(fleetLockLines({ state: "unreadable", detail: "ssh: no route to host" })), ["fleet-lock: unreadable"],
+    "a transport that failed says the same thing: the detail is said on stderr, not in the dedup key");
+});
+
+test("watchFleet(): a stale lock is raised ONCE, dropped when the lock reads none, and a fresh lock raises nothing", async () => {
+  const store = memoryStore();
+  const quiet = reading([boxRow(2)], {});
+  let lock = parseFleetLock(lockText({}), LOCK_EXPIRES + 1);
+  const run = offFleetRun(store, { fleetLock: () => lock });
+  assert.deepEqual((await run(quiet, LOCK_EXPIRES + 1)).offFleet, [LOCK_STALE_LINE], "first tick: raised");
+  assert.deepEqual((await run(quiet, LOCK_EXPIRES + 2_000)).offFleet, [], "the next tick, unchanged: not raised twice");
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), { [LOCK_STALE_LINE]: LOCK_EXPIRES + 1 },
+    "and the ledger keeps the FIRST-SEEN time");
+  lock = parseFleetLock("", LOCK_EXPIRES + 3_000);
+  assert.deepEqual((await run(quiet, LOCK_EXPIRES + 3_000)).offFleet, [], "the lock is gone: nothing to say");
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "and the line is DROPPED from the ledger");
+  const FRESH = LOCK_EXPIRES + 10_000;
+  lock = parseFleetLock(lockText({ takenAt: FRESH, expiresAt: FRESH + 60 * 60_000 }), FRESH);
+  assert.deepEqual((await run(quiet, FRESH)).offFleet, [], "a lock taken afresh and held raises nothing (positive control: a stale one did)");
+});
+
+test("watchFleet(): an unreadable lock is raised once, is ATTENTION and never QUIET, and is not posted again on the next tick", async () => {
+  const store = memoryStore();
+  const quiet = reading([boxRow(2)], {});
+  const run = offFleetRun(store, { fleetLock: () => parseFleetLock("{not json", 0) });
+  const first = await run(quiet, 1_000);
+  assert.deepEqual(first.offFleet, ["fleet-lock: unreadable"], "raised");
+  assert.equal(exitCodeFor(first, null), EXIT.ATTENTION, "and the exit says so");
+  assert.deepEqual((await run(quiet, 2_000)).offFleet, [], "the next tick, unchanged: not posted again");
+});
+
+test("watchFleet(): a caller that did not ask for the lock leaves a standing line alone -- nothing is claimed, nothing is dropped", async () => {
+  const store = memoryStore();
+  const quiet = reading([boxRow(2)], {});
+  await offFleetRun(store, { fleetLock: () => parseFleetLock(lockText({}), LOCK_EXPIRES + 1) })(quiet, LOCK_EXPIRES + 1);
+  assert.deepEqual((await offFleetRun(store)(quiet, LOCK_EXPIRES + 2_000)).offFleet, [], "no new line from a lock that was not read");
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), { [LOCK_STALE_LINE]: LOCK_EXPIRES + 1 },
+    "and the line is CARRIED, not dropped, so the next reading that does ask does not announce it a second time");
 });
 
 // ---------------------------------------------------------------------------------------------------------------
