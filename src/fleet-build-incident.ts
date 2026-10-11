@@ -45,7 +45,12 @@
  * never QUIET (#4714's rule). Without `--post` the effects are replaced by `readOnlyIncidentDeps`: reading is free, a dry
  * run files nothing.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readPlaysInFlight } from "./fleet-auto-off.ts";
+import { readFleetLock, type FleetLockReading } from "./fleet-lock.ts";
 import { boxValues, workerKey, type BoxValue, type Drift, type FleetRow } from "./fleet-watch.ts";
 
 export const FLEET_BUILD_INCIDENT_ID = "incident:fleet-build-mixed";
@@ -176,18 +181,44 @@ export function parseIncident(issue: { number: number, createdAt: string, body: 
   return { number: issue.number, createdAt: issue.createdAt, target, laggards };
 }
 
+/** The start the record keeps, one per incident: `outcome` is `running` until the patch entry has answered. */
+export type PatchStart = { issue: number, startedAt: string, outcome: string };
+
+export type PatchStartDeps = {
+  /** The recorded start, `null` when none has been made. Throws when the record cannot be read: unknown is not "never started". */
+  readRecord: () => PatchStart | null;
+  writeRecord: (record: PatchStart) => void;
+  /** Why the patch may not start now (a play running, the fleet locked, or either unreadable), `null` when it may. */
+  busyReason: () => string | null;
+  /** Runs the patch entry `fleet:patch --apply` uses. `refusal` is its REFUSING line, when it refused. */
+  runPatch: () => { status: number, refusal: string };
+  /** Posts the outcome on the incident issue. */
+  comment: (issue: number, body: string) => void;
+};
+
 export type IncidentDeps = {
   /** Every open incident, oldest first. Throws when GitHub cannot be asked: "none open" is an answer, a throw is not. */
   listOpen: () => OpenIncident[];
   /** @returns what GitHub called the new issue (its URL), for the #928 line */
   file: (draft: { title: string, body: string, labels: string[] }) => string;
   close: (issue: number, how: { reason: "completed" | "not planned", comment: string }) => void;
+  /** The forward patch for the laggards: started once per incident, and never while another play runs. */
+  patch: PatchStartDeps;
   now?: () => number;
 };
 
-export type Reconciliation = { filed: string | null, closed: number[], heldOpen: { issue: number, unread: string[] } | null };
+export type Reconciliation = {
+  filed: string | null,
+  closed: number[],
+  heldOpen: { issue: number, unread: string[] } | null,
+  /** The start made this reading, with its outcome; `null` when none was made. */
+  patch: PatchStart | null,
+  /** Why a start was due but not made this reading (busy, or a new issue number that could not be read). Retried next reading. */
+  patchHeld: string | null,
+};
 
-const NOTHING: Reconciliation = { filed: null, closed: [], heldOpen: null };
+const NOTHING: Reconciliation = { filed: null, closed: [], heldOpen: null, patch: null, patchHeld: null };
+const NO_START = { patch: null, patchHeld: null };
 
 function closeDuplicates(open: OpenIncident[], deps: IncidentDeps): number[] {
   const [keep, ...newer] = open;
@@ -203,24 +234,68 @@ function finalReading(spread: BuildSpread): string {
 }
 
 /**
- * The effect, once per reading. Mixed and none open: file ONE. Mixed and one open: nothing, and no comment per tick. Two
- * open: close the newer as a duplicate of the older. One build, one open, every box read: comment the final reading and
- * close it. One build with a box unread: left open, because a subset is not the fleet.
+ * The effect, once per reading. Mixed and none open: file ONE, then start its patch. Mixed and one open: start its patch
+ * unless it already has one, and no comment per tick. Two open: close the newer as a duplicate of the older. One build,
+ * one open, every box read: comment the final reading and close it. One build with a box unread: left open, because a
+ * subset is not the fleet.
  */
 export function reconcileIncident(spread: BuildSpread, deps: IncidentDeps): Reconciliation {
   const open = deps.listOpen();
   const closed = open.length > 1 ? closeDuplicates(open, deps) : [];
   const standing = open[0];
-  if (!standing) return spread.mixed ? { ...NOTHING, filed: fileIncident(spread, deps) } : NOTHING;
-  if (spread.mixed) return { ...NOTHING, closed };
-  if (spread.unread.length > 0) return { filed: null, closed, heldOpen: { issue: standing.number, unread: spread.unread } };
+  if (!standing) return spread.mixed ? startAfterFiling(spread, deps) : NOTHING;
+  if (spread.mixed) return { ...NOTHING, closed, ...startPatchFor(standing.number, deps) };
+  if (spread.unread.length > 0) return { ...NOTHING, closed, heldOpen: { issue: standing.number, unread: spread.unread } };
   deps.close(standing.number, { reason: "completed", comment: finalReading(spread) });
   return { ...NOTHING, closed: [...closed, standing.number] };
+}
+
+function startAfterFiling(spread: BuildSpread, deps: IncidentDeps): Reconciliation {
+  const filed = fileIncident(spread, deps);
+  const issue = issueNumberOf(filed);
+  if (issue === null) return { ...NOTHING, filed, patchHeld: `the new incident's number is not in ${filed}; the start waits for the next reading` };
+  return { ...NOTHING, filed, ...startPatchFor(issue, deps) };
+}
+
+/** The issue number from the URL `gh issue create` prints, `null` for anything else. */
+export function issueNumberOf(url: string): number | null {
+  const match = /\/issues\/(\d+)\s*$/.exec(url);
+  return match ? Number(match[1]) : null;
 }
 
 function fileIncident(spread: BuildSpread, deps: IncidentDeps): string {
   const readAt = new Date((deps.now ?? Date.now)()).toISOString();
   return deps.file({ title: incidentTitle(spread), body: incidentBody(spread, readAt), labels: FLEET_BUILD_INCIDENT_LABELS });
+}
+
+/**
+ * The forward patch for this incident, at most once. The record is read first, so a start already made (or refused, or
+ * failed) is never repeated. A busy reading is NOT recorded: the next reading asks again. The record says `running` BEFORE
+ * the patch entry runs, so a watch that dies mid-run leaves a start that is never retried, not a second patch.
+ */
+function startPatchFor(issue: number, deps: IncidentDeps): Pick<Reconciliation, "patch" | "patchHeld"> {
+  const { patch: start } = deps;
+  if (start.readRecord()?.issue === issue) return NO_START;
+  const busy = start.busyReason();
+  if (busy) return { patch: null, patchHeld: `${busy}; the start waits for a reading with the fleet idle` };
+  const startedAt = new Date((deps.now ?? Date.now)()).toISOString();
+  start.writeRecord({ issue, startedAt, outcome: "running" });
+  const { status, refusal } = start.runPatch();
+  const patch = { issue, startedAt, outcome: patchOutcome(status, refusal) };
+  start.writeRecord(patch);
+  start.comment(issue, patchCommentBody(patch));
+  return { patch, patchHeld: null };
+}
+
+function patchOutcome(status: number, refusal: string): string {
+  if (status === 0) return "done";
+  return refusal ? `refused: ${refusal}` : `failed: exit ${status}`;
+}
+
+function patchCommentBody({ issue, outcome }: PatchStart): string {
+  return `**The forward patch for the laggards was started by \`fleet-watch\`** (#4405), once for this incident. Outcome: ${outcome}. `
+    + "A refused or failed start is NOT retried by the watch: the line stays stopped until the orchestrator moves the boxes "
+    + `(\`fleet:patch\`), or closes this incident (#${issue}).`;
 }
 
 export type Gh = (args: string[]) => string;
@@ -244,7 +319,7 @@ function byCreation(a: OpenIncident, b: OpenIncident): number {
 }
 
 /** `gh issue list --label` is a list and not a search, so an issue filed a second ago is in it: search lags and would file twice. */
-export function ghIncidentDeps(gh: Gh = runGh): IncidentDeps {
+export function ghIncidentDeps(gh: Gh = runGh, patch: PatchStartDeps = ghPatchStartDeps()): IncidentDeps {
   const repo = ["--repo", FLEET_BUILD_INCIDENT_REPO];
   return {
     listOpen: () => {
@@ -257,10 +332,58 @@ export function ghIncidentDeps(gh: Gh = runGh): IncidentDeps {
     close: (issue, { reason, comment }) => {
       gh(["issue", "close", String(issue), ...repo, "--reason", reason, "--comment", comment]);
     },
+    patch,
   };
 }
 
-/** Reading is free and a dry run writes nothing: the three effects are said, not done. */
+/** The record of starts, beside `fleet-watch-state.json`: relative to the control checkout, as that file's path is. */
+export const FLEET_BUILD_INCIDENT_STATE_PATH = "runs/fleet-build-incident-state.json";
+
+/** The patch entry, the same file `fleet:patch --apply` runs. The start is spawned, never re-implemented. */
+const PATCH_ENTRY = fileURLToPath(new URL("./fleet-playbook.ts", import.meta.url));
+
+/**
+ * The real start: the record on disk, the busy readers `fleet-auto-off` and `fleet-lock` already answer with, and the patch
+ * entry spawned synchronously (as `fleet-playbook`'s `runApplyChild` does), so the reading that starts it waits for it.
+ */
+export function ghPatchStartDeps(path = FLEET_BUILD_INCIDENT_STATE_PATH, gh: Gh = runGh, now: () => number = Date.now): PatchStartDeps {
+  return {
+    readRecord: () => (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null),
+    writeRecord: (record) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
+    },
+    busyReason: () => busyReasonAt(now()),
+    runPatch: runPatchEntry,
+    comment: (issue, body) => {
+      gh(["issue", "comment", String(issue), "--repo", FLEET_BUILD_INCIDENT_REPO, "--body", body]);
+    },
+  };
+}
+
+/**
+ * A play in flight of ANY playbook counts, not only the patch's: two plays on the fleet at once is what the gate forbids.
+ * The readers are the real ones by default; a test answers for them.
+ */
+export function busyReasonAt(now: number, readers: { plays?: () => ReturnType<typeof readPlaysInFlight>, lock?: (now: number) => FleetLockReading } = {}): string | null {
+  const plays = (readers.plays ?? readPlaysInFlight)();
+  if (plays.reading !== "none") return `a fleet play is ${plays.reading} (${plays.detail})`;
+  const lock = (readers.lock ?? readFleetLock)(now);
+  if (lock.state === "held") return `the fleet is held by ${lock.lock.holder} (${lock.lock.operation})`;
+  if (lock.state === "unreadable") return `the fleet lock is unreadable (${lock.detail})`;
+  return null;
+}
+
+/** Child process, same argv shape as `runApplyChild`: its stderr is shown, and its REFUSING line is returned. */
+function runPatchEntry(): { status: number, refusal: string } {
+  const child = spawnSync(process.execPath, [...process.execArgv, PATCH_ENTRY, "--playbook=patch.yml", "--apply"],
+    { encoding: "utf8", stdio: ["ignore", "inherit", "pipe"] });
+  if (child.stderr) process.stderr.write(child.stderr);
+  const refusal = String(child.stderr ?? "").split("\n").find((line) => line.startsWith("REFUSING") || line.startsWith("refusing")) ?? "";
+  return { status: child.status ?? 1, refusal };
+}
+
+/** Reading is free and a dry run writes nothing: the effects are said, not done, and a start is said with its target. */
 export function readOnlyIncidentDeps(deps: IncidentDeps, say: (line: string) => void = console.log): IncidentDeps {
   return {
     ...deps,
@@ -269,6 +392,15 @@ export function readOnlyIncidentDeps(deps: IncidentDeps, say: (line: string) => 
       return "(dry run: not filed)";
     },
     close: (issue, { reason }) => say(`WOULD CLOSE #${issue}: ${reason}`),
+    patch: {
+      ...deps.patch,
+      writeRecord: () => {},
+      runPatch: () => {
+        say("WOULD START: fleet:patch --apply (the forward patch for the laggards)");
+        return { status: 0, refusal: "" };
+      },
+      comment: (issue) => say(`WOULD COMMENT on #${issue}: the patch's outcome`),
+    },
   };
 }
 
@@ -288,9 +420,14 @@ export const NO_INCIDENT_TICK: BuildIncidentTick = { fresh: [], closed: [], cann
  */
 export function fleetBuildIncidentTick(status: BuildStatus, deps: IncidentDeps): BuildIncidentTick {
   try {
-    const { filed, closed, heldOpen } = reconcileIncident(buildSpread(status), deps);
+    const { filed, closed, heldOpen, patch, patchHeld } = reconcileIncident(buildSpread(status), deps);
     if (heldOpen) console.log(`fleet build incident #${heldOpen.issue} held open: ${heldOpen.unread.join(", ")} not read, and a subset is not the fleet`);
-    return { fresh: filed === null ? [] : [`${filed} -- the line is stopped (${FLEET_BUILD_INCIDENT_ID})`], closed, cannotAsk: null };
+    if (patchHeld) console.log(`fleet build incident forward patch not started: ${patchHeld}`);
+    const fresh = [
+      ...(filed === null ? [] : [`${filed} -- the line is stopped (${FLEET_BUILD_INCIDENT_ID})`]),
+      ...(patch === null ? [] : [`forward patch for the incident #${patch.issue}: ${patch.outcome}`]),
+    ];
+    return { fresh, closed, cannotAsk: null };
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     console.error(`CANNOT ASK GitHub about the fleet build incident: ${reason}`);

@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 
 import {
   buildSpread, reconcileIncident, fleetBuildIncidentTick, ghIncidentDeps, readOnlyIncidentDeps, openFleetBuildIncident, parseIncident,
-  incidentBody, incidentTitle, FLEET_BUILD_INCIDENT_LINE, FLEET_BUILD_INCIDENT_LABELS, FLEET_BUILD_INCIDENT_REPO,
-  type BuildStatus, type IncidentDeps, type OpenIncident,
+  incidentBody, incidentTitle, busyReasonAt, FLEET_BUILD_INCIDENT_LINE, FLEET_BUILD_INCIDENT_LABELS, FLEET_BUILD_INCIDENT_REPO,
+  type BuildStatus, type IncidentDeps, type OpenIncident, type PatchStart, type PatchStartDeps,
 } from "./fleet-build-incident.ts";
 import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
 import { windowsBuildsOf } from "./fleet-status.ts";
@@ -115,19 +115,43 @@ test("two boxes on different builds are mixed whatever the rest did, so filing n
   assert.deepEqual(spread.unread, [nameOf(4), nameOf(5)]);
 });
 
-/** A `gh` seam holding the open issues, recording every effect. */
-function seam(open: OpenIncident[] = []) {
+type PatchGiven = { record?: PatchStart | null, busy?: string | null, status?: number, refusal?: string };
+
+/**
+ * The start seam: a record held in memory, a busy reading and a patch answer the test sets (`state` is live, so a test can
+ * clear the busy reading between readings), and a patch entry that NEVER spawns. Every effect lands in `effects` in order,
+ * so a test reads the sequence (`record`, `patch`, `comment`) and not a count.
+ */
+function patchSeam(effects: string[], given: PatchGiven = {}) {
+  const state = { record: given.record ?? null, busy: given.busy ?? null, status: given.status ?? 0, refusal: given.refusal ?? "" };
+  const deps: PatchStartDeps = {
+    readRecord: () => state.record,
+    writeRecord: (record) => { state.record = record; effects.push(`record ${record.issue} ${record.outcome}`); },
+    busyReason: () => state.busy,
+    runPatch: () => { effects.push("patch"); return { status: state.status, refusal: state.refusal }; },
+    comment: (issue) => { effects.push(`comment #${issue}`); },
+  };
+  return { deps, state };
+}
+
+/** A `gh` seam holding the open issues, recording every effect, with the start seam above as its patch. */
+function seam(open: OpenIncident[] = [], given?: PatchGiven) {
   const effects: string[] = [];
   const filed: { title: string, body: string, labels: string[] }[] = [];
   const closed: { issue: number, reason: string, comment: string }[] = [];
+  const patch = patchSeam(effects, given);
   const deps: IncidentDeps = {
     now: () => Date.parse("2026-10-11T17:00:00Z"),
     listOpen: () => open,
     file: (draft) => { filed.push(draft); effects.push("file"); return "https://github.com/a11ign/a11ign/issues/9001"; },
     close: (issue, how) => { closed.push({ issue, ...how }); effects.push(`close #${issue}`); },
+    patch: patch.deps,
   };
-  return { deps, effects, filed, closed };
+  return { deps, effects, filed, closed, patch: patch.state };
 }
+
+/** `gh` as the real argv seam, with a start seam that never spawns, so no test can reach the patch entry. */
+const ghSeam = (gh: (args: string[]) => string) => ghIncidentDeps(gh, patchSeam([]).deps);
 
 const incident = (number: number): OpenIncident => ({ number, createdAt: "2026-10-11T12:00:00Z", target: NEW, laggards: [] });
 
@@ -152,14 +176,119 @@ test("mixed and none open: files ONE incident carrying the contract (title, labe
 
 test("one build and none open files nothing (NEGATIVE CONTROL for the filing above)", () => {
   const { deps, effects } = seam();
-  assert.deepEqual(reconcileIncident(buildSpread(oneBuild), deps), { filed: null, closed: [], heldOpen: null });
+  assert.deepEqual(reconcileIncident(buildSpread(oneBuild), deps), { filed: null, closed: [], heldOpen: null, patch: null, patchHeld: null });
   assert.deepEqual(effects, []);
 });
 
-test("mixed with an open incident files nothing and says nothing: no comment per tick", () => {
+test("mixed with an open incident whose start is already recorded files nothing, starts nothing, and says nothing", () => {
+  const started: PatchStart = { issue: 5100, startedAt: "2026-10-11T12:30:00Z", outcome: "done" };
+  const { deps, effects } = seam([incident(5100)], { record: started });
+  assert.deepEqual(reconcileIncident(buildSpread(rulingMap), deps), { filed: null, closed: [], heldOpen: null, patch: null, patchHeld: null });
+  assert.deepEqual(effects, [], "no file, no close, no patch and no comment: the start was made once, and this tick is silent");
+});
+
+test("a newly open mixed incident with no start recorded runs the patch entry ONCE, the record written before it and its outcome after", () => {
   const { deps, effects } = seam([incident(5100)]);
-  assert.deepEqual(reconcileIncident(buildSpread(rulingMap), deps), { filed: null, closed: [], heldOpen: null });
-  assert.deepEqual(effects, [], "no file, no close, and no comment: `IncidentDeps` has no comment effect to call");
+  const outcome = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.deepEqual(effects, ["record 5100 running", "patch", "record 5100 done", "comment #5100"]);
+  assert.equal(outcome.patch?.issue, 5100);
+  assert.equal(outcome.patch?.outcome, "done");
+  assert.equal(outcome.patchHeld, null);
+});
+
+test("the same incident on the NEXT reading does not start again: one patch across two readings (NEGATIVE CONTROL for the start above)", () => {
+  const { deps, effects } = seam([incident(5100)]);
+  reconcileIncident(buildSpread(rulingMap), deps);
+  const next = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.equal(effects.filter((effect) => effect === "patch").length, 1);
+  assert.equal(next.patch, null);
+});
+
+test("a fleet that is NOT mixed never starts a patch, even with the incident open and boxes unread (positive control for the mixed check)", () => {
+  const { deps, effects } = seam([incident(5100)]);
+  const outcome = reconcileIncident(buildSpread(fleet({ ...on(NEW, 2, 14), 16: "down" })), deps);
+  assert.equal(outcome.patch, null);
+  assert.equal(effects.some((effect) => effect === "patch"), false);
+});
+
+test("a filed incident starts its patch under the NUMBER the new issue's URL carries", () => {
+  const { deps, effects } = seam();
+  const outcome = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.equal(outcome.filed, "https://github.com/a11ign/a11ign/issues/9001");
+  assert.equal(outcome.patch?.issue, 9001);
+  assert.deepEqual(effects, ["file", "record 9001 running", "patch", "record 9001 done", "comment #9001"]);
+});
+
+test("a filed URL with no issue number is NOT started this reading: it is held, and the next reading tries again", () => {
+  const { deps, effects } = seam();
+  const odd = { ...deps, file: () => "queued" };
+  const outcome = reconcileIncident(buildSpread(rulingMap), odd);
+  assert.equal(outcome.patch, null);
+  assert.match(outcome.patchHeld ?? "", /next reading/);
+  assert.equal(effects.some((effect) => effect === "patch"), false);
+});
+
+test("a busy reading (a play running) starts nothing and records nothing; the next reading with the fleet idle starts it", () => {
+  const { deps, effects, patch } = seam([incident(5100)], { busy: "a fleet play is running (a11y-fleet-patch.service)" });
+  const held = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.equal(held.patch, null);
+  assert.match(held.patchHeld ?? "", /play is running/);
+  assert.deepEqual(effects, [], "busy is not recorded as a start, so the next reading tries again");
+
+  patch.busy = null;
+  const started = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.equal(started.patch?.outcome, "done");
+  assert.equal(effects.filter((effect) => effect === "patch").length, 1);
+});
+
+test("a held or unreadable fleet lock skips the start without recording it (which readings are busy is pinned by busyReasonAt below)", () => {
+  const { deps, effects, patch } = seam([incident(5100)], { busy: "the fleet is held by dan (patch)" });
+  assert.equal(reconcileIncident(buildSpread(rulingMap), deps).patch, null);
+  assert.deepEqual(effects, []);
+  patch.busy = "the fleet lock is unreadable (ssh timed out)";
+  assert.equal(reconcileIncident(buildSpread(rulingMap), deps).patch, null);
+  assert.deepEqual(effects, []);
+});
+
+test("busyReasonAt: a play running, a HELD lock and an UNREADABLE lock are busy; an idle fleet and a STALE lock are not", () => {
+  const idle = () => ({ reading: "none" as const, detail: "" });
+  const running = () => ({ reading: "running" as const, detail: "a11y-fleet-patch.service" });
+  const none = () => ({ state: "none" as const });
+  const heldLock = () => ({ state: "held" as const, lock: { operation: "patch", holder: "dan", takenAt: 1, expiresAt: 9e12 } });
+  const staleLock = () => ({ state: "stale" as const, lock: { operation: "patch", holder: "dan", takenAt: 1, expiresAt: 2 } });
+  const unreadable = () => ({ state: "unreadable" as const, detail: "ssh timed out" });
+  const now = Date.parse("2026-10-11T17:00:00Z");
+  assert.match(busyReasonAt(now, { plays: running, lock: none }) ?? "", /play is running/);
+  assert.match(busyReasonAt(now, { plays: idle, lock: heldLock }) ?? "", /held by dan \(patch\)/);
+  assert.match(busyReasonAt(now, { plays: idle, lock: unreadable }) ?? "", /ssh timed out/);
+  assert.equal(busyReasonAt(now, { plays: idle, lock: staleLock }), null, "a stale lock is not a held fleet");
+  assert.equal(busyReasonAt(now, { plays: idle, lock: none }), null, "positive control: nothing running and no lock is idle");
+});
+
+test("a refused start is recorded WITH its refusal and is not retried by a later reading", () => {
+  const { deps, effects } = seam([incident(5100)], { status: 2, refusal: "REFUSING: 3 boxes busy with a lab job" });
+  const first = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.equal(first.patch?.outcome, "refused: REFUSING: 3 boxes busy with a lab job");
+  const second = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.equal(second.patch, null);
+  assert.equal(effects.filter((effect) => effect === "patch").length, 1, "one attempt, however many readings follow");
+  assert.equal(effects.at(-2), "record 5100 refused: REFUSING: 3 boxes busy with a lab job");
+});
+
+test("a failed start (a non-zero exit with no REFUSING line) is recorded with its exit and is not retried", () => {
+  const { deps, effects } = seam([incident(5100)], { status: 1 });
+  assert.equal(reconcileIncident(buildSpread(rulingMap), deps).patch?.outcome, "failed: exit 1");
+  assert.equal(reconcileIncident(buildSpread(rulingMap), deps).patch, null);
+  assert.equal(effects.filter((effect) => effect === "patch").length, 1);
+});
+
+test("a dry run says it WOULD start, and starts nothing and records nothing", () => {
+  const said: string[] = [];
+  const { deps, effects, patch } = seam([incident(5100)]);
+  reconcileIncident(buildSpread(rulingMap), readOnlyIncidentDeps(deps, (line) => said.push(line)));
+  assert.ok(said.some((line) => line.startsWith("WOULD START")), "the start is said");
+  assert.deepEqual(effects, [], "and the seam saw no record, no patch and no comment");
+  assert.equal(patch.record, null);
 });
 
 test("two open incidents (a race between two ticks): the NEWER is closed as a duplicate of the older, and nothing is filed", () => {
@@ -228,11 +357,12 @@ test("a failing `gh` is CANNOT_ASK in the tick and never a clean reading, whiche
   assert.equal(errors.length, 2, "each failure is SAID on stderr");
 });
 
-test("a newly filed incident is a fresh line for the #928 post", () => {
+test("a newly filed incident is a fresh line for the #928 post, and its forward patch's outcome is a second line", () => {
   const tick = fleetBuildIncidentTick(rulingMap, seam().deps);
-  assert.equal(tick.fresh.length, 1);
+  assert.equal(tick.fresh.length, 2);
   assert.match(tick.fresh[0], /issues\/9001/);
   assert.match(tick.fresh[0], /incident:fleet-build-mixed/);
+  assert.equal(tick.fresh[1], "forward patch for the incident #9001: done");
 });
 
 type Call = string[];
@@ -255,7 +385,7 @@ function fakeGh(initial: { number: number, createdAt: string, body: string }[] =
 
 test("the real argv: the list is a LABEL list and not a search, create carries every label, close carries reason and comment", () => {
   const { gh, calls } = fakeGh();
-  const deps = ghIncidentDeps(gh);
+  const deps = ghSeam(gh);
   deps.listOpen();
   const url = deps.file({ title: "T", body: "B", labels: FLEET_BUILD_INCIDENT_LABELS });
   deps.close(5100, { reason: "completed", comment: "done" });
@@ -272,7 +402,7 @@ test("the real argv: the list is a LABEL list and not a search, create carries e
 
 test("round trip through the store: what is filed is read back as the incident, with its target and laggards", () => {
   const { gh, issues } = fakeGh();
-  const deps = ghIncidentDeps(gh);
+  const deps = ghSeam(gh);
   reconcileIncident(buildSpread(rulingMap), { ...deps, now: () => Date.parse("2026-10-11T17:00:00Z") });
   assert.equal(issues.length, 1);
   const read = openFleetBuildIncident(deps);
@@ -300,10 +430,10 @@ test("the OLDER incident stands by creation time, not by issue number: a lower n
   const issue = (number: number, createdAt: string) => ({ number, createdAt, body: incidentBody(buildSpread(rulingMap), "t") });
   // #5100 was transferred in after #5101 was filed, so the lower number is the NEWER incident.
   const store = [issue(5100, "2026-10-11T15:00:00Z"), issue(5101, "2026-10-11T09:00:00Z")];
-  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh(store).gh))?.number, 5101);
+  assert.equal(openFleetBuildIncident(ghSeam(fakeGh(store).gh))?.number, 5101);
 
   const { gh, calls } = fakeGh(store);
-  const result = reconcileIncident(buildSpread(rulingMap), ghIncidentDeps(gh));
+  const result = reconcileIncident(buildSpread(rulingMap), ghSeam(gh));
   assert.deepEqual(result.closed, [5100], "the newer by time is closed, whatever its number");
   const closes = calls.filter((args) => args[1] === "close");
   assert.deepEqual(closes.map((args) => args[2]), ["5100"]);
@@ -313,22 +443,22 @@ test("the OLDER incident stands by creation time, not by issue number: a lower n
 test("creation ties fall to the issue number, and a createdAt that does not parse sorts last", () => {
   const issue = (number: number, createdAt: string) => ({ number, createdAt, body: incidentBody(buildSpread(rulingMap), "t") });
   const tied = [issue(5103, "2026-10-11T12:00:00Z"), issue(5102, "2026-10-11T12:00:00Z")];
-  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh(tied).gh))?.number, 5102);
+  assert.equal(openFleetBuildIncident(ghSeam(fakeGh(tied).gh))?.number, 5102);
   const undated = [issue(5100, "not a date"), issue(5104, "2026-10-11T12:00:00Z")];
-  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh(undated).gh))?.number, 5104);
+  assert.equal(openFleetBuildIncident(ghSeam(fakeGh(undated).gh))?.number, 5104);
 });
 
 test("openFleetBuildIncident: the oldest of two, null for none, and a THROW (not null) for a gh that cannot be asked", () => {
   const issue = (number: number) => ({ number, createdAt: "2026-10-11T12:00:00Z", body: incidentBody(buildSpread(rulingMap), "t") });
-  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh([issue(5101), issue(5100)]).gh))?.number, 5100);
-  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh().gh)), null);
-  assert.throws(() => openFleetBuildIncident(ghIncidentDeps(() => { throw new Error("gh: not logged in"); })), /not logged in/);
+  assert.equal(openFleetBuildIncident(ghSeam(fakeGh([issue(5101), issue(5100)]).gh))?.number, 5100);
+  assert.equal(openFleetBuildIncident(ghSeam(fakeGh().gh)), null);
+  assert.throws(() => openFleetBuildIncident(ghSeam(() => { throw new Error("gh: not logged in"); })), /not logged in/);
 });
 
 test("a dry run reads and says, and files and closes nothing", () => {
   const said: string[] = [];
   const { gh, calls } = fakeGh();
-  const deps = readOnlyIncidentDeps(ghIncidentDeps(gh), (line) => said.push(line));
+  const deps = readOnlyIncidentDeps(ghSeam(gh), (line) => said.push(line));
   const result = reconcileIncident(buildSpread(rulingMap), deps);
   assert.deepEqual(calls.map((call) => call[1]), ["list"], "only the read reached gh");
   assert.match(said[0], /WOULD FILE: Mixed Windows build across the fleet: 12 boxes behind/);
