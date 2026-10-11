@@ -6,14 +6,14 @@ Acceptance:
 cd /home/agent/repos/wt-5026-control && pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include 'src/fleet-build-incident.test.ts' --include 'src/fleet-watch.test.ts'
 ```
 
-**As run (measured, 2026-10-11, this head):** `VERDICT pass: 97 tests in 2 files`; `pnpm exec tsc --noEmit` exits 0. The row's command as written (`pnpm exec rstest run <two files>`, no `--config`, no `--include`) printed no `VERDICT` line from this worktree: the toolchain config is the one carrying the `node:test` shim (the same fact `agent~there-is-a-playbook-4445.md` records), so the form above is the one that reports.
+**As run (measured, 2026-10-11, this head):** `VERDICT pass: 99 tests in 2 files`; `pnpm exec tsc --noEmit` exits 0. The row's command as written (`pnpm exec rstest run <two files>`, no `--config`, no `--include`) printed no `VERDICT` line from this worktree: the toolchain config is the one carrying the `node:test` shim (the same fact `agent~there-is-a-playbook-4445.md` records), so the form above is the one that reports.
 
 ## What changed
 
 - `src/fleet-build-incident.ts` (new): `buildSpread(status)` (pure; target = the highest build, dotted-numeric), `reconcileIncident(spread, deps)` (file / nothing / close-duplicate / close-final / hold), `FLEET_BUILD_INCIDENT_LINE`, `openFleetBuildIncident()`, and `ghIncidentDeps(gh)` behind which every `gh` call sits.
 - `src/fleet-watch.ts`: `boxValues` and `workerKey` exported (the new file reads the same drift the way `offFleetLines` does, so it imports them instead of copying), one `WatchDeps.buildIncident` seam called once per reading after the status read, `WatchFound.buildIncident`, two terms in `exitCodeFor`, and a section in the #928 post. `main()` passes the real `gh` only under `--post`.
 - `src/fleet-watch.test.ts`: the two `exitCodeFor` fixtures carry `buildIncident`; three new tests for the seam and the exit codes.
-- `src/fleet-build-incident.test.ts` (new): 21 tests; the drift comes out of the REAL `fleetConsistency`.
+- `src/fleet-build-incident.test.ts` (new): 23 tests; the drift comes out of the REAL `fleetConsistency`.
 - `.changeset/fleet-watch-reads-the-5026.md` (minor).
 
 ## The incident contract, exactly as filed
@@ -34,7 +34,7 @@ The generated body was run through agent-org's own `missingTemplateFields` (`src
 - plain string compare in place of dotted-numeric: 2 fail (the test where a build's third component is 9 against one whose is 10, and the ruling map).
 - never files: 5 fail. Files when not mixed: 2 fail. Files when mixed with one already open: 3 fail.
 - closes with a box unread: 1 fails (the unread test only). Never closes: 2 fail.
-- duplicate closes the OLDER: 1 fails. Matches the id anywhere in a body: 1 fails. A search in place of the label list: 1 fails. A failing `gh` swallowed as "none open": 3 fail.
+- duplicate closes the OLDER: 1 fails. Open incidents ordered by issue NUMBER in place of creation time (reviewer-control-61's blocker; `listOpen` now sorts by `createdAt`, the number breaking a tie, an unparseable date last): 2 fail (the number-versus-time test and the tie/undated test). Matches the id anywhere in a body: 1 fails. A search in place of the label list: 1 fails. A failing `gh` swallowed as "none open": 3 fail.
 - in `fleet-watch.ts` (the fleet-watch tests): `cannotAsk` ignored by `exitCodeFor`: 1 fails; a filed incident not ATTENTION: 1 fails; the seam never called: 1 fails.
 
 ## Not done here, and a known limit

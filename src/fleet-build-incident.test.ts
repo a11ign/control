@@ -261,6 +261,28 @@ test("only a body with the line on a line of its own is the incident: the id quo
   assert.equal(parseIncident({ number: 2, createdAt: "x", body: `see ${FLEET_BUILD_INCIDENT_LINE} for the stop` }), null);
 });
 
+test("the OLDER incident stands by creation time, not by issue number: a lower number made later is the duplicate", () => {
+  const issue = (number: number, createdAt: string) => ({ number, createdAt, body: incidentBody(buildSpread(rulingMap), "t") });
+  // #5100 was transferred in after #5101 was filed, so the lower number is the NEWER incident.
+  const store = [issue(5100, "2026-10-11T15:00:00Z"), issue(5101, "2026-10-11T09:00:00Z")];
+  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh(store).gh))?.number, 5101);
+
+  const { gh, calls } = fakeGh(store);
+  const result = reconcileIncident(buildSpread(rulingMap), ghIncidentDeps(gh));
+  assert.deepEqual(result.closed, [5100], "the newer by time is closed, whatever its number");
+  const closes = calls.filter((args) => args[1] === "close");
+  assert.deepEqual(closes.map((args) => args[2]), ["5100"]);
+  assert.match(closes[0][closes[0].indexOf("--comment") + 1], /Duplicate of #5101/);
+});
+
+test("creation ties fall to the issue number, and a createdAt that does not parse sorts last", () => {
+  const issue = (number: number, createdAt: string) => ({ number, createdAt, body: incidentBody(buildSpread(rulingMap), "t") });
+  const tied = [issue(5103, "2026-10-11T12:00:00Z"), issue(5102, "2026-10-11T12:00:00Z")];
+  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh(tied).gh))?.number, 5102);
+  const undated = [issue(5100, "not a date"), issue(5104, "2026-10-11T12:00:00Z")];
+  assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh(undated).gh))?.number, 5104);
+});
+
 test("openFleetBuildIncident: the oldest of two, null for none, and a THROW (not null) for a gh that cannot be asked", () => {
   const issue = (number: number) => ({ number, createdAt: "2026-10-11T12:00:00Z", body: incidentBody(buildSpread(rulingMap), "t") });
   assert.equal(openFleetBuildIncident(ghIncidentDeps(fakeGh([issue(5101), issue(5100)]).gh))?.number, 5100);

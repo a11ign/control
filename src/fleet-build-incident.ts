@@ -228,6 +228,21 @@ export type Gh = (args: string[]) => string;
 /** The one `gh` runner: ambient credential, throws on a non-zero exit with `gh`'s own words. */
 export const runGh: Gh = (args) => execFileSync("gh", args, { encoding: "utf8", timeout: GH_TIMEOUT_MS });
 
+/**
+ * Oldest first by CREATION TIME, the issue number breaking a tie. The number is not the age: a transferred issue is
+ * renumbered on arrival, so the older incident can carry the higher number and "the older one stands" must not read it.
+ * A `createdAt` that does not parse sorts last, so it never outranks a dated incident.
+ */
+function byCreation(a: OpenIncident, b: OpenIncident): number {
+  const at = (incident: OpenIncident) => {
+    const time = Date.parse(incident.createdAt);
+    return Number.isNaN(time) ? Number.POSITIVE_INFINITY : time;
+  };
+  const [first, second] = [at(a), at(b)];
+  if (first !== second) return first < second ? -1 : 1;
+  return a.number - b.number;
+}
+
 /** `gh issue list --label` is a list and not a search, so an issue filed a second ago is in it: search lags and would file twice. */
 export function ghIncidentDeps(gh: Gh = runGh): IncidentDeps {
   const repo = ["--repo", FLEET_BUILD_INCIDENT_REPO];
@@ -235,7 +250,7 @@ export function ghIncidentDeps(gh: Gh = runGh): IncidentDeps {
     listOpen: () => {
       const listed: { number: number, createdAt: string, body: string }[] = JSON.parse(
         gh(["issue", "list", ...repo, "--state", "open", "--label", "incident", "--limit", String(LIST_LIMIT), "--json", "number,createdAt,body"]));
-      return listed.flatMap((issue) => parseIncident(issue) ?? []).sort((a, b) => a.number - b.number);
+      return listed.flatMap((issue) => parseIncident(issue) ?? []).sort(byCreation);
     },
     file: ({ title, body, labels }) =>
       gh(["issue", "create", ...repo, "--title", title, "--body", body, ...labels.flatMap((label) => ["--label", label])]).trim(),
