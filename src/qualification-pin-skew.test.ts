@@ -209,7 +209,7 @@ test("through `run()`: the refusal exits 3 on stderr BEFORE `pending`, so no sta
   try {
     await run(argv, {
       catalogueText: CATALOGUE, readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
-      dispatch: () => { events.push("dispatch"); return 0; }, qualify });
+      dispatch: () => { events.push("dispatch"); return 0; }, qualify, openIncident: () => null });
   } catch (error) {
     if (!/^exit \d$/.test((error as Error).message)) throw error;
   } finally {

@@ -31,6 +31,8 @@ const LAB_JOB_SOURCE = readFileSync(fileURLToPath(new URL("./lab-job.ts", import
 const FLEET = ["a11y-worker-2", "a11y-worker-3", "a11y-worker-4", "a11y-worker-5", "a11y-worker-6"]
   .map((name, i) => ({ name, url: `http://192.0.2.${i + 2}:8765` }));
 const state = (name: string, s: string) => ({ name, host: name, state: s });
+/** No fleet build incident open: the #4405 guard reads this and proceeds. Each `run()` here has its own refusal to test, not this one. */
+const NO_OPEN_INCIDENT = () => null;
 
 /** Run `run()` with every dependency faked; returns what happened in order. `process.exit` is captured. */
 async function drive(argv: string[], wakeStates: (needed: { name: string }[]) => { name: string; host: string; state: string }[]) {
@@ -46,7 +48,7 @@ async function drive(argv: string[], wakeStates: (needed: { name: string }[]) =>
   process.exit = ((code: number) => { exited = code; throw new Error(`exit ${code}`); }) as typeof process.exit;
   try {
     await run(argv, {
-      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+      catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
       readFleet: () => ({ refusal: null, workers: FLEET }),
       wake: async (needed) => { events.push("wake"); woken = needed.map((w) => w.name); return wakeStates(needed); },
       checkFleet: async (_expected, pool) => { events.push("check"); checkedPool = pool as string[]; },
@@ -158,13 +160,13 @@ test("wakeRefusal: a busy worker is fine, and the refusal names each worker that
 test("with no `wake` handed to run() nothing is woken -- only the command-line entry wires the real one", async () => {
   const events: string[] = [];
   await run(["-e", "job=capture", "-e", "only=x"], {
-    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC,
+    catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     readFleet: () => ({ refusal: null, workers: FLEET }),
     checkFleet: async () => { events.push("check"); }, dispatch: () => { events.push("dispatch"); },
   });
   assert.deepEqual(events, ["check", "dispatch"]);
   // ...and the real entry DOES wire it. This pin is the positive control for the test above.
-  assert.match(LAB_JOB_SOURCE, /await run\(process\.argv\.slice\(2\), \{ wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify \}\)/);
+  assert.match(LAB_JOB_SOURCE, /await run\(process\.argv\.slice\(2\), \{ wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify, openIncident: openFleetBuildIncident \}\)/);
 });
 
 test("wakeNeeded hands the wake the mac each worker CARRIES, and null for one whose inventory entry declares none", async () => {
