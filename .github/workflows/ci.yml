@@ -1,5 +1,5 @@
-# The merge gate. Every pull request and every merge-queue entry runs lint, the typecheck and the tests (`checks`), the changeset check (`changeset`) and the playbook checks (`ansible`), and the last job below,
-# `gate`, waits for all three. It is named `gate` because that is the check `main`'s protection and the `merge-queue-main` ruleset require (`docs/code-repository-protection.json` in
+# The merge gate. Every pull request and every merge-queue entry runs lint, the typecheck and the tests (`checks`), the changeset check (`changeset`), the playbook checks (`ansible`) and the release's
+# version step on a scratch clone (`release-dry-run`, which works only when the change touches what the release installs from), and the last job below, `gate`, waits for all four. It is named `gate` because that is the check `main`'s protection and the `merge-queue-main` ruleset require (`docs/code-repository-protection.json` in
 # a11ign/a11ign names it). `merge_group` is what lets the queue's temporary branches run it: a required check that never runs on one blocks the queue for ever.
 #
 # THIS REPOSITORY IS NOT SELF-CONTAINED, AND CI SAYS SO BY CONSTRUCTION (a11ign/a11ign#2704). `control` has no dependency of any kind (ADR 0012), so it reaches the code beside it by
@@ -136,17 +136,84 @@ jobs:
         working-directory: ansible
         run: python3 check-modules.py
 
-  # THE REQUIRED CHECK. `main`'s protection and the `merge-queue-main` ruleset name `gate`, so it stays the one check that answers for the run. It waits for the three jobs above and
+  # A PULL REQUEST THAT CHANGES HOW THIS TREE INSTALLS DRY-RUNS THE RELEASE'S VERSION STEP (a11ign/a11ign#5066; a11ign/agent-org#888, #885 class 3 and a11ign/a11ign#4988, the job of a11ign/agent-org#967). A change to
+  # `package.json`, the lockfile or a workflow that breaks the install passes `checks` and shows first as a failed release on `main`: nothing on the pull request ran the path `release.yml` takes (the shared
+  # `release-per-merge.yml`'s `version` job: with a lockfile, `pnpm install --frozen-lockfile`, the repository's OWN `changeset version`, then `pnpm install --lockfile-only`; without one, `pnpm dlx
+  # @changesets/cli@<changesets-version> version`). This job runs those commands in a scratch clone of the candidate tree and writes nothing: `contents: read`, no credential kept by the checkout, no push, no token.
+  #
+  # IT RUNS ON EVERY EVENT AND DOES ITS WORK ONLY WHEN THE CHANGE TOUCHES `package.json`, `pnpm-lock.yaml`, `.npmrc` OR `.github/workflows/`. GitHub filters `paths:` per WORKFLOW and not per job, and a
+  # workflow-wide filter would skip `gate` with it, so the job reads the paths itself and the steps after `touched` are conditional on it: an untouched change is a `success` here, never a skip, and `gate`
+  # keeps accepting `success` alone. The paths are judged against the first parent of the checked-out commit: the merge ref of a pull request or a merge-queue entry.
+  #
+  # THE TOOLS ARE THIS REPOSITORY'S RELEASE'S, NOT agent-org's: `release.yml` passes `kind` and `gate-check` and no `pnpm-version`, `changesets-version` or `node-version`, so the shared workflow's rules apply and are
+  # repeated here. pnpm comes from `packageManager` (an empty `version` makes `pnpm/action-setup` read it, as the release's does); Node is the shared workflow's default `22`; the repository has a lockfile, so the
+  # release runs the repository's own `@changesets/cli` and `CHANGESETS_VERSION` (the shared workflow's default) is read only by the branch a pull request that deletes the lockfile would reach. It versions EVERY
+  # changeset in the tree, where the release versions only those no tag has consumed: a superset, so a failure the release would meet is met here.
+  #
+  # THE CHECKOUT AND THE VERSION STEP'S CLONE ARE FULL-DEPTH. `changeset version` reads git history and DEEPENS a shallow clone, and on a `--depth=1` one it spins (agent-org#967's first run hung 29 minutes there;
+  # screenreader-fleet#33, screenreader-worker#47 and toolchain#40 fixed the same hang with `fetch-depth: 0`).
+  #
+  # NO CONSUMER-INSTALL STEP, ON PURPOSE. agent-org#967 adds a second step that runs what a11ign's `agent-org-newest-tag` runs on a tag (`pnpm install --frozen-lockfile --ignore-scripts`). Nothing installs a tag of
+  # THIS repository: it is published to no registry and holds no dependency (ADR 0012), and a11ign's `scripts/lay-layer.ts` lays `control` by cloning the tag and copying the files `layers.json` names, with no install.
+  release-dry-run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CHANGESETS_VERSION: 3.0.3
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The WHOLE history, not two commits: `touched` needs only HEAD and its first parent, but the version step clones this checkout and `changeset version` deepens a shallow clone and hangs (see the job's header).
+          # No credential is kept: nothing here pushes.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Does the change touch what the release installs from?
+        id: touched
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          echo "changed paths:"
+          echo "$changed"
+          if grep -q -E '^(package\.json|pnpm-lock\.yaml|\.npmrc)$|^\.github/workflows/' <<<"$changed"; then
+            echo "touched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touched=false" >> "$GITHUB_OUTPUT"
+            echo "no install-affecting path changed: the release dry run is not needed"
+          fi
+      # No `version`: the action reads `packageManager`, which is what the release's pnpm comes from here.
+      - uses: pnpm/action-setup@v6
+        if: steps.touched.outputs.touched == 'true'
+      - uses: actions/setup-node@v7
+        if: steps.touched.outputs.touched == 'true'
+        with:
+          node-version: 22
+      - name: The release's version step, dry-run on a scratch clone -- install, changeset version, lockfile refresh
+        if: steps.touched.outputs.touched == 'true'
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/release-dry-run"
+          git clone --quiet "file://$GITHUB_WORKSPACE" "$scratch"
+          cd "$scratch"
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+            pnpm exec changeset version
+            pnpm install --lockfile-only
+          else
+            pnpm dlx "@changesets/cli@$CHANGESETS_VERSION" version
+          fi
+
+  # THE REQUIRED CHECK. `main`'s protection and the `merge-queue-main` ruleset name `gate`, so it stays the one check that answers for the run. It waits for the four jobs above and
   # accepts `success` ONLY: `always()` because a job whose need failed is SKIPPED, and a skipped required check counts as passed; and no `skipped` allowance, because the changeset
   # job succeeds on a merge-group entry rather than skipping, so a skip here means it did not run.
   gate:
-    needs: [changeset, checks, ansible]
+    needs: [changeset, checks, ansible, release-dry-run]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - name: Every job ran, and ran clean
         run: |
-          for result in "${{ needs.changeset.result }}" "${{ needs.checks.result }}" "${{ needs.ansible.result }}"; do
+          for result in "${{ needs.changeset.result }}" "${{ needs.checks.result }}" "${{ needs.ansible.result }}" "${{ needs.release-dry-run.result }}"; do
             if [ "$result" != "success" ]; then
               echo "::error::a job reported '$result', not success"
               exit 1
