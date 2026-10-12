@@ -43,7 +43,8 @@ import { pathToFileURL } from "node:url";
 import { readControlPlaneFleet } from "./control-plane-fleet.ts";
 import { makeStage, readDeployPins, stagePublished } from "./layer-pins.ts";
 import { resolveMovedByMacLive, subnetOf } from "./fleet-status.ts";
-import { requestJson } from "../../worker-fleet/src/worker-http.ts";
+// Carried rather than reached by relative path: `fleet-wake` imports this module and the lab loads it with no `../../worker-fleet` (a11ign#5184).
+import { requestJson } from "./worker-fleet-carried.ts";
 
 const HEALTH_TIMEOUT_MS = 5_000;
 

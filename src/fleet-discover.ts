@@ -46,10 +46,9 @@ import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.ts's
-// header for why. These imports cross back to worker-fleet the SANCTIONED way, by relative path.
-import { requestJson } from "../../worker-fleet/src/worker-http.ts";
-import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.ts";
-import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.ts";
+// header for why. The worker-fleet helpers it uses are CARRIED in worker-fleet-carried.ts rather than reached by
+// relative path, so this module loads outside a core checkout (a11ign#5184, where the lab imports fleet-wake).
+import { requestJson, WORKER_GROUP, groupPerLine, refuseUnknownFlags, flagValue } from "./worker-fleet-carried.ts";
 // #1684: shared with fleet-wake.ts (#1683) -- same "durable copy first" precedence ansible.cfg's own
 // `inventory =` line states, for the READ half only. See main()'s own comment for why the WRITE half
 // (`--enroll`) does not use this.
