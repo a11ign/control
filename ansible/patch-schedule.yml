@@ -70,8 +70,9 @@
     patch_window_weekday: 6
     patch_window_start_hour: 2
     patch_window_end_hour: 6
-    # The control plane's checkout and the loader, as `a11y-fleet-auto-off.service` names them (#4292, #4341).
-    patch_checkout: /root/a11y-witness
+    # THE CHECKOUT THIS UNIT RUNS FROM IS CONTROL'S: the playbook is control's own `src/fleet-playbook.ts`, and the core no longer
+    # lays a copy of it (ADR 0045 cut 8, #5086). The loader is as `a11y-fleet-auto-off.service` names it (#4292, #4341).
+    patch_checkout: /root/control
     patch_node_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
     patch_units:
       - a11y-fleet-patch-window.service
@@ -92,8 +93,8 @@
       # checkout that differs from `origin/main` (`staleRefRefusal`) and nothing else moves `{{ patch_checkout }}` between
       # deploys; a timer that refused for seven days would raise the missed-window line for a fault it could have cured.
       # `a11y-fleet-auto-off.service`'s own step (#3852, #3976), IN ORDER and each only if the one before succeeded: no
-      # play running, fetch, `--ff-only` (never a checkout), then lay the two layers the merge may have re-pinned. The `-`
-      # is the point: a failed step leaves the tree as it was and the command's own refusal says so.
+      # play running, fetch, `--ff-only` (never a checkout). The `-` is the point: a failed step leaves the tree as it was
+      # and the command's own refusal says so.
       # `$$` is systemd's escape for a literal `$`.
       ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
           a11y-fleet-deploy.service a11y-fleet-sleep.service a11y-fleet-provision-role.service a11y-fleet-recover.service \
@@ -101,11 +102,9 @@
           a11y-fleet-collect-logs.service a11y-fleet-patch.service) && \
         { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
         { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
-        git merge --ff-only --quiet origin/main && \
-        node scripts/lay-layer.ts screenreader-fleet && \
-        node scripts/lay-layer.ts control'
+        git merge --ff-only --quiet origin/main'
       # `--apply` IS HERE, OR THE TIMER IS A REPORT ON A CLOCK (#2784); `--scheduled` refuses without it.
-      ExecStart=/usr/bin/node --import {{ patch_node_loader }} {{ patch_checkout }}/packages/control/src/fleet-playbook.ts --playbook=patch.yml --apply --scheduled --window-days={{ patch_window_days }} --retry-days={{ patch_window_retry_days }} --weekday={{ patch_window_weekday }} --window-start-hour={{ patch_window_start_hour }} --window-end-hour={{ patch_window_end_hour }}
+      ExecStart=/usr/bin/node --import {{ patch_node_loader }} {{ patch_checkout }}/src/fleet-playbook.ts --playbook=patch.yml --apply --scheduled --window-days={{ patch_window_days }} --retry-days={{ patch_window_retry_days }} --weekday={{ patch_window_weekday }} --window-start-hour={{ patch_window_start_hour }} --window-end-hour={{ patch_window_end_hour }}
 
     patch_timer_unit: |
       [Unit]
