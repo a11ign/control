@@ -59,7 +59,7 @@ refuseAnyFlag({ entry: import.meta.url, command: "npm run fleet:wake" });
  * ADR 0045 rule 2: a consumer never reads another's source). The deadline is a TOTAL one, because
  * node:http's `timeout` measures socket inactivity and a worker that accepts and then stalls never trips it.
  */
-type JsonResponse = { status: number, ok: boolean, text: string, json: any };
+type JsonResponse = { status: number, ok: boolean, text: string, json?: { busy?: boolean, ready?: boolean, reason?: string } };
 type RequestJson = (url: string, options?: { timeoutMs?: number }) => Promise<JsonResponse>;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -101,7 +101,7 @@ function parseJson(text: string) {
  * `argv[1]` is realpath'd so an npm `.bin` symlink still matches `entry`.
  */
 function refuseAnyFlag({ entry, command, argv = process.argv.slice(2) }: { entry: string, command: string, argv?: string[] }) {
-  let invoked = "";
+  let invoked;
   try {
     invoked = process.argv[1] ? pathToFileURL(realpathSync(process.argv[1])).href : "";
   } catch {
