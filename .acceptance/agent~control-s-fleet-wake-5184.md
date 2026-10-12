@@ -40,4 +40,16 @@ Measured by walking `fleet-wake.ts`'s relative imports at this head: three files
 - `src/fleet-wake.ts` (`worker-http`, `cli-flags`): a11ign/control#72, open.
 - `src/control-plane-fleet.ts` and `src/fleet-switch.ts` (`fleet-env`): `fleet-switch.ts` needs only `groupPerLine` and `WORKER_GROUP`, which this PR now carries. `control-plane-fleet.ts` also needs `workersFromInventory`, `workerNamesFromInventory` and `portFromGroupVars`, the inventory reader proper, which this PR does not carry. Outside this row's Region; filed as its own row.
 
+## Rework: the carried `fleet-consistency` copy had gone stale (reviewer-control-73, not convinced at `ccb8d111`)
+
+The copy was taken from a detached local `worker-fleet` checkout that predated worker-fleet#5021, so it lacked `edgeUpdaterGuard.state` in
+`REPORTED_ONLY` and the dotted-path read (`valueAt`). Re-carried from `worker-fleet` `origin/main` (`d740ee2`); of the five carried modules only
+`fleet-consistency.ts` differed between that checkout and `origin/main`. The parity test now also feeds guests that report `edgeUpdaterGuard`
+(differing, `null`, and a non-object) and asserts the dotted entry appears in `reportedOnly`, so the field list is not compared empty with empty.
+
+- `node --test src/worker-fleet-carried.test.ts` with the original laid at `../../worker-fleet` from `origin/main`: 8 pass, 0 fail.
+- Mutation: the previous (stale) copy under the same test: 7 pass, 1 fail, in the fleet-consistency test.
+- Acceptance command: exit 0. Both new files lint with zero errors under the core's config.
+- `fleet-discover`, `fleet-status`, `with-control-plane-fleet` and `control-has-no-dependencies` tests: 91 pass, 5 fail; the same 91/5 on unmodified `main` in the same layout.
+
 Closes a11ign/a11ign#5184
