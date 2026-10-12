@@ -210,6 +210,52 @@
               if ($wrong.Count -gt 0) { $Ansible.Failed = $true; "deferral did not read back: " + ($wrong -join '; ') }
               else { "$($Wanted.Count) deferral value(s) read back" }
 
+        - name: Stage the feature update's download before the install, on a target pass
+          # a11ign#5314: on a box with nothing staged, the install below met the feature update at download and failed it
+          # with HRESULT 0, so no media was staged for a switch to commit. `state: downloaded` fetches the Upgrades
+          # category and installs nothing. `ignore_errors` lets the verdict below name WUA's own result; the `always`
+          # still puts the deferral back. A box that already holds the download reports no failure and is not refused.
+          # `reboot: false` as the install has it: every win_updates here never reboots, and the restart is the play's win_reboot.
+          when:
+            - patch_target_set | bool
+            - not ansible_check_mode
+          become: true
+          ansible.windows.win_updates:
+            category_names: [Upgrades]
+            state: downloaded
+            reboot: false
+            log_path: 'C:\Windows\Temp\a11y-patch-updates.log'
+          register: patch_predownload
+          ignore_errors: true
+
+        - name: A feature update that did not download fails the box, with WUA's own download result
+          # The module reports only the HRESULT, which is 0 when WUA never began the download. Its log holds WUA's
+          # ResultCode and HRESULT per update (`Download result for ...`), so the verdict reads the last of those lines.
+          when:
+            - patch_target_set | bool
+            - not ansible_check_mode
+            - patch_predownload.failed | default(false) | bool
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $false
+              Select-String -LiteralPath 'C:\Windows\Temp\a11y-patch-updates.log' -Pattern 'Download result' |
+                Select-Object -Last 5 | ForEach-Object { $_.Line }
+          register: patch_download_result
+          changed_when: false
+          failed_when: false
+
+        - name: A feature update that did not stage fails the box before the install runs
+          when:
+            - patch_target_set | bool
+            - not ansible_check_mode
+            - patch_predownload.failed | default(false) | bool
+          ansible.builtin.fail:
+            msg: >-
+              {{ inventory_hostname }}: the feature update did not download, so nothing is staged for a switch.
+              Module: {{ patch_predownload.msg | default('no message') }}. Updates: {{ patch_predownload.updates | default({}) | to_json }}.
+              WUA's download results: {{ patch_download_result.output | default([]) | join(' | ') | default('none logged', true) }}
+
         - name: Install the pending quality updates, WITHOUT letting the module reboot
           # `reboot: false` is load-bearing: the reboot below is this play's own, visible and conditional.
           become: true

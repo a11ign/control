@@ -67,10 +67,10 @@ function refusesOnBusyBeforeChanging(play: Play): boolean {
 function rebootsOnlyItself(play: Play): boolean {
   const updates = tasksUsing(play, "ansible.windows.win_updates");
   const reboots = tasksUsing(play, "ansible.windows.win_reboot");
-  if (updates.length !== 1 || reboots.length !== 1) return false;
-  const neverModuleReboot = updates[0]["ansible.windows.win_updates"].reboot === false;
+  if (updates.length === 0 || reboots.length !== 1) return false;
+  const neverModuleReboot = updates.every((task: Task) => task["ansible.windows.win_updates"].reboot === false);
   const onlyAfterInstalling = /installed_update_count/.test(JSON.stringify(reboots[0].when ?? ""));
-  return neverModuleReboot && onlyAfterInstalling && updates[0] !== reboots[0];
+  return neverModuleReboot && onlyAfterInstalling && !updates.includes(reboots[0]);
 }
 
 /** The restore runs in `always` and takes its values from the role's list through the variable's name. */
