@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const PINS = JSON.parse(readFileSync(new URL("../deploy-pins.json", import.meta.url), "utf8"));
+const PINS: { layers: Record<string, { package: string, version: string }> } = JSON.parse(readFileSync(new URL("../deploy-pins.json", import.meta.url), "utf8"));
 const LOCK = readFileSync(new URL("../pnpm-lock.yaml", import.meta.url), "utf8");
 
 /** Every module in this package, so a new one cannot arrive unguarded. */
