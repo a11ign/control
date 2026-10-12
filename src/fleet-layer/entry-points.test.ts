@@ -341,7 +341,6 @@ const KNOWN_PLAIN_ENTRY_GUARDS: readonly string[] = Object.freeze([
   "packages/control/src/fleet-discover.ts",
   "packages/control/src/fleet-playbook.ts",
   "packages/control/src/fleet-status.ts",
-  "packages/control/src/fleet-wake.ts",
   "packages/control/src/lab-job.ts",
   "packages/control/src/lab-pipeline.ts",
   "packages/worker-fleet/src/fleet-env.ts",
