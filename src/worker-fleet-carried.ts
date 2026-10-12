@@ -110,6 +110,7 @@ export function assertWorkerUrl(value: string | null | undefined, { source = "--
  *   strictly worse than saying the value is untyped. The SHAPE that matters is checked where it is
  *   defined: `capture-core`'s `Capture` typedef, and the worker's own `/health` contract.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- parsed JSON read by field path, as in the original
 export function requestJson(url: string, { method = "GET", body, timeoutMs = 30_000 }: { method?: string; body?: unknown; timeoutMs?: number; } = {}): Promise<{ status: number; ok: boolean; text: string; json: any; }> {
   const target = new URL(url);
   const send = target.protocol === "https:" ? httpsRequest : httpRequest;
