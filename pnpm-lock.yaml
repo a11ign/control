@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@a11ign/toolchain':
-        specifier: ^0.1.5
-        version: 0.1.5(@rstest/core@0.12.3)
+        specifier: ^0.1.7
+        version: 0.1.7(@rstest/core@0.12.3)
       '@changesets/cli':
         specifier: 3.0.3
         version: 3.0.3
@@ -24,12 +24,10 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  packages/control: {}
-
 packages:
 
-  '@a11ign/toolchain@0.1.5':
-    resolution: {integrity: sha512-T+aX/fbI1G28IL7FXaGVdBSlXry0FyiGsmYLt50MGHwAaISTDPi7zxFqOJLaVgE3BR7Ie9sQboBE3DfsKYE1DQ==}
+  '@a11ign/toolchain@0.1.7':
+    resolution: {integrity: sha512-L6VIx47+zW7xnyoNouIBtJrdJnCjqQVs/aSW/74EW6hDeZP6gj62I9Qqv5FbTz3asRkMOe7rh7/5odohyWSYcw==}
     engines: {node: '>=22.15.0'}
     hasBin: true
     peerDependencies:
@@ -485,7 +483,7 @@ packages:
 
 snapshots:
 
-  '@a11ign/toolchain@0.1.5(@rstest/core@0.12.3)':
+  '@a11ign/toolchain@0.1.7(@rstest/core@0.12.3)':
     dependencies:
       '@rstest/core': 0.12.3
 
