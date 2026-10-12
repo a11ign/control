@@ -215,6 +215,7 @@
           # with HRESULT 0, so no media was staged for a switch to commit. `state: downloaded` fetches the Upgrades
           # category and installs nothing. `ignore_errors` lets the verdict below name WUA's own result; the `always`
           # still puts the deferral back. A box that already holds the download reports no failure and is not refused.
+          # `reboot: false` as the install has it: every win_updates here never reboots, and the restart is the play's win_reboot.
           when:
             - patch_target_set | bool
             - not ansible_check_mode
@@ -222,6 +223,7 @@
           ansible.windows.win_updates:
             category_names: [Upgrades]
             state: downloaded
+            reboot: false
             log_path: 'C:\Windows\Temp\a11y-patch-updates.log'
           register: patch_predownload
           ignore_errors: true

@@ -114,7 +114,7 @@ test("the pre-download downloads the Upgrades category only, on a target pass, a
   const stage = findTask(PATCH_PLAY.tasks, STAGE_TASK);
   assert.ok(stage, `the patch play must carry a task named "${STAGE_TASK}..."`);
   assert.deepEqual(stage["ansible.windows.win_updates"], {
-    category_names: ["Upgrades"], state: "downloaded", log_path: "C:\\Windows\\Temp\\a11y-patch-updates.log" });
+    category_names: ["Upgrades"], state: "downloaded", reboot: false, log_path: "C:\\Windows\\Temp\\a11y-patch-updates.log" });
   assert.ok(stage.when.includes("patch_target_set | bool"), "the pre-download must be gated on a target pass");
   assert.equal(stage.ignore_errors, true, "the verdict, not the module's own exit, must name the failure");
 });
