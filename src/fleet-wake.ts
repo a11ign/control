@@ -59,7 +59,9 @@ refuseAnyFlag({ entry: import.meta.url, command: "npm run fleet:wake" });
  * ADR 0045 rule 2: a consumer never reads another's source). The deadline is a TOTAL one, because
  * node:http's `timeout` measures socket inactivity and a worker that accepts and then stalls never trips it.
  */
-type JsonResponse = { status: number, ok: boolean, text: string, json?: { busy?: boolean, ready?: boolean, reason?: string } };
+type JsonResponse = { status: number, ok: boolean, text: string, json?: unknown };
+/** The slice of a worker's `/health` body this file reads; the wire is untyped, so it is named where it is read. */
+type HealthBody = { busy?: boolean, ready?: boolean, reason?: string };
 type RequestJson = (url: string, options?: { timeoutMs?: number }) => Promise<JsonResponse>;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -253,10 +255,11 @@ export async function probeWorker(url: string, { timeoutMs = HEALTH_TIMEOUT_MS, 
       : { outcome: "no-answer", message: `${code ? `${code}: ` : ""}${message}` };
   }
   if (!response.ok) return { outcome: "not-ready", reason: `/health answered HTTP ${response.status}` };
-  if (response.json?.busy === true) return { outcome: "busy" };
-  if (response.json?.ready === true) return { outcome: "ready" };
+  const health = response.json as HealthBody | undefined;
+  if (health?.busy === true) return { outcome: "busy" };
+  if (health?.ready === true) return { outcome: "ready" };
   return { outcome: "not-ready",
-    reason: response.json?.reason ?? "/health answered without `ready: true` and without a reason" };
+    reason: health?.reason ?? "/health answered without `ready: true` and without a reason" };
 }
 
 export type WakeTarget = { name: string, host: string, mac?: string | null };
