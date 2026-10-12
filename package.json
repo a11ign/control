@@ -52,13 +52,17 @@
     "layout-check": "layout-check",
     "changeset": "changeset"
   },
-  "//": "NO `dependencies` KEY HAS ANY ENTRY, AND THAT IS THE POINT. ADR 0012 keeps the credential that can reconfigure twelve auto-logging-in Windows boxes away from npm's transitive surface, and this package is the code that runs on the machine holding it. `scripts/package-manifest.test.ts` asserts the emptiness rather than trusting this comment: the ADR made the same claim in prose and was violated on BOTH machines it described, for as long as nobody looked. The `devDependencies` are the repository's own tooling (the shared rstest config, the layout check, changesets, the typechecker): the control plane runs from a raw checkout and never installs them, and the same test names them, so a sixth is a reviewed change.",
-  "dependencies": {},
+  "//": "THE DEPENDENCIES ARE EXACTLY THE TWO PUBLISHED LAYERS, each at the version deploy-pins.json names (ADR 0045 cut 9, ceo ruling on a11ign#5312). ADR 0012 kept this package to a raw checkout with no node_modules, because the credential that reconfigures the fleet sat beside the largest supply-chain surface; ADR 0045 item 5 removed that and named the mechanism as this row. control-has-no-dependencies.test.ts is the guarantee: no other declared dependency, and no package-name import outside these two. The plane installs with `pnpm install --frozen-lockfile --ignore-scripts` and nothing else, so the third-party closure beside the key is what the lockfile pins. tsx is a devDependency: the test child runs TypeScript and the plane installs production dependencies only. The `devDependencies` are the repository's own tooling, and a new one is a reviewed change.",
+  "dependencies": {
+    "@a11ign/screenreader-fleet": "0.10.2",
+    "@a11ign/screenreader-worker": "0.13.0"
+  },
   "devDependencies": {
     "@a11ign/toolchain": "^0.1.7",
     "@changesets/cli": "3.0.3",
     "@rstest/core": "^0.12.3",
     "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }

@@ -10,8 +10,8 @@
     },
     "screenreader-fleet": {
       "package": "@a11ign/screenreader-fleet",
-      "version": "0.9.0",
-      "integrity": "sha512-ie6tZtGwQa99/AJHAbJ2j5FHC6RmiORXdxHfVppCPRzrO3LfmuX2WX8Fof5roa7e0yxb3qaXkTs17oxTi54L3Q==",
+      "version": "0.10.2",
+      "integrity": "sha512-rlyo5VXW/+MPKXQWwdOAlNLQvvcHuvtHFmKAO14DLAqcbatqna7pJgKSIcBt24k0SkuVcb5x6Ks3pG614tCpZw==",
       "path": "packages/worker-fleet",
       "remote": "https://github.com/a11ign/screenreader-fleet.git"
     }

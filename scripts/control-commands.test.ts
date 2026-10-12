@@ -16,6 +16,11 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string>; dependencies?: Record<string, string>; };
+/** The two published layers, package name -> pinned version, as `deploy-pins.json` holds them. */
+const PINNED_LAYERS = Object.fromEntries(
+  Object.values((JSON.parse(readFileSync(new URL("../deploy-pins.json", import.meta.url), "utf8")) as { layers: Record<string, { package: string, version: string }> }).layers)
+    .map((layer) => [layer.package, layer.version]),
+);
 
 /** The commands the core's `package.json` started with `packages/control` in them, at a11ign/a11ign `70361744f`. */
 const COMMANDS = [
@@ -53,8 +58,8 @@ test("the lab commands a lab job dispatch and watch use are all here: job, pipel
   }
 });
 
-test("`doctor` and `worker:code` run the fleet's bins by name, from the pinned release, and add no dependency to run them", () => {
+test("`doctor` and `worker:code` run the fleet's bins by name, from the pinned release, and declare no dependency beyond the two pinned layers", () => {
   assert.equal(manifest.scripts.doctor, "node src/with-control-plane-fleet.ts doctor");
   assert.equal(manifest.scripts["worker:code"], "node src/with-control-plane-fleet.ts worker-code");
-  assert.deepEqual(manifest.dependencies ?? {}, {}, "the published fleet is unpacked beside a run and never declared (ADR 0012)");
+  assert.deepEqual(manifest.dependencies ?? {}, PINNED_LAYERS, "the only declared dependencies are the two published layers at their pins (ADR 0045); anything else is installed beside the fleet key (ADR 0012)");
 });

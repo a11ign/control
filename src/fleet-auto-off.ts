@@ -127,11 +127,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
-import { requestJson } from "../../worker-fleet/src/worker-http.ts";
+import { sandboxGitEnv } from "@a11ign/screenreader-fleet/git-safe-env";
+import { requestJson } from "@a11ign/screenreader-fleet/worker-http";
 import { layerDeclaration, layerOwning } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag } from "./layer-pins.ts";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
+import { refuseUnknownFlags } from "@a11ign/screenreader-fleet/cli-flags";
 import { inventoryHosts } from "./fleet-discover.ts";
 import { inventoryPathFor } from "./control-plane-fleet.ts";
 import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
@@ -557,7 +557,7 @@ export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof
  * are equal files.
  *
  * Only the laid shape (`.layer-ref` beside `src/`) is judged: a clone at the layer's path holds the layer repository's own
- * layout (`packages/worker-fleet/src` under it), which `../../worker-fleet/src/` cannot import from, so it is not a tree that runs.
+ * layout (`packages/worker-fleet/src` under it), which a sibling-checkout import cannot reach, so it is not a tree that runs.
  */
 export function judgeLaidLayer({ name, dir, path, tag }: LayerAtItsPin): ReturnType<JudgeLayer> {
   const refFile = join(dir, ".layer-ref");
