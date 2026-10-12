@@ -1,6 +1,6 @@
 Row a11ign/a11ign#5312 (control's fleet auto-off runs from control's own checkout). Region is `src/fleet-auto-off.ts`, its test, `src/control-has-no-dependencies.test.ts`, `scripts/control-commands.test.ts`, `scripts/package-manifest.test.ts`, `package.json`, `pnpm-lock.yaml`, `deploy-pins.json`. The ceo ruling (a11ign/a11ign#5312, 2026-10-12 22:20Z) is the scope: the two published layers declared at their pins, the guard amended, `tsx` as a devDependency, the layer-test failures moved or deleted with reasons.
 
-Acceptance: `! grep -rn "\.\./\.\./worker-fleet" src/fleet-auto-off.ts && pnpm exec node --test src/fleet-auto-off.test.ts`
+Acceptance: `bash -c '! grep -rn "\.\./\.\./worker-fleet" src/fleet-auto-off.ts && pnpm exec node --test src/fleet-auto-off.test.ts'`
 
 **As run (measured, 2026-10-13):**
 - Acceptance command: `tests 113, pass 112, fail 0, todo 1` (exit 0).
