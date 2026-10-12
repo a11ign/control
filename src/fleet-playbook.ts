@@ -1725,14 +1725,17 @@ export function sequenceHoldGate({ chosen, holds, allowHold, limitFlag }: {
     + "each named with --allow-hold." };
 }
 
+/** The repository the rows, and so the fleet holds, live in (#5307). Not the checkout's remote: control's own checkout has issues disabled. */
+const ROWS_REPO = "a11ign/a11ign";
+
 /**
  * The rows that could be holding the fleet, RIGHT NOW -- `gh issue list`, scoped exactly as #1839's own
  * open-check does: `--state open --label fleet-gated`, because that is the only population a fleet hold
  * could ever apply to (a row whose acceptance needs the fleet).
  *
- * NO `--repo`, matching every other `gh` call in this org (`work-gate.mjs` and its neighbours): `gh`
- * resolves the repository from the checkout's own git remote, and stating it again here would be a
- * second copy of a fact one `git remote` already carries.
+ * `--repo` IS STATED (#5307). It was left to `gh` to resolve from the checkout's remote, which is right
+ * for the core and wrong for control's own checkout, whose remote is `a11ign/control` with issues disabled:
+ * a write play run from there refused on the hold read before it reached the plane.
  *
  * A FAILURE CARRIES `tokenSet`: whether the environment `gh` actually ran in held a token. It is
  * `ghEnvironment`'s own answer, not a second derivation of it, so a blank token file (which `ghEnvironment`
@@ -1743,7 +1746,7 @@ export function readFleetGatedIssues({ env = process.env, readToken = readGhToke
   const ghEnv = ghEnvironment(env, readToken);
   try {
     return JSON.parse(String(run("gh",
-      ["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100"],
+      ["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100", "--repo", ROWS_REPO],
       // stderr PIPED, not inherited: on a tokenless control plane gh's own text is "please run: gh auth
       // login", which is the wrong advice for a root box (#1875) -- `fleetHoldReadRefusal` says what to do.
       { encoding: "utf8", env: ghEnv, stdio: ["ignore", "pipe", "pipe"] })));
