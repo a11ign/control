@@ -24,15 +24,15 @@
  * start its own workers because of an install problem in something unrelated.
  */
 import { createSocket } from "node:dgram";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { pathToFileURL } from "node:url";
 
 // MOVED here from packages/worker-fleet/src 2026-09-06 (architecture audit §3.2) -- see fleet-status.ts's
-// header for why. `fleet-discover.ts` moved alongside it, so that import stays local; the other two
-// cross back to worker-fleet the SANCTIONED way, by relative path.
+// header for why. `fleet-discover.ts` moved alongside it, so that import stays local; the HTTP read and
+// the flag refusal are this file's own (below), so nothing here reaches into worker-fleet.
 import { inventoryHosts } from "./fleet-discover.ts";
-import { requestJson } from "../../worker-fleet/src/worker-http.ts";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
 // #1683/#1684: SHARED, not restated -- both this file and fleet-discover.ts need "the durable copy
 // first, the in-tree checkout second", and defining it here would make fleet-discover.ts (which this
 // file already imports `inventoryHosts` from) import back FROM here, a cycle. `control-plane-fleet.ts`
@@ -50,7 +50,73 @@ import { locateByMac } from "./with-control-plane-fleet.ts";
  *
  * An unrecognised flag is otherwise IGNORED, so it runs the default and reports success.
  */
-refuseUnknownFlags([], { entry: import.meta.url, command: "npm run fleet:wake" });
+refuseAnyFlag({ entry: import.meta.url, command: "npm run fleet:wake" });
+
+/**
+ * `/health` is the only thing this file asks a worker, so it carries its own GET rather than importing
+ * `worker-fleet`'s `requestJson`: a path into the core's `packages/worker-fleet` resolves only while control
+ * is laid beside it, and the package name is refused by `control-has-no-dependencies.test.ts` (ADR 0012,
+ * ADR 0045 rule 2: a consumer never reads another's source). The deadline is a TOTAL one, because
+ * node:http's `timeout` measures socket inactivity and a worker that accepts and then stalls never trips it.
+ */
+type JsonResponse = { status: number, ok: boolean, text: string, json?: unknown };
+/** The slice of a worker's `/health` body this file reads; the wire is untyped, so it is named where it is read. */
+type HealthBody = { busy?: boolean, ready?: boolean, reason?: string };
+type RequestJson = (url: string, options?: { timeoutMs?: number }) => Promise<JsonResponse>;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+const requestJson: RequestJson = (url, { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) => {
+  const target = new URL(url);
+  const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    const req = send(target, { method: "GET", headers: { accept: "application/json" } }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => { text += chunk; });
+      res.on("error", fail);
+      res.on("end", () => {
+        clearTimeout(deadline);
+        const status = res.statusCode ?? 0;
+        resolve({ status, ok: status >= 200 && status < 300, text, json: parseJson(text) });
+      });
+    });
+    // The code is attached because recovery here is keyed on CODES, never on message text.
+    const deadline = setTimeout(() => {
+      const error = new Error(`Request to ${url} timed out after ${timeoutMs} ms`) as NodeJS.ErrnoException;
+      error.code = "ETIMEDOUT";
+      req.destroy(error);
+    }, timeoutMs);
+    function fail(error: unknown) { clearTimeout(deadline); reject(error); }
+    req.on("error", fail);
+    req.end();
+  });
+};
+
+/** A worker's error page is not a parse failure worth throwing over. */
+function parseJson(text: string) {
+  try { return JSON.parse(text); } catch { return undefined; }
+}
+
+/**
+ * Refuse any flag, when this module IS the command and only then: the call sits at module top level, so
+ * it runs on IMPORT and would otherwise judge the IMPORTING process's argv (the lab's captures import this).
+ * `argv[1]` is realpath'd so an npm `.bin` symlink still matches `entry`.
+ */
+function refuseAnyFlag({ entry, command, argv = process.argv.slice(2) }: { entry: string, command: string, argv?: string[] }) {
+  let invoked;
+  try {
+    invoked = process.argv[1] ? pathToFileURL(realpathSync(process.argv[1])).href : "";
+  } catch {
+    invoked = pathToFileURL(process.argv[1] ?? "").href;
+  }
+  if (entry !== invoked) return;
+  const flags = argv.filter((argument) => argument.startsWith("-"));
+  if (flags.length === 0) return;
+  for (const flag of flags) console.error(`  ${command}: unknown flag ${flag}`);
+  console.error("  It takes no flags at all.");
+  console.error("  Refusing rather than ignoring it: an ignored flag runs the default and reports success.");
+  process.exit(2);
+}
 
 /** Port 9 (discard) by convention; nothing listens, the NIC's firmware matches the frame. */
 const WOL_PORT = 9;
@@ -178,7 +244,7 @@ export type Probe = { outcome: "ready" } | { outcome: "busy" } | { outcome: "not
  */
 
 /** @param {string} url the worker's base URL */
-export async function probeWorker(url: string, { timeoutMs = HEALTH_TIMEOUT_MS, request = requestJson }: { timeoutMs?: number; request?: typeof requestJson; } = {}): Promise<Probe> {
+export async function probeWorker(url: string, { timeoutMs = HEALTH_TIMEOUT_MS, request = requestJson }: { timeoutMs?: number; request?: RequestJson; } = {}): Promise<Probe> {
   let response;
   try {
     response = await request(`${url}/health`, { timeoutMs });
@@ -189,14 +255,15 @@ export async function probeWorker(url: string, { timeoutMs = HEALTH_TIMEOUT_MS, 
       : { outcome: "no-answer", message: `${code ? `${code}: ` : ""}${message}` };
   }
   if (!response.ok) return { outcome: "not-ready", reason: `/health answered HTTP ${response.status}` };
-  if (response.json?.busy === true) return { outcome: "busy" };
-  if (response.json?.ready === true) return { outcome: "ready" };
+  const health = response.json as HealthBody | undefined;
+  if (health?.busy === true) return { outcome: "busy" };
+  if (health?.ready === true) return { outcome: "ready" };
   return { outcome: "not-ready",
-    reason: response.json?.reason ?? "/health answered without `ready: true` and without a reason" };
+    reason: health?.reason ?? "/health answered without `ready: true` and without a reason" };
 }
 
 export type WakeTarget = { name: string, host: string, mac?: string | null };
-export type WakeOptions = { port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number, log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>, request?: typeof requestJson, sleep?: (ms: number) => Promise<void>, now?: () => number, macRead?: typeof resolveMovedByMacLive, proofPath?: string | null, proofTransport?: ProofTransport };
+export type WakeOptions = { port?: number, broadcast?: string, deadlineMs?: number, pollMs?: number, probeTimeoutMs?: number, log?: (line: string) => void, send?: (mac: string, broadcast?: string) => Promise<number>, request?: RequestJson, sleep?: (ms: number) => Promise<void>, now?: () => number, macRead?: typeof resolveMovedByMacLive, proofPath?: string | null, proofTransport?: ProofTransport };
 export type WakeConfig = Required<Omit<WakeOptions, "broadcast">> & { broadcast?: string };
 export type WakeResult = WakeTarget & { state: string, packets: number, detail?: string };
 
