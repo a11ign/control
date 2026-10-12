@@ -2,13 +2,15 @@
  * What `fleet-wake`'s load closure needs from `worker-fleet`, carried HERE so it loads outside a core checkout (a11ign#5184, epic #4425
  * done-when 3). The lab's consumers import `@a11ign/control/fleet-wake` from the lab's OWN checkout, where `../../worker-fleet/src/` does not
  * exist, and the package name is refused by `control-has-no-dependencies.test.ts` (ADR 0012: the control plane runs from a raw checkout with
- * no `node_modules`). So `fleet-discover.ts`, `fleet-status.ts` and `with-control-plane-fleet.ts` import from here instead of reaching up.
+ * no `node_modules`). So `fleet-discover.ts`, `fleet-status.ts`, `with-control-plane-fleet.ts`, `control-plane-fleet.ts` and `fleet-switch.ts`
+ * import from here instead of reaching up.
  *
  * EVERY DECLARATION BELOW IS A COPY, taken verbatim from the file named above it. This module owns none of them and adds none: a behaviour
  * change goes to `worker-fleet` first and arrives here by copy, and `worker-fleet-carried.test.ts` compares each copy with the original on
  * the same inputs wherever the original is laid, so the two cannot drift unseen. (`cli-flags.ts` and `worker-health.ts` and
  * `fleet-consistency.ts` are carried whole; `worker-http.ts` and `fleet-env.ts` are carried by declaration, because the rest of
- * `fleet-env.ts` reads an inventory path that means nothing here.)
+ * `fleet-env.ts` reads an inventory path that means nothing here. The inventory reader `control-plane-fleet.ts` and `fleet-switch.ts`
+ * need is carried by declaration too, from `fleet-env.ts`'s own group reader.)
  *
  * Imports `node:` built-ins only. Keep it that way: the control plane has no `node_modules`.
  */
@@ -342,6 +344,216 @@ export function groupPerLine(text: string): Array<string | undefined> {
     if (!HOST_LINE.test(line)) descend(stack, line);
     return groupOf(stack.map((f) => f.key));
   });
+}
+
+export const DEFAULT_WORKER_PORT = 8765;
+
+/** Anything that mentions the key but does not parse — a reformat, a quoted value, a list. */
+const SUSPECT = /ansible_host\s*:/;
+
+/**
+ * A host var declaring whether the host is in the CAPTURE SET. Absent means in: the default is unchanged, so
+ * a host that says nothing needs no inventory edit.
+ */
+const CAPTURE_KEY = "a11y_capture";
+
+const CAPTURE_LINE = new RegExp(`^(\\s*)${CAPTURE_KEY}\\s*:\\s*(\\S+)\\s*$`);
+
+const CAPTURE_SUSPECT = new RegExp(`${CAPTURE_KEY}\\s*:`);
+
+/**
+ * A host as the inventory declares it — the ADDRESS and the NAME together.
+ *
+ * They travel as one value because separating them is what sent `fleet:sleep` at the wrong machine: every
+ * tool that ACTS on a worker takes the name, every tool that REPORTS on one printed the address, and
+ * nothing mapped between them. `collectHost` explains the incident.
+ *
+ * `capture` is false for a host that declares `a11y_capture: false`: enrolled, served, deployed to, and not
+ * handed corpus cases.
+ */
+export type Host = {name: string|undefined, host: string, capture: boolean};
+
+/**
+ * The hosts of one inventory group, each with whether it is in the capture set.
+ *
+ * ONE reader for both questions ("the whole fleet" and "the capture set"), because a second pass over the
+ * file is a second parser, and this repo has paid for that shape already (`fleet-discover.mjs`).
+ *
+ * @param {string} text
+ * @param {string} group
+ * @returns {Host[]}
+ */
+function hostsInGroup(text: string, group: string): Host[] {
+  /** @type {Host[]} */
+  const hosts: Host[] = [];
+  /** @type {Frame[]} */
+  const stack: Frame[] = [];
+  /** @type {Map<string, {capture: boolean, line: number}>} */
+  const declared: Map<string, { capture: boolean; line: number; }> = new Map();
+  text.split(/\r?\n/).forEach((line, index) => {
+    if (!line.trim() || line.trimStart().startsWith("#")) return;
+    const match = line.match(HOST_LINE);
+    if (match) {
+      collectHost(hosts, { match, index, stack, group });
+      return;
+    }
+    if (CAPTURE_SUSPECT.test(line)) {
+      readCaptureDeclaration(declared, { line, index, stack });
+      return;
+    }
+    if (SUSPECT.test(line)) {
+      throw new Error(
+        `inventory.yml:${index + 1} looks like a host entry but does not parse: ${line.trim()}\n`
+        + "This reader understands `ansible_host: <address>` and nothing else, deliberately — a fleet list "
+        + "that silently comes up short is invisible, because a run with fewer workers looks normal.");
+    }
+    descend(stack, line);
+  });
+  if (!hosts.length) {
+    throw new Error(`no hosts found under ${group}.hosts in inventory.yml. Add one before running.`);
+  }
+  return applyCaptureDeclarations(hosts, declared, group);
+}
+
+/**
+ * Record `a11y_capture: true|false` against the host whose var it is — the nearest enclosing key.
+ *
+ * Strict for the reason the header gives: `a11y_capture: no` or `"false"` that this reader took for "not
+ * declared" would leave a cold host in the capture set, and a capture guard would then refuse the run
+ * naming the wrong cause. Only the two literals are read; anything else names its line.
+ *
+ * @param {Map<string, {capture: boolean, line: number}>} declared
+ * @param {{line: string, index: number, stack: Frame[]}} at
+ */
+function readCaptureDeclaration(declared: Map<string, { capture: boolean; line: number; }>, { line, index, stack }: { line: string; index: number; stack: Frame[]; }) {
+  const match = line.match(CAPTURE_LINE);
+  const value = match?.[2];
+  if (value !== "true" && value !== "false") {
+    throw new Error(
+      `inventory.yml:${index + 1} declares ${CAPTURE_KEY} but not as \`true\` or \`false\`: ${line.trim()}\n`
+      + "This reader takes those two literals and nothing else, so a host is never left in or out of the "
+      + "capture set by a spelling it did not understand.");
+  }
+  const indent = (match as RegExpMatchArray)[1].length;
+  const owner = [...stack].reverse().find((frame) => frame.indent < indent)?.key;
+  declared.set(owner ?? "", { capture: value === "true", line: index + 1 });
+}
+
+/**
+ * Attach each declaration to its host, and refuse one that belongs to no host of the group.
+ *
+ * A declaration on a group or on a host in another group would otherwise be read and dropped, which is the
+ * silent shape this module exists to refuse: somebody believes a machine is out of the capture set and it is
+ * not.
+ *
+ * @param {Host[]} hosts
+ * @param {Map<string, {capture: boolean, line: number}>} declared
+ * @param {string} group
+ * @returns {Host[]}
+ */
+function applyCaptureDeclarations(hosts: Host[], declared: Map<string, { capture: boolean; line: number; }>, group: string): Host[] {
+  const names = new Set(hosts.map((host) => host.name));
+  for (const [owner, { line }] of declared) {
+    if (!names.has(owner)) {
+      throw new Error(
+        `inventory.yml:${line} declares ${CAPTURE_KEY} on \`${owner}\`, which is not a host in ${group}.\n`
+        + `Declare it directly under the host (\`${group}.hosts.<name>.${CAPTURE_KEY}\`); it is not read anywhere else.`);
+    }
+  }
+  return hosts.map((host) => ({ ...host, capture: declared.get(host.name ?? "")?.capture ?? true }));
+}
+
+/**
+ * Worker URLs from the text of an inventory file.
+ *
+ * `scope` says which question is asked. `"fleet"` (the default) is every enrolled worker -- what `doctor`,
+ * `worker:code`, `fleet:status` and the deploy tooling mean, and they must keep seeing a worker that is
+ * serving but not capturing. `"capture"` is the fleet minus every host that declares `a11y_capture: false`
+ * -- what `A11Y_WORKERS` means. It is a string and not a flag because a boolean argument does not say
+ * which of the two you got.
+ *
+ * Exported and pure so the strictness above is testable: a reader that has never been shown to reject
+ * anything is a reader nobody knows the limits of.
+ *
+ * @param {string} text
+ * @param {{ port?: number, group?: string, scope?: "fleet" | "capture" }} [options]
+ * @returns {string[]}
+ */
+export function workersFromInventory(text: string, { port = DEFAULT_WORKER_PORT, group = WORKER_GROUP, scope = "fleet" }: { port?: number; group?: string; scope?: "fleet" | "capture"; } = {}): string[] {
+  const hosts = hostsInGroup(text, group);
+  const chosen = scope === "capture" ? hosts.filter((host) => host.capture) : hosts;
+  if (!chosen.length) {
+    // An empty A11Y_WORKERS means "find the local VMs", which do not exist on the control plane -- so an
+    // inventory with every host excluded must fail HERE, naming the cause, not as something unrelated.
+    throw new Error(`every host under ${group}.hosts declares ${CAPTURE_KEY}: false, so the capture set is empty.`);
+  }
+  return chosen.map(({ host }) => `http://${host}:${port}`);
+}
+
+/**
+ * The inventory as `{ url -> name }`, so a report can say which machine a command would act on.
+ *
+ * Same parser, same group rules — deliberately not a second reader of the same file, which this repo
+ * calls its most expensive recurring shape and has already paid for once in `fleet-discover.mjs`.
+ *
+ * @param {string} text
+ * @param {{ port?: number, group?: string }} [options]
+ * @returns {Record<string, string>}
+ */
+export function workerNamesFromInventory(text: string, { port = DEFAULT_WORKER_PORT, group = WORKER_GROUP }: { port?: number; group?: string; } = {}): Record<string, string> {
+  /** @type {Host[]} */
+  const hosts: Host[] = [];
+  /** @type {Frame[]} */
+  const stack: Frame[] = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    if (!line.trim() || line.trimStart().startsWith("#")) return;
+    const match = line.match(HOST_LINE);
+    if (match) return collectHost(hosts, { match, index, stack, group });
+    descend(stack, line);
+  });
+  // Falls back to the ADDRESS when the inventory nests a host without a name. That cannot happen in a
+  // well-formed inventory — Ansible keys hosts by name — but `undefined` reaching a report would print as
+  // the string "undefined", which is this repo's worst failure shape: a value that looks like an answer.
+  // An address is a worse label than a name and still identifies the machine, which is what this map is for.
+  return Object.fromEntries(hosts.map(({ name, host }) => [`http://${host}:${port}`, name ?? host]));
+}
+
+/**
+ * Keep this host if it is in the worker group; refuse it if it is in no group at all.
+ *
+ * A host outside every group is the ambiguous case, and it gets an error rather than a default. Including
+ * it recreates the phantom-worker bug; dropping it silently is how a fleet list comes up short — and this
+ * module exists because both of those are invisible. So it says which line, and which group it expected.
+ *
+ * @param {Host[]} hosts
+ * @param {{match: RegExpMatchArray, index: number, stack: Frame[], group: string}} found
+ */
+function collectHost(hosts: Host[], { match, index, stack, group }: { match: RegExpMatchArray; index: number; stack: Frame[]; group: string; }) {
+  const found = groupOf(stack.map((frame) => frame.key));
+  if (found === group) {
+    // The inventory NAME comes along with the address. Ansible nests the host as
+    // `...hosts.<name>.ansible_host`, so the name is the innermost frame the stack is still holding.
+    //
+    // Carried because every tool that ACTS on a worker takes the name (`-l a11y-worker-4`) while every
+    // tool that REPORTS on one printed only the address — and nothing mapped them. On 2026-08-24 that
+    // sent `fleet:sleep` at the wrong machine: `fleet:status` named .224 as the Edge-drifted box, and
+    // .224 is a11y-worker-FIVE. Two commands, one fleet, no shared vocabulary.
+    hosts.push({ name: stack[stack.length - 1]?.key, host: match[1].replace(/^["']|["']$/g, ""), capture: true });
+    return;
+  }
+  if (found === undefined) {
+    throw new Error(
+      `inventory.yml:${index + 1} declares a host outside any group: ${match[0].trim()}\n`
+      + `This reader takes workers from \`${group}\` only, so it cannot tell whether an ungrouped host is a `
+      + "capture worker or something else on the network. Nest it under `all.children.<group>.hosts`.");
+  }
+}
+
+/** The port the group vars declare, so it is stated once and not guessed here. */
+/** @param {string} text @returns {number} */
+export function portFromGroupVars(text: string): number {
+  const match = text.match(/^\s*a11y_port\s*:\s*(\d+)\s*$/m);
+  return match ? Number(match[1]) : DEFAULT_WORKER_PORT;
 }
 
 // ======================================================================================================================

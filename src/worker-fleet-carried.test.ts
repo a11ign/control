@@ -36,8 +36,8 @@ test("the originals loaded and are the functions this file means to compare, so 
   assert.notEqual(carried.requestJson, http.requestJson, "the copy IS the original: this module re-exports instead of carrying");
 });
 
-test("the three modules that carry no longer reach into worker-fleet, and each still imports something (the positive control)", () => {
-  const modules = ["fleet-discover.ts", "fleet-status.ts", "with-control-plane-fleet.ts"];
+test("the five modules that carry no longer reach into worker-fleet, and each still imports something (the positive control)", () => {
+  const modules = ["fleet-discover.ts", "fleet-status.ts", "with-control-plane-fleet.ts", "control-plane-fleet.ts", "fleet-switch.ts"];
   for (const module of modules) {
     const source = readFileSync(new URL(module, import.meta.url), "utf8");
     const specifiers = [...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((match) => match[1]);
@@ -98,6 +98,37 @@ test("the inventory group reader: the same group on every line, and the same gro
   ].join("\n");
   assert.deepEqual(carried.groupPerLine(inventory), env.groupPerLine(inventory));
   assert.ok(carried.groupPerLine(inventory).includes(carried.WORKER_GROUP), "the fixture does place a line in the worker group");
+});
+
+test("the inventory readers: the same worker URLs, names, capture scope, port and refusal, on the same inventory", () => {
+  assert.equal(carried.DEFAULT_WORKER_PORT, env.DEFAULT_WORKER_PORT);
+  const inventory = [
+    "all:", "  children:", "    a11y_workers:", "      hosts:",
+    "        a11y-worker-2:", "          ansible_host: 10.0.0.2",
+    "        a11y-worker-3:", "          ansible_host: 10.0.0.3", "          a11y_capture: false",
+    "    lab:", "      hosts:", "        lab-1:", "          ansible_host: 10.0.0.9", "",
+  ].join("\n");
+  assert.deepEqual(carried.workersFromInventory(inventory), env.workersFromInventory(inventory));
+  assert.deepEqual(carried.workersFromInventory(inventory, { port: 9000 }), env.workersFromInventory(inventory, { port: 9000 }));
+  assert.deepEqual(carried.workersFromInventory(inventory, { scope: "capture" }), env.workersFromInventory(inventory, { scope: "capture" }));
+  assert.deepEqual(carried.workerNamesFromInventory(inventory), env.workerNamesFromInventory(inventory));
+  assert.deepEqual(carried.workerNamesFromInventory(inventory, { port: 9000 }), env.workerNamesFromInventory(inventory, { port: 9000 }));
+  assert.deepEqual(carried.workersFromInventory(inventory), ["http://10.0.0.2:8765", "http://10.0.0.3:8765"], "the fixture does place two workers in the group, and not the lab host");
+  assert.deepEqual(carried.workersFromInventory(inventory, { scope: "capture" }), ["http://10.0.0.2:8765"], "the fixture does exclude one worker from capture");
+
+  const everyWorkerExcluded = [
+    "all:", "  children:", "    a11y_workers:", "      hosts:",
+    "        a11y-worker-2:", "          ansible_host: 10.0.0.2", "          a11y_capture: false",
+  ].join("\n");
+  const refusal = (run: () => unknown) => { try { run(); } catch (error) { return (error as Error).message; } return undefined; };
+  const mine = refusal(() => carried.workersFromInventory(everyWorkerExcluded, { scope: "capture" }));
+  assert.ok(mine, "a capture set with no host in it is refused");
+  assert.equal(mine, refusal(() => env.workersFromInventory(everyWorkerExcluded, { scope: "capture" })));
+
+  assert.equal(carried.portFromGroupVars("a11y_port: 9100\n"), env.portFromGroupVars("a11y_port: 9100\n"));
+  assert.equal(carried.portFromGroupVars("a11y_port: 9100\n"), 9100, "the fixture does read a port");
+  assert.equal(carried.portFromGroupVars("nothing here\n"), env.portFromGroupVars("nothing here\n"));
+  assert.equal(carried.portFromGroupVars("nothing here\n"), 8765, "a file with no port falls back to the default");
 });
 
 test("the environment's fleet and the address check: the same workers, and the same refusal text", () => {
