@@ -121,7 +121,7 @@ function importerDependencies(importers: string[]): Map<string, string> {
   const end = importers.indexOf("    devDependencies:");
   const resolved = new Map<string, string>();
   for (let i = start; i < end; i++) {
-    const name = importers[i].match(/^      (\S+):$/)?.[1];
+    const name = importers[i].match(/^ {6}(\S+):$/)?.[1];
     if (name) resolved.set(unquote(name), importers[i + 2].replace(/^\s+version: /, ""));
   }
   return resolved;

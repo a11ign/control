@@ -127,7 +127,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "@a11ign/screenreader-fleet/git-safe-env";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { requestJson } from "@a11ign/screenreader-fleet/worker-http";
 import { layerDeclaration, layerOwning } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag } from "./layer-pins.ts";
