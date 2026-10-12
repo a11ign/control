@@ -228,6 +228,14 @@
               failed {{ patch_updates.failed_update_count | default(0) }},
               reboot {{ 'required' if patch_updates.reboot_required | default(false) else 'not required' }}
 
+        - name: Name each update that installed, by title and KB, so a feature update is not read as a plain restart
+          # a11ign#5308: two passes on worker-12 printed only the counts, so nobody could tell which update the "1" was.
+          ansible.builtin.debug:
+            msg: "{{ inventory_hostname }}: installed {{ item.value.title | default('untitled') }} (KB {{ item.value.kb | default(['none']) | join(', ') }})"
+          loop: >-
+            {{ patch_updates.updates | default({}) | dict2items
+               | selectattr('value.installed', 'defined') | selectattr('value.installed') | list }}
+
         - name: Commit the staged feature update's switch through the Update Orchestrator
           # a11ign#4979: the module reported `Succeeded, RebootRequired` with the media built and Setup's
           # `DelayedSwitch: 1` serialised, and three plain `shutdown.exe` restarts came back on the same build
