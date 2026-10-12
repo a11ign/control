@@ -23,4 +23,4 @@ cd /home/agent/repos/wt-5183-control && bash -c 'test "$(git grep -cE "from \"\.
 - `fleet-wake.ts` still imports `fleet-discover.ts`, `fleet-status.ts` and `with-control-plane-fleet.ts`, which import `../../worker-fleet/src/{worker-http,cli-flags,fleet-env,worker-health}.ts`. So the lab's `fleet-wake` consumers still fail at load outside a core checkout. Filed as a row; this PR does not make done-when 3 true.
 - `pnpm run typecheck`/lint not run: this worktree has no `node_modules`.
 
-Closes: none -- a11ign/a11ign#5183 lives in another repository; `product-manager` closes it at merge.
+Closes a11ign/a11ign#5183
