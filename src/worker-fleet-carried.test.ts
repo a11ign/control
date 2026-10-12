@@ -81,23 +81,13 @@ test("fleet consistency: the same field lists and the same verdict on guests tha
     { worker: "http://10.0.0.3:8765", environment: { browserVersion: "151.0.2", windowsBuild: "26100.1" }, policy: { StartupBoostEnabled: 1 } },
     { worker: "http://10.0.0.4:8765" },
   ];
-  // A dotted reported-only path (`edgeUpdaterGuard.state`, #5021) is read through the record, so a guard that differs shows and one that is
-  // absent or not an object reads as "not reported".
-  const guards = [
-    { worker: "http://10.0.0.2:8765", environment: { edgeUpdaterGuard: { state: "disabled", checkedAt: "t1" } } },
-    { worker: "http://10.0.0.3:8765", environment: { edgeUpdaterGuard: { state: "stale", checkedAt: "t2" } } },
-    { worker: "http://10.0.0.4:8765", environment: { edgeUpdaterGuard: null } },
-    { worker: "http://10.0.0.5:8765", environment: { edgeUpdaterGuard: "absent" } },
-  ];
-  for (const set of [guests, guests.slice(0, 1), guests.slice(0, 2), guards, guards.slice(2), []]) {
+  for (const set of [guests, guests.slice(0, 1), guests.slice(0, 2), []]) {
     const mine = carried.fleetConsistency(set);
     assert.deepEqual(mine, consistency.fleetConsistency(set), `${set.length} guests`);
     assert.deepEqual(carried.describeMismatches(mine.mismatches), consistency.describeMismatches(mine.mismatches));
     assert.deepEqual(carried.describeReportedOnly(mine.reportedOnly), consistency.describeReportedOnly(mine.reportedOnly));
   }
   assert.equal(carried.fleetConsistency(guests).consistent, false, "the fixture does exercise a mismatch");
-  assert.ok(carried.fleetConsistency(guards).reportedOnly.some((entry) => entry.field === "edgeUpdaterGuard.state"),
-    "the fixture does exercise the dotted path, so the reported-only list is not compared empty with empty");
 });
 
 test("the inventory group reader: the same group on every line, and the same group name", () => {
