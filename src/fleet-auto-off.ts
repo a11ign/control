@@ -481,7 +481,7 @@ export function importClosure(entry: string, readSource: (path: string) => strin
   return [...seen].sort();
 }
 
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 /** Repo-relative, derived from where this file is rather than typed, so a move of the package moves the comparison. */
 const THIS_FILE = fileURLToPath(import.meta.url).slice(REPO_ROOT.length);

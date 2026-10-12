@@ -926,13 +926,20 @@ test("#3269 3: a control plane that cannot be reached is an empty ledger, every 
 // Refuse to power anything off when the files this runs differ from main -- #3275.
 // ---------------------------------------------------------------------------------------------------------
 
-const REPO = fileURLToPath(new URL("../../../", import.meta.url));
-const THIS = "packages/control/src/fleet-auto-off.ts";
+const REPO = fileURLToPath(new URL("../", import.meta.url));
+const THIS = "src/fleet-auto-off.ts";
 const BESIDE = [
-  "packages/control/ansible/sleep.yml",
-  "packages/control/ansible/files/a11y-fleet-auto-off.service",
-  "packages/control/ansible/files/a11y-fleet-auto-off.timer",
+  "ansible/sleep.yml",
+  "ansible/files/a11y-fleet-auto-off.service",
+  "ansible/files/a11y-fleet-auto-off.timer",
 ];
+
+// #5312: control runs from its own checkout, so its root is the directory that holds `deploy-pins.json` -- the paths above are
+// meaningless if REPO was typed one level too high (it was `../../../`, which is the home directory from this checkout).
+test("#5312 REPO is control's own root: deploy-pins.json, this file and the files beside it are under it", () => {
+  assert.ok(existsSync(join(REPO, "deploy-pins.json")), "REPO holds deploy-pins.json");
+  for (const path of [THIS, ...BESIDE]) assert.ok(existsSync(join(REPO, path)), `${path} is under REPO`);
+});
 
 /**
  * Every script the unit's Exec lines run, core-relative: the absolute ones under the checkout's literal path, and the bare ones
@@ -1001,7 +1008,7 @@ test("#3275 importClosure: follows import, export-from, multi-line and dynamic i
 test("#3275 importClosure on the real program: every file it names exists, and the ones that decide a shutdown are in", () => {
   const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
   for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
-  for (const expected of [THIS, "packages/control/src/fleet-watch.ts", "packages/control/src/fleet-wake.ts",
+  for (const expected of [THIS, "src/fleet-watch.ts", "src/fleet-wake.ts",
     "packages/worker-fleet/src/worker-http.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
   assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
   for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
@@ -1029,16 +1036,16 @@ test("#3275 checkAgainstMain: identical proceeds; a differing closure file refus
   const proceed = checkAgainstMain({ now: 1, fetchedAt: null, git: same.git, readSource: fakeSource });
   assert.deepEqual(proceed.verdict, { action: "proceed" });
   const diffArgs = same.calls.find((c) => c[0] === "diff")!;
-  for (const path of [THIS, "packages/control/src/other.mjs", ...BESIDE]) assert.ok(diffArgs.includes(path), `${path} compared`);
+  for (const path of [THIS, "src/other.mjs", ...BESIDE]) assert.ok(diffArgs.includes(path), `${path} compared`);
 
-  const differs = scriptedGit({ diffOut: "packages/control/src/other.mjs\n" });
+  const differs = scriptedGit({ diffOut: "src/other.mjs\n" });
   const refused = checkAgainstMain({ now: 1, fetchedAt: null, git: differs.git, readSource: fakeSource }).verdict;
   assert.deepEqual(refused, { action: "refuse", reason: "stale-checkout",
-    detail: "1 file differs: packages/control/src/other.mjs" });
+    detail: "1 file differs: src/other.mjs" });
 });
 
 test("#3275 checkAgainstMain: a file the checkout does not track counts as differing", () => {
-  const git = scriptedGit({ tracked: (paths) => paths.filter((p) => p !== "packages/control/ansible/sleep.yml") });
+  const git = scriptedGit({ tracked: (paths) => paths.filter((p) => p !== "ansible/sleep.yml") });
   const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: fakeSource });
   assert.equal(verdict.action, "refuse");
   assert.match((verdict as { detail: string }).detail, /sleep\.yml/);
@@ -1088,7 +1095,7 @@ test("#3845 checkAgainstMain: the layer's files go to its pin and NEVER to git's
   assert.equal((judged[0] as { tag: string }).tag, TAG, "at the tag main's deploy-pins.json names");
   for (const call of git.calls.filter((c) => c[0] === "diff" || c[0] === "ls-files")) {
     assert.ok(!call.includes(FLEET_FILE), `git ${call[0]} was asked about a file it cannot track`);
-    assert.ok(call.includes("packages/control/src/other.mjs"), "and the core's files still are compared");
+    assert.ok(call.includes("src/other.mjs"), "and the core's files still are compared");
   }
   assert.ok(git.calls.some((c) => c[0] === "show" && c[1] === "origin/main:deploy-pins.json"), "the pin is main's, not the working tree's");
 });
@@ -1114,11 +1121,11 @@ test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.ts IS at th
 });
 
 test("#3845 checkAgainstMain: a layer laid at another tag refuses, NAMING the layer; a core difference is still reported beside it", () => {
-  const git = scriptedGit({ pins: pinsAt("0.5.1"), diffOut: "packages/control/src/other.mjs\n" });
+  const git = scriptedGit({ pins: pinsAt("0.5.1"), diffOut: "src/other.mjs\n" });
   const judgeLayer = () => laidAt("@a11ign/screenreader-fleet@0.4.0");
   const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: sourceWithLayer, judgeLayer });
   assert.deepEqual(verdict, { action: "refuse", reason: "stale-checkout",
-    detail: `2 files differ: packages/control/src/other.mjs, ${LAYER_PATH} (layer ${LAYER} is laid at @a11ign/screenreader-fleet@0.4.0, main pins ${TAG})` });
+    detail: `2 files differ: src/other.mjs, ${LAYER_PATH} (layer ${LAYER} is laid at @a11ign/screenreader-fleet@0.4.0, main pins ${TAG})` });
 });
 
 test("#3845 checkAgainstMain: a layer that cannot be read, or has no pin on main, is CANNOT_TELL and says which", () => {
@@ -1190,13 +1197,13 @@ test("#3845 the REAL checkout: the laid layer is a laid tree at the tag it was l
 const sourceOfControlOnly = (path: string) => (path === THIS ? 'import "./other.mjs";\n' : "");
 
 test("#5085 control's own files go to git as they are, no pin is read for them, and no layer owns them", () => {
-  const git = scriptedGit({ diffOut: "packages/control/src/other.mjs\n" });
+  const git = scriptedGit({ diffOut: "src/other.mjs\n" });
   const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: sourceOfControlOnly });
-  assert.deepEqual(verdict, { action: "refuse", reason: "stale-checkout", detail: "1 file differs: packages/control/src/other.mjs" });
-  assert.ok(git.calls.some((c) => c[0] === "diff" && c.includes("packages/control/src/other.mjs")), "positive control: the comparison ran");
+  assert.deepEqual(verdict, { action: "refuse", reason: "stale-checkout", detail: "1 file differs: src/other.mjs" });
+  assert.ok(git.calls.some((c) => c[0] === "diff" && c.includes("src/other.mjs")), "positive control: the comparison ran");
   assert.ok(!git.calls.some((c) => c[0] === "show"), "no pin was read: nothing in the closure is a layer");
-  assert.equal(layerOwning("packages/control/src/other.mjs"), null);
-  assert.equal(layersFrom({ manifest: { layers: {} }, root: REPO }).layerOwning("packages/control/src/other.mjs"), null, "nor does a declaration with no layers");
+  assert.equal(layerOwning("src/other.mjs"), null);
+  assert.equal(layersFrom({ manifest: { layers: {} }, root: REPO }).layerOwning("src/other.mjs"), null, "nor does a declaration with no layers");
 });
 
 test("#3275 checkAgainstMain: a failed fetch, an unresolvable origin/main and an empty closure each REFUSE", () => {
@@ -1343,7 +1350,7 @@ test("#3275 checkAgainstMain against REAL git: a change on origin/main refuses, 
   sh(seed, "config", "user.email", "t@example.com");
   sh(seed, "config", "user.name", "t");
   write(seed, THIS, 'import "./other.mjs";\n');
-  write(seed, "packages/control/src/other.mjs", "export const v = 1;\n");
+  write(seed, "src/other.mjs", "export const v = 1;\n");
   for (const file of BESIDE) write(seed, file, "x\n");
   sh(seed, "add", "-A");
   sh(seed, "commit", "-q", "-m", "seed");
@@ -1358,19 +1365,19 @@ test("#3275 checkAgainstMain against REAL git: a change on origin/main refuses, 
     const clean = checkAgainstMain({ now: 1, fetchedAt: null, git, readSource });
     assert.deepEqual(clean.verdict, { action: "proceed" }, "positive control: an identical checkout proceeds");
 
-    write(seed, "packages/control/src/other.mjs", "export const v = 2;\n");
+    write(seed, "src/other.mjs", "export const v = 2;\n");
     sh(seed, "commit", "-q", "-am", "main moves");
     sh(seed, "push", "-q", join(root, "origin.git"), "main");
     const moved = checkAgainstMain({ now: 1, fetchedAt: null, git, readSource });
     assert.deepEqual(moved.verdict, { action: "refuse", reason: "stale-checkout",
-      detail: "1 file differs: packages/control/src/other.mjs" });
+      detail: "1 file differs: src/other.mjs" });
     assert.equal(sh(run, "rev-parse", "HEAD").stdout, headBefore, "fetch left HEAD where it was");
-    assert.equal(readFileSync(join(run, "packages/control/src/other.mjs"), "utf8"), "export const v = 1;\n",
+    assert.equal(readFileSync(join(run, "src/other.mjs"), "utf8"), "export const v = 1;\n",
       "and the working tree is untouched: the check can never race a running play");
 
     sh(run, "merge", "-q", "--ff-only", "origin/main");
     assert.deepEqual(checkAgainstMain({ now: 1, fetchedAt: null, git, readSource }).verdict, { action: "proceed" });
-    writeFileSync(join(run, "packages/control/src/other.mjs"), "export const v = 3; // edited in place\n");
+    writeFileSync(join(run, "src/other.mjs"), "export const v = 3; // edited in place\n");
     assert.equal(checkAgainstMain({ now: 1, fetchedAt: null, git, readSource }).verdict.action, "refuse",
       "what RUNS is the working tree, so an uncommitted edit counts");
   } finally {
