@@ -51,13 +51,10 @@ import { pathToFileURL } from "node:url";
 // own inventory was the cycle with nothing on the other side to justify it. `fleet-env.mjs` stays in
 // worker-fleet -- published bins (doctor.mjs, check-worker-code.mjs) depend on it -- so these imports
 // cross the boundary the SANCTIONED way, relative, exactly like `fleet-playbook.ts` and `lab-job.ts`
-// already do.
-import { requestJson } from "../../worker-fleet/src/worker-http.ts";
-import { configuredWorkers } from "../../worker-fleet/src/fleet-env.ts";
-import { assessWorker } from "../../worker-fleet/src/worker-health.ts";
-import { fleetConsistency, describeMismatches, describeReportedOnly }
-  from "../../worker-fleet/src/fleet-consistency.ts";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
+// already do. a11ign#5184: THIS file's own imports are the exception, carried in worker-fleet-carried.ts, because
+// `fleet-wake` reaches it and the lab loads `fleet-wake` from a checkout with no `../../worker-fleet`.
+import { requestJson, configuredWorkers, assessWorker, fleetConsistency, describeMismatches, describeReportedOnly, refuseUnknownFlags }
+  from "./worker-fleet-carried.ts";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
 import { readControlPlaneFleet } from "./control-plane-fleet.ts";
 // #2752: the MAC fallback below reuses fleet-discover.ts's own `normaliseMac` rather than restating it --
