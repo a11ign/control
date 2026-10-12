@@ -1306,6 +1306,18 @@ test("#1875: with a credential present, the refusal keeps gh's own reason -- an 
   assert.match(noStderr, /\(spawnSync gh ENOENT\)/, "no stderr at all (gh missing, #1870) falls back to the error's own first line");
 });
 
+// #5307: from control's own checkout the read asked `a11ign/control`, which has issues disabled, so every write play
+// refused before reaching the plane. The argv is what gh is shown, so that is what this pins.
+test("#5307: the hold read names the repository its rows live in, whichever checkout runs the play", () => {
+  const argvs: string[][] = [];
+  const run = ((_cmd: string, args: string[]) => { argvs.push(args); return "[]"; }) as never;
+  readFleetGatedIssues({ env: { PATH: "/usr/bin" }, readToken: () => "token", run });
+  assert.equal(argvs.length, 1, "one read, one gh call");
+  const repo = argvs[0].indexOf("--repo");
+  assert.notEqual(repo, -1, `gh must be told the repository: ${argvs[0].join(" ")}`);
+  assert.equal(argvs[0][repo + 1], "a11ign/a11ign");
+});
+
 // reviewer-2 on #1910, 6d466546: `enforceSequenceHold` derived `tokenSet` from `existsSync`, so a blank token
 // file -- no token by `ghEnvironment`'s own reading, absent by bootstrap's `[ ! -s ]` -- took the credentialed
 // branch and passed gh's `gh auth login` hint through. Driven through the REAL reader, so the flag the
