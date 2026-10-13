@@ -3,7 +3,7 @@ Row a11ign/a11ign#5306: the control plane's fleet auto-off unit still lays contr
 Acceptance:
 
 ```bash
-test "$(grep -c "lay-layer.ts" ansible/files/a11y-fleet-auto-off.service)" = 0 && node --import tsx --test src/control-runs-under-tsx.test.ts src/fleet-auto-off.test.ts src/fleet-watch.test.ts
+test "$(grep -c "lay-layer.ts" ansible/files/a11y-fleet-auto-off.service)" = 0 && node --test src/control-runs-under-tsx.test.ts src/fleet-auto-off.test.ts src/fleet-watch.test.ts
 ```
 
 The grep counts the old script name in the unit and must print `0`; the second command runs the three `src/` files this change touches (207 tests, all `node:test`). The scripts suite (`pnpm test`, 45 tests) is run as a further check, not declared as acceptance.
