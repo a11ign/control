@@ -988,6 +988,34 @@ test("a job that answers in exit codes says what they mean", () => {
   }
 });
 
+/** The core's root, where this file sits at `packages/control/src/control-owned/`. */
+const CORE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+/** The lab's checkout, laid beside the core's own from `deploy-pins.json`'s `lab` pin. */
+const LAB_ROOT = `${CORE_ROOT}packages/lab/`;
+
+/**
+ * The npm scripts a job's `pnpm run <name>` can reach: the lab's own `package.json` and the core's root one. The lab's
+ * scripts left the core's root with ADR 0045 cut 9 (#5087) and are the lab's from its v0.1.40, so a name is looked up
+ * in both and the core's wins where both have it (it is the one that ran them until then).
+ */
+function packageScripts(): Record<string, string> {
+  const scriptsOf = (root: string): Record<string, string> => {
+    const path = `${root}package.json`;
+    return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as { scripts?: Record<string, string> }).scripts ?? {} : {};
+  };
+  return { ...scriptsOf(LAB_ROOT), ...scriptsOf(CORE_ROOT) };
+}
+
+/**
+ * Where a script path a job reaches is on disk: relative to the core's root where the core still holds it, and to the lab's
+ * root where it is a lab script named by the lab's own `package.json` (`tsx scripts/<x>.ts`). The core's wins, as above.
+ */
+function scriptFilePath(scriptFile: string): string {
+  const inCore = `${CORE_ROOT}${scriptFile}`;
+  const inLab = `${LAB_ROOT}${scriptFile}`;
+  return !existsSync(inCore) && existsSync(inLab) ? inLab : inCore;
+}
+
 /**
  * `evidence-check` is not the only job that answers in exit codes -- it is the only one that SAYS what
  * they mean. `rules-gate`, `rules-real-pages`, `rules-real-pages-update`, `stability`, `gate-stability`
@@ -1009,8 +1037,7 @@ test("a job that answers in exit codes says what they mean", () => {
  * reason -- `updateBranchReturnCodes()` below is the derived check that actually verifies what its
  * `--update` branch can return.
  */
-const PACKAGE_SCRIPTS = JSON.parse(readFileSync(
-  fileURLToPath(new URL("../../../../package.json", import.meta.url)), "utf8")).scripts as Record<string, string>;
+const PACKAGE_SCRIPTS = packageScripts();
 const DERIVED_VERDICT = /\b(gateVerdict|fleetVerdict)\(/;
 
 /**
@@ -1032,7 +1059,7 @@ function resolvedScriptFile(argv: unknown): string | undefined {
 
 function jobAdoptsVerdict(scriptFile: string | undefined): boolean {
   if (!scriptFile) return false;
-  const path = fileURLToPath(new URL(`../../../../${scriptFile}`, import.meta.url));
+  const path = scriptFilePath(scriptFile);
   return existsSync(path) && DERIVED_VERDICT.test(readFileSync(path, "utf8"));
 }
 
@@ -1119,7 +1146,7 @@ test("a job that runs with --update declares only exit codes its --update branch
     assert.ok(declared.length > 0, `${name} passes --update but declares no exitMeanings at all`);
     const scriptFile = resolvedScriptFile(job.argv);
     if (!scriptFile) throw new Error(`${name} passes --update but its script could not be resolved`);
-    const source = readFileSync(fileURLToPath(new URL(`../../../../${scriptFile}`, import.meta.url)), "utf8");
+    const source = readFileSync(scriptFilePath(scriptFile), "utf8");
     const reachable = updateBranchReturnCodes(source);
     const bogus = declared.filter((code) => !reachable.has(code));
     assert.deepEqual(bogus, [],
@@ -1185,7 +1212,7 @@ test("#1626: install-axe-browser never invokes npx, and names a file this checko
     "npx would let this job turn into an arbitrary package install on the box holding the corpus");
   const scriptArg = tokens.find((t) => t.endsWith(".js"));
   assert.ok(scriptArg, "install-axe-browser's argv must name a script file, not rely on a global playwright");
-  assert.ok(existsSync(fileURLToPath(new URL(`../../../../${scriptArg}`, import.meta.url))),
+  assert.ok(existsSync(scriptFilePath(scriptArg)),
     `install-axe-browser's argv names ${scriptArg}, which is not on disk`);
 });
 
@@ -1347,8 +1374,10 @@ test("every `job=<name>` a message tells an operator to run is a job the catalog
   //
   // DISCOVERED, never listed: a hand-written list of the files that mention a job name is the same defect
   // one layer out.
+  // `.acceptance/` is excluded: a pull request's acceptance record quotes the commands its author RAN, mutations included
+  // (`-e job=x`), and is never a message a tool prints to an operator. The core at `CORE_REF` tracks one that does.
   const grep = spawnSync("git", ["grep", "-hoE", "job=[a-z0-9-]+", "--",
-    ":!packages/control/ansible/lab-job.yml", ":!*.test.ts", ":!*.test.mjs"],
+    ":!packages/control/ansible/lab-job.yml", ":!.acceptance", ":!*.test.ts", ":!*.test.mjs"],
     { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: sandboxGitEnv(), encoding: "utf8" });
   assert.equal(grep.status, 0, `git grep found no job= references at all, which cannot be right: `
     + `${grep.stderr}`);
@@ -1380,9 +1409,7 @@ test("every `job=<name>` a message tells an operator to run is a job the catalog
  * argv sees none of them — including every fleet capture job — so it would examine 20 entries and report a
  * clean sheet about a catalogue it had mostly not looked at.
  */
-const NPM_SCRIPTS: Record<string, string> = ((
-  JSON.parse(readFileSync(fileURLToPath(new URL("../../../../package.json", import.meta.url)), "utf8"))
-) as { scripts?: Record<string, string> }).scripts ?? {};
+const NPM_SCRIPTS: Record<string, string> = PACKAGE_SCRIPTS;
 
 const SCRIPT_PATH = /[\w./-]+\.(?:mjs|ts|py)\b/g;
 
@@ -1415,7 +1442,7 @@ const WORKER_ENV = /A11Y_WORKERS?\b/;
  */
 const readsWorkerFromEnv = (script: string): boolean => {
   let text: string;
-  try { text = readFileSync(script, "utf8"); } catch { return false; }
+  try { text = readFileSync(scriptFilePath(script), "utf8"); } catch { return false; }
   const code = script.endsWith(".py") ? text.replace(/#[^\n]*/g, "") : stripComments(text);
   return WORKER_ENV.test(code);
 };

@@ -8,7 +8,7 @@
 #
 # THE PACKAGE IS THIS REPOSITORY'S ROOT (a11ign/a11ign#4217), AND THE CORE STILL KNOWS IT AS `packages/control`. Every `packages/control/...` the code and the tests name is that LAID path, in the
 # core's checkout and on the control plane (`/root/a11y-witness/packages/control/...`), and it does not move when this repository's layout does. What the lay step below decides is which of the
-# root's files make up the package there: `src/`, `ansible/`, `layers.json` (the playbooks' own list, until the host row), `deploy-pins.json` (control's declaration, a11ign/a11ign#5085), `CLAUDE.md` and `README.md`, with a `package.json` cut down to what the core's `pnpm install --frozen-lockfile` can
+# root's files make up the package there: `src/`, `ansible/`, `layers.json` (the playbooks' own list, until the host row), `deploy-pins.json` (control's declaration, a11ign/a11ign#5085), `pnpm-lock.yaml` (`control-has-no-dependencies.test.ts` reads the layers' production closure from it, a11ign/a11ign#5312), `CLAUDE.md` and `README.md`, with a `package.json` cut down to what the core's `pnpm install --frozen-lockfile` can
 # hold (its lockfile has `packages/control` with no dependencies, so the root's `devDependencies` must not arrive). The same list is the next row's, where the core lays the package on a host.
 # `packages/worker-fleet` is the one the pinned core carries. Laying screenreader-fleet's own repository over it was tried and does not work: its manifest pins `@a11ign/judge` and
 # `@a11ign/evidence` at 0.1.0, so the core's `pnpm install --frozen-lockfile` refuses ("2 dependencies are mismatched"), and its `dist` is not built.
@@ -77,7 +77,7 @@ jobs:
         run: |
           rm -rf core/packages/control
           mkdir core/packages/control
-          cp -R control/src control/ansible control/layers.json control/deploy-pins.json control/CLAUDE.md control/README.md core/packages/control/
+          cp -R control/src control/ansible control/layers.json control/deploy-pins.json control/pnpm-lock.yaml control/CLAUDE.md control/README.md core/packages/control/
           jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
           printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"], "exclude": ["packages/guards/src/fixtures"] }\n' > core/tsconfig.control.json
           git -C core add -Af packages/control
