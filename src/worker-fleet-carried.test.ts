@@ -4,7 +4,7 @@
  * `fleet-discover.ts`, `fleet-status.ts` and `with-control-plane-fleet.ts` no longer import `../../worker-fleet`, so the lab can load
  * `@a11ign/control/fleet-wake` from its own checkout. The price is a second copy of each helper, and a second copy is a second answer
  * the day one changes. `fleet-env.test.ts` in worker-fleet pins the same shape for its own `cli-flags` copy; this file does it for
- * control's, wherever the original is laid (control's CI lays it at `packages/worker-fleet`, and a checkout beside one has it too).
+ * control's. The originals are the published `@a11ign/screenreader-fleet` at the pin in `deploy-pins.json`, read through its exports.
  *
  * THE ORIGINALS ARE IMPORTED HERE, in a test, which `control-has-no-dependencies.test.ts` does not walk: it follows the imports of
  * `src/*.ts` modules that ship to the control plane, and a test never does.
@@ -15,17 +15,11 @@ import { createServer, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import * as carried from "./worker-fleet-carried.ts";
-
-const ORIGINALS = "../../worker-fleet/src/";
-const original = async <T>(file: string): Promise<T> => import(`${ORIGINALS}${file}`) as Promise<T>;
-
-const [http, env, flags, health, consistency] = await Promise.all([
-  original<typeof import("../../worker-fleet/src/worker-http.ts")>("worker-http.ts"),
-  original<typeof import("../../worker-fleet/src/fleet-env.ts")>("fleet-env.ts"),
-  original<typeof import("../../worker-fleet/src/cli-flags.ts")>("cli-flags.ts"),
-  original<typeof import("../../worker-fleet/src/worker-health.ts")>("worker-health.ts"),
-  original<typeof import("../../worker-fleet/src/fleet-consistency.ts")>("fleet-consistency.ts"),
-]);
+import * as http from "@a11ign/screenreader-fleet/worker-http";
+import * as env from "@a11ign/screenreader-fleet/fleet-env";
+import * as flags from "@a11ign/screenreader-fleet/cli-flags";
+import * as health from "@a11ign/screenreader-fleet/health";
+import * as consistency from "@a11ign/screenreader-fleet/fleet-consistency";
 
 test("the originals loaded and are the functions this file means to compare, so no test below compares nothing with nothing", () => {
   assert.equal(typeof http.requestJson, "function");
@@ -118,13 +112,23 @@ test("fleet consistency: the same field lists and the same verdict on guests tha
     { worker: "http://10.0.0.3:8765", environment: { browserVersion: "151.0.2", windowsBuild: "26100.1" }, policy: { StartupBoostEnabled: 1 } },
     { worker: "http://10.0.0.4:8765" },
   ];
-  for (const set of [guests, guests.slice(0, 1), guests.slice(0, 2), []]) {
+  // A dotted reported-only path (`edgeUpdaterGuard.state`, #5021) is read through the record, so a guard that differs shows and one that is
+  // absent or not an object reads as "not reported".
+  const guards = [
+    { worker: "http://10.0.0.2:8765", environment: { edgeUpdaterGuard: { state: "disabled", checkedAt: "t1" } } },
+    { worker: "http://10.0.0.3:8765", environment: { edgeUpdaterGuard: { state: "stale", checkedAt: "t2" } } },
+    { worker: "http://10.0.0.4:8765", environment: { edgeUpdaterGuard: null } },
+    { worker: "http://10.0.0.5:8765", environment: { edgeUpdaterGuard: "absent" } },
+  ];
+  for (const set of [guests, guests.slice(0, 1), guests.slice(0, 2), guards, guards.slice(2), []]) {
     const mine = carried.fleetConsistency(set);
     assert.deepEqual(mine, consistency.fleetConsistency(set), `${set.length} guests`);
     assert.deepEqual(carried.describeMismatches(mine.mismatches), consistency.describeMismatches(mine.mismatches));
     assert.deepEqual(carried.describeReportedOnly(mine.reportedOnly), consistency.describeReportedOnly(mine.reportedOnly));
   }
   assert.equal(carried.fleetConsistency(guests).consistent, false, "the fixture does exercise a mismatch");
+  assert.ok(carried.fleetConsistency(guards).reportedOnly.some((entry) => entry.field === "edgeUpdaterGuard.state"),
+    "the fixture does exercise the dotted path, so the reported-only list is not compared empty with empty");
 });
 
 test("the inventory group reader: the same group on every line, and the same group name", () => {

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { workersFromInventory, portFromGroupVars, namedInventoryWorkers } from "../../../worker-fleet/src/fleet-env.ts";
+import { workersFromInventory, portFromGroupVars, namedInventoryWorkers } from "@a11ign/screenreader-fleet/fleet-env";
 
 // Reads inventory.example.yml, deliberately -- the REAL inventory.yml is gitignored (real addresses,
 // restored from the secrets store at bring-up) and does not exist in CI or a fresh clone.
@@ -39,8 +39,11 @@ test("THE INVENTORY IS A FLEET DOCTOR CAN SEE, and it is named", () => {
   // restored from the secrets store at bring-up) and this checkout would otherwise need it just to run
   // `npm test`. `inventory-example-parity.test.ts` is what keeps the example's shape (and therefore this
   // test's premise) honest.
+  // Both paths are passed: the package's defaults point at the monorepo's `ansible/`, which a control checkout does not have, and the
+  // reader's catch-all then answers [] -- a silent empty list where this test needs a named fleet.
   const workers = namedInventoryWorkers({
     inventoryPath: fileURLToPath(new URL("../../ansible/inventory.example.yml", import.meta.url)),
+    groupVarsPath: fileURLToPath(new URL("../../ansible/group_vars/a11y_workers.yml", import.meta.url)),
   });
   assert.ok(workers.length > 0, "this checkout declares a bare-metal fleet; the reader must find it");
   for (const { name, url } of workers) {

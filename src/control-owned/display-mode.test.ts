@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 // THIS FILE DECLARED A WALK SCOPE UNTIL IT STARTED RUNNING POWERSHELL, and it cannot honestly declare one
 // now. The tests at the bottom spawn `pwsh`, and `walk-scope.mjs` records a child process as
@@ -81,7 +83,7 @@ test("display.yml fetches the driver with win_get_url's own checksum, never inst
  * One task of `display.yml`, from its `- name:` line to the next one -- because the whole file cannot
  * answer "WHICH task says this".
  *
- * The same lesson `scriptParts` records one level down, and #2065 is where it bit this half of the file:
+ * The same lesson the script's declaration/body split records (screenreader-fleet, #5350), and #2065 is where it bit this half of the file:
  * every clause below is about which of two ADJACENT tasks carries a condition, and a match against
  * `DISPLAY_TASK` is satisfied by either. `when: not display_driver_ok` appears on six tasks here; an
  * assertion that the proof read is not gated on the installer's exit code has to read the proof read.
@@ -210,35 +212,6 @@ test("display.yml's final debug never reads display_driver_proof.output uncondit
     + "unconditional read broke workers 2-6, which never register that variable");
 });
 
-const SET_DISPLAY_MODE_SCRIPT = readFileSync(
-  fileURLToPath(new URL("../../../worker-fleet/src/provisioning/set-display-mode.ps1", import.meta.url)), "utf8");
-
-/**
- * The script split into the two halves a mutation can tell apart, because the raw file cannot.
- *
- * reviewer-2's blocker on #1968 at `b7b79649`: every assertion below used to match the whole file, so
- * `/MonitorFromPoint/` was satisfied three times over -- by the `DllImport` declaration, by the script's
- * own header prose, and only incidentally by the one line that calls it. Deleting that call left 18/18
- * green. The corrected "delete every matching line" mutation in that PR's body widened the deletion
- * rather than fixing the assertion: it proved the WORD was gone, never that the CALL was load-bearing.
- *
- * `declarations` is the C# inside `Add-Type -TypeDefinition '...'`; `body` is the PowerShell that
- * actually runs, with that block and every comment line removed. An API now has to be DECLARED in the
- * first and CALLED in the second, and deleting either line ALONE is red.
- */
-function scriptParts(): { declarations: string; body: string } {
-  const declarations = /Add-Type -TypeDefinition '([\s\S]*?)'/.exec(SET_DISPLAY_MODE_SCRIPT)?.[1];
-  assert.ok(declarations,
-    "set-display-mode.ps1 no longer has an `Add-Type -TypeDefinition '...'` block -- this split examines "
-    + "nothing, and every assertion built on it would be vacuously true");
-  const body = SET_DISPLAY_MODE_SCRIPT
-    .replace(declarations!, "")
-    .split("\n")
-    .filter((line) => !/^\s*#/.test(line))
-    .join("\n");
-  return { declarations: declarations!, body };
-}
-
 test("the display mode is set through run-interactive.yml, never a direct win_powershell call over SSH", () => {
   // #1567, 2026-09-21: a direct `win_powershell` task calling EnumDisplaySettings failed on all 10 real
   // workers -- SSH does not attach to the interactive window station GDI calls need, the same fact
@@ -348,16 +321,13 @@ test("the logon task is interactive_token, the logon type the display call needs
 
 test("the logon task SURFACES a failing read-back as a non-zero exit, never swallows it", () => {
   // set-display-mode.ps1 reads the mode back after writing it and `exit 1`s on a disagreement (asserted
-  // above). `powershell.exe -Command` ends 0 unless told otherwise, so without `exit $LASTEXITCODE` the
+  // in screenreader-fleet's display-mode.test.ts, #5350). `powershell.exe -Command` ends 0 unless told otherwise, so without `exit $LASTEXITCODE` the
   // task would report success for a box still off the pin.
   const real = logonRegistration(TASKS);
   assert.ok(surfacesTheExitCode(real), "the action must end with `exit $LASTEXITCODE` straight after the script");
   assert.ok(!surfacesTheExitCode(real.replace(/;\s+exit \$LASTEXITCODE/, "")), "the check is vacuous");
   assert.ok(!surfacesTheExitCode(real.replace(/exit \$LASTEXITCODE/, "exit 0")),
     "a hard-coded `exit 0` swallows the failure and must fail the check");
-  const { body } = scriptParts();
-  assert.match(body, /dmPelsWidth -ne \$Width -or [^\n]*dmPelsHeight -ne \$Height\)\s*\{[^}]*exit 1/,
-    "the script's read-back must exit 1 on a mismatch -- the task can only surface what the script signals");
 });
 
 test("display.yml's provision-time task is still present: the logon task is ADDED, not swapped", () => {
@@ -395,7 +365,8 @@ test("fleet:provision's report names the logon task, so its registration is prin
  */
 const PWSH = process.env.A11Y_PWSH ?? "pwsh";
 const HARNESS = fileURLToPath(new URL("../../../worker-fleet/src/display-mode-harness.ps1", import.meta.url));
-const SCRIPT_PATH = fileURLToPath(new URL("../../../worker-fleet/src/provisioning/set-display-mode.ps1", import.meta.url));
+// The published package ships the script; the harness is NOT in any published version (see the report on #5374).
+const SCRIPT_PATH = join(dirname(createRequire(import.meta.url).resolve("@a11ign/screenreader-fleet")), "..", "src", "provisioning", "set-display-mode.ps1");
 // `Get-ModuleFunctionScriptBlock`, which returns a function's literal text from the PARSED file. Imported
 // rather than retyped: a second copy of a predicate drifts from the first.
 const AST_HELPERS = fileURLToPath(new URL(
