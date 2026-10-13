@@ -46,6 +46,17 @@ test("the five modules that carry no longer reach into worker-fleet, and each st
   }
 });
 
+test("the six modules that read the flag vocabulary take it from the carried copy, not from a sibling path (a11ign#5344)", () => {
+  // `git-safe-env` and the rest of the layer are still reached by path until a11ign#5312, so this scan names the one module it is about.
+  const modules = ["fleet-auto-off.ts", "fleet-converge.ts", "fleet-playbook.ts", "lab-failed-units.ts", "lab-pipeline.ts", "post-qualification-status.ts"];
+  for (const module of modules) {
+    const source = readFileSync(new URL(module, import.meta.url), "utf8");
+    const specifiers = [...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((match) => match[1]);
+    assert.ok(specifiers.includes("./worker-fleet-carried.ts"), `${module}: does not import the carried copy, so the scan read nothing or the import went back`);
+    assert.deepEqual(specifiers.filter((specifier) => specifier.includes("cli-flags")), [], `${module} reaches cli-flags by path`);
+  }
+});
+
 test("the flag vocabulary: the same flags are unknown, the same one is suggested, the same value is read", () => {
   const known = ["--cidr=", "--port=", "--enroll", "--json"];
   const argvs = [

@@ -131,7 +131,7 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 import { requestJson } from "../../worker-fleet/src/worker-http.ts";
 import { layerDeclaration, layerOwning } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag } from "./layer-pins.ts";
-import { refuseUnknownFlags } from "../../worker-fleet/src/cli-flags.ts";
+import { refuseUnknownFlags } from "./worker-fleet-carried.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
 import { inventoryPathFor } from "./control-plane-fleet.ts";
 import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";

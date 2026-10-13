@@ -74,7 +74,7 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.ts";
+import { refuseUnknownFlags, flagValue } from "./worker-fleet-carried.ts";
 import { LAYER_PINNED, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
