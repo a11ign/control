@@ -223,3 +223,52 @@ test("control: a clean run that stamps lastReenabledAt for itself (a drift inven
   assert.ok(v.includes("a run that changed nothing invents lastReenabledAt for a box that never re-enabled")
     || v.includes("a run that changed nothing does not carry the previous lastReenabledAt and lastReenabled forward"), v.join("|"));
 });
+
+const DIRECTORY_TASK = "    - name: Create the guard directory";
+const LAY_SCRIPT = "    - name: Lay the guard script";
+const NOT_CREATED = "the guard directory is not created before the script is laid, so the copy fails where it is absent (#5466)";
+
+/** The guard block up to the script copy: the directory, its ACL, and nothing that runs the guard. */
+function directorySection(text: string): string {
+  const block = taskBlock(text, GUARD_BLOCK);
+  const at = block.indexOf(DIRECTORY_TASK);
+  const lay = block.indexOf(LAY_SCRIPT);
+  return at < 0 || lay < at ? "" : block.slice(at, lay);
+}
+
+/** What the guard directory must be, as a list of what is wrong. Empty means it holds. */
+function directoryViolations(text: string): string[] {
+  const section = directorySection(text);
+  if (!section) return [NOT_CREATED];
+  const checks: Array<[string, boolean]> = [
+    ["the guard directory is not created", !/ansible\.windows\.win_file:\n\s+path: "\{\{ edge_guard_dir \}\}"\n\s+state: directory$/m.test(section)],
+    ["the guard directory keeps the ACL it inherits from ProgramData",
+      !/ansible\.windows\.win_acl_inheritance:\n\s+path: "\{\{ edge_guard_dir \}\}"\n\s+state: absent\n\s+reorganize: false/.test(section)],
+    ["Users may do more than read the guard directory",
+      !/\{ user: 'BUILTIN\\Users', rights: ReadAndExecute \}/.test(section) || /BUILTIN\\Users', rights: (?!ReadAndExecute)/.test(section)],
+    ["SYSTEM and Administrators are not the only writers",
+      !/\{ user: 'BUILTIN\\Administrators', rights: FullControl \}/.test(section) || !/\{ user: 'NT AUTHORITY\\SYSTEM', rights: FullControl \}/.test(section)],
+  ];
+  return checks.filter(([, wrong]) => wrong).map(([message]) => message);
+}
+
+test("the guard directory exists before the script is laid, owned by SYSTEM and Administrators, readable by Users", () => {
+  assert.deepEqual(directoryViolations(TASKS), [],
+    "a SYSTEM script in a directory Users can write is a privilege escalation, and nothing creates the directory (#5466)");
+});
+
+test("control: the directory task removed FAILS, and so does one laid after the script", () => {
+  assert.deepEqual(directoryViolations(mutatedGuard([directorySection(TASKS), ""])), [NOT_CREATED]);
+  // Moved to the end of the block, after the script copy and the registration: the copy would already have failed.
+  const block = taskBlock(TASKS, GUARD_BLOCK);
+  const head = block.slice(0, block.indexOf(DIRECTORY_TASK));
+  const afterScript = head + block.slice(block.indexOf(LAY_SCRIPT)) + directorySection(TASKS);
+  assert.deepEqual(directoryViolations(TASKS.replace(block, afterScript)), [NOT_CREATED]);
+});
+
+test("control: Users granted write, or the inherited ACL kept, FAILS", () => {
+  const v = directoryViolations(mutatedGuard(["{ user: 'BUILTIN\\Users', rights: ReadAndExecute }", "{ user: 'BUILTIN\\Users', rights: Modify }"]));
+  assert.ok(v.includes("Users may do more than read the guard directory"), v.join("|"));
+  const kept = directoryViolations(mutatedGuard(["        reorganize: false\n", "        reorganize: true\n"]));
+  assert.ok(kept.includes("the guard directory keeps the ACL it inherits from ProgramData"), kept.join("|"));
+});

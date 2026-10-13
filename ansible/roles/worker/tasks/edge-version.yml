@@ -291,6 +291,35 @@
     edge_guard_task: a11y-edge-updater-guard
     edge_guard_dir: 'C:\ProgramData\a11ign'
   block:
+    # Nothing created this directory, so the copy below failed on every box where it was absent (a11ign#5466,
+    # fleet:provision on 15 of 15). A directory made under ProgramData inherits whatever ProgramData grants
+    # Users, and this one holds a script that runs as SYSTEM at startup: a user who could write it could make
+    # SYSTEM run anything. So the ACL is part of creating the directory, as it is for the SSH key above.
+    - name: Create the guard directory
+      ansible.windows.win_file:
+        path: "{{ edge_guard_dir }}"
+        state: directory
+
+    - name: Stop the guard directory inheriting anything
+      # Do not copy the inherited ACEs down first: that is how Users' write would survive into the new ACL.
+      ansible.windows.win_acl_inheritance:
+        path: "{{ edge_guard_dir }}"
+        state: absent
+        reorganize: false
+
+    # The worker runs unelevated and reads edge-updater-guard.json from here, so Users get read and nothing more.
+    - name: Only SYSTEM and Administrators may write the guard directory
+      ansible.windows.win_acl:
+        path: "{{ edge_guard_dir }}"
+        user: "{{ item.user }}"
+        rights: "{{ item.rights }}"
+        type: allow
+        state: present
+      loop:
+        - { user: 'BUILTIN\Administrators', rights: FullControl }
+        - { user: 'NT AUTHORITY\SYSTEM', rights: FullControl }
+        - { user: 'BUILTIN\Users', rights: ReadAndExecute }
+
     - name: Lay the guard script
       ansible.windows.win_copy:
         dest: "{{ edge_guard_dir }}\\edge-updater-guard.ps1"
