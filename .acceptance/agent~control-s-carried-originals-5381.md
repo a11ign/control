@@ -3,7 +3,7 @@ Row a11ign/a11ign#5381, replacing a11ign#5374: the control Region's test files s
 Acceptance:
 
 ```bash
-! git grep -q -E "(\.\./)+worker-fleet/src/" -- src/worker-fleet-carried.test.ts src/control-owned/fleet-consistency.test.ts src/control-owned/fleet-env.test.ts src/control-owned/worker-port.test.ts src/control-owned/display-mode.test.ts && ! git grep -q -E "worker-fleet/src/provisioning" -- src/fleet-playbook.test.ts
+bash -c '! git grep -q -E "(\.\./)+worker-fleet/src/" -- src/worker-fleet-carried.test.ts src/control-owned/fleet-consistency.test.ts src/control-owned/fleet-env.test.ts src/control-owned/worker-port.test.ts src/control-owned/display-mode.test.ts && ! git grep -q -E "worker-fleet/src/provisioning" -- src/fleet-playbook.test.ts'
 ```
 
 The Acceptance above is the PR head: the two greps over the working tree, run from the worktree. The open check and CI's acceptance job read this form.
