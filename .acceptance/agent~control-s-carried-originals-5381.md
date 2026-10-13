@@ -1,10 +1,12 @@
 Row a11ign/a11ign#5381, replacing a11ign#5374: the control Region's test files stop reaching `../../worker-fleet/src/` for the carried originals and for the `.ps1` scripts, and take the originals from `@a11ign/screenreader-fleet` at the 0.9.0 pin. Names no workflow, so it is not `lane:ceo`.
 
-Acceptance (the PR head: the two greps over the working tree, run from the worktree; the open check and CI's acceptance job read this form):
+Acceptance:
 
 ```bash
 ! git grep -q -E "(\.\./)+worker-fleet/src/" -- src/worker-fleet-carried.test.ts src/control-owned/fleet-consistency.test.ts src/control-owned/fleet-env.test.ts src/control-owned/worker-port.test.ts src/control-owned/display-mode.test.ts && ! git grep -q -E "worker-fleet/src/provisioning" -- src/fleet-playbook.test.ts
 ```
+
+The Acceptance above is the PR head: the two greps over the working tree, run from the worktree. The open check and CI's acceptance job read this form.
 
 Merge-commit reading (the row's own Acceptance, Done-when 1). It is `Hand-run`: whoever closes the row pastes its run at the merge commit. It cannot pass before the merge, because it reads `origin/main`:
 
