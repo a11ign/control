@@ -3,7 +3,7 @@ Row a11ign/a11ign#5373, prerequisite for a11ign/a11ign#5335 and #5312 (ceo rulin
 Acceptance:
 
 ```bash
-! git grep -q -E "(\.\./)+(worker-fleet/src/doctor|scripts/test-support)" HEAD -- src/control-owned/doctor.test.ts src/control-owned/provision-stamp-inputs.test.ts src/layer-launchers.test.ts
+cd /home/agent/repos/wt-5373-control && bash -c '! git grep -q -E "(\.\./)+(worker-fleet/src/doctor|scripts/test-support)" HEAD -- src/control-owned/doctor.test.ts src/control-owned/provision-stamp-inputs.test.ts src/layer-launchers.test.ts'
 ```
 
 The grep is the row's own Acceptance, run on this branch's tree (`HEAD`) rather than `origin/main`, as #5346's was on its own: the row's `origin/main` form fails until this PR lands, so a pull request could never pass CI with it. The tree at `HEAD` is the tree the merge carries. The before-state is the `origin/main` row in the table below, where the same pattern prints three hits.
