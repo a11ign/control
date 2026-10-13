@@ -22,7 +22,7 @@ import { captureTimes, readCapturesState, writeCapturesState, withFileLock, read
 import { sandboxGitEnv } from "./git-safe-env.ts";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layerDeclaration, layerOwning, layersFrom } from "./layer-checkouts.ts";
+import { layerDeclaration, layerOwning, layersFrom, layersRootOf } from "./layer-checkouts.ts";
 import { pinnedTag, readDeployPins } from "./layer-pins.ts";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
@@ -1632,4 +1632,32 @@ test("#5014 5 the lock is read ONCE per tick for the whole fleet, and `tick`'s d
   assert.equal(reads, 1, "three workers, one read");
   const defaulted = await idleBoxTick(playIs("none"));
   assert.deepEqual(defaulted.decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// The layers are asked of the checkout the program runs from (a11ign/a11ign#5312, reviewer-control-89).
+// ---------------------------------------------------------------------------------------------------------
+
+test("layersRootOf: a checkout of its own is its own root; one laid at packages/control answers with the tree above it", () => {
+  assert.equal(layersRootOf("/root/control"), "/root/control");
+  assert.equal(layersRootOf("/root/control/"), "/root/control");
+  assert.equal(layersRootOf("/work/core/packages/control"), "/work/core", "the core's CI lays this package there, with the layers beside it");
+  assert.equal(layersRootOf("/work/packages/other"), "/work/packages/other", "only a directory called control under packages is the laid shape");
+  assert.equal(layersRootOf("/work/core/packages/control/src"), "/work/core/packages/control/src", "a subdirectory is not the package's root");
+});
+
+test("the real layer declarations resolve inside the checkout this program runs from, never above it", () => {
+  // The defect: `layer-checkouts.ts` walked `../../../` from `src/`, which is the core's root only when control sits at
+  // `packages/control`. From a checkout of its own it read `<parent of the checkout>/packages/worker-fleet`, and
+  // `fleet-auto-off` imports that module. Asked of the REAL resolver over the REAL `deploy-pins.json`, from wherever this
+  // file runs, so it fails on the unfixed module in a checkout of its own and holds in the core's lay too.
+  const checkout = fileURLToPath(new URL("../", import.meta.url)).replace(/\/$/, "");
+  const base = layersRootOf(checkout);
+  const names = Object.keys(readDeployPins().layers);
+  assert.ok(names.length >= 2, "positive control: deploy-pins.json declares the layers, so the loop below examines something");
+  for (const name of names) {
+    const { dir, path } = layerDeclaration(name);
+    assert.equal(dir, join(base, path), `layer ${name} resolves to ${dir}`);
+    assert.ok(dir === base || dir.startsWith(`${base}/`), `layer ${name} resolves outside ${base}: ${dir}`);
+  }
 });

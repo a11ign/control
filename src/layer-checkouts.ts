@@ -44,14 +44,29 @@
  * `pinned.control`: control is deployed from its own checkout, and a layer's version is `layer-pins.ts`'s `pinnedTag`.
  */
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { readDeployPins, releaseTag, type DeployPins } from "./layer-pins.ts";
 
 export { releaseTag };
 
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+/**
+ * The directory a layer's `path` in `deploy-pins.json` is relative to: THIS CHECKOUT'S OWN ROOT, which is where control runs from (ADR 0045
+ * rule 1, a11ign/a11ign#5312). It was `../../../` while control sat at `packages/control` under the core, and from a checkout of its own that
+ * walks out of it: `layerDeclaration("screenreader-fleet").dir` read `<parent of the checkout>/packages/worker-fleet`, a tree that is not there.
+ *
+ * The one place control still sits at `packages/control` is the core's CI (`ci.yml` lays it there, with the layers cloned beside it at the
+ * core's root), so a checkout whose own path ends `packages/control` answers with the tree above it. A function of the path alone, so a test
+ * can hold both shapes without a second checkout.
+ */
+export function layersRootOf(checkoutRoot: string): string {
+  const root = resolve(checkoutRoot);
+  const laidUnderATree = basename(root) === "control" && basename(dirname(root)) === "packages";
+  return laidUnderATree ? dirname(dirname(root)) : root;
+}
+
+const REPO_ROOT = layersRootOf(fileURLToPath(new URL("../", import.meta.url)));
 
 /**
  * The layer's hasher, in the order its spellings are tried: `.ts` since screenreader-worker v0.9.0, `.mjs` before it. THE `.mjs` IS A FALLBACK AND NOT A CONVENTION: a host
