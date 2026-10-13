@@ -57,6 +57,17 @@ test("the six modules that read the flag vocabulary take it from the carried cop
   }
 });
 
+test("the modules that read the inventory and the consistency verdict take them from the carried copy, not from a sibling path (a11ign#5349)", () => {
+  // The same scan as the cli-flags test above, over the six importers of `fleet-env` and `fleet-consistency`: none of them may name either by path.
+  const modules = ["fleet-playbook.ts", "fleet-discover.test.ts", "fleet-switch.test.ts", "fleet-build-incident.test.ts", "fleet-watch.test.ts", "fleet-status.test.ts"];
+  for (const module of modules) {
+    const source = readFileSync(new URL(module, import.meta.url), "utf8");
+    const specifiers = [...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((match) => match[1]);
+    assert.ok(specifiers.includes("./worker-fleet-carried.ts"), `${module}: does not import the carried copy, so the scan read nothing or the import went back`);
+    assert.deepEqual(specifiers.filter((specifier) => /fleet-env|fleet-consistency/.test(specifier)), [], `${module} reaches fleet-env or fleet-consistency by path`);
+  }
+});
+
 test("requestJson comes from the carried copy in fleet-auto-off and fleet-status's test, not from worker-http by path (a11ign#5346)", () => {
   // The binding, not the module: `refuseUnknownFlags` also comes from the carried copy, so a scan of specifiers alone stays green when `requestJson` goes back.
   const modules = ["fleet-auto-off.ts", "fleet-status.test.ts"];
