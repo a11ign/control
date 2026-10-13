@@ -82,7 +82,10 @@ function registrationChecks(text: string): Array<[string, boolean]> {
     ["the guard does not run at the highest run level", !has(/^\s+run_level: highest$/m)],
     ["no startup trigger", !has(/^\s+- type: boot$/m)],
     ["no repeating trigger", !has(/^\s+repetition:$/m)
-      || !has(/^\s+- interval: "PT\{\{ edge_guard_interval_minutes \}\}M"$/m)],
+      || !has(/^\s+interval: "PT\{\{ edge_guard_interval_minutes \}\}M"$/m)],
+    // A LIST here reads as an array to win_scheduled_task, which tests `-is [Hashtable]` and hands the array to
+    // COM as Repetition: "failed to set trigger property 'Repetition' ... Index was outside the bounds" (a11ign#5472).
+    ["repetition is a list, which the module cannot set", has(/^\s+repetition:\n\s+- /m)],
     ["the guard task is not enabled", !has(/^\s+enabled: true$/m)],
     ["the guard task's name is not pinned",
       !reg.includes(`name: "{{ edge_guard_task }}"`) || !text.includes(`edge_guard_task: ${GUARD_TASK_NAME}`)],
@@ -141,6 +144,13 @@ function mutatedGuard(...edits: Array<[string, string]>): string {
 test("the guard holds: SYSTEM, startup and repeating triggers, prefix match, stop before disable, a record", () => {
   assert.deepEqual(guardViolations(TASKS), [],
     "without these, Edge puts a task back between provisions and the updater moves the pin (a11ign#5015)");
+});
+
+test("control: repetition written as a list FAILS, because win_scheduled_task cannot set it (a11ign#5472)", () => {
+  const v = guardViolations(mutatedGuard([
+    `repetition:\n              interval: "PT{{ edge_guard_interval_minutes }}M"\n              duration: P1D`,
+    `repetition:\n              - interval: "PT{{ edge_guard_interval_minutes }}M"\n                duration: P1D`]));
+  assert.ok(v.includes("repetition is a list, which the module cannot set"), v.join("|"));
 });
 
 test("the interval is a variable at the top of the block, not a new defaults key", () => {
