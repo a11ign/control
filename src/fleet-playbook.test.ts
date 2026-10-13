@@ -29,7 +29,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
   writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange,
-  lockTakeStep, lockEndStep }
+  lockTakeStep, lockEndStep, patchTargetReadCommand, ANSIBLE_ON_THE_PLANE, planeUnitStart }
   from "./fleet-playbook.ts";
 import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
@@ -252,6 +252,28 @@ test("THE CONTROL PLANE IS SENT A COMMIT, NEVER A NAME IT WOULD RESOLVE ITSELF (
     `the merge target must be the resolved commit:\n${command}`);
   assert.doesNotMatch(command, /merge[^\n]*origin\//,
     "merging `origin/<ref>` is the bug: it is a second, later resolution of the same question");
+});
+
+test("#5310: the checkout, its ansible/ directory and patch_checkout name ONE path, on the plane", () => {
+  // `patch-schedule.yml` runs the scheduled patch from `patch_checkout`. If the fleet's own `cd` and
+  // `--working-directory` name a different directory, the play fails on the plane, not here.
+  const patchCheckout = readFileSync(new URL("../ansible/patch-schedule.yml", import.meta.url), "utf8")
+    .match(/^\s*patch_checkout:\s*(\S+)\s*$/m)?.[1];
+  assert.ok(patchCheckout, "ansible/patch-schedule.yml must declare patch_checkout");
+  assert.equal(CONTROL_PLANE_CHECKOUT_PATH, patchCheckout);
+
+  // `ssh` lands in /root, so the relative `cd` the playbook emits is the same directory as the absolute path.
+  const cdTarget = controlPlaneCheckout("main", "d2729386d6b8807cf610c6e620173930020798a5").match(/^cd (\S+) &&/)?.[1];
+  assert.equal(`/root/${cdTarget}`, patchCheckout, "controlPlaneCheckout must enter the patch_checkout directory");
+
+  assert.equal(ANSIBLE_ON_THE_PLANE, `${cdTarget}/ansible`);
+  assert.equal(`/root/${ANSIBLE_ON_THE_PLANE}`, `${patchCheckout}/ansible`);
+  assert.ok(patchTargetReadCommand(["w1"]).startsWith(`cd ${ANSIBLE_ON_THE_PLANE} && `),
+    "the read-only target probe runs from the same ansible/ directory");
+
+  // The unit the deploy starts runs from that same directory: run the builder, not a regex over its source.
+  assert.equal(planeUnitStart("a11y-fleet-w1"),
+    `systemd-run --unit=a11y-fleet-w1 --remain-after-exit --working-directory=${cdTarget}/ansible `);
 });
 
 test("but the CHECKOUT is still a name, because a bare SHA would detach the control plane (#666)", () => {
@@ -1736,7 +1758,7 @@ test("#5014 the wiring: the lock is taken before the unit starts, from the budge
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const start = source.slice(source.indexOf("function startPlaybookUnit("));
   assert.ok(start.indexOf("takeFleetLockOrExit({ chosen, followBudgetMs })") > 0
-    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("systemd-run --unit="), "taken before `systemd-run` exists");
+    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("planeUnitStart(unit)"), "taken before the unit's start exists");
   assert.match(source, /function takeFleetLockOrExit[\s\S]*?lockTakeStep\(\{ chosen, followBudgetMs, now: Date\.now\(\) \}\)[\s\S]*?process\.exit\(2\)/,
     "a refusal exits 2, as every other gate here does");
   assert.match(source, /followBudgetMs: patchGate\.followBudgetMs, aim \}\)/, "main hands it the SAME budget followUnit is given: no run length is copied");

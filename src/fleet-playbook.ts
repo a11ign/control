@@ -141,6 +141,20 @@ const ANSIBLE_DIR = resolve(import.meta.dirname, "../ansible");
 // `control-plane-checkout.ts` for why four sweeps missed it. Relative, because `ssh()` above lands
 // in `/root` first.
 const CHECKOUT = CONTROL_PLANE_CHECKOUT;
+// The playbooks' own directory on the plane. The checkout IS the control repository now (a11ign#5306), so
+// its `ansible/` sits at the top, not under `packages/control/`: the old `packages/control/ansible` path
+// names a directory that is not there, and a play that `cd`s or `--working-directory`s into it fails.
+// Exported so the test can pin it against `patch_checkout` in `ansible/patch-schedule.yml` (a11ign#5310).
+export const ANSIBLE_ON_THE_PLANE = `${CHECKOUT}/ansible`;
+
+/**
+ * The head of the `systemd-run` that starts a playbook unit, up to (and including) the trailing space the
+ * caller's next flag follows. Its own function so the test can run it: the unit runs from the directory
+ * `ANSIBLE_ON_THE_PLANE` names, and a `--working-directory` that drifts from it fails only on the plane.
+ */
+export function planeUnitStart(unit: string): string {
+  return `systemd-run --unit=${unit} --remain-after-exit --working-directory=${ANSIBLE_ON_THE_PLANE} `;
+}
 
 /**
  * Playbooks this may run, by NAME. Not a path, and not free text: the value is interpolated into a
@@ -959,7 +973,7 @@ try {
   // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
   // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
   ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
-    + `systemd-run --unit=${unit} --remain-after-exit --working-directory=${CHECKOUT}/packages/control/ansible `
+    + planeUnitStart(unit)
     + `--setenv=ANSIBLE_CONFIG=ansible.cfg${override.setenv} `
     // NO `-i` HERE. `ansible.cfg` sets `inventory = /etc/a11ign/inventory.yml,inventory.yml` so the
     // durable copy is read FIRST -- and an explicit `-i` on the command line OVERRIDES that config
@@ -2027,7 +2041,7 @@ export function fleetTopBuild(boxes: PatchBox[]): { build: string; names: string
 
 /** The read-only ad hoc call that asks those boxes for their registry build and release, from the control plane's `ansible` directory. */
 export function patchTargetReadCommand(names: string[]): string {
-  return `cd ${CHECKOUT}/packages/control/ansible && ANSIBLE_CONFIG=ansible.cfg ansible ${names.join(",")} `
+  return `cd ${ANSIBLE_ON_THE_PLANE} && ANSIBLE_CONFIG=ansible.cfg ansible ${names.join(",")} `
     + `-m ansible.windows.win_shell -a '${PATCH_TARGET_SCRIPT}'`;
 }
 
