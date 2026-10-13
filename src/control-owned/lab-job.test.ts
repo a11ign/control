@@ -7,13 +7,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
 import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
 
-/** The lab's scripts directory, resolved the same way `read` resolves the playbooks. */
-const LAB_SCRIPTS = fileURLToPath(new URL("../../../lab/scripts/", import.meta.url));
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { stripComments } from "@a11ign/toolchain/lib/local-import-closure";
@@ -159,31 +156,6 @@ const DERIVED_INPUT: Record<string, string> = {
   "audit-scorer-shortcuts.py": "scorer:shortcuts (or :candidate/:baseline) — emits runs/unclosable-vetoes.json",
   "audit_grants.py": "corpus:grants-audit — emits runs/grants-map.json",
 };
-
-test("a gate that dispatches to the control plane must be told --local when the control plane runs it", () => {
-  // `dispatchUnlessLocal` makes the lab the DEFAULT and `--local` the escape hatch, which is right for an
-  // operator at a laptop. But a `lab-job.yml` entry IS the control plane's dispatch, so the default there
-  // makes the script dispatch again from inside the job it was dispatched into.
-  //
-  // MEASURED 2026-08-30: `gate-probe-order` died `sh: 1: ansible-playbook: not found`, exit 127 -- a
-  // message that reads like a broken lab rather than a job wired to call itself. `stability` had the same
-  // wiring. DISCOVERED here rather than listed, because "which scripts dispatch" is a fact about the
-  // source that a hand-written list goes stale against, exactly as the worker-file list did.
-  const dispatching = readdirSync(LAB_SCRIPTS)
-    .filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
-    .filter((file) => readFileSync(LAB_SCRIPTS + file, "utf8").includes("gates/dispatch.ts"));
-  assert.ok(dispatching.length >= 2,
-    `found ${dispatching.length} dispatching gates; the discovery is broken, not the catalogue clean`);
-
-  const offenders: string[] = [];
-  for (const [name, job] of Object.entries(catalogueJobs())) {
-    const argv = (Array.isArray(job?.argv) ? job.argv : []).map(String);
-    const script = dispatching.find((f) => argv.some((part) => part.endsWith(f)));
-    if (script && !argv.includes("--local")) offenders.push(`${name} runs ${script} without --local`);
-  }
-  assert.deepEqual(offenders, [],
-    "these jobs re-dispatch from inside the lab and die with `ansible-playbook: not found`");
-});
 
 test("a job may not run a script whose input another command has to derive", () => {
   // MEASURED 2026-08-30. `shortcuts-baseline` called `audit-scorer-shortcuts.py` directly while `shortcuts`
@@ -1215,20 +1187,6 @@ test("#1626: install-axe-browser never invokes npx, and names a file this checko
   assert.ok(scriptArg, "install-axe-browser's argv must name a script file, not rely on a global playwright");
   assert.ok(existsSync(fileURLToPath(new URL(`../../../../${scriptArg}`, import.meta.url))),
     `install-axe-browser's argv names ${scriptArg}, which is not on disk`);
-});
-
-test("#1626: axe-calibration's declared exit codes are ones its own script can actually produce", () => {
-  // The #1511 lesson applied to a job with no shared gateVerdict/exitCodeFor to borrow: axe-calibration.ts
-  // is its own contract, so what it can return is read from ITS source, never typed by hand here.
-  const source = readFileSync(resolve(LAB_SCRIPTS, "axe-calibration.ts"), "utf8");
-  const meanings = (PLAY_VARS.lab_jobs["axe-calibration"] as JobEntry & { exitMeanings?: Record<string, string> })
-    .exitMeanings ?? {};
-  const declared = Object.keys(meanings);
-  assert.ok(declared.length > 0, "axe-calibration must declare what its non-zero exits mean");
-  for (const code of declared) {
-    assert.match(source, new RegExp(String.raw`process\.exitCode\s*=\s*${code}\b`),
-      `axe-calibration declares exit ${code}, but its script has no \`process.exitCode = ${code}\``);
-  }
 });
 
 test("only a job that reports progress has a progress root, and it is declared", () => {

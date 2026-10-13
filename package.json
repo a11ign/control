@@ -13,7 +13,8 @@
     "./fleet-playbook": "./src/fleet-playbook.ts",
     "./lab-pipeline": "./src/lab-pipeline.ts",
     "./fleet-wake": "./src/fleet-wake.ts",
-    "./layer-checkouts": "./src/layer-checkouts.ts"
+    "./layer-checkouts": "./src/layer-checkouts.ts",
+    "./lab-carried": "./src/lab-carried.ts"
   },
   "scripts": {
     "doctor": "node src/with-control-plane-fleet.ts doctor",

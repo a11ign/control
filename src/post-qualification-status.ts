@@ -42,10 +42,10 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { flagValue, refuseUnknownFlags } from "./worker-fleet-carried.ts";
-import { qualificationStatus } from "../../lab/src/gates/qualification-status.ts";
+import { qualificationStatus, type Outcome, type StatusPayload } from "./lab-carried.ts";
 
 /** What the lab job printed, as the gate reads it; `{}` is "no readable verdict". */
-export type Outcome = import("../../lab/src/gates/qualification-status.ts").Outcome;
+export type { Outcome, StatusPayload };
 
 /** This repository's canonical slug -- what `origin` says; `a11ign/a11y-witness` is a former name. */
 export const DEFAULT_REPO = "a11ign/a11ign";
@@ -61,7 +61,6 @@ export const EXIT = { POSTED: 0, REFUSED: 1, NOT_YET: 3 };
 /** What one `gh` call said. `missing` is "there is no `gh` here at all", which is a credential problem and not a refusal. */
 export type GhAnswer = { status: number | null, stdout: string, stderr: string, missing: boolean };
 export type RunGh = (args: string[]) => GhAnswer;
-export type StatusPayload = import("../../lab/src/gates/qualification-status.ts").StatusPayload;
 export type PostResult = { posted: true, payload: StatusPayload } | { posted: false, reason: "no-credential", payload: StatusPayload, detail: string } | { posted: false, reason: "rejected", payload: StatusPayload, detail: string };
 
 /**

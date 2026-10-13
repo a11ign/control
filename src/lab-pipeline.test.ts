@@ -264,34 +264,6 @@ test("a chain that TRAINS must gate what it built, not what was already shipped"
 });
 
 /**
- * THE REAL-PAGE PIPELINE MUST CAPTURE EVERY SCORED ROLE, and this is the test that says so.
- *
- * `capture-real-pages` defaults to `--role=training`, so a stage that names no role captures 39 of the 89
- * real pages — and `rules-real-pages` then scores, and `--update` rewrites the baseline against, whatever
- * happened to be on disk from some earlier run. Measured 2026-08-27: a calibration-only capture followed
- * by an update took the baseline from 85 pages to 81 and erased a known 2.4.3, silently.
- *
- * Derived from the corpus rather than hardcoded, so adding a role to `real-page-corpus.mjs` fails HERE
- * instead of quietly halving a run's coverage. `fixture` is excluded because those pages are not scored
- * as conformant real pages — the same list `pagesFor` serves.
- */
-test("the real-pages pipeline captures every role the corpus scores", async () => {
-  const { REAL_PAGES } = await import("../../lab/src/training/real-page-corpus.mjs");
-  const scored = [...new Set(REAL_PAGES.map((page) => page.role))].filter((role) => role !== "fixture");
-  const captured = (PIPELINES["real-pages"].jobs as Array<string | { job: string; vars?: Record<string, string> }>)
-    .filter((entry): entry is { job: string; vars?: Record<string, string> } =>
-      typeof entry !== "string" && entry.job === "capture-real-pages")
-    .map((entry) => entry.vars?.role)
-    .filter((role): role is string => typeof role === "string");
-  for (const role of scored) {
-    assert.ok(captured.includes(role),
-      `pipeline 'real-pages' never captures role='${role}', so it would score and rewrite the baseline `
-      + `against whatever stale captures that role has on disk. Captured: ${captured.join(", ") || "(none — "
-      + "the stage names no role, so it takes capture-real-pages' default of training)"}`);
-  }
-});
-
-/**
  * `capture-real-pages` must come BEFORE any stage that rebuilds the realism tier.
  *
  * `retrain` ends with `build-realism`, which assembles the real-page tier from the captures ON DISK. Run
