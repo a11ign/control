@@ -148,6 +148,15 @@ const CHECKOUT = CONTROL_PLANE_CHECKOUT;
 export const ANSIBLE_ON_THE_PLANE = `${CHECKOUT}/ansible`;
 
 /**
+ * The head of the `systemd-run` that starts a playbook unit, up to (and including) the trailing space the
+ * caller's next flag follows. Its own function so the test can run it: the unit runs from the directory
+ * `ANSIBLE_ON_THE_PLANE` names, and a `--working-directory` that drifts from it fails only on the plane.
+ */
+export function planeUnitStart(unit: string): string {
+  return `systemd-run --unit=${unit} --remain-after-exit --working-directory=${ANSIBLE_ON_THE_PLANE} `;
+}
+
+/**
  * Playbooks this may run, by NAME. Not a path, and not free text: the value is interpolated into a
  * command a remote shell interprets, on the box holding the fleet SSH key. Same containment as
  * `-e out=<name>` in `lab-job.yml`, for the same reason.
@@ -964,7 +973,7 @@ try {
   // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
   // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
   ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
-    + `systemd-run --unit=${unit} --remain-after-exit --working-directory=${ANSIBLE_ON_THE_PLANE} `
+    + planeUnitStart(unit)
     + `--setenv=ANSIBLE_CONFIG=ansible.cfg${override.setenv} `
     // NO `-i` HERE. `ansible.cfg` sets `inventory = /etc/a11ign/inventory.yml,inventory.yml` so the
     // durable copy is read FIRST -- and an explicit `-i` on the command line OVERRIDES that config

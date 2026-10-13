@@ -29,7 +29,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
   writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange,
-  lockTakeStep, lockEndStep, patchTargetReadCommand, ANSIBLE_ON_THE_PLANE }
+  lockTakeStep, lockEndStep, patchTargetReadCommand, ANSIBLE_ON_THE_PLANE, planeUnitStart }
   from "./fleet-playbook.ts";
 import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
@@ -271,9 +271,9 @@ test("#5310: the checkout, its ansible/ directory and patch_checkout name ONE pa
   assert.ok(patchTargetReadCommand(["w1"]).startsWith(`cd ${ANSIBLE_ON_THE_PLANE} && `),
     "the read-only target probe runs from the same ansible/ directory");
 
-  // The `--working-directory` sits inside `startPlaybookUnit`'s ssh string, which no test calls, so pin its text.
-  assert.match(readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8"),
-    /--working-directory=\$\{ANSIBLE_ON_THE_PLANE\} /);
+  // The unit the deploy starts runs from that same directory: run the builder, not a regex over its source.
+  assert.equal(planeUnitStart("a11y-fleet-w1"),
+    `systemd-run --unit=a11y-fleet-w1 --remain-after-exit --working-directory=${cdTarget}/ansible `);
 });
 
 test("but the CHECKOUT is still a name, because a bare SHA would detach the control plane (#666)", () => {
@@ -1758,7 +1758,7 @@ test("#5014 the wiring: the lock is taken before the unit starts, from the budge
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const start = source.slice(source.indexOf("function startPlaybookUnit("));
   assert.ok(start.indexOf("takeFleetLockOrExit({ chosen, followBudgetMs })") > 0
-    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("systemd-run --unit="), "taken before `systemd-run` exists");
+    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("planeUnitStart(unit)"), "taken before the unit's start exists");
   assert.match(source, /function takeFleetLockOrExit[\s\S]*?lockTakeStep\(\{ chosen, followBudgetMs, now: Date\.now\(\) \}\)[\s\S]*?process\.exit\(2\)/,
     "a refusal exits 2, as every other gate here does");
   assert.match(source, /followBudgetMs: patchGate\.followBudgetMs, aim \}\)/, "main hands it the SAME budget followUnit is given: no run length is copied");

@@ -13,12 +13,13 @@ The row's own line `cd ~/repos/control && ...` reads the PRIMARY checkout, which
 Mutations, each restored from a scratchpad copy and checked byte-identical with `diff`:
 - `CONTROL_PLANE_CHECKOUT` back to `"a11y-witness"`: the #5310 case fails (`actual '/root/a11y-witness', expected '/root/control'`).
 - `ANSIBLE_ON_THE_PLANE` back to `${CHECKOUT}/packages/control/ansible`: the #5310 case fails (`actual 'control/packages/control/ansible', expected 'control/ansible'`).
+- `planeUnitStart`'s `--working-directory` changed to `${CHECKOUT}/packages/control/ansible`: the #5310 case fails on the builder's output.
 
 ## What changed
 
 - `src/control-plane-checkout.ts`: `CONTROL_PLANE_CHECKOUT = "control"`, and its comment now records why (the plane's checkout is the control repository, cloned at `/root/control`, a11ign#5306).
-- `src/fleet-playbook.ts`: one exported `ANSIBLE_ON_THE_PLANE = \`${CHECKOUT}/ansible\``, used by the `systemd-run --working-directory=` of the playbook unit and by `patchTargetReadCommand`, which both used `packages/control/ansible`.
-- `src/fleet-playbook.test.ts`: the #5310 case. It reads `patch_checkout` from `ansible/patch-schedule.yml` and pins that `CONTROL_PLANE_CHECKOUT_PATH` equals it, that `controlPlaneCheckout("main", sha)` enters that same directory, that `ANSIBLE_ON_THE_PLANE` is `ansible/` under it, that `patchTargetReadCommand` starts there, and that the `--working-directory=` text uses the constant.
+- `src/fleet-playbook.ts`: one exported `ANSIBLE_ON_THE_PLANE = \`${CHECKOUT}/ansible\``, used by `patchTargetReadCommand` and by the new exported `planeUnitStart(unit)`, which returns the `systemd-run --unit=… --working-directory=…` head the deploy string now calls. Before, that head was an inline template with `packages/control/ansible` in it.
+- `src/fleet-playbook.test.ts`: the #5310 case. It reads `patch_checkout` from `ansible/patch-schedule.yml` and pins that `CONTROL_PLANE_CHECKOUT_PATH` equals it, that `controlPlaneCheckout("main", sha)` enters that same directory, that `ANSIBLE_ON_THE_PLANE` is `ansible/` under it, that `patchTargetReadCommand` starts there, and that `planeUnitStart(…)` returns the `--working-directory=` of that same `ansible/` (called, not regex-matched against source). The #5014 wiring test's ordering anchor moved from the literal `systemd-run --unit=` to the call `planeUnitStart(unit)`; its check (lock taken before the unit starts) is unchanged.
 
 ## Not done here
 
@@ -26,4 +27,4 @@ Mutations, each restored from a scratchpad copy and checked byte-identical with 
 - `src/lab-job.ts` (`:76`, `:186`) and `src/lab-watch.ts` (`:44`, `:47`) keep the `packages/control/ansible` paths. Filed as a row.
 - No live `fleet:patch --apply` was run. Done-when 2 is orchestrator's.
 
-Closes: none — a11ign/a11ign#5310's Done-when 2 is a live `fleet:patch --apply` run on the plane, which is orchestrator's; `product-manager` closes the row at merge once that run has passed.
+Closes a11ign/a11ign#5310 — declared to match the pull request body, which the agent-org gate reads. Done-when 2 is a live `fleet:patch --apply` run on the plane, which is orchestrator's and is not carried by this PR; `product-manager` decides at merge whether Done-when 1 alone is enough.
