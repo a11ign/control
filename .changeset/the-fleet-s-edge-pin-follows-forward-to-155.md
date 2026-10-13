@@ -1,7 +1,0 @@
----
-"@a11ign/control": patch
----
-
-The fleet's Edge pin follows forward to `155.0.4283.45` (a11ign/a11ign#4939, from #4732), and the role stops the Edge updater BEFORE it fetches, refuses or installs, so a box that stops at the Edge step can no longer drift. Workers 7, 8 and 9 had Edge move to 154 and then 155 on its own because the updater tasks sat after "Install it": Chromium's MSI declined the 152 pin while logging success, `--rename-chrome-exe` threw, and the role stopped before the tasks that disable the updater. `worker_edge_version`, `worker_edge_msi_url` and `worker_edge_msi_sha256` move to the highest Stable x64 MSI `edgeupdates.microsoft.com` publishes (published 2026-10-08T18:58Z); `worker_edge_allow_downgrade` stays `false`. `provisionRevision` hashes `defaults/main.yml` and `edge-version.yml`, so every box reads provisioned-stale until `fleet:provision` runs, which is the live window and its own VERIFY row.
-
-`src/fleet-layer/edge-updater-before-install.test.ts` pins the order, with the same assertion shown failing on the file with the blocks put back. `edge-pin-parity.test.ts` gains `BOOTSTRAP_LAG`: the bootstrap lives in screenreader-fleet and is laid at the core's pinned tag, which still reads `152.0.4191.66`, so the test accepts that one whole earlier pin and fails the moment the bootstrap carries the role's pin, so the allowance cannot outlive its reason. The bootstrap itself is not changed here.
