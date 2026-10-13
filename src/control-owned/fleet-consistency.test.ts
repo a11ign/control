@@ -74,31 +74,18 @@ test("EVERY MUST_MATCH FIELD IS ONE THE WORKER ACTUALLY REPORTS", () => {
     "the source matcher matches names that are not there, so the assertion above proves nothing");
 });
 
-/**
- * A dotted reported-only path (`edgeUpdaterGuard.state`, #5021) names a leaf of a block the worker reports WHOLE: the root must be
- * reported by `/health`, and the leaf must be one the guard's own module produces, since `server.ts` only ever spreads the block.
- */
-const reportsPath = (reported: string, path: string) => {
-  const [root, ...leaves] = path.split(".");
-  const guard = workerSource("edge-updater-guard.ts");
-  return reportsField(reported, root) && leaves.every((leaf) => reportsField(guard, leaf));
-};
-
 test("#2063: EVERY REPORTED_ONLY FIELD IS ONE THE WORKER ACTUALLY REPORTS", () => {
   // `EVERY MUST_MATCH FIELD…` above, for the second channel, and it matters MORE here: a typo in
   // `MUST_MATCH` at least shows up as a permanent coverage gap that refuses a run, while a typo here is
   // a field that reads `unreported` for ever and looks exactly like a fleet that has not been deployed.
   const reported = workerReportedFieldsSource();
 
-  const missing = REPORTED_ONLY.map((f) => f.path).filter((path) => !reportsPath(reported, path));
+  const missing = REPORTED_ONLY.map((f) => f.path).filter((path) => !reportsField(reported, path));
   assert.deepEqual(missing, [], "REPORTED_ONLY names fields the worker's /health environment never sends");
 
   // The positive control for the line above, the same one the MUST_MATCH test carries: the matcher has
-  // to be able to MISS, or an empty list proves nothing. Both halves of a dotted path are checked: a root the worker
-  // reports with a leaf it does not, and a root it does not report at all.
-  assert.ok(!reportsPath(reported, "edgeUpdaterGuard.stateThatIsNotThere"),
-    "the dotted matcher accepts a leaf the guard does not produce, so the assertion above proves nothing");
-  assert.ok(!reportsPath(reported, "displayAdapterThatIsNotReported"),
+  // to be able to MISS, or an empty list proves nothing.
+  assert.ok(!reportsField(reported, "displayAdapterThatIsNotReported"),
     "the source matcher matches names that are not there, so the assertion above proves nothing");
 });
 
