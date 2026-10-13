@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { layerDeclaration, separateLayers } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag, readDeployPins, type DeployPins } from "./layer-pins.ts";
 import { layerRefsFor, qualificationRequest, withLayerRefs } from "./qualification-run.ts";

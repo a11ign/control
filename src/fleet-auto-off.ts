@@ -127,7 +127,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { requestJson } from "./worker-fleet-carried.ts";
 import { layerDeclaration, layerOwning } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag } from "./layer-pins.ts";
@@ -481,7 +481,7 @@ export function importClosure(entry: string, readSource: (path: string) => strin
   return [...seen].sort();
 }
 
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 /** Repo-relative, derived from where this file is rather than typed, so a move of the package moves the comparison. */
 const THIS_FILE = fileURLToPath(import.meta.url).slice(REPO_ROOT.length);
@@ -557,7 +557,7 @@ export type Layers = { layerOwning: typeof layerOwning, layerDeclaration: typeof
  * are equal files.
  *
  * Only the laid shape (`.layer-ref` beside `src/`) is judged: a clone at the layer's path holds the layer repository's own
- * layout (`packages/worker-fleet/src` under it), which `../../worker-fleet/src/` cannot import from, so it is not a tree that runs.
+ * layout (`packages/worker-fleet/src` under it), which a sibling-checkout import cannot reach, so it is not a tree that runs.
  */
 export function judgeLaidLayer({ name, dir, path, tag }: LayerAtItsPin): ReturnType<JudgeLayer> {
   const refFile = join(dir, ".layer-ref");

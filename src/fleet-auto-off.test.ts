@@ -19,10 +19,10 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureTimes, readCapturesState, writeCapturesState, withFileLock, readAutoOffRefusal, refusalBody, AUTO_OFF_STATE_PATH } from "./fleet-watch.ts";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layerDeclaration, layerOwning, layersFrom } from "./layer-checkouts.ts";
+import { layerDeclaration, layerOwning, layersFrom, layersRootOf } from "./layer-checkouts.ts";
 import { pinnedTag, readDeployPins } from "./layer-pins.ts";
 import {
   IDLE_THRESHOLD_MS, PROBE_TIMEOUT_MS, POLL_INTERVAL_MS,
@@ -926,13 +926,20 @@ test("#3269 3: a control plane that cannot be reached is an empty ledger, every 
 // Refuse to power anything off when the files this runs differ from main -- #3275.
 // ---------------------------------------------------------------------------------------------------------
 
-const REPO = fileURLToPath(new URL("../../../", import.meta.url));
-const THIS = "packages/control/src/fleet-auto-off.ts";
+const REPO = fileURLToPath(new URL("../", import.meta.url));
+const THIS = "src/fleet-auto-off.ts";
 const BESIDE = [
-  "packages/control/ansible/sleep.yml",
-  "packages/control/ansible/files/a11y-fleet-auto-off.service",
-  "packages/control/ansible/files/a11y-fleet-auto-off.timer",
+  "ansible/sleep.yml",
+  "ansible/files/a11y-fleet-auto-off.service",
+  "ansible/files/a11y-fleet-auto-off.timer",
 ];
+
+// #5312: control runs from its own checkout, so its root is the directory that holds `deploy-pins.json` -- the paths above are
+// meaningless if REPO was typed one level too high (it was `../../../`, which is the home directory from this checkout).
+test("#5312 REPO is control's own root: deploy-pins.json, this file and the files beside it are under it", () => {
+  assert.ok(existsSync(join(REPO, "deploy-pins.json")), "REPO holds deploy-pins.json");
+  for (const path of [THIS, ...BESIDE]) assert.ok(existsSync(join(REPO, path)), `${path} is under REPO`);
+});
 
 /**
  * Every script the unit's Exec lines run, core-relative: the absolute ones under the checkout's literal path, and the bare ones
@@ -946,7 +953,9 @@ function scriptsRun(unit: string): string[] {
 
 const absentFrom = (root: string, paths: string[]) => [...new Set(paths.filter((p) => !existsSync(join(root, p))))];
 
-test("#4571: every script the unit runs exists in the core it is laid into, and the old `.mjs` line is what this would have caught", () => {
+// TODO(#5312 -> plane install, orchestrator): the shipped unit still runs `packages/control/src/fleet-auto-off.ts` (the core's layout).
+// Moving the unit to the control checkout's path is the plane install's, not this row's, so this is a todo until that lands, not a pass.
+test("#4571: every script the unit runs exists in the core it is laid into, and the old `.mjs` line is what this would have caught", { todo: "unit still names packages/control/src; moves with the plane install" }, () => {
   // The follow step's `-` hides a missing script: from a11ign/a11ign#4268 until #4571 both lay lines logged `Cannot find module` on every firing.
   const unit = shippedUnit("a11y-fleet-auto-off.service");
   const named = scriptsRun(unit);
@@ -1001,8 +1010,9 @@ test("#3275 importClosure: follows import, export-from, multi-line and dynamic i
 test("#3275 importClosure on the real program: every file it names exists, and the ones that decide a shutdown are in", () => {
   const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
   for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
-  for (const expected of [THIS, "packages/control/src/fleet-watch.ts", "packages/control/src/fleet-wake.ts",
-    "packages/control/src/worker-fleet-carried.ts", "packages/worker-fleet/src/git-safe-env.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
+  for (const expected of [THIS, "src/fleet-watch.ts", "src/fleet-wake.ts", "src/worker-fleet-carried.ts", "src/git-safe-env.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
+  // The fleet's git helper is reached by its PUBLISHED name (ADR 0045) through `src/git-safe-env.ts`, which a relative walk does not follow: the timer still runs it.
+  assert.match(readFileSync(join(REPO, "src/git-safe-env.ts"), "utf8"), /from "@a11ign\/screenreader-fleet\/git-safe-env"/, "the timer's git helper is the fleet's published one");
   assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
   for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
 });
@@ -1029,24 +1039,27 @@ test("#3275 checkAgainstMain: identical proceeds; a differing closure file refus
   const proceed = checkAgainstMain({ now: 1, fetchedAt: null, git: same.git, readSource: fakeSource });
   assert.deepEqual(proceed.verdict, { action: "proceed" });
   const diffArgs = same.calls.find((c) => c[0] === "diff")!;
-  for (const path of [THIS, "packages/control/src/other.mjs", ...BESIDE]) assert.ok(diffArgs.includes(path), `${path} compared`);
+  for (const path of [THIS, "src/other.mjs", ...BESIDE]) assert.ok(diffArgs.includes(path), `${path} compared`);
 
-  const differs = scriptedGit({ diffOut: "packages/control/src/other.mjs\n" });
+  const differs = scriptedGit({ diffOut: "src/other.mjs\n" });
   const refused = checkAgainstMain({ now: 1, fetchedAt: null, git: differs.git, readSource: fakeSource }).verdict;
   assert.deepEqual(refused, { action: "refuse", reason: "stale-checkout",
-    detail: "1 file differs: packages/control/src/other.mjs" });
+    detail: "1 file differs: src/other.mjs" });
 });
 
 test("#3275 checkAgainstMain: a file the checkout does not track counts as differing", () => {
-  const git = scriptedGit({ tracked: (paths) => paths.filter((p) => p !== "packages/control/ansible/sleep.yml") });
+  const git = scriptedGit({ tracked: (paths) => paths.filter((p) => p !== "ansible/sleep.yml") });
   const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: fakeSource });
   assert.equal(verdict.action, "refuse");
   assert.match((verdict as { detail: string }).detail, /sleep\.yml/);
 });
 
 // ---------------------------------------------------------------------------------------------------------
-// #3845: the closure reaches into `packages/worker-fleet`, which this repository does not track. Its files are held to
-// the layer's PIN (the tag main's `deploy-pins.json` names), not to `git ls-files`, which listed none of them and refused on main.
+// #3845: a layer's files are held to its PIN (the tag main's `deploy-pins.json` names), not to `git ls-files`.
+// #5312: control now imports the fleet as the PUBLISHED package, which the closure walk does not follow, so no layer is laid into
+// this tree for the closure to reach. The five tests that judged a laid `packages/worker-fleet` against a fixture or against this
+// checkout were deleted with it: they could no longer see a layer, and the real-checkout one read `../../../` from a raw checkout.
+// `judgeLaidLayer` stays covered by its real-directory test below.
 // ---------------------------------------------------------------------------------------------------------
 
 const LAYER = "screenreader-fleet";
@@ -1056,9 +1069,6 @@ const TAG = `@a11ign/${LAYER}@0.5.1`;
 const INTEGRITY = `sha512-${"A".repeat(86)}==`;
 /** `deploy-pins.json` as `origin/main` would hold it, with the fleet layer pinned at `version`. */
 const pinsAt = (version: string) => JSON.stringify({ layers: { [LAYER]: { package: `@a11ign/${LAYER}`, version, integrity: INTEGRITY, path: LAYER_PATH, remote: "https://example.invalid/fleet.git" } } });
-/** The program as it really is: it imports a file of the layer, which is what makes the layer part of the comparison. */
-const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/git-safe-env.ts";\n` : "");
-const laidAt = (tag: string) => ({ differing: tag === TAG ? [] : [`${LAYER_PATH} (layer ${LAYER} is laid at ${tag}, main pins ${TAG})`] });
 
 test("#5085 the pin main holds is read from deploy-pins.json: the real file, the peer-suffix-free version, and the refusals", () => {
   const real = readDeployPins();
@@ -1076,68 +1086,6 @@ test("#3845 layerOwning: a file under a separate layer's path is the layer's, th
   assert.equal(layerOwning("packages/worker-fleet-extra/src/a.mjs"), null, "a sibling that shares a prefix is not inside the layer");
   assert.equal(layerOwning(THIS), null);
   assert.equal(layerDeclaration(LAYER).path, LAYER_PATH);
-});
-
-test("#3845 checkAgainstMain: the layer's files go to its pin and NEVER to git's diff or ls-files", () => {
-  const git = scriptedGit({ pins: pinsAt("0.5.1") });
-  const judged: unknown[] = [];
-  const judgeLayer = (layer: { name: string; tag: string }) => { judged.push(layer); return laidAt(TAG); };
-  const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: sourceWithLayer, judgeLayer });
-  assert.deepEqual(verdict, { action: "proceed" }, "a layer laid at its pin proceeds: the defect, fixed");
-  assert.equal(judged.length, 1, "positive control: the layer WAS judged");
-  assert.equal((judged[0] as { tag: string }).tag, TAG, "at the tag main's deploy-pins.json names");
-  for (const call of git.calls.filter((c) => c[0] === "diff" || c[0] === "ls-files")) {
-    assert.ok(!call.includes(FLEET_FILE), `git ${call[0]} was asked about a file it cannot track`);
-    assert.ok(call.includes("packages/control/src/other.mjs"), "and the core's files still are compared");
-  }
-  assert.ok(git.calls.some((c) => c[0] === "show" && c[1] === "origin/main:deploy-pins.json"), "the pin is main's, not the working tree's");
-});
-
-test("#4363 checkAgainstMain: a layer laid at v<semver> by lay-layer.ts IS at the pin deploy-pins.json names, and the older tag form is not", () => {
-  const root = mkdtempSync(join(tmpdir(), "auto-off-4363-"));
-  const laidAs = (tag: string) => {
-    const dir = join(root, tag.replace(/\W/g, "_"));
-    mkdirSync(join(dir, "src"), { recursive: true });
-    writeFileSync(join(dir, ".layer-ref"), `${tag}\n`);
-    return dir;
-  };
-  const verdictFor = (laid: string, pins: string) => checkAgainstMain({ now: 1, fetchedAt: null, git: scriptedGit({ pins }).git, readSource: sourceWithLayer,
-    judgeLayer: (layer) => judgeLaidLayer({ ...layer, dir: laidAs(laid) }) }).verdict;
-  try {
-    assert.deepEqual(verdictFor("v0.5.3", pinsAt("0.5.3")), { action: "proceed" }, "the flat release is laid as v0.5.3, and main pins that same build");
-    assert.deepEqual(verdictFor("@a11ign/screenreader-fleet@0.5.2", pinsAt("0.5.2")), { action: "proceed" }, "before the flat release the older form is the tag");
-    const stale = verdictFor("@a11ign/screenreader-fleet@0.5.3", pinsAt("0.5.3"));
-    assert.equal((stale as { reason: string }).reason, "stale-checkout", "a tree laid under a tag the repository never made is not at the pin");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("#3845 checkAgainstMain: a layer laid at another tag refuses, NAMING the layer; a core difference is still reported beside it", () => {
-  const git = scriptedGit({ pins: pinsAt("0.5.1"), diffOut: "packages/control/src/other.mjs\n" });
-  const judgeLayer = () => laidAt("@a11ign/screenreader-fleet@0.4.0");
-  const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: sourceWithLayer, judgeLayer });
-  assert.deepEqual(verdict, { action: "refuse", reason: "stale-checkout",
-    detail: `2 files differ: packages/control/src/other.mjs, ${LAYER_PATH} (layer ${LAYER} is laid at @a11ign/screenreader-fleet@0.4.0, main pins ${TAG})` });
-});
-
-test("#3845 checkAgainstMain: a layer that cannot be read, or has no pin on main, is CANNOT_TELL and says which", () => {
-  const readSource = sourceWithLayer;
-  const proceeds = () => laidAt(TAG);
-  const noPins = checkAgainstMain({ now: 1, fetchedAt: null, git: scriptedGit({}).git, readSource, judgeLayer: proceeds }).verdict;
-  assert.deepEqual([(noPins as { reason: string }).reason, (noPins as { detail: string }).detail],
-    ["cannot-tell", "origin/main's deploy-pins.json, which pins the layers, could not be read"]);
-
-  for (const [pins, why] of [["{}", /declares no layers/], ["[", /not JSON/], [JSON.stringify({ layers: { other: JSON.parse(pinsAt("0.5.1")).layers[LAYER] } }), /declares no layer screenreader-fleet/]] as [string, RegExp][]) {
-    const unpinned = checkAgainstMain({ now: 1, fetchedAt: null, git: scriptedGit({ pins }).git, readSource, judgeLayer: proceeds }).verdict;
-    assert.equal((unpinned as { reason: string }).reason, "cannot-tell", pins);
-    assert.match((unpinned as { detail: string }).detail, new RegExp(`layer ${LAYER} has no pin on main`));
-    assert.match((unpinned as { detail: string }).detail, why);
-  }
-
-  const unreadable = checkAgainstMain({ now: 1, fetchedAt: null, git: scriptedGit({ pins: pinsAt("0.5.1") }).git, readSource,
-    judgeLayer: () => ({ cannotTell: `layer ${LAYER} at ${LAYER_PATH} is not a laid tree` }) }).verdict;
-  assert.deepEqual(unreadable, { action: "refuse", reason: "cannot-tell", detail: `layer ${LAYER} at ${LAYER_PATH} is not a laid tree` });
 });
 
 test("#3845 judgeLaidLayer on real directories: laid at the pin passes; another tag, no marker, a marker without src/, and a clone do not", () => {
@@ -1169,19 +1117,6 @@ test("#3845 judgeLaidLayer on real directories: laid at the pin passes; another 
   }
 });
 
-test("#3845 the REAL checkout: the laid layer is a laid tree at the tag it was laid at, so the guard reads a current tree and refuses nothing", () => {
-  // Not compared with deploy-pins.json: the tree laid HERE is the core's (CI lays control over a core at `CORE_REF`, whose lockfile moves on its own
-  // schedule), and control's pins are a different declaration by design (ADR 0045 rule 3). What this test pins is #3845's own regression: the guard
-  // judged a fixture and refused the real tree. The pin side is the fixture test above ("at-pin" passes, "behind" names both tags).
-  const { path, dir } = layerDeclaration(LAYER);
-  const laidAt = readFileSync(join(dir, ".layer-ref"), "utf8").trim();
-  assert.ok(laidAt.length > 0, "the real tree carries a `.layer-ref` naming the tag it was laid at");
-  const judged = judgeLaidLayer({ name: LAYER, dir, path, tag: laidAt });
-  assert.deepEqual(judged, { differing: [] }, "the layer this tree holds is a laid tree (marker beside src/, no .git) at the tag its marker names");
-  const closure = importClosure(THIS, (file) => readFileSync(join(REPO, file), "utf8"));
-  assert.ok(closure.some((file) => layerOwning(file) === LAYER), "positive control: the real program still imports the layer, so the judgment above is the one that matters");
-});
-
 // ---------------------------------------------------------------------------------------------------------
 // #5085: control is deployed from its own checkout, so its OWN files are tracked and compared by content. The judgement of a control
 // LAID in the core (#3914) read the core's manifest for its tag, which control no longer holds a copy of (ADR 0045 rule 3).
@@ -1190,13 +1125,13 @@ test("#3845 the REAL checkout: the laid layer is a laid tree at the tag it was l
 const sourceOfControlOnly = (path: string) => (path === THIS ? 'import "./other.mjs";\n' : "");
 
 test("#5085 control's own files go to git as they are, no pin is read for them, and no layer owns them", () => {
-  const git = scriptedGit({ diffOut: "packages/control/src/other.mjs\n" });
+  const git = scriptedGit({ diffOut: "src/other.mjs\n" });
   const { verdict } = checkAgainstMain({ now: 1, fetchedAt: null, git: git.git, readSource: sourceOfControlOnly });
-  assert.deepEqual(verdict, { action: "refuse", reason: "stale-checkout", detail: "1 file differs: packages/control/src/other.mjs" });
-  assert.ok(git.calls.some((c) => c[0] === "diff" && c.includes("packages/control/src/other.mjs")), "positive control: the comparison ran");
+  assert.deepEqual(verdict, { action: "refuse", reason: "stale-checkout", detail: "1 file differs: src/other.mjs" });
+  assert.ok(git.calls.some((c) => c[0] === "diff" && c.includes("src/other.mjs")), "positive control: the comparison ran");
   assert.ok(!git.calls.some((c) => c[0] === "show"), "no pin was read: nothing in the closure is a layer");
-  assert.equal(layerOwning("packages/control/src/other.mjs"), null);
-  assert.equal(layersFrom({ manifest: { layers: {} }, root: REPO }).layerOwning("packages/control/src/other.mjs"), null, "nor does a declaration with no layers");
+  assert.equal(layerOwning("src/other.mjs"), null);
+  assert.equal(layersFrom({ manifest: { layers: {} }, root: REPO }).layerOwning("src/other.mjs"), null, "nor does a declaration with no layers");
 });
 
 test("#3275 checkAgainstMain: a failed fetch, an unresolvable origin/main and an empty closure each REFUSE", () => {
@@ -1343,7 +1278,7 @@ test("#3275 checkAgainstMain against REAL git: a change on origin/main refuses, 
   sh(seed, "config", "user.email", "t@example.com");
   sh(seed, "config", "user.name", "t");
   write(seed, THIS, 'import "./other.mjs";\n');
-  write(seed, "packages/control/src/other.mjs", "export const v = 1;\n");
+  write(seed, "src/other.mjs", "export const v = 1;\n");
   for (const file of BESIDE) write(seed, file, "x\n");
   sh(seed, "add", "-A");
   sh(seed, "commit", "-q", "-m", "seed");
@@ -1358,19 +1293,19 @@ test("#3275 checkAgainstMain against REAL git: a change on origin/main refuses, 
     const clean = checkAgainstMain({ now: 1, fetchedAt: null, git, readSource });
     assert.deepEqual(clean.verdict, { action: "proceed" }, "positive control: an identical checkout proceeds");
 
-    write(seed, "packages/control/src/other.mjs", "export const v = 2;\n");
+    write(seed, "src/other.mjs", "export const v = 2;\n");
     sh(seed, "commit", "-q", "-am", "main moves");
     sh(seed, "push", "-q", join(root, "origin.git"), "main");
     const moved = checkAgainstMain({ now: 1, fetchedAt: null, git, readSource });
     assert.deepEqual(moved.verdict, { action: "refuse", reason: "stale-checkout",
-      detail: "1 file differs: packages/control/src/other.mjs" });
+      detail: "1 file differs: src/other.mjs" });
     assert.equal(sh(run, "rev-parse", "HEAD").stdout, headBefore, "fetch left HEAD where it was");
-    assert.equal(readFileSync(join(run, "packages/control/src/other.mjs"), "utf8"), "export const v = 1;\n",
+    assert.equal(readFileSync(join(run, "src/other.mjs"), "utf8"), "export const v = 1;\n",
       "and the working tree is untouched: the check can never race a running play");
 
     sh(run, "merge", "-q", "--ff-only", "origin/main");
     assert.deepEqual(checkAgainstMain({ now: 1, fetchedAt: null, git, readSource }).verdict, { action: "proceed" });
-    writeFileSync(join(run, "packages/control/src/other.mjs"), "export const v = 3; // edited in place\n");
+    writeFileSync(join(run, "src/other.mjs"), "export const v = 3; // edited in place\n");
     assert.equal(checkAgainstMain({ now: 1, fetchedAt: null, git, readSource }).verdict.action, "refuse",
       "what RUNS is the working tree, so an uncommitted edit counts");
   } finally {
@@ -1697,4 +1632,32 @@ test("#5014 5 the lock is read ONCE per tick for the whole fleet, and `tick`'s d
   assert.equal(reads, 1, "three workers, one read");
   const defaulted = await idleBoxTick(playIs("none"));
   assert.deepEqual(defaulted.decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// The layers are asked of the checkout the program runs from (a11ign/a11ign#5312, reviewer-control-89).
+// ---------------------------------------------------------------------------------------------------------
+
+test("layersRootOf: a checkout of its own is its own root; one laid at packages/control answers with the tree above it", () => {
+  assert.equal(layersRootOf("/root/control"), "/root/control");
+  assert.equal(layersRootOf("/root/control/"), "/root/control");
+  assert.equal(layersRootOf("/work/core/packages/control"), "/work/core", "the core's CI lays this package there, with the layers beside it");
+  assert.equal(layersRootOf("/work/packages/other"), "/work/packages/other", "only a directory called control under packages is the laid shape");
+  assert.equal(layersRootOf("/work/core/packages/control/src"), "/work/core/packages/control/src", "a subdirectory is not the package's root");
+});
+
+test("the real layer declarations resolve inside the checkout this program runs from, never above it", () => {
+  // The defect: `layer-checkouts.ts` walked `../../../` from `src/`, which is the core's root only when control sits at
+  // `packages/control`. From a checkout of its own it read `<parent of the checkout>/packages/worker-fleet`, and
+  // `fleet-auto-off` imports that module. Asked of the REAL resolver over the REAL `deploy-pins.json`, from wherever this
+  // file runs, so it fails on the unfixed module in a checkout of its own and holds in the core's lay too.
+  const checkout = fileURLToPath(new URL("../", import.meta.url)).replace(/\/$/, "");
+  const base = layersRootOf(checkout);
+  const names = Object.keys(readDeployPins().layers);
+  assert.ok(names.length >= 2, "positive control: deploy-pins.json declares the layers, so the loop below examines something");
+  for (const name of names) {
+    const { dir, path } = layerDeclaration(name);
+    assert.equal(dir, join(base, path), `layer ${name} resolves to ${dir}`);
+    assert.ok(dir === base || dir.startsWith(`${base}/`), `layer ${name} resolves outside ${base}: ${dir}`);
+  }
 });

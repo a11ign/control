@@ -17,8 +17,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layersFrom, manifestOf, releaseTag, layerSourceDir as realLayerSourceDir } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag, readDeployPins } from "./layer-pins.ts";
-import { workerSourceDirty } from "../../worker-fleet/src/code-drift.ts";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { workerSourceDirty } from "@a11ign/screenreader-fleet/code-drift";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));

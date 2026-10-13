@@ -42,14 +42,11 @@ interface Pin { version: string; url: string; sha256: string }
 
 /**
  * The pin the bootstrap may still carry until the fleet layer's own repository moves it, or `undefined` once it
- * has. This is 152.0.4191.66, the role's pin until a11ign#4939. DELETE IT in the pull request that lays a
- * bootstrap carrying the role's pin: `lagIsStale` fails the test that does not.
+ * has. It is `undefined` since the fleet layer is pinned at 0.10.2 (a11ign#5312), whose bootstrap carries the role's whole pin
+ * (it was 152.0.4191.66, the role's pin until a11ign#4939). Declare one here only for a lag that is real: `lagIsStale` fails
+ * the test that leaves one in once the bootstrap catches up.
  */
-const BOOTSTRAP_LAG: Pin | undefined = {
-  version: "152.0.4191.66",
-  url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/2757513f-2ec6-4bb1-b23a-5738a92d7a56/MicrosoftEdgeEnterpriseX64.msi",
-  sha256: "5bcf8cd57351ddaa94419f800f8d90b8cbaf2b485b49d9ddb07d055b76a518df",
-};
+const BOOTSTRAP_LAG: Pin | undefined = undefined;
 
 const carriesWhole = (script: string, pin: Pin) => [pin.version, pin.url, pin.sha256].every((v) => script.includes(v));
 const acceptedPins = (role: Pin, lag: Pin | undefined): Pin[] => (lag ? [role, lag] : [role]);

@@ -47,14 +47,12 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
-import { pnpmCliInvocation } from "../../worker-fleet/src/npm-cli-executable.ts";
-// RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
-// `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
-// away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
-// RAW GIT CHECKOUT, and every import it makes has to work without an install.
-// `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
-// machines it described.
+import { sandboxGitEnv } from "./git-safe-env.ts";
+import { pnpmCliInvocation } from "@a11ign/screenreader-fleet/npm-cli-executable";
+// The CARRIED copy of `cli-flags`, not `@a11ign/screenreader-fleet/cli-flags` (a11ign#87, ceo's ruling on a11ign#5306).
+// Since ADR 0045 cut 9 the two pinned layers ARE installed here and may be imported by package name — the git, protocol,
+// code-drift and pnpm helpers above are — but ADR 0012's surface rule stands for anything else:
+// `control-has-no-dependencies.test.ts` allows no other package-name import, and asserts it transitively.
 import { refuseUnknownFlags, flagValue } from "./worker-fleet-carried.ts";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.ts";

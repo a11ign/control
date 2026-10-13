@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { run } from "./lab-job.ts";
 import { postQualificationStatus } from "./post-qualification-status.ts";
 import type { DeployPins, LabPin } from "./layer-pins.ts";

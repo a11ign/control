@@ -67,20 +67,18 @@ import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
-// RELATIVE, NEVER `@a11ign/screenreader-fleet/cli-flags`. A package-name import resolves through
-// `node_modules`, and the control plane deliberately has none — ADR 0012 keeps npm's transitive surface
-// away from the key that can reconfigure twelve auto-logging-in Windows boxes. So this package runs from a
-// RAW GIT CHECKOUT, and every import it makes has to work without an install.
-// `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
-// machines it described.
+import { sandboxGitEnv } from "./git-safe-env.ts";
+// The CARRIED copy of `cli-flags`, not `@a11ign/screenreader-fleet/cli-flags` (a11ign#87, ceo's ruling on a11ign#5306).
+// Since ADR 0045 cut 9 the two pinned layers ARE installed here and may be imported by package name — the git, protocol,
+// code-drift and pnpm helpers above are — but ADR 0012's surface rule stands for anything else:
+// `control-has-no-dependencies.test.ts` allows no other package-name import, and asserts it transitively.
 import { refuseUnknownFlags, flagValue, WORKER_GROUP, groupPerLine } from "./worker-fleet-carried.ts";
 import { LAYER_PINNED, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
 import type { WorkerHealth } from "./fleet-status.ts";
-import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.ts";
+import { protocolVerdict, servedProtocols } from "@a11ign/screenreader-fleet/protocol-guard";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.
 // The first version of this reached `workerUrls` in `check-worker-code.mjs`, which imports

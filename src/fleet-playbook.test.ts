@@ -34,7 +34,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
 import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { protocolVerdict } from "../../worker-fleet/src/protocol-guard.ts";
+import { protocolVerdict } from "@a11ign/screenreader-fleet/protocol-guard";
 
 test("commits and ordinary branch names are accepted", () => {
   for (const ref of ["afec73d", "65ead9b1c2d3e4f5", "main", "v8-feature-schema", "origin/main", "v1.2.3"]) {
