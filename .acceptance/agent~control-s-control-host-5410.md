@@ -3,10 +3,10 @@ Closes a11ign/a11ign#5410 (a11ign#5306: a rebuilt control plane had no `/root/co
 Acceptance:
 
 ```bash
-node --test src/control-host-install-checkout.test.ts src/control-host-install-run.test.ts
+node --test src/control-host-install-checkout.test.ts
 ```
 
-**As run here (2026-10-13), in this worktree:** `tests 11`, `pass 11`, `fail 0`. The first file reads the playbook's text (6 tests); the second RUNS it under `ansible-playbook` against localhost, with control's repository a local fixture on branch `main`, corepack a recording stub, and the host value, checkout and loader in a temporary directory (5 tests). The row's literal form, `cd ~/repos/control && node --test ...`, cannot pass until this merges: the primary checkout `~/repos/control` is detached at c868ee5 and does not have the test files yet.
+**As run here (2026-10-13), in this worktree:** `tests 11`, `pass 11`, `fail 0`, `skipped 0`. The file has two halves: the playbook's text (6 tests), and a RUN of the playbook under `ansible-playbook` against localhost, with control's repository a local fixture on branch `main`, corepack a recording stub, and the host value, checkout and loader in a temporary directory (5 tests). The execution tests moved here from `src/control-host-install-run.test.ts` so every changed file sits in the row's Region (`ansible/control-host-install.yml`, `src/control-host-install-checkout.test.ts`). The row's literal form, `cd ~/repos/control && node --test ...`, cannot pass until this merges: the primary checkout `~/repos/control` is detached at c868ee5 and does not have the test files yet.
 
 Execution test, what it asserts: a control pinning `pnpm@10.34.5` runs to the end, and corepack is asked, in order, for `enable`, `prepare pnpm@10.34.5 --activate`, and `pnpm install --frozen-lockfile --ignore-scripts --prod`, the install from the checkout's directory; the checkout holds control's files; the host value reads back. A manifest pinning `pnpm@latest`, or none, fails the assert naming "not an exact pnpm version", and corepack is never called. The valid-pin run is the positive control for those two refusals.
 
