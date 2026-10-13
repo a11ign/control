@@ -36,6 +36,11 @@
  * ACCEPTED when the commit its `.layer-ref` tag names on the layer's remote is the pin, and refused, naming both, when it is not.
  * A directory with neither a `.git` nor a `.layer-ref` beside `src/` is the core's own tree at that path and still refuses.
  *
+ * A PUBLISHED LAYER IS NOT A CHECKOUT ON THE PLANE (#5445). The plane's `/root/control` is a plain clone (#5312) and never held `packages/<layer>`, so a
+ * layer whose `deploy-pins.json` entry declares a `package` and `version` is judged by the release `pnpm install` left under `node_modules/<package>/`,
+ * and a layer that declares none keeps the refusal above. `layers.json` is untouched: the playbooks' own layer tasks (`ansible/tasks/*layer*.yml`,
+ * `roles/worker/defaults/main.yml`) still read it, and no file of `src/` does.
+ *
  * `worker-fleet` does NOT use this: it is published and `control` never is
  * (`worker-fleet-does-not-read-control.test.ts`), so its readers ask the worker package by name instead.
  *
@@ -208,7 +213,7 @@ function checkoutMoveFor(manifest: Manifest, pins: Record<string, string>): stri
       throw new Error(`layer "${name}" is declared at "${layer.path}", which is not a plain relative path`);
     }
     if (!REMOTE_URL.test(layer.remote)) throw new Error(`layer "${name}" declares the remote "${layer.remote}", which is not a plain https URL or path`);
-    return layerMoveShell({ name, sha, path: layer.path, remote: layer.remote });
+    return layerMoveShell({ name, sha, path: layer.path, remote: layer.remote, published: publishedOf(name, layer) });
   }).join("");
 }
 
@@ -218,17 +223,47 @@ function checkoutMoveFor(manifest: Manifest, pins: Record<string, string>): stri
  */
 const REMOTE_URL = /^[A-Za-z0-9/][A-Za-z0-9._:/@-]*$/;
 
+/** The `@a11ign/<name>` package and exact `x.y.z` release `deploy-pins.json` declares for a published layer: both go inside shell text, so both are held to a pattern first. */
+const PUBLISHED_PACKAGE = /^@a11ign\/[a-z0-9-]+$/;
+const PUBLISHED_VERSION = /^\d+\.\d+\.\d+$/;
+
+/** A layer control holds as a published dependency: the release it declares, or null for a layer that declares none (a clone or a laid tree is all it can be). */
+function publishedOf(name: string, layer: { package?: string; version?: string; }): { package: string; version: string; } | null {
+  if (layer.package === undefined && layer.version === undefined) return null;
+  if (!PUBLISHED_PACKAGE.test(layer.package ?? "") || !PUBLISHED_VERSION.test(layer.version ?? "")) {
+    throw new Error(`layer "${name}" declares the release ${JSON.stringify(layer.package)}@${JSON.stringify(layer.version)}, which is not an @a11ign/<name> package at an exact x.y.z`);
+  }
+  return { package: layer.package as string, version: layer.version as string };
+}
+
 /**
  * One layer's move, for whichever shape it is held in: a clone is fetched (tags too) and put on the pin, a laid tree is judged against
- * it, anything else refuses. The three are one `if` so exactly one of them speaks.
+ * it, and anything else is the last branch, which is ONE of two. A layer control holds as a published dependency (ADR 0045) is judged by
+ * the package `pnpm install` left under `node_modules/`, because the plane's own checkout never held `packages/<layer>` (#5312 installed it
+ * as a plain clone, #5445) and a refusal there stopped every `fleet:provision` before its playbook. A layer that declares no release is
+ * refused, because for it the directory is the only place the layer can be. The branches are one `if` so exactly one of them speaks.
  */
-function layerMoveShell({ name, sha, path, remote }: { name: string; sha: string; path: string; remote: string; }): string {
+function layerMoveShell({ name, sha, path, remote, published }: { name: string; sha: string; path: string; remote: string; published: { package: string; version: string; } | null; }): string {
   const where = `${CONTROL_PLANE_CHECKOUT_PATH}/${path}`;
   const refusal = `echo "REFUSING: layer ${name} is declared at ${path} and ${where} is neither a git checkout nor a laid tree `
     + "(.layer-ref beside src/); the core's tree does not stand in for it.\" >&2; exit 4";
+  const last = published ? installedJudgement({ name, published }) : refusal;
   return ` && ( if [ -d ${where}/.git ]; then ${clonedMove({ path, sha })}; `
     + `elif [ -f ${where}/.layer-ref ] && [ -d ${where}/src ]; then ${laidJudgement({ name, sha, where, remote })}; `
-    + `else ${refusal}; fi ) `;
+    + `else ${last}; fi ) `;
+}
+
+/**
+ * A published layer is held where `pnpm install --frozen-lockfile` put it, `node_modules/<package>/`, and what the plane can say about it is the
+ * release that directory's `package.json` names: accepted when it is the one `deploy-pins.json` declares, refused naming both when it is not
+ * or when nothing is installed. `sed`, not `node`, so the judgement needs nothing the sync did not already use. The tarball's integrity was
+ * compared where the tarball is fetched (`layer-pins.ts`); this is the plane's own copy answering for itself.
+ */
+function installedJudgement({ name, published }: { name: string; published: { package: string; version: string; }; }): string {
+  const file = `${CONTROL_PLANE_CHECKOUT_PATH}/node_modules/${published.package}/package.json`;
+  return `have=$(sed -n 's/^ *"version": *"\\([^"]*\\)".*/\\1/p' ${file} 2>/dev/null | head -n 1); `
+    + `[ "$have" = ${published.version} ] || { echo "REFUSING: layer ${name} is the published dependency ${published.package}@${published.version} `
+    + `and ${file} holds \${have:-no installed version}: run pnpm install --frozen-lockfile in ${CONTROL_PLANE_CHECKOUT_PATH}" >&2; exit 4; }`;
 }
 
 /**

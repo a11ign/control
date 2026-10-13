@@ -333,6 +333,67 @@ test("POSITIVE CONTROL: a layer path with neither a .git nor a .layer-ref beside
   refusesIn("a .layer-ref and no src/");
 });
 
+// ---- a PUBLISHED layer on a plane that holds no `packages/<layer>` (#5445) -------------------------------------------------
+
+const PUBLISHED_PACKAGE = "@a11ign/fixture-layer";
+const PUBLISHED_VERSION = "1.2.3";
+const HALF_LAID_REFUSAL = /neither a git checkout nor a laid tree/;
+
+/**
+ * The plane as #5445 measured it: a plain clone whose `packages/` does not exist, with the layer's release installed under
+ * `node_modules/` (or not, or at another version), and a manifest that declares the release the way `deploy-pins.json` does.
+ */
+function planeFixture({ installed }: { installed: string | null }) {
+  const { origin, core } = layerFixture({ annotated: false });
+  rmSync(join(core, "packages"), { recursive: true });
+  if (installed !== null) {
+    const dir = join(core, "node_modules", PUBLISHED_PACKAGE);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), `{\n  "name": "${PUBLISHED_PACKAGE}",\n  "version": "${installed}"\n}\n`);
+  }
+  const layer = { path: MOVE_PATH, remote: origin, package: PUBLISHED_PACKAGE, version: PUBLISHED_VERSION };
+  const move = layersFrom({ manifest: { layers: { [MOVE_LAYER]: layer } }, root: core }).layerCheckoutMove;
+  return { core, command: move({ [MOVE_LAYER]: "a".repeat(40) }) };
+}
+
+test("#5445 the sync command for the REAL declaration never holds the half-laid refusal, because both layers are published dependencies", () => {
+  const manifest = manifestOf(readDeployPins());
+  const names = Object.keys(manifest.layers);
+  assert.deepEqual(names.sort(), ["nvda-worker", "screenreader-fleet"], "the positive control: the declaration this guards holds the two layers the row names");
+  const pins = Object.fromEntries(names.map((name) => [name, "b".repeat(40)]));
+  const command = layersFrom({ manifest, root: tmpdir() }).layerCheckoutMove(pins);
+  assert.doesNotMatch(command, HALF_LAID_REFUSAL);
+  for (const name of names) {
+    assert.ok(command.includes(`${CONTROL_PLANE_CHECKOUT_PATH}/node_modules/${manifest.layers[name].package}/package.json`), `${name} is judged by its installed release`);
+  }
+});
+
+test("#5445 a plane with no packages/ and the declared release installed passes the sync", () => {
+  const { core, command } = planeFixture({ installed: PUBLISHED_VERSION });
+  assert.doesNotMatch(command, HALF_LAID_REFUSAL);
+  assert.equal(existsSync(join(core, "packages")), false, "the fixture is a plane that holds no packages/");
+  const run = runMove(command, core);
+  assert.equal(run.status, 0, run.stderr);
+});
+
+test("#5445 a plane whose installed release is another one, or none, REFUSES naming the layer, the release and what it holds", () => {
+  const behind = planeFixture({ installed: "1.2.2" });
+  const wrong = runMove(behind.command, behind.core);
+  assert.equal(wrong.status, REFUSED, wrong.stderr);
+  assert.match(wrong.stderr, new RegExp(`layer ${MOVE_LAYER} is the published dependency ${PUBLISHED_PACKAGE}@${PUBLISHED_VERSION}`));
+  assert.match(wrong.stderr, /holds 1\.2\.2/);
+  const absent = planeFixture({ installed: null });
+  const none = runMove(absent.command, absent.core);
+  assert.equal(none.status, REFUSED, none.stderr);
+  assert.match(none.stderr, /holds no installed version: run pnpm install --frozen-lockfile/);
+});
+
+test("#5445 a layer that declares a release no pattern accepts is refused before any command is built", () => {
+  const bad = { path: MOVE_PATH, remote: "https://example.test/x.git", package: "@a11ign/x", version: "^1.2.3" };
+  const { layerCheckoutMove } = layersFrom({ manifest: { layers: { [MOVE_LAYER]: bad } }, root: tmpdir() });
+  assert.throws(() => layerCheckoutMove({ [MOVE_LAYER]: "a".repeat(40) }), /not an @a11ign\/<name> package at an exact x\.y\.z/);
+});
+
 test("a CLONED layer is moved to a release whose commit is only a tag, because the move fetches tags", () => {
   const { core, layerDir, origin, released, branchTip, move } = layerFixture({ annotated: true });
   rmSync(layerDir, { recursive: true });
