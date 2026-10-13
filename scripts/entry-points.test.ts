@@ -2,6 +2,10 @@
 // pinned in packages/guards/src/entry-points.test.ts (#5348); the fleet's own slice is a11ign/a11ign#5358. What is left is the one question only
 // control can answer: every script control's own `package.json` runs does nothing when it is merely IMPORTED.
 //
+// It lives in `scripts/`, not `src/`, because it READS the `scripts` of `package.json`, and `src/` tests run LAID in the core, whose manifest for
+// this package has `scripts` deleted (`ci.yml`, "Lay this repository's package": `jq 'del(.version, .scripts, ...)'`). Run 38342634783 read
+// `pkg.scripts` as undefined there. `scripts/control-commands.test.ts` is held here for the same reason.
+//
 // Why it matters here: `node -e "import('./src/x.ts')"` is the only real check that a control module still loads, and an entry point that runs
 // on import turns that check into a fleet command (`fleet-playbook.ts` imported without the guard would start an ansible run).
 import { test } from "node:test";
@@ -9,8 +13,8 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-/** control's own root: `src/control-owned/` is two levels below it, here and in the core's lay (`packages/control`). */
-const ROOT = fileURLToPath(new URL("../../", import.meta.url));
+/** This repository's root, where `package.json` still has its `scripts`. */
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 /** Measured 2026-10-13: 11 entry points. Two below it, so a moved layout fails here rather than shrinking the population quietly. */
 const ENTRY_POINT_FLOOR = 9;

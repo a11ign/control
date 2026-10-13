@@ -3,10 +3,10 @@ Row a11ign/a11ign#5345, the final pull request: control keeps nothing under `src
 Acceptance:
 
 ```bash
-cd /home/agent/repos/wt-5345-control && git fetch -q origin && ! git ls-files | grep -q "^src/fleet-layer/" && test "$(git ls-files | grep -c "^src/control-owned/")" -eq 22
+cd /home/agent/repos/wt-5345-control && git fetch -q origin && ! git ls-files | grep -q "^src/fleet-layer/" && test "$(git ls-files | grep -c "^src/control-owned/")" -eq 21
 ```
 
-What it reads: the head's tracked files hold no path under `src/fleet-layer/`, hold exactly 22 under `src/control-owned/` (the 14 pure renames of the first step and the 8 split files). The row's own command (`git ls-tree -r --name-only origin/main | grep -q "^src/fleet-layer/"`) reads `origin/main`, so it turns true at the merge of this pull request and not before; this one reads the head so it can be checked now.
+What it reads: the head's tracked files hold no path under `src/fleet-layer/`, hold exactly 21 under `src/control-owned/` (the 14 pure renames of the first step and 7 of the 8 split files; the eighth, `entry-points`, is `scripts/entry-points.test.ts`, see below). The row's own command (`git ls-tree -r --name-only origin/main | grep -q "^src/fleet-layer/"`) reads `origin/main`, so it turns true at the merge of this pull request and not before; this one reads the head so it can be checked now.
 
 ## Where every test went (measured, 2026-10-13, by exact title against each destination's `origin/main`)
 
@@ -28,12 +28,12 @@ The 18 files that were not pure renames held 209 test titles at control `origin/
 ## Mutation (`git add` an untracked file / `git rm --cached`, run, undo, `git status` identical)
 
 - A file at `src/fleet-layer/x.test.ts`: first test fails, exit 1.
-- One `src/control-owned/` file removed from the index: the count is 21, exit 1.
+- One `src/control-owned/` file removed from the index: the count is 20, exit 1.
 
 ## What changed
 
 - `src/fleet-layer/` is gone: 10 whole files deleted (`capture-body-owner`, `cli-flags`, `fleet-scripts`, `git-safe-env`, `npm-cli-executable`, `provision-stamp`, `worker-code-check`, `worker-fleet-does-not-read-control`, `worker-http-client-owner`, `worker-url`), each with every test in a merged destination; 8 files carved to their control halves in `src/control-owned/`.
-- `src/control-owned/entry-points.test.ts` is a new control slice: every `src/*.ts` a `package.json` script runs does nothing when imported. Measured 11 entry points, floor 9, with a predicate positive control and a "control declares no bin" test.
+- `scripts/entry-points.test.ts` (first at `src/control-owned/`, moved after CI run 38342634783 read `pkg.scripts` as undefined: the lay deletes `scripts` from the package's manifest, so a `src/` test cannot read it) is a new control slice: every `src/*.ts` a `package.json` script runs does nothing when imported. Measured 11 entry points, floor 9, with a predicate positive control and a "control declares no bin" test.
 - A `.changeset` entry.
 
 ## Not done here
