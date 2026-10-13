@@ -1,4 +1,4 @@
-Row a11ign/a11ign#5472. Region is `ansible/roles/worker/tasks/edge-version.yml` and `src/control-owned/edge-updater-guard.test.ts` only. No `fleet:*`, `lab:*` or `worker:*` command was run (resource ban: a live provision is `lane:orchestrator`'s, and it is the #5155 after-reading the row's second done-when point names).
+Row a11ign/a11ign#5472. Region is `ansible/roles/worker/tasks/edge-version.yml` and `src/control-owned/edge-updater-guard.test.ts` only. No `fleet:*`, `lab:*` or `worker:*` command was run (a live provision is `lane:orchestrator`'s, and it is the step the row's second done-when point names).
 
 Acceptance: `node --test src/control-owned/edge-updater-guard.test.ts`
 
