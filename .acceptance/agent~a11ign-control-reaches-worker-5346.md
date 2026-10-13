@@ -3,10 +3,10 @@ Row a11ign/a11ign#5346, step 1b of ruling B (a11ign/a11ign#5335, split from #534
 Acceptance:
 
 ```bash
-bash -c 'cd /home/agent/repos/wt-5346-control && ! git grep -nE "worker-fleet/src/(worker-http|check-worker-code)" origin/main -- src scripts ":(exclude)src/fleet-layer" ":(exclude)src/worker-fleet-carried.ts" ":(exclude)src/worker-fleet-carried.test.ts" ":(exclude)src/with-control-plane-fleet.test.ts"'
+bash -c 'cd /home/agent/repos/wt-5346-control && ! git grep -nE "worker-fleet/src/(worker-http|check-worker-code)" -- src scripts ":(exclude)src/fleet-layer" ":(exclude)src/worker-fleet-carried.ts" ":(exclude)src/worker-fleet-carried.test.ts" ":(exclude)src/with-control-plane-fleet.test.ts"'
 ```
 
-The grep is the row's own Acceptance. At `origin/main` `f0d4cbb` it prints 5 lines, all of them in this change; on this branch's working tree, with the same pathspec and no revision, it prints nothing. It passes at `origin/main` only once this lands. `src/*.test.ts` run only laid over the core (`ci.yml`), so they were run in a lay, below.
+The grep is the row's own Acceptance, run on this branch's tree (as #5344's was on its own), so it reads what this PR leaves behind. At `origin/main` `f0d4cbb` the same pattern prints 5 lines, all of them in this change; on this branch it prints nothing. Once this lands, `origin/main` reads the same way. `src/*.test.ts` run only laid over the core (`ci.yml`), so they were run in a lay, below.
 
 ## Mutation and before/after (measured in a scratch lay; the lay's copy was mutated, never the worktree, and restored by `cp` from a saved copy, verified with `diff`)
 
