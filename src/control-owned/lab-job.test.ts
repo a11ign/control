@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "../git-safe-env.ts";
 
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";

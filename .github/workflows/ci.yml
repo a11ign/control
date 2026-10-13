@@ -36,7 +36,7 @@ env:
   # a11ign/a11ign#4820's merge (main, 2026-10-10, #4797, step 2 of #4551): the core that pins lab v0.1.28, whose `scripts/*.ts` (build-realism-tier, calibrate-abstention, gate-probe-order, axe-calibration, lab-inventory, stability-gate, corpus-prune-orphans, fleet-hours, evidence-check) sit beside the `.mjs` shims kept for one release, so `ansible/lab-job.yml` and `lab-job.test.ts` name the `.ts` (#4796, step 3). The pin before it, 393f26a92 (#4803's merge), laid lab v0.1.27, whose `scripts/` are still the `.mjs` programs.
   # a11ign/a11ign#4803's merge (main, 2026-10-10, #4785, step 2 of #4519): the core that pins lab v0.1.27, whose `src/gates/qualification-status.ts` exists beside the `.mjs` shim kept for one release, so `post-qualification-status.ts` imports the `.ts` (#4786, step 3). It also locks @a11ign/screenreader-fleet 0.7.3 and nvda-worker 0.9.0. The pin before it, 83b46f522 (#4692's merge), laid lab v0.1.24, which holds only the `.mjs`.
   # a11ign/a11ign#4692's merge (main, 2026-10-10, #4516): the core that locks @a11ign/screenreader-fleet 0.7.2 (its files are `.ts`, and neither `fleet-env.ts` nor `cli-flags.ts` imports a package, so every fleet module this package reaches loads from the control plane's raw checkout, #4680, #4686) and lays lab v0.1.24 and nvda-worker 0.9.0. The pins before it: 78f353032 (#4684's merge) locked fleet 0.7.1, whose `cli-flags.ts` still re-exported `@a11ign/toolchain` and failed `control-has-no-dependencies`; 19a0795 (#4675's merge) locked 0.7.0, whose `fleet-env.ts` did the same; d32bc6cb7 (a draft head) laid 0.6.0, whose `worker-code-check` imported a hasher nvda-worker 0.9.0 no longer ships (#4651). A sha and never a branch: a branch moves under a pull request that did not touch it.
-  CORE_REF: b6d3cbd7616dd68d52726a5c63201f453d0ead62
+  CORE_REF: c5dddb33d622e547945289b690510fa223ebcb79
 
 jobs:
   # A releasable change needs a changeset or a `no-release:` line (a11ign/a11ign#4127, adopted by #4135). `releasable-paths` is this repository's `dora` entry's `releasablePaths`
@@ -72,7 +72,7 @@ jobs:
       # The core's tests list files with `git ls-files` (`walkTree`), and the core at `CORE_REF` still TRACKS `packages/control`, so a file this repository renames (a11ign/a11ign#4268) would be listed under its old
       # name and read from a disk that no longer has it. `git add -Af` makes the index say what the lay put on disk; nothing is committed. `-f` because a core that lays this package (a11ign/a11ign#3506) gitignores `/packages/control`, and a plain `add` refuses an ignored path (exit 1, run 37986489972).
       # AFTER the install, not before (a11ign/a11ign#3506): the core's `prepare` lays `a11ign/control` itself, at the tag its `layers.json` declares, so a lay made first is overwritten by that tag's source
-      # (run 37987050034 typechecked the OLD `.mjs` imports). The same `prepare` lays the fleet layer, which is where `packages/worker-fleet` comes from.
+      # (run 37987050034 typechecked the OLD `.mjs` imports). That `prepare` laid the fleet layer as well, until a11ign/a11ign#5312: the step after the lay below does it from this repository's `deploy-pins.json`.
       - name: Lay this repository's package over the core's own
         run: |
           rm -rf core/packages/control
@@ -81,6 +81,16 @@ jobs:
           jq 'del(.version, .scripts, .devDependencies, .packageManager, .engines)' control/package.json > core/packages/control/package.json
           printf '{ "extends": "./tsconfig.json", "include": ["packages/control/src/**/*.ts"], "exclude": ["packages/guards/src/fixtures"] }\n' > core/tsconfig.control.json
           git -C core add -Af packages/control
+      # THE LAYERS THE TESTS READ ARE LAID FROM THIS REPOSITORY'S OWN PINS (a11ign/a11ign#5312). The core's `prepare` used to lay `packages/nvda-worker`, `packages/worker-fleet` and `packages/lab`; the core at
+      # `CORE_REF` lays none of them (no `layers.json`), and the tests under `src/control-owned/` read the layers' sources by path. `deploy-pins.json` is where control declares which release of each it deploys,
+      # so the lay reads it: a release tag named there, cloned at the path it names. A pin moved there moves what is read here, and no second list can drift from it.
+      - name: Lay the layers deploy-pins.json names, beside the core's own
+        run: |
+          set -o pipefail
+          jq -r '(.layers[] | [.remote, "v" + .version, .path]), (.lab | [.remote, .tag, .path]) | @tsv' control/deploy-pins.json |
+            while IFS=$'\t' read -r remote tag path; do
+              git clone --quiet --depth 1 --branch "$tag" "$remote" "core/${path:?}"
+            done
       # Lint and typecheck run before the tests so a style or type failure reads red without waiting for the suite.
       # `--no-ignore`: a core that lays this package lints it nowhere (`packages/control/**` is in its `ignores`, a11ign/a11ign#3506), because the package is linted HERE. Without the flag eslint exits 2 on "all files ignored".
       - run: pnpm exec eslint --no-ignore packages/control

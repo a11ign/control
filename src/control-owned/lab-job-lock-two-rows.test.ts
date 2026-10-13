@@ -38,7 +38,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sandboxGitEnv } from "../../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "../git-safe-env.ts";
 import { parseDeployPins, playbookLayerListName } from "../layer-pins.ts";
 
 const PINS_PATH = fileURLToPath(new URL("../../deploy-pins.json", import.meta.url));

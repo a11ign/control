@@ -236,13 +236,17 @@ describe("the declaration", () => {
   });
 });
 
-describe("control stays dependency-free", () => {
+describe("control declares only the two published layers", () => {
   // The manifest CI lays at `packages/control` keeps `dependencies` and drops `scripts` (`ci.yml`), so this is the half that holds there and here;
   // the commands are pinned against the real manifest in `scripts/control-commands.test.ts`, which runs in this repository's own `pnpm test`.
   const manifest = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { name?: string; dependencies?: Record<string, string>; };
+  const pinned = Object.fromEntries(
+    Object.values((JSON.parse(REAL_TEXT) as { layers: Record<string, { package: string, version: string }> }).layers)
+      .map((layer) => [layer.package, layer.version]));
 
-  test("`dependencies` is still empty (ADR 0012): pinning the worker and the fleet did not declare them", () => {
+  test("`dependencies` are exactly the two layers at the versions deploy-pins.json pins (ADR 0045, which amends ADR 0012)", () => {
     expect(manifest.name).toBe("@a11ign/control"); // positive control: this is the package's manifest
-    expect(manifest.dependencies ?? {}).toEqual({});
+    expect(Object.keys(pinned).length).toBe(2); // positive control: the pins file declares the two layers the manifest is read against
+    expect(manifest.dependencies ?? {}).toEqual(pinned);
   });
 });

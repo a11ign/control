@@ -42,8 +42,9 @@
  * ## Why this cannot import `worker-code-check.mjs` directly
  *
  * That file's `expectedWorkerCode` reaches `codeVersion`/`workerSourceDir` through a SUBPATH export
- * (`@a11ign/screenreader-worker/code-version`), which resolves through `node_modules` — and this package
- * runs from a raw git checkout with none (ADR 0012; `control-has-no-dependencies.test.ts` enforces it).
+ * (`@a11ign/screenreader-worker/code-version`), which resolves through `node_modules`. This file computes `expected`
+ * from the laid layer's SOURCE, which is what a worker is compared against (ADR 0012, as amended by ADR 0045 cut 9;
+ * `control-has-no-dependencies.test.ts` enforces the import rule).
  * `code-drift.mjs` is the part of that file with no opinion about what "expected" means — pure comparison
  * and message-building, importing nothing but `node:child_process` — and this file computes `expected`
  * itself, the same way `fleet-playbook.ts` already does, through `layer-checkouts.ts`, which says where
@@ -54,7 +55,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { assertWorkersServe } from "../../worker-fleet/src/code-drift.ts";
+import { assertWorkersServe } from "@a11ign/screenreader-fleet/code-drift";
 import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.ts";
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same

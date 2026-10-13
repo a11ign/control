@@ -393,8 +393,15 @@ test("the deprecated `consistent` field carries the CORRECTED answer, never the 
 // `REPORTED_ONLY` is in here for a sharper reason than symmetry (#2063): a fixture that omitted those
 // fields would make EVERY case in this file read as a fleet with a reported-only gap, so every verdict
 // line would carry a drift clause and each case would quietly stop being about its own subject.
-const ENVIRONMENT = Object.fromEntries(
-  [...MUST_MATCH, ...REPORTED_ONLY].map(({ path }) => [path, `same-${path}`]));
+// A dotted path (`edgeUpdaterGuard.state`, #5021) is a leaf of a block the worker reports whole, so it is built nested: a flat key
+// of that name is a field the reader never finds, and every case would read the guard as unreported.
+const ENVIRONMENT: Record<string, unknown> = {};
+for (const { path } of [...MUST_MATCH, ...REPORTED_ONLY]) {
+  const [root, ...leaves] = path.split(".");
+  ENVIRONMENT[root] = leaves.length === 0
+    ? `same-${path}`
+    : { ...(ENVIRONMENT[root] as Record<string, unknown> | undefined), [leaves.join(".")]: `same-${path}` };
+}
 
 /** A probe as `probeWorker` returns one, with only the readiness dial to turn. */
 const fakeProbe = (name: string, state: "ready" | "busy" | "warming" | "unreachable") =>

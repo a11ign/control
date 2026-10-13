@@ -34,7 +34,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { refuseUnknownFlags } from "./worker-fleet-carried.ts";
-import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
