@@ -30,7 +30,7 @@
  * need different shapes and both are correct:
  *
  *   - `fleet-playbook.ts` ssh's as root (`ssh()` builds `root@${CONTROL_PLANE}`) and its wrapper lands
- *     in `/root` before running anything, so a bare `cd a11y-witness` is right there.
+ *     in `/root` before running anything, so a bare `cd control` is right there.
  *   - `lab-pipeline.ts` builds a `systemd-run --working-directory=`, which takes an absolute path.
  *
  * Keeping each consumer's existing shape is deliberate: making them agree by changing one of them would
@@ -50,10 +50,12 @@
  * The directory the control plane's checkout lives in, under the ssh user's home (`/root`).
  *
  * THE VALUE IS A FACT ABOUT A MACHINE, not about this repository, so it does not follow a rename of the
- * product. Changing it here asserts that the directory on the control plane has actually been renamed —
- * which is a thing somebody does with `mv`, not with a sweep.
+ * product. It is `control` because the plane's checkout IS the control repository (a11ign#5306), cloned at
+ * `/root/control`, and `ansible/patch-schedule.yml`'s `patch_checkout` names that same path. Changing it
+ * here asserts that the directory on the control plane has actually been renamed — which is a thing
+ * somebody does with `mv`, not with a sweep.
  */
-export const CONTROL_PLANE_CHECKOUT = "a11y-witness";
+export const CONTROL_PLANE_CHECKOUT = "control";
 
 /** The same fact as an absolute path, for a caller that cannot use a relative one. */
 export const CONTROL_PLANE_CHECKOUT_PATH = `/root/${CONTROL_PLANE_CHECKOUT}`;
