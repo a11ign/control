@@ -382,8 +382,8 @@
           - type: daily
             start_boundary: '2026-01-01T00:00:00'
             repetition:
-              - interval: "PT{{ edge_guard_interval_minutes }}M"
-                duration: P1D
+              interval: "PT{{ edge_guard_interval_minutes }}M"
+              duration: P1D
         state: present
         enabled: true
 
