@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
   subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive, probeWorker } from "./fleet-status.ts";
-import type { requestJson } from "../../worker-fleet/src/worker-http.ts";
+import type { requestJson } from "./worker-fleet-carried.ts";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY }
   from "../../worker-fleet/src/fleet-consistency.ts";
 import { readFileSync } from "node:fs";

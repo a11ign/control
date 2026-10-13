@@ -1002,7 +1002,7 @@ test("#3275 importClosure on the real program: every file it names exists, and t
   const closure = importClosure(THIS, (path) => readFileSync(join(REPO, path), "utf8"));
   for (const file of closure) assert.ok(existsSync(join(REPO, file)), `${file} is in the closure but not on disk`);
   for (const expected of [THIS, "packages/control/src/fleet-watch.ts", "packages/control/src/fleet-wake.ts",
-    "packages/worker-fleet/src/worker-http.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
+    "packages/control/src/worker-fleet-carried.ts", "packages/worker-fleet/src/git-safe-env.ts"]) assert.ok(closure.includes(expected), `${expected} is run by the timer`);
   assert.ok(closure.length > 5, "positive control: a walk that finds almost nothing would make every comparison vacuous");
   for (const file of BESIDE) assert.ok(existsSync(join(REPO, file)), `${file} is named in RUN_BESIDE_THE_CODE but absent`);
 });
@@ -1051,13 +1051,13 @@ test("#3275 checkAgainstMain: a file the checkout does not track counts as diffe
 
 const LAYER = "screenreader-fleet";
 const LAYER_PATH = "packages/worker-fleet";
-const FLEET_FILE = `${LAYER_PATH}/src/worker-http.ts`;
+const FLEET_FILE = `${LAYER_PATH}/src/git-safe-env.ts`;
 const TAG = `@a11ign/${LAYER}@0.5.1`;
 const INTEGRITY = `sha512-${"A".repeat(86)}==`;
 /** `deploy-pins.json` as `origin/main` would hold it, with the fleet layer pinned at `version`. */
 const pinsAt = (version: string) => JSON.stringify({ layers: { [LAYER]: { package: `@a11ign/${LAYER}`, version, integrity: INTEGRITY, path: LAYER_PATH, remote: "https://example.invalid/fleet.git" } } });
 /** The program as it really is: it imports a file of the layer, which is what makes the layer part of the comparison. */
-const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/worker-http.ts";\n` : "");
+const sourceWithLayer = (path: string) => (path === THIS ? `import "./other.mjs";\nimport "../../worker-fleet/src/git-safe-env.ts";\n` : "");
 const laidAt = (tag: string) => ({ differing: tag === TAG ? [] : [`${LAYER_PATH} (layer ${LAYER} is laid at ${tag}, main pins ${TAG})`] });
 
 test("#5085 the pin main holds is read from deploy-pins.json: the real file, the peer-suffix-free version, and the refusals", () => {

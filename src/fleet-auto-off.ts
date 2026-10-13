@@ -128,7 +128,7 @@ import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
-import { requestJson } from "../../worker-fleet/src/worker-http.ts";
+import { requestJson } from "./worker-fleet-carried.ts";
 import { layerDeclaration, layerOwning } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag } from "./layer-pins.ts";
 import { refuseUnknownFlags } from "./worker-fleet-carried.ts";

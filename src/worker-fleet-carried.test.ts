@@ -57,6 +57,21 @@ test("the six modules that read the flag vocabulary take it from the carried cop
   }
 });
 
+test("requestJson comes from the carried copy in fleet-auto-off and fleet-status's test, not from worker-http by path (a11ign#5346)", () => {
+  // The binding, not the module: `refuseUnknownFlags` also comes from the carried copy, so a scan of specifiers alone stays green when `requestJson` goes back.
+  const modules = ["fleet-auto-off.ts", "fleet-status.test.ts"];
+  for (const module of modules) {
+    const source = readFileSync(new URL(module, import.meta.url), "utf8");
+    const imports = [...source.matchAll(/^\s*import\s+(?:type\s+)?\{([^}]*)\}\s*from\s+"([^"]+)"/gm)].map((match) => ({
+      from: match[2],
+      names: match[1].split(",").map((name) => name.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]),
+    }));
+    assert.ok(imports.length > 0, `${module}: no named import found, so the scan read nothing`);
+    assert.ok(imports.some((imported) => imported.from === "./worker-fleet-carried.ts" && imported.names.includes("requestJson")), `${module}: requestJson is not imported from the carried copy`);
+    assert.deepEqual(imports.filter((imported) => imported.names.includes("requestJson") && imported.from !== "./worker-fleet-carried.ts").map((imported) => imported.from), [], `${module} takes requestJson from another path`);
+  }
+});
+
 test("the flag vocabulary: the same flags are unknown, the same one is suggested, the same value is read", () => {
   const known = ["--cidr=", "--port=", "--enroll", "--json"];
   const argvs = [
