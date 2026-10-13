@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -286,8 +286,12 @@ test("#1670: the ansible-playbook argv never hardcodes -i, so ansible.cfg's own 
   assert.ok(!args.includes("-i"),
     "an explicit -i replaces ansible.cfg's inventory fallback list rather than falling back to it -- "
     + "this argv must never carry one");
-  assert.deepEqual(args, ["packages/control/ansible/lab-job.yml", "-e", "job=train"],
-    "the playbook path and every forwarded arg must still reach ansible-playbook, in order");
+  assert.deepEqual(args.slice(1), ["-e", "job=train"],
+    "every forwarded arg must still reach ansible-playbook, in order");
+  // #5426: the playbook is named by where THIS checkout keeps it, and it exists there (the positive control: a path
+  // naming the core's laid layout is absent in control's own checkout, where `ansible/` is at the top).
+  assert.equal(args[0], fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url)));
+  assert.ok(existsSync(args[0]), `${args[0]} must exist in this checkout`);
 });
 
 // ---------------------------------------------------------------------------------------------------------

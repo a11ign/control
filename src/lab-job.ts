@@ -71,9 +71,12 @@ import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
 // #4405 (ruling, 2026-10-11): an OPEN fleet build incident stops every job that puts a box to work. The read lives beside the incident.
 import { openFleetBuildIncident, type OpenIncident } from "./fleet-build-incident.ts";
 
-const REPO = fileURLToPath(new URL("../../../", import.meta.url));
-const CATALOGUE = fileURLToPath(new URL("../ansible/lab-job.yml", import.meta.url));
-const ANSIBLE_CONFIG = "packages/control/ansible/ansible.cfg";
+// #5426: `ansible/` beside `src/`, wherever this file lives. The plane's checkout is control's own repository (`/root/control`,
+// #5310), where `ansible/` is at the top; a laid copy under the core puts it at `packages/control/ansible`. Both are one
+// directory up from here, so no spelling of the core's layout is needed (the `../../../` this replaced was `/` on the plane).
+const ANSIBLE_DIR = fileURLToPath(new URL("../ansible/", import.meta.url));
+const CATALOGUE = `${ANSIBLE_DIR}lab-job.yml`;
+const ANSIBLE_CONFIG = `${ANSIBLE_DIR}ansible.cfg`;
 
 /**
  * Every `-e key=value` extra var on the command line — the only form every example in this repo's docs
@@ -183,7 +186,7 @@ const isDescribeOnly = (argv: string[]): boolean => extraVars(argv).describe !==
  * apply at all.
  */
 export function ansiblePlaybookArgs(forwarded: string[]): string[] {
-  return ["packages/control/ansible/lab-job.yml", ...forwarded];
+  return [CATALOGUE, ...forwarded];
 }
 
 /**
@@ -193,7 +196,7 @@ export function ansiblePlaybookArgs(forwarded: string[]): string[] {
  */
 function dispatchToAnsible(forwarded: string[]): number {
   const result = spawnSync("ansible-playbook", ansiblePlaybookArgs(forwarded),
-    { cwd: REPO, stdio: "inherit", env: { ...process.env, ANSIBLE_CONFIG } });
+    { cwd: ANSIBLE_DIR, stdio: "inherit", env: { ...process.env, ANSIBLE_CONFIG } });
   return result.status ?? 1;
 }
 
