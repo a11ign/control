@@ -16,7 +16,7 @@ import { checkLayout, checkLayoutTree } from "@a11ign/toolchain/layout-check";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
-  name?: string; dependencies?: Record<string, string>; devDependencies?: Record<string, string>;
+  name?: string; dependencies?: Record<string, string>; devDependencies?: Record<string, string>; exports?: Record<string, string>;
 };
 
 const TOOLING = ["@a11ign/toolchain", "@changesets/cli", "@rstest/core", "@types/node", "typescript"];
@@ -32,6 +32,16 @@ test("the root manifest declares no `dependencies`, and no devDependency beyond 
 
 test("a sixth devDependency is named, so the allowance cannot grow unseen", () => {
   assert.deepEqual(unlisted({ ...manifest.devDependencies, "left-pad": "^1.0.0" }), ["left-pad"]);
+});
+
+test("./lab-carried is exported, and the file it names carries the declarations the lab's consumer imports", () => {
+  // The lab's consumer reaches the carried copy through this export, so removing the line would break it with no test failing; the file must also be the one the export names.
+  assert.equal(manifest.exports?.["./lab-carried"], "./src/lab-carried.ts");
+  const carried = readFileSync(new URL("../src/lab-carried.ts", import.meta.url), "utf8");
+  assert.match(carried, /export function qualificationStatus\(/);
+  assert.match(carried, /export type Outcome =/);
+  assert.match(carried, /export type StatusPayload =/);
+  assert.doesNotMatch(readFileSync(new URL("../src/post-qualification-status.ts", import.meta.url), "utf8"), /\.\.\/\.\.\/lab\//, "positive control: the poster reads the carried copy, not the lab");
 });
 
 test("the root manifest is the package: its name, and the layout check clean on this tree", () => {
