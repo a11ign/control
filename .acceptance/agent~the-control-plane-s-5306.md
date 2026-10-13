@@ -3,8 +3,10 @@ Row a11ign/a11ign#5306: the control plane's fleet auto-off unit still lays contr
 Acceptance:
 
 ```bash
-cd /home/agent/repos/wt-5306-control && ! grep -q "lay-layer.ts" ansible/files/a11y-fleet-auto-off.service
+test "$(grep -c "lay-layer.ts" ansible/files/a11y-fleet-auto-off.service)" = 0 && node --import tsx --test src/control-runs-under-tsx.test.ts src/fleet-auto-off.test.ts src/fleet-watch.test.ts
 ```
+
+The grep counts the old script name in the unit and must print `0`; the second command runs the three `src/` files this change touches (207 tests, all `node:test`). The scripts suite (`pnpm test`, 45 tests) is run as a further check, not declared as acceptance.
 
 **As run (measured, 2026-10-13, at this head):** the grep exits `0`. `pnpm test` (the scripts suite) passes 45 tests in 8 files. `src/control-runs-under-tsx.test.ts`, `src/fleet-auto-off.test.ts` and `src/fleet-watch.test.ts` pass 207 tests in 3 files, run through a scratch rstest config that includes `src/**` (the repo's `pnpm test` config covers `scripts/**` only). `pnpm run typecheck` exits `0`. There is no `lint` script in this repository, so no lint was run.
 
