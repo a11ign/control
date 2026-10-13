@@ -1,5 +1,0 @@
----
-"@a11ign/control": minor
----
-
-`fleet-watch` starts the forward patch for the laggards once per stop-the-line incident (a11ign/a11ign#5028, #4405). `src/fleet-build-incident.ts`: when the fleet is mixed and a new incident is filed, or the standing incident has no start recorded, the watch runs `fleet:patch --apply` through the same entry the orchestrator runs, and records it in `runs/fleet-build-incident-state.json` BEFORE it runs (`running`) and AFTER (its outcome: `done`, `refused: <REFUSING line>` or `failed: exit <n>`). One comment on the incident says the outcome. A refused or failed start is never retried: the line stays stopped until the orchestrator moves the boxes or closes the incident. A reading with a fleet play running, or the fleet locked (a held or unreadable lock), starts nothing and records nothing, so the next reading asks again. A new incident whose URL carries no issue number waits one reading. Without `--post` the start is only said (`WOULD START`). Revert: make `startPatchFor` return `NO_START`; the incident still files, stops dispatch and posts its #928 line as before.
