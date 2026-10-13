@@ -1,6 +1,6 @@
 Row a11ign/a11ign#5312 (control's fleet auto-off runs from control's own checkout), with a11ign/a11ign#5335 done-when 3 and #5381 done-when 5 folded in (ceo). Scope is the rulings of 2026-10-12: the two published layers declared at their pins and the four helpers imported from them, the guard amended, `tsx` as a devDependency, `CORE_REF` moved to `c5dddb33d622e547945289b690510fa223ebcb79`, and the `valueAt` / `edgeUpdaterGuard.state` re-carry (#5021) restored.
 
-Acceptance: `bash -c 'cd ~/repos/control && ! grep -rn "\.\./\.\./worker-fleet" src/fleet-auto-off.ts && pnpm exec node --test src/fleet-auto-off.test.ts && git grep -q "CORE_REF: c5dddb33d622e547945289b690510fa223ebcb79" HEAD -- .github/workflows/ci.yml'`
+Acceptance: `bash -c '! grep -rn "\.\./\.\./worker-fleet" src/fleet-auto-off.ts && pnpm exec node --test src/fleet-auto-off.test.ts && git grep -q "CORE_REF: c5dddb33d622e547945289b690510fa223ebcb79" HEAD -- .github/workflows/ci.yml'`
 
 **As run at this head (2026-10-13):**
 - The `node --test src/fleet-auto-off.test.ts` leg: `tests 113, pass 112, fail 0, todo 1` (the todo is the existing #4571 unit-file test), exit 0; the `grep` leg finds no `../../worker-fleet`; the `git grep` leg (the `CORE_REF` pin) exits 0 at the head.
