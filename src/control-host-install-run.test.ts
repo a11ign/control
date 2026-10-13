@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 
 const PLAYBOOK = fileURLToPath(new URL("../ansible/control-host-install.yml", import.meta.url));
 const HOST_VALUE = "203.0.113.7";
@@ -45,7 +46,7 @@ function fixtureRepo(dir: string, packageManager: string | undefined): string {
   writeFileSync(join(repo, "package.json"), `${JSON.stringify({ name: "@a11ign/control", packageManager }, null, 2)}\n`);
   writeFileSync(join(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
   const git = (...args: string[]) => {
-    const run = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+    const run = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", env: sandboxGitEnv() });
     assert.equal(run.status, 0, `git ${args.join(" ")}: ${run.stderr}`);
   };
   git("init", "-q", "-b", "main");
@@ -90,7 +91,8 @@ function runPlaybook(packageManager: string | undefined) {
   const run = spawnSync("ansible-playbook", ["-i", "localhost,", "-e", `@${varsPath}`, PLAYBOOK], {
     cwd: dir,
     encoding: "utf8",
-    env: { ...process.env, ANSIBLE_LOCALHOST_WARNING: "False" },
+    // The playbook's own `git` module runs under this env too, so the scrub covers the clone as well as the fixture.
+    env: sandboxGitEnv({ ANSIBLE_LOCALHOST_WARNING: "False" }),
   });
   return {
     status: run.status,
