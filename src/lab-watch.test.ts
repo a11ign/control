@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 // #866: "a failed unit becomes visible without anyone asking." These tests never touch the lab or `gh` --
 // `runLabStatus`'s `run` is injected throughout, exactly as the amendment describes this as buildable and
 // testable offline.
@@ -22,15 +24,18 @@ function playbookRun(taskName: string, hostStdout: string) {
   };
 }
 
+const statusPlaybook = fileURLToPath(new URL("../ansible/lab-status.yml", import.meta.url));
+
 test("runLabStatus forces the json callback for this one call, leaving ansible.cfg's default untouched", () => {
   let capturedEnv: NodeJS.ProcessEnv | undefined;
   const run = (argv: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
-    assert.deepEqual(argv, ["ansible-playbook", "packages/control/ansible/lab-status.yml"]);
+    assert.deepEqual(argv, ["ansible-playbook", statusPlaybook]);
     capturedEnv = opts?.env;
     return JSON.stringify(playbookRun(REPORT_TASK_NAME, "{}"));
   };
   runLabStatus(run);
-  assert.equal(capturedEnv?.ANSIBLE_CONFIG, "packages/control/ansible/ansible.cfg");
+  assert.equal(capturedEnv?.ANSIBLE_CONFIG, fileURLToPath(new URL("../ansible/ansible.cfg", import.meta.url)));
+  assert.ok(existsSync(String(capturedEnv?.ANSIBLE_CONFIG)), "the config named must exist in this checkout (#5426)");
   assert.equal(capturedEnv?.ANSIBLE_STDOUT_CALLBACK, "json");
 });
 

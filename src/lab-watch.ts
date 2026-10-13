@@ -17,7 +17,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { renderReport } from "./lab-failed-units.ts";
 
 export type DescribedFailures = { attention: boolean, entries: { unit: string, ageDescription: string }[] };
@@ -28,6 +28,9 @@ export const EXIT = { QUIET: 0, ATTENTION: 1, CANNOT_ASK: 2 };
 // MUST MATCH the task name in `lab-status.yml` exactly -- `extractReportJson` finds its result by this
 // string, not by position, so the two can drift only if one of them is edited and not the other.
 export const REPORT_TASK_NAME = "Failed units, as JSON (for lab-watch.ts)";
+
+// #5426: resolved from this file, so it holds in control's own checkout (`ansible/` at the top) and in a laid copy alike.
+const ANSIBLE_DIR = fileURLToPath(new URL("../ansible/", import.meta.url));
 
 export const ORG_READING_ISSUE = 928;
 
@@ -41,10 +44,10 @@ const defaultRun: Runner = (argv, opts) => execFileSync(argv[0], argv.slice(1), 
  * @returns {unknown} the parsed callback document
  */
 export function runLabStatus(run: Runner = defaultRun): unknown {
-  const out = run(["ansible-playbook", "packages/control/ansible/lab-status.yml"], {
+  const out = run(["ansible-playbook", `${ANSIBLE_DIR}lab-status.yml`], {
     env: {
       ...process.env,
-      ANSIBLE_CONFIG: "packages/control/ansible/ansible.cfg",
+      ANSIBLE_CONFIG: `${ANSIBLE_DIR}ansible.cfg`,
       ANSIBLE_STDOUT_CALLBACK: "json",
       // `ansible.cfg` enables `ansible.posix.profile_tasks`, whose per-task timing lines go to the SAME
       // stdout as the json callback and make `JSON.parse` below throw -- so this script's first real run
