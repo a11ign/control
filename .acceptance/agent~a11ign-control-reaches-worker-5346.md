@@ -21,8 +21,10 @@ The lay is the control worktree's `src`, `ansible`, `layers.json`, `deploy-pins.
 | `control-has-no-dependencies.test.ts` | 3 pass, 0 fail | 3 pass, 0 fail |
 
 - The one failure in `fleet-auto-off` is `#4571 every script the unit runs exists in the core it is laid into`: it wants `scripts/lay-layer.ts`, which neither the core checkout's HEAD (`08199153f`) nor its `origin/main` holds. It fails identically at baseline, so it is not this change. The skip in `layer-checkouts` is `#4363` (`BARE_TAGS_FROM`, which needs `scripts/lay-layer.ts` too). CI's own lay is the verdict for both.
-- Mutation, one direction: `src/fleet-auto-off.ts:131` put back to `../../worker-fleet/src/worker-http.ts`. The new test fails: `fleet-auto-off.ts reaches worker-http by path`. Restored byte-identical.
-- Mutation, the other direction: the scan's regex replaced with one that matches no import. The new test fails on its positive control: `fleet-auto-off.ts: does not import the carried copy, so the scan read nothing or the import went back`. Restored byte-identical.
+- Mutation, the reviewer's (#82, "not convinced"): the `requestJson` binding removed from `src/fleet-auto-off.ts:131`, with `refuseUnknownFlags` still imported from the carried copy. The new test fails: `fleet-auto-off.ts: requestJson is not imported from the carried copy`. Before the rework this stayed green. Restored byte-identical.
+- Mutation, by path: `src/fleet-auto-off.ts:131` put back to `../../worker-fleet/src/worker-http.ts`. The new test fails with the same message. Restored byte-identical.
+- Mutation, the scan made to read nothing (its regex replaced with one that matches no import): the new test fails on its positive control, `fleet-auto-off.ts: no named import found, so the scan read nothing`. Restored byte-identical.
+- The new test reads the named bindings of each import, so it pins `requestJson` itself, not the module's presence; the file's 11 tests pass unmutated.
 - `eslint --no-ignore` over the five touched files: 0 errors, 127 warnings, the same count as at `origin/main`.
 - `tsc --noEmit -p tsconfig.control.json`: 5 errors, the same set at `origin/main`, none in a touched file. They are `layer-launchers.test.ts` and `provision-stamp*.test.ts` needing `scripts/test-support/stamp-files.ts`, which the core checkout lacks.
 
@@ -32,7 +34,7 @@ The lay is the control worktree's `src`, `ansible`, `layers.json`, `deploy-pins.
 - `src/fleet-status.test.ts:11`: the type import of `requestJson` from `./worker-fleet-carried.ts`. Line 12 (`fleet-consistency`) is the third row's and is untouched.
 - `src/fleet-auto-off.test.ts`: the closure expectation now names `packages/control/src/worker-fleet-carried.ts` and `packages/worker-fleet/src/git-safe-env.ts` where it named `worker-http.ts`; the `FLEET_FILE` fixture and the `sourceWithLayer` fixture follow.
 - `src/layer-checkouts.test.ts`: `FIVE_READERS` takes the `check-worker-code.ts` path from `layerSourceDir("screenreader-fleet")` through the module-level resolver (aliased as `realLayerSourceDir`, because the local `layerSourceDir` binds to the nvda-worker checkout). The count stays five.
-- `src/worker-fleet-carried.test.ts`: the new test. It scans `fleet-auto-off.ts` and `fleet-status.test.ts` for their import specifiers, requires `./worker-fleet-carried.ts` among them (the positive control), and requires no specifier naming `worker-http`.
+- `src/worker-fleet-carried.test.ts`: the new test. It reads the named bindings of every import in `fleet-auto-off.ts` and `fleet-status.test.ts`, requires `requestJson` among those imported from `./worker-fleet-carried.ts`, and requires that no other path supplies `requestJson` (the positive control is that at least one named import is found).
 - `.changeset/control-carries-request-json-5346.md` (patch).
 - Not changed: `src/code-drift.ts`'s literal in `FIVE_READERS` (the row does not name it).
 
