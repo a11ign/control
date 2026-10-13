@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { workersFromInventory } from "../../worker-fleet/src/fleet-env.ts";
+import { workersFromInventory } from "./worker-fleet-carried.ts";
 
 import { PDU, buildRequest, decodeResponse, snmpClient, walk, readSwitch, switchStates, switchLine, switchReport,
   readSwitchConfig, switchPortsByHost, readSwitchLive, macOfFdbRow, OID } from "./fleet-switch.ts";

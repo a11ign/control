@@ -74,13 +74,12 @@ import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags, flagValue } from "./worker-fleet-carried.ts";
+import { refuseUnknownFlags, flagValue, WORKER_GROUP, groupPerLine } from "./worker-fleet-carried.ts";
 import { LAYER_PINNED, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
 import type { WorkerHealth } from "./fleet-status.ts";
-import { WORKER_GROUP, groupPerLine } from "../../worker-fleet/src/fleet-env.ts";
 import { protocolVerdict, servedProtocols } from "../../worker-fleet/src/protocol-guard.ts";
 // BY PATH, never by package name, AND TRANSITIVELY SO. The control plane has no `node_modules` — ADR
 // 0012's boundary — so a path import is not enough on its own: what it imports must obey the rule too.

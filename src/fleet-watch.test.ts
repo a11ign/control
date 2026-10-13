@@ -16,7 +16,7 @@ import {
   withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, pidAlive, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
-import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
+import { fleetConsistency } from "./worker-fleet-carried.ts";
 import { controlUnitDrift } from "./control-unit-drift.ts";
 import { NO_INCIDENT_TICK } from "./fleet-build-incident.ts";
 import { parseFleetLock } from "./fleet-lock.ts";

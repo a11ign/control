@@ -11,7 +11,7 @@ import {
   incidentBody, incidentTitle, busyReasonAt, FLEET_BUILD_INCIDENT_LINE, FLEET_BUILD_INCIDENT_LABELS, FLEET_BUILD_INCIDENT_REPO,
   type BuildStatus, type IncidentDeps, type OpenIncident, type PatchStart, type PatchStartDeps,
 } from "./fleet-build-incident.ts";
-import { fleetConsistency } from "../../worker-fleet/src/fleet-consistency.ts";
+import { fleetConsistency } from "./worker-fleet-carried.ts";
 import { windowsBuildsOf } from "./fleet-status.ts";
 
 const OLD = "10.0.22631";
