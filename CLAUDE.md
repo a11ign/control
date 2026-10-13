@@ -38,12 +38,17 @@ takes a VM UUID rather than a host, and it fails immediately off macOS. Physical
 rather than file-pushed, so they deploy by pulling:
 
 ```bash
+pnpm install --frozen-lockfile         # a checkout installs BEFORE any write play, and again after a pull that moves control
 pnpm run fleet:deploy                  # pull + install + restart + PROVE it (bare metal)
 pnpm run fleet:provision               # the ROLE: NVDA, the Edge pin, policies, and the provision stamp
 pnpm run fleet:provision -- --serial=0 # all boxes at once, rather than one at a time
 eval "$(pnpm run --silent fleet:env)"                                # A11Y_WORKERS from inventory.yml
 pnpm run fleet:status                                                # what every box is doing, right now
 ```
+
+The write plays import the two layers control declares as dependencies (ADR 0045), which a checkout holds only after
+`pnpm install`. A checkout that was never installed fails the write plays with `ERR_MODULE_NOT_FOUND: @a11ign/screenreader-fleet`:
+the cause is the missing install, not the import.
 
 `fleet:provision --serial=0` (all at once) is right here because `provisionRevision` is a MUST_MATCH cache key — a canary box IS the failure mode. [Why →](docs/operational-lessons.md#fleetprovision---serial0-and-the-sre-workbook)
 
