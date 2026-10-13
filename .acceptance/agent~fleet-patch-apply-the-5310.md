@@ -27,4 +27,4 @@ Mutations, each restored from a scratchpad copy and checked byte-identical with 
 - `src/lab-job.ts` (`:76`, `:186`) and `src/lab-watch.ts` (`:44`, `:47`) keep the `packages/control/ansible` paths. Filed as a row.
 - No live `fleet:patch --apply` was run. Done-when 2 is orchestrator's.
 
-Closes a11ign/a11ign#5310 — declared to match the pull request body, which the agent-org gate reads. Done-when 2 is a live `fleet:patch --apply` run on the plane, which is orchestrator's and is not carried by this PR; `product-manager` decides at merge whether Done-when 1 alone is enough.
+Closes: none — a11ign/a11ign#5310 stays open until its Done-when 2 (orchestrator's live `fleet:patch --apply` run, after this merge) has passed; `product-manager` closes the row. Declared to match the pull request body, which the agent-org gate reads.
