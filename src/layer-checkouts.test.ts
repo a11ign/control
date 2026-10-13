@@ -15,7 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layersFrom, manifestOf, releaseTag } from "./layer-checkouts.ts";
+import { layersFrom, manifestOf, releaseTag, layerSourceDir as realLayerSourceDir } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag, readDeployPins } from "./layer-pins.ts";
 import { workerSourceDirty } from "../../worker-fleet/src/code-drift.ts";
 import { sandboxGitEnv } from "../../worker-fleet/src/git-safe-env.ts";
@@ -49,7 +49,8 @@ const FIVE_READERS = [
   "packages/control/src/lab-job.ts",
   "packages/control/ansible/deploy.yml",
   "packages/worker-fleet/src/code-drift.ts",
-  "packages/worker-fleet/src/check-worker-code.ts",
+  // Through the resolver, so this list names no path into screenreader-fleet (#5346).
+  join(realLayerSourceDir("screenreader-fleet"), "check-worker-code.ts"),
 ];
 
 /** Comments out: a path named in PROSE is not a path that is read. `//`, block and `#` comments. */

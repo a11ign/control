@@ -57,6 +57,16 @@ test("the six modules that read the flag vocabulary take it from the carried cop
   }
 });
 
+test("requestJson comes from the carried copy in fleet-auto-off and fleet-status's test, not from worker-http by path (a11ign#5346)", () => {
+  const modules = ["fleet-auto-off.ts", "fleet-status.test.ts"];
+  for (const module of modules) {
+    const source = readFileSync(new URL(module, import.meta.url), "utf8");
+    const specifiers = [...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((match) => match[1]);
+    assert.ok(specifiers.includes("./worker-fleet-carried.ts"), `${module}: does not import the carried copy, so the scan read nothing or the import went back`);
+    assert.deepEqual(specifiers.filter((specifier) => specifier.includes("worker-http")), [], `${module} reaches worker-http by path`);
+  }
+});
+
 test("the flag vocabulary: the same flags are unknown, the same one is suggested, the same value is read", () => {
   const known = ["--cidr=", "--port=", "--enroll", "--json"];
   const argvs = [
