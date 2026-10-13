@@ -1,4 +1,7 @@
-// Relocated from packages/worker-fleet/src/no-win32-imports.test.ts by #3504: it reads control/lab/guards/the root, so it stays in the core and reads the fleet through the layer checkout at packages/worker-fleet.
+// The part of fleet-layer/no-win32-imports.test.ts with no merged destination (a11ign/a11ign#5345): the worker package's own index (#1772).
+// The portable trees moved to a11ign/lab (src/packaging/no-win32-imports-lab.test.ts, #5347) and core (packages/guards/src, #5348); the
+// fleet's own slice is a11ign/a11ign#5358. The walker below is kept only to answer the one test that stays.
+
 /**
  * Nothing that runs off Windows may load the capture driver at import time.
  *
@@ -42,9 +45,6 @@ import { readFileSync, statSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// #2171: shared, because four private copies of this walk descended a directory symlink and threw ELOOP.
-import { filesUnder } from "../../../guards/src/files-under.ts";
-
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
 /** The module whose mere import throws where there is no screen reader. */
@@ -53,50 +53,9 @@ const POISON = "@guidepup/guidepup";
 /** Importing this by NAME reaches POISON, because the package index re-exports `capture-core.mjs`. */
 const WORKER_PACKAGE = "@a11ign/screenreader-worker";
 const WORKER_INDEX = "packages/nvda-worker/src/index.ts";
-/** The only file left that reaches guidepup statically ON PURPOSE -- named once, used by the allowlist
- *  below and by the anti-vacuity test that proves the walker still works (#1772). */
+/** The only file left that reaches guidepup statically ON PURPOSE -- named once, used by the anti-vacuity
+ *  test that proves the walker still works (#1772). */
 const VOICEOVER_SPIKE = "packages/lab/src/harnesses/run-spike.ts";
-
-/**
- * Source trees that must run on macOS AND Linux.
- *
- * The lab is a Linux container that dispatches captures over HTTP and never drives NVDA itself; the CLI
- * ships to whatever a user has. `packages/nvda-worker` is deliberately absent — it is the win32 half, and
- * it is allowed and required to import the driver.
- */
-const PORTABLE_TREES = [
-  "packages/worker-fleet/src",
-  "packages/lab/src",
-  "packages/lab/scripts",
-  "packages/cli/src",
-  "packages/judge/src",
-  "packages/evidence/src",
-];
-
-/**
- * Files that are Windows-only entry points, with the reason each is allowed to reach the driver.
- *
- * An allowlist rather than a pattern, because "is this file allowed to be win32-only" is a decision and
- * not a shape. A new file reaching the driver fails until somebody makes that decision.
- */
-const WIN32_ONLY: Record<string, string> = {
-  [VOICEOVER_SPIKE]: "a VoiceOver spike — it imports guidepup on purpose and runs on a Mac only",
-};
-
-const isSource = (path: string) => /\.(mjs|ts)$/.test(path) && !/\.test\.ts$/.test(path)
-  && !/\.d\.ts$/.test(path);
-
-/** Every source file under the repo-relative `dir`, as repo-relative paths. */
-function sourcesIn(dir: string): string[] {
-  // `existsSync` first because a tree in PORTABLE_TREES may legitimately not exist, and `filesUnder`
-  // throws on a missing root rather than walking to `[]` -- which is what this guard wants everywhere
-  // else, and what the floor below would otherwise be the only thing catching.
-  if (!existsSync(join(REPO, dir))) return [];
-  return filesUnder(join(REPO, dir), {
-    skipDirectory: (name) => name === "node_modules" || name === "dist",
-    keepFile: isSource,
-  }).map((full) => full.slice(REPO.length)).sort();
-}
 
 /**
  * STATIC imports only — `import x from "y"` and `export … from "y"`.
@@ -161,17 +120,6 @@ function pathToDriver(entry: string): string[] | null {
   return null;
 }
 
-const PORTABLE = PORTABLE_TREES.flatMap((tree) => sourcesIn(tree));
-
-test("the trees being examined are real, so this guard cannot pass having read nothing", () => {
-  // The first version of `verify.corpus.test.ts` read a field that does not exist and passed against a
-  // corpus carrying 604 crashes. A discovery test that discovers nothing is the same defect.
-  assert.ok(PORTABLE.length > 100, `only ${PORTABLE.length} portable source files found; the layout moved`);
-  for (const tree of PORTABLE_TREES) {
-    assert.ok(sourcesIn(tree).length > 0, `${tree} yielded no source files`);
-  }
-});
-
 test("the poison really is reachable from a real file, or this guard proves nothing", () => {
   // Assert the mechanism the test exists to detect actually exists. Without this, a broken resolver or a
   // regex that stopped matching would leave every assertion below vacuously true. This used to walk from
@@ -193,41 +141,4 @@ test("the worker package's own index no longer reaches the driver statically -- 
   assert.equal(chain, null, `${WORKER_INDEX} reaches ${POISON} statically again via `
     + `${chain?.join(" -> ")}; the guidepup import in capture-setup.ts/capture-probes.ts must stay a `
     + "dynamic import() inside the function that needs it.");
-});
-
-test("no portable module statically reaches the capture driver", () => {
-  const offenders = PORTABLE
-    .filter((file) => !Object.hasOwn(WIN32_ONLY, file))
-    .map((file) => ({ file, chain: pathToDriver(file) }))
-    .filter((found) => found.chain);
-
-  assert.deepEqual(offenders.map((o) => o.chain!.join("\n      -> ")), [],
-    `A module that runs on the Linux lab (or in the shipped CLI) loads ${POISON} at import time, which `
-    + "throws `No available supported screen readers` there. macOS resolves VoiceOver, so every local "
-    + "check passes and only the lab fails.\n"
-    + `Import the specific module by PATH rather than ${WORKER_PACKAGE} — code-version.ts, `
-    + "capture-pure.ts and worker-files.ts are dependency-free for this reason — or reach the driver "
-    + "through a dynamic `await import()` inside the function that needs it, as capture-fixtures.ts does.");
-});
-
-test("the allowlist is honest: every file on it really is win32-only", () => {
-  // An allowlist that outlives its entries is a hole nobody can see. If one of these stops reaching the
-  // driver, it should come OFF the list rather than sit there permitting something that is not happening.
-  for (const [file, why] of Object.entries(WIN32_ONLY)) {
-    assert.ok(existsSync(join(REPO, file)), `${file} is allowlisted and does not exist`);
-    assert.ok(why.length > 20, `${file} is allowlisted without a reason`);
-    assert.ok(pathToDriver(file),
-      `${file} no longer reaches ${POISON}, so it is portable now — remove it from WIN32_ONLY rather `
-      + "than leaving a permission for something that is not happening.");
-  }
-});
-
-test("a dynamic import is not flagged, because it is the remedy", () => {
-  // `capture-fixtures.ts` reaches the driver through `await import()` inside a function, so it loads
-  // anywhere and only pays for guidepup where it is called. If this test ever fails, the import scanner
-  // has started matching dynamic imports and would forbid the fix along with the bug.
-  const fixtures = "packages/lab/src/harnesses/capture-fixtures.ts";
-  assert.match(readFileSync(join(REPO, fixtures), "utf8"), /await import\("@a11ign\/screenreader-worker"\)/);
-  assert.equal(pathToDriver(fixtures), null,
-    `${fixtures} reaches the driver statically; only its dynamic import should exist`);
 });
