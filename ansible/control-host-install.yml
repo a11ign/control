@@ -46,6 +46,11 @@
     # The `tsx` the control plane's TypeScript runs under (#4292, #4341): one install BESIDE the layer, because a laid layer has no node_modules and ESM ignores NODE_PATH, so a bare
     # `--import tsx` does not resolve there. `a11y-fleet-auto-off.service`, `a11y-gate-heartbeat.service`, `deploy.yml` and `roles/worker/tasks/bespoke.yml` name this path.
     control_tsx_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
+    # Control's own checkout on the plane (a11ign#5306): what `a11y-fleet-auto-off.service` and the units beside it name as `/root/control`.
+    control_repo_url: https://github.com/a11ign/control.git
+    control_checkout: /root/control
+    # Overridable so the test can put a recording stub at this boundary; the plane's real corepack is the default.
+    control_corepack: /usr/bin/corepack
 
   tasks:
     - name: The value must actually be here -- an absent extra-var beats an empty file installed silently
@@ -92,10 +97,63 @@
           {{ control_host_destination }} installed and verified: {{ landed_content }}. A future shell with
           A11Y_CONTROL_HOST unset now falls back to this instead of refusing.
 
+    # THE CHECKOUT AND ITS PINNED PNPM (a11ign#5306; `ceo` ruling 2026-10-13). A rebuilt plane had no `/root/control` and no `pnpm`, so every unit that
+    # names the checkout had no working directory. The install is the one ADR 0012 allows as amended by ADR 0045 cut 9: the lockfile decides
+    # (`--frozen-lockfile`), no install script runs (`--ignore-scripts`), and the pnpm is the one `packageManager` names, never `latest`.
+    # `--prod` because the plane runs production dependencies only (control's `package.json`). Nothing else is installed here.
+    - name: Control's own checkout is on the plane, at origin/main
+      ansible.builtin.git:
+        repo: "{{ control_repo_url }}"
+        dest: "{{ control_checkout }}"
+        version: main
+        update: true
+      register: control_checkout_state
+
+    - name: Read the pnpm version control's package.json pins
+      ansible.builtin.slurp:
+        path: "{{ control_checkout }}/package.json"
+      register: control_manifest
+
+    - name: The pin must be one exact pnpm version
+      ansible.builtin.set_fact:
+        control_pnpm_pin: "{{ (control_manifest.content | b64decode | from_json).packageManager | default('', true) }}"
+
+    - name: Refuse a manifest that pins no exact pnpm, rather than install whichever is newest
+      ansible.builtin.assert:
+        that: control_pnpm_pin is match('^pnpm@[0-9]+[.][0-9]+[.][0-9]+$')
+        fail_msg: >-
+          {{ control_checkout }}/package.json has packageManager "{{ control_pnpm_pin }}", which is not an exact pnpm version (`pnpm@X.Y.Z`).
+          Nothing has been installed; pin one in control and re-run.
+        success_msg: "control pins {{ control_pnpm_pin }}"
+
+    - name: Enable corepack, then activate the pnpm control pins
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", enable]
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      changed_when: false
+
+    - name: Activate that pnpm through corepack
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", prepare, "{{ control_pnpm_pin }}", --activate]
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      changed_when: false
+
+    - name: Install control's production dependencies, from the lockfile alone
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", pnpm, install, --frozen-lockfile, --ignore-scripts, --prod]
+        chdir: "{{ control_checkout }}"
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      register: control_install
+      changed_when: "'Already up to date' not in control_install.stdout"
+
     # ASSERTED, NOT INSTALLED (#4341). The loader is a host fact outside this repository, and a rebuilt control plane without it would leave `fleet-auto-off` dying at start: it
     # stops deciding, and the failure is in the SAFE direction, so nothing else would say so. This runs the loader rather than `stat`ting a path, because "the file exists" is not
-    # "`node --import` resolves it". It does not `npm install` it: ADR 0012 keeps npm's transitive surface off the machine that holds the fleet key, and putting a package
-    # install into a routine playbook is a decision `orchestrator` made once by hand (#4292) and this playbook should not remake silently. The failure NAMES the command.
+    # "`node --import` resolves it". It does not `npm install` it: that loader sits BESIDE the layer, outside control's own production closure, and #4292 made that install once
+    # by hand. The checkout and the pinned pnpm install above are in this playbook by `ceo`'s ruling of 2026-10-13 (a11ign#5306); they are
+    # control's lockfile install, not a second package manager's. The failure NAMES the command.
     - name: The loader the control plane's TypeScript runs under must resolve
       ansible.builtin.command:
         argv: [/usr/bin/node, --import, "{{ control_tsx_loader }}", -e, "console.log('tsx ok')"]
