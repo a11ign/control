@@ -2,9 +2,11 @@ Row a11ign/a11ign#5426. **Run location (read, 2026-10-13):** `lab-job.ts` and `l
 
 Outside-Region: src/lab-job.test.ts, src/lab-watch.test.ts — they pinned the old string; they now pin the file-relative path and assert it exists (positive control).
 
-Acceptance: `pnpm exec node --test src/lab-job.test.ts src/lab-watch.test.ts src/lab-jobs-run-pnpm.test.ts`
+Acceptance: `pnpm exec node --test src/lab-job.test.ts src/lab-jobs-run-pnpm.test.ts`
 
-**As run (measured):** tests 100, pass 100, fail 0. `tsc --noEmit` clean. (`yaml` and `@a11ign/*` were linked in from the core's `node_modules` to resolve, an environment fact of this worktree.)
+The row's own command also names `src/lab-watch.test.ts`; the acceptance job refuses it (it reaches `gh` through `lab-watch.ts:113`, which needs a token this job lacks), so it is run locally and reported below, not declared.
+
+**As run (measured):** the row's three files together: tests 100, pass 100, fail 0 (run locally, with a token-less environment: `lab-watch.test.ts` injects its runner). `tsc --noEmit` clean. (`yaml` and `@a11ign/*` were linked in from the core's `node_modules` to resolve, an environment fact of this worktree.)
 
 Mutation: `CATALOGUE` put back to `packages/control/ansible/lab-job.yml` makes the `#1670` argv test fail; restored byte-identical (`cp` before and after).
 
