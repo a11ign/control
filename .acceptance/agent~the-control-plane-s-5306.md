@@ -3,12 +3,12 @@ Row a11ign/a11ign#5306: the control plane's fleet auto-off unit still lays contr
 Acceptance:
 
 ```bash
-test "$(grep -c "lay-layer.ts" ansible/files/a11y-fleet-auto-off.service)" = 0 && node --test src/control-runs-under-tsx.test.ts src/fleet-auto-off.test.ts src/fleet-watch.test.ts
+cd /home/agent/repos/wt-5306-control && grep -q "^ExecStart=.* /root/control/src/fleet-auto-off.ts --apply$" ansible/files/a11y-fleet-auto-off.service && node --test src/control-runs-under-tsx.test.ts src/fleet-auto-off.test.ts src/fleet-watch.test.ts
 ```
 
-The grep counts the old script name in the unit and must print `0`; the second command runs the three `src/` files this change touches (207 tests, all `node:test`). The scripts suite (`pnpm test`, 45 tests) is run as a further check, not declared as acceptance.
+The grep proves the unit runs control's own program with `--apply`. The absence of the deleted script is pinned by `#5306: the service lays nothing` in `src/fleet-auto-off.test.ts`, which the `node --test` line runs (208 tests across the three files, all `node:test`, no loader). The scripts suite (`pnpm test`, 45 tests) is run as a further check, not declared as acceptance.
 
-**As run (measured, 2026-10-13, at this head):** the grep exits `0`. `pnpm test` (the scripts suite) passes 45 tests in 8 files. `src/control-runs-under-tsx.test.ts`, `src/fleet-auto-off.test.ts` and `src/fleet-watch.test.ts` pass 207 tests in 3 files, run through a scratch rstest config that includes `src/**` (the repo's `pnpm test` config covers `scripts/**` only). `pnpm run typecheck` exits `0`. There is no `lint` script in this repository, so no lint was run.
+**As run (measured, 2026-10-13, at this head):** the grep exits `0`. `pnpm test` (the scripts suite) passes 45 tests in 8 files. `src/control-runs-under-tsx.test.ts`, `src/fleet-auto-off.test.ts` and `src/fleet-watch.test.ts` pass 208 tests in 3 files under plain `node --test` (no loader: Node 24 strips the types). Before the `#5306` unit assertion was added they passed 207 under a scratch rstest config that includes `src/**`, since the repo's `pnpm test` config covers `scripts/**` only. The new assertion, pointed at a mutant unit that names `lay-layer`, fails, and the unit was restored `cmp`-identical. `pnpm run typecheck` exits `0`. There is no `lint` script in this repository, so no lint was run.
 
 The full `src/` run is 1107 of 1117 passing in 70 files. The 10 failures are path-layout failures in files this change does not touch (a standalone checkout has no `packages/nvda-worker`, `packages/lab`, or `packages/control/ansible/inventory.yml`). None of those files reads the unit or `fleet-auto-off.ts`.
 

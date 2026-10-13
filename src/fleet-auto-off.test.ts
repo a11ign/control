@@ -702,6 +702,14 @@ test("#2784: the service passes --apply, or the timer is a report on a clock", (
     ["ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-auto-off.ts --apply"]);
 });
 
+test("#5306: the service lays nothing, so no tick runs the deleted lay-layer script (a11ign#5087)", () => {
+  // The positive control is the same text read the same way: the active lines name the program, so an
+  // empty `lay-layer` match means it was looked for, not that the file was never read.
+  const active = activeLines(shippedUnit("a11y-fleet-auto-off.service")).join("\n");
+  assert.match(active, /fleet-auto-off\.ts/, "positive control: the active lines name the program");
+  assert.doesNotMatch(active, /lay-layer/);
+});
+
 test("#2784: the service runs from the checkout, or its relative state path is ENOENT on every tick", () => {
   // Read live on a11y-control at 09:40Z: with no WorkingDirectory the unit starts in `/`, and
   // `writeState("runs/fleet-auto-off-state.json")` throws ENOENT, so the timer fails every ten seconds
