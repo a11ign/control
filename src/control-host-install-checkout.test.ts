@@ -21,8 +21,8 @@ const PLAYBOOK = readFileSync(new URL("../ansible/control-host-install.yml", imp
 const varValue = (name: string) => new RegExp(`^    ${name}: (\\S+)$`, "m").exec(PLAYBOOK)?.[1];
 
 /** The task list, one entry per task: a task opens with a four-space `- name:`. */
-const TASKS = PLAYBOOK.split(/^(?=    - name: )/m).slice(1).map((body) => ({
-  name: /^    - name: (.*)$/m.exec(body)?.[1] ?? "",
+const TASKS = PLAYBOOK.split(/^(?= {4}- name: )/m).slice(1).map((body) => ({
+  name: /^ {4}- name: (.*)$/m.exec(body)?.[1] ?? "",
   body,
 }));
 
