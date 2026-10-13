@@ -1,21 +1,18 @@
 Row a11ign/a11ign#5381, replacing a11ign#5374: the control Region's test files stop reaching `../../worker-fleet/src/` for the carried originals and for the `.ps1` scripts, and take the originals from `@a11ign/screenreader-fleet` at the 0.9.0 pin. Names no workflow, so it is not `lane:ceo`.
 
-Acceptance:
+Acceptance (the PR head: the two greps over the working tree, run from the worktree; the open check and CI's acceptance job read this form):
+
+```bash
+! git grep -q -E "(\.\./)+worker-fleet/src/" -- src/worker-fleet-carried.test.ts src/control-owned/fleet-consistency.test.ts src/control-owned/fleet-env.test.ts src/control-owned/worker-port.test.ts src/control-owned/display-mode.test.ts && ! git grep -q -E "worker-fleet/src/provisioning" -- src/fleet-playbook.test.ts
+```
+
+Merge-commit reading (the row's own Acceptance, Done-when 1). It is `Hand-run`: whoever closes the row pastes its run at the merge commit. It cannot pass before the merge, because it reads `origin/main`:
 
 ```bash
 bash -c 'cd ~/repos/control && git fetch -q origin && ! git grep -q -E "(\\.\\./)+worker-fleet/src/" origin/main -- src/worker-fleet-carried.test.ts src/control-owned/fleet-consistency.test.ts src/control-owned/fleet-env.test.ts src/control-owned/worker-port.test.ts src/control-owned/display-mode.test.ts && ! git grep -q -E "worker-fleet/src/provisioning" origin/main -- src/fleet-playbook.test.ts'
 ```
 
-The row's Acceptance, run here against this branch rather than `origin/main` (the same two greps, with the working tree in place of `origin/main`; the row's own form runs after merge):
-
-```
-$ ! git grep -q -E "(\.\./)+worker-fleet/src/" -- src/worker-fleet-carried.test.ts src/control-owned/fleet-consistency.test.ts src/control-owned/fleet-env.test.ts src/control-owned/worker-port.test.ts src/control-owned/display-mode.test.ts ; echo $?
-0
-$ ! git grep -q -E "worker-fleet/src/provisioning" -- src/fleet-playbook.test.ts ; echo $?
-0
-```
-
-The Acceptance is satisfied at the merge commit only; the row's Done-when is that it passes on `origin/main` after this PR merges.
+Local result of the PR-head form, run in this worktree: both greps exit 0 (`echo $?` prints `0` for each).
 
 ## Before and after
 
