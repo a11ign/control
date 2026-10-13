@@ -60,7 +60,7 @@ test("the pnpm comes from control's packageManager field, and that field must be
   assert.match(find("The pin must be one exact pnpm version").body, /packageManager/);
   assert.ok(find("Refuse a manifest").body.includes("'^pnpm@[0-9]+[.][0-9]+[.][0-9]+$'"), "the refusal names an exact-version regex");
   const activate = argvTokens(find("Activate that pnpm").body);
-  assert.deepEqual(activate.slice(0, 2), ["/usr/bin/corepack", "prepare"]);
+  assert.deepEqual(activate.slice(0, 2), ["{{ control_corepack }}", "prepare"]);
   assert.equal(activate[2], "{{ control_pnpm_pin }}");
   assert.equal(activate[3], "--activate");
   assert.doesNotMatch(PLAYBOOK, /pnpm@latest/);
@@ -69,7 +69,7 @@ test("the pnpm comes from control's packageManager field, and that field must be
 test("the install is the lockfile's own: --frozen-lockfile and --ignore-scripts in its argv, run in the checkout", () => {
   const install = find("Install control's production dependencies");
   const tokens = argvTokens(install.body);
-  assert.deepEqual(tokens.slice(0, 3), ["/usr/bin/corepack", "pnpm", "install"]);
+  assert.deepEqual(tokens.slice(0, 3), ["{{ control_corepack }}", "pnpm", "install"]);
   assert.ok(tokens.includes("--frozen-lockfile"), "the lockfile decides");
   assert.ok(tokens.includes("--ignore-scripts"), "no install script runs");
   assert.match(install.body, /chdir: "\{\{ control_checkout \}\}"/);

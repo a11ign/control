@@ -49,6 +49,8 @@
     # Control's own checkout on the plane (a11ign#5306): what `a11y-fleet-auto-off.service` and the units beside it name as `/root/control`.
     control_repo_url: https://github.com/a11ign/control.git
     control_checkout: /root/control
+    # Overridable so the test can put a recording stub at this boundary; the plane's real corepack is the default.
+    control_corepack: /usr/bin/corepack
 
   tasks:
     - name: The value must actually be here -- an absent extra-var beats an empty file installed silently
@@ -126,21 +128,21 @@
 
     - name: Enable corepack, then activate the pnpm control pins
       ansible.builtin.command:
-        argv: [/usr/bin/corepack, enable]
+        argv: ["{{ control_corepack }}", enable]
       environment:
         COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       changed_when: false
 
     - name: Activate that pnpm through corepack
       ansible.builtin.command:
-        argv: [/usr/bin/corepack, prepare, "{{ control_pnpm_pin }}", --activate]
+        argv: ["{{ control_corepack }}", prepare, "{{ control_pnpm_pin }}", --activate]
       environment:
         COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       changed_when: false
 
     - name: Install control's production dependencies, from the lockfile alone
       ansible.builtin.command:
-        argv: [/usr/bin/corepack, pnpm, install, --frozen-lockfile, --ignore-scripts, --prod]
+        argv: ["{{ control_corepack }}", pnpm, install, --frozen-lockfile, --ignore-scripts, --prod]
         chdir: "{{ control_checkout }}"
       environment:
         COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
