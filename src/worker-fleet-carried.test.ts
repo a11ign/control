@@ -4,7 +4,7 @@
  * `fleet-discover.ts`, `fleet-status.ts` and `with-control-plane-fleet.ts` no longer import `../../worker-fleet`, so the lab can load
  * `@a11ign/control/fleet-wake` from its own checkout. The price is a second copy of each helper, and a second copy is a second answer
  * the day one changes. `fleet-env.test.ts` in worker-fleet pins the same shape for its own `cli-flags` copy; this file does it for
- * control's, wherever the original is laid (control's CI lays it at `packages/worker-fleet`, and a checkout beside one has it too).
+ * control's. The originals are the published `@a11ign/screenreader-fleet` at the pin in `deploy-pins.json`, read through its exports.
  *
  * THE ORIGINALS ARE IMPORTED HERE, in a test, which `control-has-no-dependencies.test.ts` does not walk: it follows the imports of
  * `src/*.ts` modules that ship to the control plane, and a test never does.
@@ -15,17 +15,11 @@ import { createServer, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import * as carried from "./worker-fleet-carried.ts";
-
-const ORIGINALS = "../../worker-fleet/src/";
-const original = async <T>(file: string): Promise<T> => import(`${ORIGINALS}${file}`) as Promise<T>;
-
-const [http, env, flags, health, consistency] = await Promise.all([
-  original<typeof import("../../worker-fleet/src/worker-http.ts")>("worker-http.ts"),
-  original<typeof import("../../worker-fleet/src/fleet-env.ts")>("fleet-env.ts"),
-  original<typeof import("../../worker-fleet/src/cli-flags.ts")>("cli-flags.ts"),
-  original<typeof import("../../worker-fleet/src/worker-health.ts")>("worker-health.ts"),
-  original<typeof import("../../worker-fleet/src/fleet-consistency.ts")>("fleet-consistency.ts"),
-]);
+import * as http from "@a11ign/screenreader-fleet/worker-http";
+import * as env from "@a11ign/screenreader-fleet/fleet-env";
+import * as flags from "@a11ign/screenreader-fleet/cli-flags";
+import * as health from "@a11ign/screenreader-fleet/health";
+import * as consistency from "@a11ign/screenreader-fleet/fleet-consistency";
 
 test("the originals loaded and are the functions this file means to compare, so no test below compares nothing with nothing", () => {
   assert.equal(typeof http.requestJson, "function");

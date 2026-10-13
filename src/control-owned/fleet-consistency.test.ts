@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { MUST_MATCH, REPORTED_ONLY } from "../../../worker-fleet/src/fleet-consistency.ts";
+import { MUST_MATCH, REPORTED_ONLY } from "@a11ign/screenreader-fleet/fleet-consistency";
 import { join } from "node:path";
 import { layerSourceDir } from "../layer-checkouts.ts";
 

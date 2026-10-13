@@ -16,7 +16,8 @@ import assert from "node:assert/strict";
 
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -169,8 +170,10 @@ test("the provision stamp is the ENVIRONMENT, not the moment it was applied", ()
   //
   // This repo already made the same call one field over: workerCode is deliberately OUTSIDE the cache key
   // because "it changes when a comment changes". A git SHA changes for strictly more reasons.
-  const script = readFileSync(fileURLToPath(
-    new URL("../../worker-fleet/src/provisioning/stamp-provision-revision.ps1", import.meta.url)), "utf8");
+  // The script is read from the published package, not from its checkout. Its owner's provision-stamp.test.ts (#5350) pins the normalised
+  // hash and the file list, but nothing upstream says the SHA stays out of the stamp, so this assertion stays here until it does.
+  const script = readFileSync(join(
+    dirname(createRequire(import.meta.url).resolve("@a11ign/screenreader-fleet")), "..", "src", "provisioning", "stamp-provision-revision.ps1"), "utf8");
   const code = script.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
 
   assert.match(code, /^\$stamp = \$combined$/m,

@@ -32,7 +32,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_WORKER_PORT } from "../../../worker-fleet/src/fleet-env.ts";
+import { DEFAULT_WORKER_PORT } from "@a11ign/screenreader-fleet/fleet-env";
 
 const repo = (path: string) => readFileSync(fileURLToPath(new URL(`../../../../${path}`, import.meta.url)), "utf8");
 
