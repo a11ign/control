@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const ansible = (path: string) => readFileSync(new URL(`../ansible/${path}`, import.meta.url), "utf8");
-const CONTROL_PATH = /packages\/control\/src\/[a-z-]+\.(mjs|ts)/;
+// `packages/control/src` in the core's layout, `control/src` at control's own checkout (a11ign#5312): the auto-off unit moved, and the pins must still see it.
+const CONTROL_PATH = /(?:packages\/)?control\/src\/[a-z-]+\.(mjs|ts)/;
 
 /** The one spelling `control-host-install.yml` asserts is present, which is what the units and tasks may name. */
 const LOADER = /^\s*control_tsx_loader:\s*(\S+)\s*$/m.exec(ansible("control-host-install.yml"))?.[1] ?? "";
@@ -25,7 +26,7 @@ test("the two control-plane units run their module through that loader, by absol
   for (const [unit, module] of [["a11y-fleet-auto-off", "fleet-auto-off"], ["a11y-gate-heartbeat", "gate-heartbeat"]]) {
     const execStart = ansible(`files/${unit}.service`).split("\n").filter((l) => l.startsWith("ExecStart="));
     assert.equal(execStart.length, 1, `${unit}: one ExecStart`);
-    assert.match(execStart[0], new RegExp(`^ExecStart=/usr/bin/node --import ${LOADER.replaceAll(".", "\\.")} \\S*/packages/control/src/${module}\\.ts( --apply)?$`));
+    assert.match(execStart[0], new RegExp(`^ExecStart=/usr/bin/node --import ${LOADER.replaceAll(".", "\\.")} \\S*/(?:packages/control/)?src/${module}\\.ts( --apply)?$`));
   }
 });
 
@@ -51,6 +52,6 @@ test("no ansible file runs a control .mjs: the pattern finds the .ts spelling, s
   assert.ok(files.length > 0, "no ansible files listed, so nothing below would be examined");
   const named = files.filter((f) => CONTROL_PATH.test(ansible(f)));
   assert.ok(named.length >= 6, `the pattern should find control modules in most of these (found in ${named.length})`);
-  const mjs = files.filter((f) => ansible(f).split("\n").some((l) => /packages\/control\/src\/[a-z-]+\.mjs/.test(l)));
+  const mjs = files.filter((f) => ansible(f).split("\n").some((l) => /(?:packages\/)?control\/src\/[a-z-]+\.mjs/.test(l)));
   assert.deepEqual(mjs, []);
 });

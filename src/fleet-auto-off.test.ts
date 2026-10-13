@@ -699,7 +699,15 @@ test("#2784: the service passes --apply, or the timer is a report on a clock", (
   // live with exactly this unit and both rows closed on a fleet idle for 25h+.
   const execStart = activeLines(shippedUnit("a11y-fleet-auto-off.service")).filter((l) => l.startsWith("ExecStart="));
   assert.deepEqual(execStart,
-    ["ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/a11y-witness/packages/control/src/fleet-auto-off.ts --apply"]);
+    ["ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-auto-off.ts --apply"]);
+});
+
+test("#5306: the service lays nothing, so no tick runs the deleted lay-layer script (a11ign#5087)", () => {
+  // The positive control is the same text read the same way: the active lines name the program, so an
+  // empty `lay-layer` match means it was looked for, not that the file was never read.
+  const active = activeLines(shippedUnit("a11y-fleet-auto-off.service")).join("\n");
+  assert.match(active, /fleet-auto-off\.ts/, "positive control: the active lines name the program");
+  assert.doesNotMatch(active, /lay-layer/);
 });
 
 test("#2784: the service runs from the checkout, or its relative state path is ENOENT on every tick", () => {
@@ -707,7 +715,7 @@ test("#2784: the service runs from the checkout, or its relative state path is E
   // `writeState("runs/fleet-auto-off-state.json")` throws ENOENT, so the timer fails every ten seconds
   // and never dispatches. The state path must stay relative to the directory the unit names.
   const active = activeLines(shippedUnit("a11y-fleet-auto-off.service"));
-  assert.deepEqual(active.filter((l) => l.startsWith("WorkingDirectory=")), ["WorkingDirectory=/root/a11y-witness"]);
+  assert.deepEqual(active.filter((l) => l.startsWith("WorkingDirectory=")), ["WorkingDirectory=/root/control"]);
   assert.ok(!DEFAULT_STATE_PATH.startsWith("/"), "if the state path becomes absolute, this pin and the unit line can go");
 });
 
@@ -784,7 +792,7 @@ test("#3852: the follow step's play list is the tick's own (`LAUNCHABLE_PLAYBOOK
     "a play this list misses is a tree moved under a running play; one it adds is a follow that never happens");
 });
 
-test("#3852: behind `main`, the checkout fast-forwards and THEN lays the layer at the pin the merge brought", () => {
+test("#3852: behind `main`, the checkout fast-forwards and nothing else is run, so no layer is laid", () => {
   const sandbox = followSandbox();
   try {
     const before = sandbox.head();
@@ -793,10 +801,9 @@ test("#3852: behind `main`, the checkout fast-forwards and THEN lays the layer a
     assert.equal(result.status, 0, result.stderr);
     assert.equal(sandbox.head(), sandbox.originHead(), "the tree stands on origin/main");
     assert.notEqual(sandbox.head(), before);
-    const laid = sandbox.calls().filter((c) => c.startsWith("node "));
-    const head = sandbox.head().slice(0, 7);
-    assert.deepEqual(laid, [`node scripts/lay-layer.ts screenreader-fleet: ${head}`, `node scripts/lay-layer.ts control: ${head}`],
-      "each layer laid once, and the tree already held the merged commit when it was (the pin it reads is the new one, #3976)");
+    // The positive control: the recorder is live, so an empty `node` list is a reading and not a recorder that never wrote.
+    assert.ok(sandbox.calls().some((c) => c.startsWith("systemctl ")), "the play check ran and was recorded");
+    assert.deepEqual(sandbox.calls().filter((c) => c.startsWith("node ")), [], "no node call: the tick lays nothing (a11ign#5306)");
   } finally {
     sandbox.dispose();
   }
@@ -942,27 +949,25 @@ test("#5312 REPO is control's own root: deploy-pins.json, this file and the file
 });
 
 /**
- * Every script the unit's Exec lines run, core-relative: the absolute ones under the checkout's literal path, and the bare ones
- * (`scripts/lay-layer.ts`) the follow step runs from `WorkingDirectory=`. An absolute path elsewhere (the loader under `/opt`) is the host's, not the core's.
+ * Every script the unit's Exec lines run, checkout-relative: the absolute ones under the checkout's literal path (`/root/control` on the
+ * plane, or the core's old `/root/a11y-witness`), and the bare ones the follow step runs from `WorkingDirectory=`. An absolute path
+ * elsewhere (the loader under `/opt`) is the host's, not the checkout's.
  */
 function scriptsRun(unit: string): string[] {
   const exec = activeLines(unit.replace(/\\\n\s*/g, " ")).filter((l) => /^ExecStart(Pre)?=/.test(l)).join("\n");
-  const tokens = [...exec.matchAll(/(?<![\w./-])(?:\/root\/a11y-witness\/)?([\w./-]+\.(?:ts|mjs|cjs|js))\b/g)].map((m) => m[1]);
+  const tokens = [...exec.matchAll(/(?<![\w./-])(?:\/root\/(?:a11y-witness|control)\/)?([\w./-]+\.(?:ts|mjs|cjs|js))\b/g)].map((m) => m[1]);
   return tokens.filter((path) => !path.startsWith("/"));
 }
 
 const absentFrom = (root: string, paths: string[]) => [...new Set(paths.filter((p) => !existsSync(join(root, p))))];
 
-// TODO(#5312 -> plane install, orchestrator): the shipped unit still runs `packages/control/src/fleet-auto-off.ts` (the core's layout).
-// Moving the unit to the control checkout's path is the plane install's, not this row's, so this is a todo until that lands, not a pass.
-test("#4571: every script the unit runs exists in the core it is laid into, and the old `.mjs` line is what this would have caught", { todo: "unit still names packages/control/src; moves with the plane install" }, () => {
+test("#4571: every script the unit runs exists in control's own checkout, and the old `.mjs` line is what this would have caught", () => {
   // The follow step's `-` hides a missing script: from a11ign/a11ign#4268 until #4571 both lay lines logged `Cannot find module` on every firing.
   const unit = shippedUnit("a11y-fleet-auto-off.service");
   const named = scriptsRun(unit);
-  // By PREFIX, so a unit still on `.mjs` fails the absence check below with the script's name, not this one.
-  assert.ok(named.includes(THIS) && named.some((p) => p.startsWith("scripts/lay-layer.")),
-    `the scan finds the scripts it exists for (positive control for the emptiness below), found ${JSON.stringify(named)}`);
-  assert.deepEqual(absentFrom(REPO, named), [], "a script the unit runs that the laid core does not hold");
+  // The positive control for the emptiness below: the scan must find THIS program on the unit as shipped.
+  assert.ok(named.includes(THIS), `the scan finds the script it exists for (positive control for the emptiness below), found ${JSON.stringify(named)}`);
+  assert.deepEqual(absentFrom(REPO, named), [], "a script the unit runs that control's own checkout does not hold");
   // The marker is checked in both directions, against a core that holds exactly what the shipped unit names: it must say nothing there,
   // and it must name the script on the unit as it stood, so it is not a scan that only ever finds the remedy present.
   const core = mkdtempSync(join(tmpdir(), "unit-scripts-"));
@@ -972,8 +977,8 @@ test("#4571: every script the unit runs exists in the core it is laid into, and 
       writeFileSync(join(core, path), "");
     }
     assert.deepEqual(absentFrom(core, scriptsRun(unit)), []);
-    const asItStood = unit.replaceAll("lay-layer.ts", "lay-layer.mjs");
-    assert.deepEqual(absentFrom(core, scriptsRun(asItStood)), ["scripts/lay-layer.mjs"]);
+    const asItStood = unit.replaceAll("fleet-auto-off.ts", "fleet-auto-off.mjs");
+    assert.deepEqual(absentFrom(core, scriptsRun(asItStood)), ["src/fleet-auto-off.mjs"]);
   } finally {
     rmSync(core, { recursive: true, force: true });
   }
