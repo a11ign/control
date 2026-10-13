@@ -75,7 +75,7 @@ export function inventorySources(ansibleCfgText: string): string[] {
     if (!INVENTORY_PATH_SHAPE.test(entry) || entry.split("/").includes("..")) {
       throw new Error(`ansible.cfg inventory entry is not a plain path: ${entry}`);
     }
-    return entry.startsWith("/") ? entry : `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/${entry}`;
+    return entry.startsWith("/") ? entry : `${CONTROL_PLANE_CHECKOUT_PATH}/ansible/${entry}`;
   });
 }
 

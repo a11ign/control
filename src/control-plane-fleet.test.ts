@@ -13,7 +13,7 @@ import { readControlPlaneFleet, inventoryPathFor, macsByHost } from "./control-p
 import { inventoryHosts } from "./fleet-discover.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
-const IN_TREE_FALLBACK = `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`;
+const IN_TREE_FALLBACK = `${CONTROL_PLANE_CHECKOUT_PATH}/ansible/inventory.yml`;
 
 const ANSIBLE_CFG = "[defaults]\ninventory = /etc/a11ign/inventory.yml,inventory.yml\n";
 const GROUP_VARS = "a11y_port: 8765\n";
@@ -108,7 +108,7 @@ test("#1683 MUTATION TARGET: the durable path must be CHECKED, not assumed -- a 
 test("#1683: the real defaults name the same durable path ansible.cfg's own first-listed source does, "
   + "and the real in-tree path this file always read", () => {
   const path = inventoryPathFor({ exists: () => false });
-  assert.match(path, /packages\/control\/ansible\/inventory\.yml$/);
+  assert.match(path, /\/ansible\/inventory\.yml$/);
 });
 
 // #2655: the mac rides on the fleet read. `macsByHost` restates `inventoryHosts` (a cycle keeps it from

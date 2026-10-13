@@ -853,7 +853,7 @@ const driveGate = (chosen: string, reads: () => { path: string, text: string }[]
 };
 
 test("#1343: the gate's sources are ansible.cfg's own -- installed first, the in-tree fallback in the control plane's checkout", () => {
-  assert.deepEqual(inventorySources(ANSIBLE_CFG), [INSTALLED, `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`]);
+  assert.deepEqual(inventorySources(ANSIBLE_CFG), [INSTALLED, `${CONTROL_PLANE_CHECKOUT_PATH}/ansible/inventory.yml`]);
   assert.throws(() => inventorySources("[defaults]\n"), /no `inventory =` line/);
   assert.throws(() => inventorySources("inventory = /etc/x;reboot\n"), /not a plain path/);
   assert.throws(() => inventorySources("inventory = ../../etc/shadow\n"), /not a plain path/);
@@ -895,7 +895,7 @@ test("#1343: a malformed inventory, a workerless one and an unreachable control 
 // gate, is a real risk with no test against it -- only "malformed as the ONLY source" was pinned above.
 // A malformed source BESIDE a good one must still refuse, in EITHER order: this is stricter than
 // Ansible, which merely skips an unparseable source, and refusing is the safe direction to keep.
-const IN_TREE = `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`;
+const IN_TREE = `${CONTROL_PLANE_CHECKOUT_PATH}/ansible/inventory.yml`;
 const MALFORMED = inventoryOf([9]).replace("ansible_host: 192.0.2.9", "ansible_host: 192.0.2.9 trailing");
 
 test("#1362: a malformed source beside a good one refuses the gate, in EITHER order, and asks 0 boxes", async () => {
@@ -916,7 +916,7 @@ test("#1362: a malformed source beside a good one refuses the gate, in EITHER or
 
 test("#1343: a readable inventory asks exactly its workers by inventory name, merges identical sources, and a HOLD among them refuses", async () => {
   const both = [{ path: INSTALLED, text: inventoryOf([2, 3]) },
-    { path: `${CONTROL_PLANE_CHECKOUT_PATH}/packages/control/ansible/inventory.yml`, text: inventoryOf([2, 3]) }];
+    { path: `${CONTROL_PLANE_CHECKOUT_PATH}/ansible/inventory.yml`, text: inventoryOf([2, 3]) }];
   const held = driveGate("deploy.yml", () => both, (workers) => [workers[0].name]);
   const { refusal } = await held.result;
   assert.equal(held.readPaths[0][0], INSTALLED, "the installed inventory is read first, as ansible.cfg orders it");
