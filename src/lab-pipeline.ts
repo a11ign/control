@@ -55,7 +55,7 @@ import { pnpmCliInvocation } from "../../worker-fleet/src/npm-cli-executable.ts"
 // RAW GIT CHECKOUT, and every import it makes has to work without an install.
 // `control-has-no-dependencies.test.ts` asserts that, because the same claim in prose was violated on both
 // machines it described.
-import { refuseUnknownFlags, flagValue } from "../../worker-fleet/src/cli-flags.ts";
+import { refuseUnknownFlags, flagValue } from "./worker-fleet-carried.ts";
 // The TESTED spelling of "which journal is this". See `printUnitLog`.
 import { journalScope } from "./fleet-playbook.ts";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
