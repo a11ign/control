@@ -57,8 +57,8 @@
  *
  * ## It refuses to power anything off when the files it RUNS differ from `main` (#3275, same class as #3269)
  *
- * The timer executes `/root/a11y-witness` on the control plane, and nothing moves that checkout when `main` moves:
- * its only fast-forward is `controlPlaneCheckout()`, a side effect of some play. So a safety property merged to `main`
+ * The timer executes this file from control's own checkout (`/root/control` on the control plane, a11ign#5312), and nothing
+ * moves that checkout when `main` moves except the unit's own follow step (a11ign#5306). So a safety property merged to `main`
  * (a wake proof, a busy check) is absent from the program that actually powers boxes off. Under `--apply`, and only
  * when some worker is about to be powered off, `checkAgainstMain` compares this program's own import closure (derived
  * by walking its `import`s, so a new import is covered the day it lands) plus `sleep.yml` and the two unit files

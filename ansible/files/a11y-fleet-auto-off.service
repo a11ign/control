@@ -23,29 +23,29 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/r
 # guarantee does not depend on it: the `busy`/`no-answer` branches of `autoOffDecision` and `sleep.yml`'s own
 # re-check immediately before the shutdown are what refuse a capturing worker.
 #
-# THE LITERAL PATH IS THE ONLY WAY A STATIC UNIT FILE CAN SAY THIS AT ALL -- it cannot import
-# `control-plane-checkout.ts`'s export the way a TypeScript consumer does, the same reason
-# `a11y-corpus-snapshot.service` names `/opt/a11y` literally for the lab's own checkout
-# (`control-plane-checkout-is-one-fact.test.ts`). `a11y-witness` here is that same guard's own
-# `CHECKOUT_NAME`, read out of `control-plane-checkout.ts`, not a second literal invented for this file.
+# THE LITERAL PATH IS THE ONLY WAY A STATIC UNIT FILE CAN SAY THIS AT ALL -- it cannot import a TypeScript
+# constant the way a consumer does. `/root/control` is control's OWN checkout (a11ign#5312, control#89): the
+# directory `fleet-auto-off.ts` resolves its REPO_ROOT to, and the one `patch_checkout` names in
+# `ansible/patch-schedule.yml`. It is NOT `control-plane-checkout.ts`'s CONTROL_PLANE_CHECKOUT, which names the
+# core's checkout that the fleet plays still enter.
 # `WorkingDirectory` IS HERE BECAUSE THE STATE PATH IS RELATIVE (#2784). `fleet-auto-off.ts` keeps its idle
 # clock at `runs/fleet-auto-off-state.json`, resolved against the process's cwd, and a systemd service starts
 # in `/`: read live 2026-09-30 09:40Z, the first tick of the freshly installed timer died with
 # `ENOENT: open 'runs/fleet-auto-off-state.json'` and so did every one after it, every ten seconds. The
-# by-hand run that proved the shutdown had set `-p WorkingDirectory=/root/a11y-witness`, which is why the
+# by-hand run that proved the shutdown had set its own working directory, which is why the
 # report looked fine. The failure is in the SAFE direction (nothing is powered off), which is also why a
 # green unit suite could not see it. Same literal checkout as ExecStart, for the same reason.
-WorkingDirectory=/root/a11y-witness
+WorkingDirectory=/root/control
 # THE LOADER IS A HOST FACT, NAMED BY ABSOLUTE PATH (#4292, #4341). The file is TypeScript and `/usr/bin/node` strips types only from 24, so the unit says what runs it.
 # A bare `--import tsx` does NOT resolve here (ESM ignores NODE_PATH, and a laid layer has no node_modules); `/opt/a11y-tsx` is one `tsx` installed beside the layer,
 # asserted by `control-host-install.yml`, so a rebuilt control plane that lacks it fails THERE and not as a timer that silently stops deciding.
-ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/a11y-witness/packages/control/src/fleet-auto-off.ts --apply
+ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-auto-off.ts --apply
 # THE CHECKOUT FOLLOWS `main` BEFORE EVERY TICK, OR A MERGE THAT TOUCHES THE CLOSURE STRANDS THE FLEET POWERED ON (#3852, #3846).
-# Nothing else moves `/root/a11y-witness` between deploys, and `fleet-auto-off.ts` refuses `stale-checkout` on any difference
+# Nothing else moves `/root/control` between deploys, and `fleet-auto-off.ts` refuses `stale-checkout` on any difference
 # from `origin/main` (#3275): from about 04:21Z on 2026-10-06 it refused 2,569 times and 15 boxes sat on and idle all day. The
 # guard was right and the checkout drifted, so the remedy is to stop it drifting, not to loosen the guard. The agents host's
 # `a11ign-fleet-watch.service` does this with `agent-org primary:update`; that is not copyable here (no pnpm, no node_modules,
-# ADR 0012), so the steps are git and the layer's own laying script, which needs only node and git.
+# ADR 0012), so the steps are git alone.
 #
 # IN ORDER, each only if the one before it succeeded:
 #   1. No play is running. Ansible loads task files lazily, so moving the tree under `fleet:provision` changes the play
@@ -54,17 +54,9 @@ ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.m
 #   2. Fetch `main`, unless the tick's own fetch (the guard's, throttled to a minute) did it within the minute.
 #   3. `git merge --ff-only origin/main`. Never `checkout`: a checkout a deploy put on another ref is left standing, and the
 #      guard refuses it by name. Where `main` has moved on and this tree cannot fast-forward, it is refused, not forced.
-#   4. `node scripts/lay-layer.ts screenreader-fleet`, AFTER the merge because it reads the pin from the lockfile this merge
-#      brought. The layer is untracked (#3504), so the merge never touches it and the order cannot strand it; only a checkout
-#      that still tracks the old `packages/worker-fleet` (the one-time move off it) needs the layer laid BEFORE any merge,
-#      which `orchestrator` does by hand once. `controlPlaneCheckout()` is not used: it wants the layer as a clone with a
-#      `.git` (exit 4 without one), and the control plane holds it LAID, which is the only shape the guard judges (#3845).
-#   5. `node scripts/lay-layer.ts control`, for the same reason and in the same place (#3976): the guard also judges
-#      `packages/control` against the tag `layers.json` pins for `control` (#3914), and `layers.json` is tracked, so a merge
-#      that moves that pin moves `main` while the laid copy stays at the old tag. From 08:31Z to 08:53Z on 2026-10-07 (#3940
-#      moved the pin to v0.1.5) every tick refused `stale-checkout -- layer control is laid at v0.1.4, main pins v0.1.5` and the
-#      idle workers stayed on, until `orchestrator` laid it by hand. This unit's own `ExecStart` runs AFTER this step, so the
-#      code that reads the verdict is the code the lay just put there. `lab` is not laid: the control plane holds no `packages/lab`.
+#
+# NOTHING ELSE IS LAID HERE. Control's own checkout is the program's root (a11ign#5312), and the core it reads is the published
+# `@a11ign/worker-fleet`, which `pnpm install` in that checkout installs (a11ign#5306, Done-when 2), not this step. A tick lays nothing.
 #
 # NOT `controlPlaneCheckout()`'s lock-free sibling by accident: no lock is taken. `fleet:deploy`'s move is the same
 # `--ff-only` to a commit on `main`, so two movers land on the same line or one is refused, and git's own `index.lock`
@@ -81,6 +73,4 @@ ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --
     a11y-fleet-collect-logs.service a11y-fleet-patch.service) && \
   { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
   { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
-  git merge --ff-only --quiet origin/main && \
-  node scripts/lay-layer.ts screenreader-fleet && \
-  node scripts/lay-layer.ts control'
+  git merge --ff-only --quiet origin/main'
