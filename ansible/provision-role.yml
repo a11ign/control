@@ -138,12 +138,11 @@
 
     - name: The guest is ON the commit it was told to be on
       # ASSERTED, as `deploy.yml` does, never assumed from the step above having exited 0: verification that
-      # shares a failure mode with the action verifies nothing. `a11y_expected_commit`, when a hand run
-      # names one, must be the commit resolved above, so a name that resolved elsewhere fails too.
+      # shares a failure mode with the action verifies nothing. Line 1 is the commit resolved from
+      # `a11y_expected_commit` (or `origin/<ref>`), always full-length, so a hand run naming a short sha or a
+      # branch compares like for like.
       ansible.builtin.assert:
-        that:
-          - role_head.stdout_lines | last | trim == role_head.stdout_lines | first | trim
-          - a11y_expected_commit is not defined or role_head.stdout_lines | last | trim == a11y_expected_commit
+        that: role_head.stdout_lines | last | trim == role_head.stdout_lines | first | trim
         fail_msg: >-
           {{ inventory_hostname }} is on {{ role_head.stdout_lines | last | trim }}, not
           {{ role_head.stdout_lines | first | trim }}. The fetch reported success, so this is the checkout or the
