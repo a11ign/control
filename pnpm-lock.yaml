@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@a11ign/screenreader-fleet':
-        specifier: 0.10.2
-        version: 0.10.2(@a11ign/scorer@0.3.3)(@rstest/core@0.12.3)(typescript@7.0.2)
+        specifier: 0.11.0
+        version: 0.11.0(@a11ign/scorer@0.3.3)(@rstest/core@0.12.3)(typescript@7.0.2)
       '@a11ign/screenreader-worker':
-        specifier: 0.13.0
-        version: 0.13.0
+        specifier: 0.13.1
+        version: 0.13.1
     devDependencies:
       '@a11ign/toolchain':
         specifier: ^0.1.7
@@ -58,13 +58,13 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
-  '@a11ign/screenreader-fleet@0.10.2':
-    resolution: {integrity: sha512-rlyo5VXW/+MPKXQWwdOAlNLQvvcHuvtHFmKAO14DLAqcbatqna7pJgKSIcBt24k0SkuVcb5x6Ks3pG614tCpZw==}
+  '@a11ign/screenreader-fleet@0.11.0':
+    resolution: {integrity: sha512-V4fNZjEToXfX2seAqgb2mAwKTf8/oRPBLsO8EEhnHDJzD/bLGe3jtB4lmtd9vbxQrLRKZW7OcdjUS80NBnmdvQ==}
     engines: {node: '>=20'}
     hasBin: true
 
-  '@a11ign/screenreader-worker@0.13.0':
-    resolution: {integrity: sha512-hX62pfnZehLPUYmeQnR9nTTMtvtQ1tWioF1xFGg4Aet/1DKpUus2B369F1OlOyj1SIDwtqHy825TPZwK6rziig==}
+  '@a11ign/screenreader-worker@0.13.1':
+    resolution: {integrity: sha512-DG1Ws9bkEt3Hxqeh45bMg5o/jTWbg1ybwnMfS8HWnsln7Et6ZPce4b2Lrs1TPdtkhUf802lmw0GRWDKN2n0jfw==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -744,7 +744,7 @@ snapshots:
     dependencies:
       '@a11ign/evidence': 0.3.2
 
-  '@a11ign/screenreader-fleet@0.10.2(@a11ign/scorer@0.3.3)(@rstest/core@0.12.3)(typescript@7.0.2)':
+  '@a11ign/screenreader-fleet@0.11.0(@a11ign/scorer@0.3.3)(@rstest/core@0.12.3)(typescript@7.0.2)':
     dependencies:
       '@a11ign/judge': 0.5.1(@a11ign/scorer@0.3.3)
       '@a11ign/screenreader-worker': 0.9.0
@@ -758,7 +758,7 @@ snapshots:
       - '@rstest/coverage-v8'
       - typescript
 
-  '@a11ign/screenreader-worker@0.13.0':
+  '@a11ign/screenreader-worker@0.13.1':
     dependencies:
       '@guidepup/guidepup': 0.31.0
 

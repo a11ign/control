@@ -71,9 +71,12 @@
 
 - name: Fetch (tags too) and check out each layer, detached, at its pinned commit
   # Over the CLONES: a laid tree has no history to move. NOTHING HERE CHECKS A LAID TREE AGAINST ITS PIN, and
-  # on purpose: the install that follows (`deploy.yml`) re-lays it at the tag the core's lockfile pins, so what is
-  # laid now is not what will run, and judging it would refuse a lockfile bump by the install that applies it. The
-  # lab's check (`lab-layer-checkouts.yml`) judges a laid tree where no install follows.
+  # on purpose: what is laid now is not what the guest will run. The install that follows (`deploy.yml`) does NOT
+  # re-lay the tree (#5546: at the core's pinned commit nothing writes `.layer-ref` or moves `packages/<layer>`), it
+  # resolves the layer's release from the registry into `node_modules/@a11ign/<package>`, and that release is what
+  # runs. So `deploy.yml` judges a laid tree AFTER the install by the version under `node_modules/` against
+  # `deploy-pins.json`'s `version`, and judging the stale tag here would refuse a lockfile bump by the install that
+  # applies it. The lab's check (`lab-layer-checkouts.yml`) judges a laid tree where no install follows.
   # The core's block, repeated per layer in the LAYER's directory: `$LASTEXITCODE` after every call because
   # PowerShell's `$ErrorActionPreference` does not cover native executables (`deploy.yml` records the five
   # boxes that reported `changed` while sitting on the wrong commit); a modified tracked file is dirt on an

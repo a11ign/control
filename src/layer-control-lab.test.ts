@@ -444,11 +444,12 @@ function tasksNamed(file: string, ...names: string[]) {
 }
 
 /** Tasks that run `win_shell`, played on localhost against a fixture core checkout, with the layer list beside them as in the repository. */
-function playGuestTasks({ tasks, vars, extra = [], env }: { tasks: string, vars: object, extra?: string[], env?: Record<string, string> }) {
+function playGuestTasks({ tasks, vars, extra = [], env, pins }: { tasks: string, vars: object, extra?: string[], env?: Record<string, string>, pins?: object }) {
   const play = newDir();
   mkdirSync(join(play, "ansible/tasks"), { recursive: true });
   copyFileSync(resolve(ANSIBLE, "tasks/read-layer-checkouts.yml"), join(play, "ansible/tasks/read-layer-checkouts.yml"));
   writeFileSync(join(play, LIST), JSON.stringify(SEPARATE));
+  if (pins) writeFileSync(join(play, "deploy-pins.json"), JSON.stringify(pins));
   writeFileSync(join(play, "ansible/tasks/under-test.yml"), `${tasks}\n`);
   writeFileSync(join(play, "ansible/play.yml"), [
     "- hosts: localhost", "  gather_facts: false", `  vars: ${JSON.stringify(vars)}`, "  tasks:",
@@ -539,45 +540,85 @@ test("the origin rewrite leaves a laid layer alone, rewrites a clone's, and refu
   assert.equal(coreOrigin(), "https://example.test/the-core.git");
 });
 
-const DEPLOY_AFTER_INSTALL = ["Read each layer's commit AFTER the install", "Each layer is ON its pin after the install, laid or cloned"];
+const DEPLOY_AFTER_INSTALL = [
+  "Which release deploy-pins.json names for each layer",
+  "Read each layer AFTER the install",
+  "Each layer is ON its pin after the install, laid or cloned",
+];
+const PINNED_RELEASE = "1.2.0";
+const pinsFor = (version: string) => ({ layers: { [LAYER]: { package: `@a11ign/${LAYER}`, version, path: LAYER_PATH } } });
 
-test("the deploy checks a laid layer against its pin AFTER the install, and refuses a laid tree at another tag, the core's copy, or a tag nobody holds", (t) => {
+/** What the install leaves under `node_modules/@a11ign/<package>/`: the registry's release, whatever tag the laid tree beside it carries. */
+function installRelease(core: string, version: string | null) {
+  const dir = join(core, "node_modules/@a11ign", LAYER);
+  rmSync(dir, { recursive: true, force: true });
+  if (version === null) return;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: `@a11ign/${LAYER}`, version }));
+}
+
+test("the deploy judges a laid tree by the release the install put under node_modules, which no install re-lays the tree to match (#5546)", (t) => {
   if (!guestPlayable) return t.skip(SKIP_GUEST);
-  const { origin, first, second, layerDir, layOnly, cloneIt, vars } = guestFixture();
+  const { origin, core, second, layOnly, vars } = guestFixture();
   const tasks = tasksNamed("deploy.yml", ...DEPLOY_AFTER_INSTALL);
-  const check = (pin: string) => playGuestTasks({ tasks, vars: { ...vars, inventory_hostname: "a11y-worker-fixture",
-    a11y_layer_checkouts: [{ key: LAYER, value: { path: LAYER_PATH, remote: origin } }], a11y_layer_commits: { [LAYER]: pin } } });
+  const check = (version = PINNED_RELEASE) => playGuestTasks({ tasks, pins: pinsFor(version), vars: { ...vars, inventory_hostname: "a11y-worker-fixture",
+    a11y_layer_checkouts: [{ key: LAYER, value: { path: LAYER_PATH, remote: origin } }], a11y_layer_commits: { [LAYER]: second } } });
+  // THE CASE THIS ROW IS FOR: the tree is laid at 1.0.0 (the FIRST commit), the pin names a later commit and a later release, and the
+  // install put that release under node_modules without touching the tree. Before #5546 this was refused at "is at '<first>'".
   layOnly(LAID_FILES);
-  const atPin = check(first);
-  assert.equal(atPin.status, 0, atPin.output);
-  const wrongPin = check(second);
-  assert.notEqual(wrongPin.status, 0, "laid at 1.0.0 (the first commit), pinned to the second");
-  assert.match(wrongPin.output, new RegExp(`layer ${LAYER} is at '${first}' after the\\s+install, not ${second}`));
-  layOnly({ ".layer-ref": `${TAG_LIGHTWEIGHT}\n`, "src/index.mjs": "export {};\n" });
-  assert.equal(check(second).status, 0, "a lightweight tag names its commit directly");
-  layOnly({ ".layer-ref": `@a11ign/${LAYER}@9.9.9\n`, "src/index.mjs": "export {};\n" });
-  const noTag = check(first);
-  assert.notEqual(noTag.status, 0, "a tag the layer's repository does not hold names no commit");
-  assert.match(noTag.output, /at '' after the\s+install/);
+  installRelease(core, PINNED_RELEASE);
+  const olderTag = check();
+  assert.equal(olderTag.status, 0, olderTag.output);
+  assert.match(olderTag.output, /version 1\.2\.0/, "the reading is the release, so the pass is not an assertion that never ran");
+  // POSITIVE CONTROL, the other direction: a layer that is genuinely at the wrong build still refuses, by name and with both numbers.
+  installRelease(core, "1.0.0");
+  const wrongRelease = check();
+  assert.notEqual(wrongRelease.status, 0, "the install resolved 1.0.0 where the pin names 1.2.0");
+  assert.match(wrongRelease.output, new RegExp(`layer ${LAYER}\\s+is a laid tree and the install put release\\s+'1\\.0\\.0' of @a11ign/${LAYER} under node_modules, not\\s+${PINNED_RELEASE}`));
+  assert.match(wrongRelease.output, /deploy-pins\.json layers\.fixture-layer\.version/, "the message says where the pin came from");
+  installRelease(core, null);
+  const noRelease = check();
+  assert.notEqual(noRelease.status, 0, "no release under node_modules: nothing stands in for the laid layer");
+  assert.match(noRelease.output, /node_modules[\\/]@a11ign[\\/]fixture-layer[\\/]package\.json does not exist/);
+  // The laid tree's own tag is not read at all, so a tag nobody holds or a hostile one changes nothing: the release is the reading.
+  installRelease(core, PINNED_RELEASE);
   layOnly({ ".layer-ref": "../../etc/passwd\n", "src/index.mjs": "export {};\n" });
-  assert.match(check(first).output, /does not hold a tag/);
+  assert.equal(check().status, 0, "the tag is not consulted and no remote is asked");
   layOnly(CORE_TREE);
-  const coreTree = check(first);
-  assert.notEqual(coreTree.status, 0, "`src/` with no `.layer-ref` is the core's copy: no pin can be read from it");
+  const coreTree = check();
+  assert.notEqual(coreTree.status, 0, "`src/` with no `.layer-ref` is the core's copy, and a release under node_modules does not make it the layer");
   assert.match(coreTree.output, /neither a clone of fixture-layer nor a laid tree/);
-  cloneIt();
-  git(layerDir, "checkout", "-q", "--detach", first);
-  assert.equal(check(first).status, 0, "a layer still held as a clone is read at HEAD: the control for the laid cases");
-  assert.notEqual(check(second).status, 0);
+  layOnly({ ".layer-ref": `${TAG_ANNOTATED}\n` });
+  assert.notEqual(check().status, 0, "the marker alone, with no `src/`, is not a laid tree");
 });
 
-test("the deploy's post-install read sits AFTER the install and BEFORE the worker restarts, and reads the same pin the merge asserted", () => {
+test("the deploy still judges a layer held as a CLONE by its commit, and never by the release under node_modules", (t) => {
+  if (!guestPlayable) return t.skip(SKIP_GUEST);
+  const { origin, core, first, second, layerDir, cloneIt, vars } = guestFixture();
+  const tasks = tasksNamed("deploy.yml", ...DEPLOY_AFTER_INSTALL);
+  const check = (pin: string) => playGuestTasks({ tasks, pins: pinsFor(PINNED_RELEASE), vars: { ...vars, inventory_hostname: "a11y-worker-fixture",
+    a11y_layer_checkouts: [{ key: LAYER, value: { path: LAYER_PATH, remote: origin } }], a11y_layer_commits: { [LAYER]: pin } } });
+  cloneIt();
+  git(layerDir, "checkout", "-q", "--detach", first);
+  installRelease(core, "0.0.1");
+  const atPin = check(first);
+  assert.equal(atPin.status, 0, `${atPin.output}\nA clone at its pin passes whatever node_modules holds: the commit is its reading`);
+  assert.match(atPin.output, new RegExp(`commit ${first}`));
+  const wrongPin = check(second);
+  assert.notEqual(wrongPin.status, 0, "cloned at the first commit, pinned to the second");
+  assert.match(wrongPin.output, new RegExp(`layer ${LAYER}\\s+is at '${first}' after the\\s+install, not\\s+${second}`));
+  installRelease(core, PINNED_RELEASE);
+  assert.notEqual(check(second).status, 0, "a release that matches the pin does not excuse a clone on another commit");
+});
+
+test("the deploy's post-install read sits AFTER the install and BEFORE the worker restarts, and a clone is still judged by the commit the merge asserted", () => {
   const code = codeText(read("packages/control/ansible/deploy.yml"));
-  const order = [/- name: Install dependencies/, /- name: Read each layer's commit AFTER the install/, /- name: Restart the worker task/]
+  const order = [/- name: Install dependencies/, /- name: Read each layer AFTER the install/, /- name: Restart the worker task/]
     .map((marker) => code.search(marker));
   assert.ok(order.every((at) => at >= 0), "a task this test names has moved");
   assert.deepEqual(order, [...order].sort((a, b) => a - b), "install, then the post-install read, then the restart");
-  assert.match(code, /that: \(item\.stdout \| default\(''\) \| trim\) == a11y_layer_commits\[item\.item\.key\]/);
+  assert.match(code, /'commit ' ~ a11y_layer_commits\[item\.item\.key\]/);
+  assert.match(code, /'version ' ~ a11y_layer_pins\[item\.item\.key\]\.version/);
 });
 
 const LAB_AFTER_INSTALL = ["Read each layer's commit AFTER the install", "Each layer is ON its pin after the install, laid or cloned"];
