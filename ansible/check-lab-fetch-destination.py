@@ -63,9 +63,18 @@ def landed_at(task, artifact, source, scratch):
     """The destination Ansible computes for `task`, with `playbook_dir` = <root>/ansible; also the root it was laid in."""
     root = Path(tempfile.mkdtemp(dir=scratch))
     (root / "ansible").mkdir()
+    (root / "tmp").mkdir()
     probe = root / "ansible" / "probe.yml"
     probe.write_text(yaml.safe_dump(probe_play(task, artifact, source)))
-    env = {**os.environ, "ANSIBLE_STDOUT_CALLBACK": "json", "ANSIBLE_LOCALHOST_WARNING": "False"}
+    # Ansible writes its temp files under $HOME by default, which a read-only home refuses before the probe runs. Keeping
+    # them in the scratch root means the check needs nothing writable but its own temporary directory.
+    env = {
+        **os.environ,
+        "ANSIBLE_STDOUT_CALLBACK": "json",
+        "ANSIBLE_LOCALHOST_WARNING": "False",
+        "ANSIBLE_LOCAL_TEMP": str(root / "tmp"),
+        "ANSIBLE_REMOTE_TEMP": str(root / "tmp"),
+    }
     result = subprocess.run(
         ["ansible-playbook", "-i", "localhost,", probe.name],
         cwd=probe.parent, env=env, capture_output=True, text=True,
