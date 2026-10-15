@@ -14,14 +14,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+import { validRef, guestCommitVars, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
   displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
@@ -33,6 +33,7 @@ import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTER
   from "./fleet-playbook.ts";
 import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { protocolVerdict } from "@a11ign/screenreader-fleet/protocol-guard";
 
@@ -1862,4 +1863,103 @@ test("#5030 2: the take-over is BOUNDED: a wake lock that is somehow always fres
   assert.match(step.refusal ?? "", /^REFUSING patch\.yml: the fleet lock is held by wake/);
   assert.equal(ended.length, 2);
   assert.equal(takes, 3, "one take, then one after each end");
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// #5512: `fleet:provision` asked every guest to fast-forward to a CONTROL commit, which a guest (a clone of the core)
+// does not hold, and nothing asserted the guest landed on anything.
+
+test("#5512: provision-role.yml sends no control commit to guests that hold the core; every other play still gets the pair", () => {
+  const given = { ref: "HEAD", expected: "aa3db0764634f8ea3d0112ace0f90c4223dabfd4" };
+  assert.equal(guestCommitVars({ chosen: "provision-role.yml", ...given }), "",
+    "a control sha is not an object in a guest's repository, so naming it there is the defect");
+  // The positive control: the emptiness above would also pass if the helper returned "" for everything.
+  assert.equal(guestCommitVars({ chosen: "deploy.yml", ...given }),
+    ` -e a11y_git_ref=HEAD -e a11y_expected_commit=${given.expected}`);
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+  assert.equal(source.split("-e a11y_expected_commit=").length - 1, 1,
+    "the dispatcher builds that pair in ONE place (guestCommitVars), so no play can bypass the rule");
+  assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, expected \}\)\}/);
+});
+
+/** The play's own tasks, by name, parsed with PyYAML (this package takes no npm dependency, ADR 0012). */
+function playTasks(names: string[]): Record<string, unknown>[] {
+  const script = "import sys,json,yaml\nplay=yaml.safe_load(open(sys.argv[1]))[0]\n"
+    + "print(json.dumps([t for t in play['pre_tasks'] if t.get('name') in sys.argv[2:]]))";
+  const out = execFileSync("python3", ["-I", "-c", script, fileURLToPath(new URL("../ansible/provision-role.yml", import.meta.url)), ...names],
+    { encoding: "utf8" });
+  return JSON.parse(out) as Record<string, unknown>[];
+}
+
+const HAVE_PROVISION_TOOLS = ["ansible-playbook", "pwsh"].every((tool) => spawnSync(tool, ["--version"], { encoding: "utf8" }).status === 0);
+const NO_PROVISION_TOOLS = "ansible-playbook or pwsh is not installed on this machine, so the play's guest script cannot be run (the control plane has both)";
+const FAST_FORWARD = "Fast-forward the guest checkout so the role acts on THIS version";
+const LANDED = "The guest is ON the commit it was told to be on";
+
+/**
+ * Runs the REAL fast-forward script and the REAL assertion out of provision-role.yml against a throwaway guest: only the module
+ * is swapped (`win_shell` -> `shell` under `pwsh`, because this machine is not Windows) and nothing else of either task is touched.
+ * The core is a local repository of two commits; the guest is a clone of it parked on the first, or on a commit of its own.
+ */
+function provisionGuest({ guestAt, expect, extra = {} }: { guestAt: "behind" | "diverged"; expect?: "first" | "second"; extra?: Record<string, string> }):
+  { status: number | null; out: string; head: string; first: string; second: string; } {
+  const dir = mkdtempSync(join(tmpdir(), "provision-role-"));
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args],
+    { cwd, encoding: "utf8", env: sandboxGitEnv({ GIT_CONFIG_GLOBAL: "/dev/null" }) }).trim();
+  const core = join(dir, "core");
+  const guest = join(dir, "guest");
+  git(dir, "init", "-q", "-b", "main", core);
+  git(core, "commit", "-q", "--allow-empty", "-m", "first");
+  const first = git(core, "rev-parse", "HEAD");
+  git(dir, "clone", "-q", core, guest);
+  git(core, "commit", "-q", "--allow-empty", "-m", "second");
+  const second = git(core, "rev-parse", "HEAD");
+  if (guestAt === "diverged") git(guest, "commit", "-q", "--allow-empty", "-m", "committed on the guest");
+  const [fastForward, landed] = [FAST_FORWARD, LANDED].map((name) => playTasks([name])[0]!);
+  const shellTask: Record<string, unknown> = { ...fastForward, "ansible.builtin.shell": fastForward["ansible.windows.win_shell"], args: { ...(fastForward.args as object), executable: "pwsh" } };
+  delete shellTask["ansible.windows.win_shell"];
+  const playbook = join(dir, "play.json");
+  writeFileSync(playbook, JSON.stringify([{ hosts: "all", gather_facts: false, vars: { a11y_repo_path: guest }, tasks: [shellTask, landed] }]));
+  const ran = spawnSync("ansible-playbook", ["-i", "localhost,", "-c", "local", playbook, "-e", JSON.stringify({ ...extra, ...(expect ? { a11y_expected_commit: expect === "first" ? first : second } : {}) })],
+    { encoding: "utf8", env: sandboxGitEnv({ ANSIBLE_CONFIG: "", ANSIBLE_NOCOLOR: "1" }) });
+  return { status: ran.status, out: `${ran.stdout}${ran.stderr}`, head: git(guest, "rev-parse", "HEAD"), first, second };
+}
+
+test("#5512: the real fast-forward lands the guest on the commit it resolved, and the assertion passes", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  const ran = provisionGuest({ guestAt: "behind", extra: { a11y_git_ref: "main" } });
+  assert.equal(ran.status, 0, ran.out);
+  assert.equal(ran.head, ran.second, "the guest moved from the first commit to the core's tip");
+  const named = provisionGuest({ guestAt: "behind" });
+  assert.equal(named.status, 0, "`origin/main` is the play's own default when no ref is given");
+  assert.equal(named.head, named.second);
+});
+
+test("#5512: a commit the guest does not hold fails the box and names it -- the 15-of-15 silent success", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  const control = "aa3db0764634f8ea3d0112ace0f90c4223dabfd4";
+  const ran = provisionGuest({ guestAt: "behind", extra: { a11y_expected_commit: control } });
+  assert.notEqual(ran.status, 0, ran.out);
+  assert.match(ran.out, new RegExp(`${control} is not a commit in this guest's repository`));
+  assert.equal(ran.head, ran.first, "and the checkout was left where it was");
+});
+
+test("#5512: a guest that cannot fast-forward fails the box instead of reporting the stale HEAD", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  const ran = provisionGuest({ guestAt: "diverged" });
+  assert.notEqual(ran.status, 0, ran.out);
+  assert.match(ran.out, /git merge failed with/);
+  assert.notEqual(ran.head, ran.second, "the positive control above lands on the tip, so this guest really did not");
+});
+
+test("#5512: the assertion fails a guest whose HEAD is not the commit it resolved", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  // The merge SUCCEEDS here ("already up to date": the first commit is an ancestor of the diverged guest's HEAD) and HEAD is
+  // elsewhere, which is exactly what only the assertion can see.
+  const ran = provisionGuest({ guestAt: "diverged", expect: "first" });
+  assert.notEqual(ran.status, 0, ran.out);
+  assert.match(ran.out, /is on [0-9a-f]{40}, not [0-9a-f]{40}/);
+});
+
+test("#5512: nothing that acts on the checkout runs before the assertion", () => {
+  const play = readFileSync(fileURLToPath(new URL("../ansible/provision-role.yml", import.meta.url)), "utf8");
+  const executable = play.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  assert.ok(executable.indexOf(LANDED) > executable.indexOf(FAST_FORWARD) && executable.indexOf(LANDED) < executable.indexOf("tasks/layer-checkouts.yml"));
+  assert.doesNotMatch(executable, /rev-parse --short/, "a short sha is not comparable to a full one");
 });

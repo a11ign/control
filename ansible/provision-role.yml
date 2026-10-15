@@ -119,13 +119,35 @@
         # not shipped today, which is exactly why this is worth setting NOW -- adding one would silently
         # break provisioning on every box, and the failure would read as a broken guest checkout.
       ansible.windows.win_shell: |
-        git -c core.hooksPath=a11y-no-hooks fetch --quiet origin
-        git -c core.hooksPath=a11y-no-hooks merge --ff-only --quiet {{ a11y_expected_commit | default('origin/' ~ (a11y_git_ref | default('main'))) }}
-        git -c core.hooksPath=a11y-no-hooks rev-parse --short HEAD
+        # EACH GIT CALL IS CHECKED (#5512). This was three bare commands, so the exit status was `rev-parse`'s
+        # and a `merge` that could not run -- the commit was not an object in the guest's repository -- was
+        # invisible: 15 of 15 boxes printed `changed` and "provisioning from 5fcf95e0a" while five days stale.
+        function Run($what) { & git -c core.hooksPath=a11y-no-hooks @args; if ($LASTEXITCODE -ne 0) { throw "git $what failed with $LASTEXITCODE" } }
+        Run "fetch" fetch --quiet origin
+        # Resolved HERE, on the guest, where the object is or is not. Line 1 is the commit this box was asked
+        # to be on and the last line is where it is: the next task compares them.
+        $target = git -c core.hooksPath=a11y-no-hooks rev-parse --verify --quiet "{{ a11y_expected_commit | default('origin/' ~ (a11y_git_ref | default('main'))) }}^{commit}"
+        if ($LASTEXITCODE -ne 0 -or -not $target) { throw "{{ a11y_expected_commit | default('origin/' ~ (a11y_git_ref | default('main'))) }} is not a commit in this guest's repository" }
+        Write-Output $target
+        Run "merge" merge --ff-only --quiet $target
+        git -c core.hooksPath=a11y-no-hooks rev-parse HEAD
       args:
         chdir: "{{ a11y_repo_path }}"
       register: role_head
       changed_when: true
+
+    - name: The guest is ON the commit it was told to be on
+      # ASSERTED, as `deploy.yml` does, never assumed from the step above having exited 0: verification that
+      # shares a failure mode with the action verifies nothing. Line 1 is the commit resolved from
+      # `a11y_expected_commit` (or `origin/<ref>`), always full-length, so a hand run naming a short sha or a
+      # branch compares like for like.
+      ansible.builtin.assert:
+        that: role_head.stdout_lines | last | trim == role_head.stdout_lines | first | trim
+        fail_msg: >-
+          {{ inventory_hostname }} is on {{ role_head.stdout_lines | last | trim }}, not
+          {{ role_head.stdout_lines | first | trim }}. The fetch reported success, so this is the checkout or the
+          fast-forward being refused -- usually a guest committed on locally. `git -C {{ a11y_repo_path }}
+          status` on the box says which. Nothing past this point has run on it.
 
     - name: Put each layer that has its own repository on its pinned commit
       # The expected commit is a PAIR (core, layer), and the layer's half is its own fetch, merge and assert in
@@ -134,7 +156,7 @@
 
     - name: Say which version
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }} provisioning from {{ role_head.stdout | trim }}"
+        msg: "{{ inventory_hostname }} provisioning from {{ (role_head.stdout_lines | last | trim)[:12] }}"
 
   roles:
     - role: worker

@@ -918,6 +918,24 @@ function endFleetLock(chosen: string) {
 }
 
 /**
+ * THE PLAYS WHOSE GUEST CHECKOUT IS THE CORE'S, NOT CONTROL'S (#5512). `ref` and `expected` are resolved in THIS repository
+ * (control), and a guest's `a11y-witness` checkout is a clone of the core, whose history holds no control commit: asked to
+ * `merge --ff-only` one, `provision-role.yml` failed inside a one-shell script whose exit status was its last command's, and
+ * all 15 boxes said `provisioning from 5fcf95e0a` while sitting on a checkout five days stale (read 2026-10-15).
+ *
+ * So a play that fast-forwards the CORE sends neither: the guest's own default (`origin/main`) is the core's tip, and the play
+ * resolves and ASSERTS it on the guest, where the object is. `deploy.yml` is not in this set: it asserts the pair it is handed
+ * and fails loudly, and what a core pin for it should be is a decision of its own.
+ */
+const CORE_FAST_FORWARD_PLAYBOOKS = ["provision-role.yml"];
+
+/** The `-e` pair every other play gets (`a11y_git_ref`, `a11y_expected_commit`), and nothing for a core-fast-forward one. */
+export function guestCommitVars({ chosen, ref, expected }: { chosen: string; ref: string; expected: string; }): string {
+  if (CORE_FAST_FORWARD_PLAYBOOKS.includes(chosen)) return "";
+  return ` -e a11y_git_ref=${ref} -e a11y_expected_commit=${expected}`;
+}
+
+/**
  * Start the playbook on the control plane as a named systemd unit, and return that unit's name.
  *
  * A PHASE, not a name restating its code: "get it running somewhere it will survive me" is a distinct
@@ -988,11 +1006,10 @@ try {
     // dispatch path does not. A verification that exercises a different invocation from the one that ships
     // is this repo's most-recorded defect, and it is the reason to remove the flag rather than to point it
     // at the new path: one source of truth, in the file every playbook already honours.
-    + `ansible-playbook ${chosen} -e a11y_git_ref=${ref}`
     // The COMMIT that ref resolves to here, so each guest can assert it landed on it rather than the
     // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
     // the guests fetch; this catches the fetch silently not taking.
-    + ` -e a11y_expected_commit=${expected}`
+    + `ansible-playbook ${chosen}${guestCommitVars({ chosen, ref, expected })}`
     // The pair's second half: each layer that lives in its own repository, pinned to ITS commit (#3395).
     + layerCommitsExtraVars(layerCommits)
     // The control-plane address ALREADY resolved above (env var or its installed file, #285), so
