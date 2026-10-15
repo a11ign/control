@@ -459,3 +459,39 @@ test("#4363 BARE_TAGS_FROM is a second copy of the core's, and releaseTag agrees
   }
   assert.equal(theirs.releaseTag("@a11ign/screenreader-fleet", "0.5.3"), "v0.5.3", "positive control: the core's own function was reached and does flatten");
 });
+
+// ---- a PUBLISHED layer answers layerCodeVersion from its release, with no checkout (#5540) ---------------------------------------
+
+/** A plane holding the layer only as `node_modules/<package>/dist/code-version.mjs`, whose no-argument `codeVersion()` answers `stamp`. */
+function releaseOnlyPlane(stamp: string | null): string {
+  const root = mkdtempSync(join(tmpdir(), "layer-release-"));
+  if (stamp !== null) {
+    const dist = join(root, "node_modules", PUBLISHED_PACKAGE, "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, "code-version.mjs"), `export const codeVersion = (dir) => ${JSON.stringify(stamp)} + (dir === undefined ? "" : "-hashed");\n`);
+  }
+  return root;
+}
+
+const publishedLayer = { path: "packages/nvda-worker", package: PUBLISHED_PACKAGE, version: PUBLISHED_VERSION };
+const codeVersionOn = (root: string, layer: Record<string, string>) => layersFrom({ manifest: { layers: { "nvda-worker": layer } }, root }).layerCodeVersion("nvda-worker");
+
+test("#5540 a published layer with no packages/<layer> checkout answers with the release's own stamp", async () => {
+  const root = releaseOnlyPlane("dbe7c8cf55f930ba");
+  try { assert.equal(await codeVersionOn(root, publishedLayer), "dbe7c8cf55f930ba"); } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#5540 a layer that HAS a checkout is hashed from src/ even when it declares a release", async () => {
+  const root = hasherLayer(["code-version.ts"], "checkout");
+  try {
+    assert.equal(await codeVersionOn(root, { ...publishedLayer, path: "elsewhere" }), "checkout from code-version.ts");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#5540 a layer declaring neither a checkout nor an installed release refuses, naming both", async () => {
+  const undeclared = releaseOnlyPlane(null);
+  try {
+    await assert.rejects(codeVersionOn(undeclared, { path: "packages/nvda-worker" }), /does not exist: check it out there/);
+    await assert.rejects(codeVersionOn(undeclared, publishedLayer), new RegExp(`packages/nvda-worker.*${PUBLISHED_PACKAGE} is not installed`));
+  } finally { rmSync(undeclared, { recursive: true, force: true }); }
+});
