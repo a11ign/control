@@ -9,7 +9,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { PLAYBOOKS, patchRefusal, patchOutcome, patchPlan, patchBoxOf, patchRunRecordCommand, PATCH_RUN_RECORD,
@@ -377,8 +380,34 @@ test("#4905: the dispatch CALLS the target's extra vars and the gate's budget --
   assert.match(PLAYBOOK_SOURCE, /followUnit\(unit, patchGate\.followBudgetMs\)/);
 });
 
-test("#5506: the patch-window unit carries A11Y_PVE_KEY from a required variable, never a committed value", () => {
-  assert.match(SCHEDULE_YML, /Environment=A11Y_PVE_KEY=\{\{ patch_plane_key \}\}/);
+// RENDERED, NOT READ (#5506, reviewer-control-100): the real play's own `vars` go through the real `ansible-playbook`
+// templating on localhost, and the unit file it would lay is what is asserted.
+function renderPatchServiceUnit(planeKey: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "patch-unit-"));
+  const out = join(dir, "unit.service");
+  const extract = spawnSync("python3", ["-I", "-c",
+    "import sys,json,yaml;plays=yaml.safe_load(open(sys.argv[1]));"
+    + "print(json.dumps(next(p for p in plays if 'patch_service_unit' in p.get('vars',{}))['vars']))",
+    fileURLToPath(new URL("../ansible/patch-schedule.yml", import.meta.url))], { encoding: "utf8" });
+  assert.equal(extract.status, 0, extract.stderr);
+  const playbook = [{ hosts: "localhost", connection: "local", gather_facts: false, vars: JSON.parse(extract.stdout),
+    tasks: [{ "ansible.builtin.copy": { content: "{{ patch_service_unit }}", dest: out } }] }];
+  writeFileSync(join(dir, "play.json"), JSON.stringify(playbook));
+  const run = spawnSync("ansible-playbook", ["-i", "localhost,", "-e", JSON.stringify({ patch_plane_key: planeKey }), join(dir, "play.json")],
+    { encoding: "utf8", env: { ...process.env, ANSIBLE_LOCALHOST_WARNING: "false" } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  const unit = readFileSync(out, "utf8");
+  rmSync(dir, { recursive: true, force: true });
+  return unit;
+}
+
+test("#5506: the RENDERED patch-window unit carries the key path it was given, and ExecStart is control's checkout", () => {
+  const unit = renderPatchServiceUnit("/plane/key_for_test");
+  assert.match(unit, /^Environment=A11Y_PVE_KEY=\/plane\/key_for_test$/m);
+  assert.match(unit, /^ExecStart=.*\/root\/control\/src\/fleet-playbook\.ts --playbook=patch\.yml/m);
+  assert.doesNotMatch(unit, /a11y-witness\/packages\/control/);
+});
+
+test("#5506: the first play refuses an empty key path (the guard, read off the file; its negative control is the render above)", () => {
   assert.match(SCHEDULE_YML, /patch_plane_key \| default\('', true\) \| length > 0/);
-  assert.match(SCHEDULE_YML, /^ {4}patch_plane_key: ""$/m);
 });
