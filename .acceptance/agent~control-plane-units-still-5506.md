@@ -11,7 +11,7 @@ Closes a11ign/a11ign#5506
 Acceptance:
 
 ```bash
-cd /home/agent/repos/control-wt-5506 && node --import tsx --test src/fleet-patch.test.ts
+cd /home/agent/repos/control-wt-5506 && pnpm exec rstest run --config scripts/rstest/rstest.config.ts --include 'src/fleet-patch.test.ts'
 ```
 
 Mutation: none -- the test is a text pin of one rendered line; removing the line turns it red by construction.
