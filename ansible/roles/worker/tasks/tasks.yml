@@ -30,9 +30,12 @@
     name: "{{ worker_task_name }}"
     description: a11ign NVDA capture worker
     actions:
-      - path: "{{ worker_repo_path }}\\packages\\nvda-worker\\src\\run-server.cmd"
+      # The published launcher, the file the provision stamp hashes (ADR 0045 cut 6). Argument 2 is the working
+      # directory, which the launcher refuses to start without: the server writes provision-revision.txt and
+      # worker.log into it, so it is the repo root the laid launcher used to cd to.
+      - path: "{{ worker_repo_path }}\\node_modules\\@a11ign\\screenreader-worker\\launcher\\run-server.cmd"
         # Quoted because the path contains spaces.
-        arguments: '"{{ node_exe.output | first }}"'
+        arguments: '"{{ node_exe.output | first }}" "{{ worker_repo_path }}"'
     username: "{{ ansible_user }}"
     # MANDATORY. A service, or anything launched over plain SSH, has no desktop — and guidepup reports
     # that as "nvda.start failed: NVDA is not supported", which reads like a broken install and is not
