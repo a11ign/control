@@ -73,7 +73,7 @@ import { sandboxGitEnv } from "./git-safe-env.ts";
 // code-drift and pnpm helpers above are — but ADR 0012's surface rule stands for anything else:
 // `control-has-no-dependencies.test.ts` allows no other package-name import, and asserts it transitively.
 import { refuseUnknownFlags, flagValue, WORKER_GROUP, groupPerLine } from "./worker-fleet-carried.ts";
-import { LAYER_PINNED, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
+import { LAYER_PINNED, installedLayersJudged, installedLayersRead, manifestOf, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
@@ -963,9 +963,40 @@ const REAL_START_DEPS: StartPlaybookDeps = { ssh, takeLock: takeFleetLockOrExit,
  * BEFORE the write, by what `ssh` was asked, rather than by where two lines sit in `main`.
  */
 export function moveControlPlane({ ref, expected, layerCommits }: { ref: string; expected: string; layerCommits: Record<string, string>; },
-  deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> = REAL_START_DEPS): void {
+  deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> & PlaneRefusal = REAL_START_DEPS): void {
   deps.declaredCore();
+  // #5556: the installed layers are READ here, in the function every run's first write goes through, so the order is observable by what `ssh` is asked.
+  const lagging = installedLayersRefusal(deps);
+  if (lagging) {
+    (deps.refuse ?? refuseWithExit)(lagging);
+    return;
+  }
   deps.ssh(controlPlaneCheckout(ref, expected, layerCommits));
+}
+
+/** How a refusal is said and ended: the notes go to stderr and the run exits 2. A test replaces both, and `refuse` may throw. */
+interface PlaneRefusal {
+  say?: (line: string) => void;
+  refuse?: (text: string) => never;
+}
+function refuseWithExit(text: string): never {
+  process.stderr.write(`${text}\n`);
+  return process.exit(2);
+}
+
+/**
+ * The plane's installed layers against its own lockfile, asked by `moveControlPlane` BEFORE it writes, and only read (#5556). A merged pin bump reaches the
+ * plane's HEAD by `git merge --ff-only` and nothing installs afterwards, so HEAD can hold a lockfile that `node_modules/` does not: the move's
+ * own judgement then refuses AFTER the merge, spending the first write of a covered run on a fact one read could have named. Where the plane is
+ * in that state this says both release numbers and that `pnpm install --frozen-lockfile` is the remedy, which is a write to the control plane
+ * and is NOT made here (it waits on a ruling, #5155). Returns the refusal to print, or null; notes are printed either way.
+ */
+export function installedLayersRefusal(deps: Pick<StartPlaybookDeps, "ssh"> & Pick<PlaneRefusal, "say"> = REAL_START_DEPS): string | null {
+  const manifest = manifestOf(readDeployPins());
+  const read = String(deps.ssh(installedLayersRead(manifest), { capture: true }));
+  const { refusal, notes } = installedLayersJudged(manifest, read);
+  for (const note of notes) (deps.say ?? ((line) => process.stderr.write(`${line}\n`)))(`  note: ${note}`);
+  return refusal;
 }
 
 /**

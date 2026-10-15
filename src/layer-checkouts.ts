@@ -286,6 +286,60 @@ function installedJudgement({ name, published }: { name: string; published: { pa
 }
 
 /**
+ * ONE READ, BEFORE ANY WRITE: what each published layer is on the plane, beside what the plane's own lockfile resolves for it (#5556). The move's
+ * judgement above refuses AFTER `git merge --ff-only` has run, and a pin bump leaves the plane's HEAD on the new lockfile with `node_modules/`
+ * one release behind (control#109: 0.13.0 installed, 0.13.1 resolved), so the first write of a covered, once-only run stopped there. This is the same
+ * question asked first and only read: one line per published layer, `<name> <held> <locked>`, where `held` is `-` for a layer the move judges
+ * another way (a clone, a laid tree), `none` for no installed release, and `locked` is `none` when the lockfile names none. The lockfile's
+ * IMPORTER entry answers, not a grep for `<package>@`, because a transitive `screenreader-worker@0.9.0` sits in the same file.
+ */
+export function installedLayersRead(manifest: Manifest): string {
+  const reads = Object.entries(manifest.layers).flatMap(([name, layer]) => {
+    const published = publishedOf(name, layer);
+    if (!published || !LAYER_REF.test(layer.path) || layer.path.includes("..")) return [];
+    const where = `${CONTROL_PLANE_CHECKOUT_PATH}/${layer.path}`;
+    const file = `${CONTROL_PLANE_CHECKOUT_PATH}/node_modules/${published.package}/package.json`;
+    const lock = `${CONTROL_PLANE_CHECKOUT_PATH}/pnpm-lock.yaml`;
+    return [`( if [ -d ${where}/.git ] || { [ -f ${where}/.layer-ref ] && [ -d ${where}/src ]; }; then held=-; `
+      + `else held=$(sed -n 's/^ *"version": *"\\([^"]*\\)".*/\\1/p' ${file} 2>/dev/null | head -n 1); fi; `
+      + `locked=$(grep -A2 "^      '${published.package}':" ${lock} 2>/dev/null `
+      + `| sed -n 's/^ *version: *\\([0-9][0-9.]*\\).*/\\1/p' | head -n 1); `
+      + `printf '%s %s %s\\n' ${name} "\${held:-none}" "\${locked:-none}" )`];
+  });
+  return reads.join("; ");
+}
+
+/**
+ * What `installedLayersRead`'s output says, as the move will judge it. A REFUSAL only where the plane's HEAD already holds the lockfile that
+ * declares the release and `node_modules/` does not: that is the state `pnpm install` repairs and the move cannot, so the run would be spent
+ * for nothing. Where the plane's HEAD is itself behind (its lockfile names ANOTHER release), the move is what brings it
+ * forward and an install before it would install the OLD lockfile, so that is a NOTE and the run proceeds to the move's own judgement.
+ * A layer the read gave no line for, or whose lockfile entry could not be read, is refused rather than read as behind or in step: absence is not agreement.
+ */
+export function installedLayersJudged(manifest: Manifest, output: string): { refusal: string | null; notes: string[]; } {
+  const rows = new Map(output.split("\n").map((line) => line.trim().split(/\s+/)).filter((cells) => cells.length === 3).map(([name, held, locked]) => [name, { held, locked }]));
+  const refusals: string[] = [];
+  const notes: string[] = [];
+  for (const [name, layer] of Object.entries(manifest.layers)) {
+    const published = publishedOf(name, layer);
+    if (!published) continue;
+    const row = rows.get(name);
+    const label = `layer ${name} (${published.package})`;
+    if (!row) { refusals.push(`${label}: the read of ${CONTROL_PLANE_CHECKOUT_PATH} returned no line for it, so its installed release is not known`); continue; }
+    if (row.held === "-") continue;
+    const said = `${label}: ${row.held === "none" ? "no release is installed" : `installed ${row.held}`} under ${CONTROL_PLANE_CHECKOUT_PATH}/node_modules, `
+      + `the plane's lockfile resolves ${row.locked === "none" ? "no release" : row.locked}, deploy-pins.json declares ${published.version}`;
+    if (row.locked === "none") refusals.push(`${said}: the lockfile names no release for it (or could not be read), so whether what is installed is what it resolves is not known`);
+    else if (row.held === published.version) continue;
+    else if (row.locked === published.version) refusals.push(said);
+    else notes.push(`${said}: the plane's checkout is behind the declaration, so the move comes first and its layer judgement will then refuse until pnpm install --frozen-lockfile is run in ${CONTROL_PLANE_CHECKOUT_PATH}`);
+  }
+  if (refusals.length === 0) return { refusal: null, notes };
+  return { refusal: `REFUSING before the control plane is written to: ${refusals.join("; ")}. `
+    + `Run pnpm install --frozen-lockfile in ${CONTROL_PLANE_CHECKOUT_PATH} (a write to the plane that this command does not make), then run again.`, notes };
+}
+
+/**
  * A clone is moved to the pin. TAGS ARE FETCHED, because a release's commit can be only a tag: `screenreader-worker` v0.4.0 is a version
  * commit that no branch holds, and `git fetch origin` (heads only) left `git checkout` to die with "reference is not a tree" (#4150).
  */

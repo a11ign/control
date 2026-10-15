@@ -1900,8 +1900,10 @@ test("#5515: a missing core pin refuses BEFORE the control plane is written to (
   // The positive control: with a pin the same call DOES write, once, so the empty list above is the refusal and not a no-op.
   const order: string[] = [];
   moveControlPlane({ ref: "HEAD", expected: "a".repeat(40), layerCommits: {} },
-    { ssh: (command) => { order.push("ssh"); return command; }, declaredCore: () => { order.push("pin"); return "7".repeat(40); } });
-  assert.deepEqual(order, ["pin", "ssh"], "the pin is read, then the control plane is written to");
+    { ssh: (command, options) => { order.push("ssh"); return options?.capture ? "nvda-worker 0.13.1 0.13.1\nscreenreader-fleet 0.11.0 0.11.0\n" : command; },
+      declaredCore: () => { order.push("pin"); return "7".repeat(40); },
+      refuse: () => { throw new Error("the plane's installed layers read as lagging"); } });
+  assert.deepEqual(order, ["pin", "ssh", "ssh"], "the pin is read, the plane's layers are read, then the control plane is written to");
 });
 
 /** Runs `startPlaybookUnit` for real with the three outside reaches replaced, and returns what it asked of each, in order. */
