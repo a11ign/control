@@ -33,6 +33,7 @@ import { validRef, guestCommitVars, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DI
   from "./fleet-playbook.ts";
 import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { layersFrom } from "./layer-checkouts.ts";
+import { sandboxGitEnv } from "./git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { protocolVerdict } from "@a11ign/screenreader-fleet/protocol-guard";
 
@@ -1904,7 +1905,7 @@ function provisionGuest({ guestAt, expect, extra = {} }: { guestAt: "behind" | "
   { status: number | null; out: string; head: string; first: string; second: string; } {
   const dir = mkdtempSync(join(tmpdir(), "provision-role-"));
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args],
-    { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
+    { cwd, encoding: "utf8", env: sandboxGitEnv({ GIT_CONFIG_GLOBAL: "/dev/null" }) }).trim();
   const core = join(dir, "core");
   const guest = join(dir, "guest");
   git(dir, "init", "-q", "-b", "main", core);
@@ -1920,7 +1921,7 @@ function provisionGuest({ guestAt, expect, extra = {} }: { guestAt: "behind" | "
   const playbook = join(dir, "play.json");
   writeFileSync(playbook, JSON.stringify([{ hosts: "all", gather_facts: false, vars: { a11y_repo_path: guest }, tasks: [shellTask, landed] }]));
   const ran = spawnSync("ansible-playbook", ["-i", "localhost,", "-c", "local", playbook, "-e", JSON.stringify({ ...extra, ...(expect ? { a11y_expected_commit: expect === "first" ? first : second } : {}) })],
-    { encoding: "utf8", env: { ...process.env, ANSIBLE_CONFIG: "", ANSIBLE_NOCOLOR: "1" } });
+    { encoding: "utf8", env: sandboxGitEnv({ ANSIBLE_CONFIG: "", ANSIBLE_NOCOLOR: "1" }) });
   return { status: ran.status, out: `${ran.stdout}${ran.stderr}`, head: git(guest, "rev-parse", "HEAD"), first, second };
 }
 
