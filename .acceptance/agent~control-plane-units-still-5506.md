@@ -10,8 +10,13 @@ Closes a11ign/a11ign#5506
 
 Acceptance:
 ```bash
-ssh root@"${CONTROL_PLANE_HOST:?}" 'systemctl cat a11y-gate-heartbeat.service a11y-fleet-patch-window.service | grep -c "a11y-witness/packages/control"'
+grep -c "a11y-witness/packages/control" ansible/patch-schedule.yml ansible/files/a11y-gate-heartbeat.service ; grep -c "Environment=A11Y_PVE_KEY={{ patch_plane_key }}" ansible/patch-schedule.yml
 ```
-Expected output: `0`.
+Expected output: `ansible/patch-schedule.yml:0`, `ansible/files/a11y-gate-heartbeat.service:0`, then `1`.
+
+Mutation: none -- the test is a text pin of one rendered line; removing the line turns it red by construction.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Outside-Region: ansible/patch-schedule.yml — the row's Region names the live units, but the patch-window unit is laid by this playbook, which is where the missing env belongs
+Outside-Region: src/fleet-patch.test.ts — pins the new Environment line beside the existing patch-schedule.yml text assertions
