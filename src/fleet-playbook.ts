@@ -923,16 +923,49 @@ function endFleetLock(chosen: string) {
  * `merge --ff-only` one, `provision-role.yml` failed inside a one-shell script whose exit status was its last command's, and
  * all 15 boxes said `provisioning from 5fcf95e0a` while sitting on a checkout five days stale (read 2026-10-15).
  *
- * So a play that fast-forwards the CORE sends neither: the guest's own default (`origin/main`) is the core's tip, and the play
- * resolves and ASSERTS it on the guest, where the object is. `deploy.yml` is not in this set: it asserts the pair it is handed
- * and fails loudly, and what a core pin for it should be is a decision of its own.
+ * So a play that fast-forwards the CORE is never handed a control commit. Until #5515 it was handed nothing, and the guest
+ * resolved its own `origin/main`, which moves while a `--serial` run is in flight. Now both core plays are handed the core commit
+ * `deploy-pins.json` declares, so every guest in a run lands on the same one (`deploy.yml` also gets `a11y_git_ref`, which it checks out first).
  */
 const CORE_FAST_FORWARD_PLAYBOOKS = ["provision-role.yml"];
 
-/** The `-e` pair every other play gets (`a11y_git_ref`, `a11y_expected_commit`), and nothing for a core-fast-forward one. */
-export function guestCommitVars({ chosen, ref, expected }: { chosen: string; ref: string; expected: string; }): string {
-  if (CORE_FAST_FORWARD_PLAYBOOKS.includes(chosen)) return "";
-  return ` -e a11y_git_ref=${ref} -e a11y_expected_commit=${expected}`;
+/** The `-e` pair a guest's core checkout is put on: the DECLARED core commit (#5515), and the ref only for a play that checks one out. */
+export function guestCommitVars({ chosen, ref, core }: { chosen: string; ref: string; core: string; }): string {
+  const expected = ` -e a11y_expected_commit=${core}`;
+  return CORE_FAST_FORWARD_PLAYBOOKS.includes(chosen) ? expected : ` -e a11y_git_ref=${ref}${expected}`;
+}
+
+/** The core commit `deploy-pins.json` declares: read at the start of a run, and refused by name when it declares none. */
+function declaredCoreCommit(): string {
+  const { core } = readDeployPins();
+  if (core === undefined) {
+    process.stderr.write("deploy-pins.json declares no core commit, so there is no commit to put a guest's core checkout on (#5515).\n");
+    process.exit(2);
+  }
+  return core.commit;
+}
+
+/**
+ * What `startPlaybookUnit` reaches outside the process for, so a test can run it and read the command it built (#5515): the
+ * ssh to the control plane, the fleet lock it takes, and the core pin it reads. The defaults are the real ones.
+ */
+export interface StartPlaybookDeps {
+  ssh: (command: string, options?: { capture?: boolean; timeoutMs?: number }) => unknown;
+  takeLock: (call: { chosen: string; followBudgetMs: number }) => void;
+  declaredCore: () => string;
+}
+const REAL_START_DEPS: StartPlaybookDeps = { ssh, takeLock: takeFleetLockOrExit, declaredCore: declaredCoreCommit };
+
+/**
+ * The first WRITE to the control plane (#5515): it is put on the commit the run is for, and only after the guests' core pin has been
+ * read, so a deploy that declares none refuses with the control plane untouched. The value is not kept: `startPlaybookUnit` reads the
+ * pin again where it is used, so none travels between the two. A function of its own so a test can observe that the refusal comes
+ * BEFORE the write, by what `ssh` was asked, rather than by where two lines sit in `main`.
+ */
+export function moveControlPlane({ ref, expected, layerCommits }: { ref: string; expected: string; layerCommits: Record<string, string>; },
+  deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> = REAL_START_DEPS): void {
+  deps.declaredCore();
+  deps.ssh(controlPlaneCheckout(ref, expected, layerCommits));
 }
 
 /**
@@ -952,14 +985,17 @@ export function guestCommitVars({ chosen, ref, expected }: { chosen: string; ref
  *   `aim` is where each MOVED worker is aimed this run, already identity-checked (#2832); empty for a healthy fleet.
  * @returns {string} the unit name
  */
-function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+export function startPlaybookUnit({ chosen, ref, limitFlag, serialFlag, allowEdgeDowngrade, apply,
   displayMode, layerCommits, aim, patchTarget, followBudgetMs }: {
-        chosen: string; ref: string; expected: string; limitFlag: string | undefined;
+        chosen: string; ref: string; limitFlag: string | undefined;
         serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean;
         displayMode: string | undefined; layerCommits: Record<string, string>;
         aim: { addresses: Record<string, string>; workers: string[]; };
         patchTarget: PatchTarget | null; followBudgetMs: number;
-    }): string {
+    }, deps: StartPlaybookDeps = REAL_START_DEPS): string {
+  // The guests' core commit, read HERE where it is used (#5515): no value travels from `main` to this call, so there is no
+  // call site that can hand a guest control's own commit. `main` still reads it first, for the refusal, before the control plane moves.
+  const core = deps.declaredCore();
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -978,7 +1014,7 @@ function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allow
 // `systemd-run` refuses a name that is still loaded — a SUCCEEDED run keeps its name just as a failed
 // one does.
 const unit = `a11y-fleet-${chosen.replace(/\.yml$/, "")}`;
-takeFleetLockOrExit({ chosen, followBudgetMs }); // #5014: before the unit exists; exits 2 on a refusal and 1 if it cannot be written
+deps.takeLock({ chosen, followBudgetMs }); // #5014: before the unit exists; exits 2 on a refusal and 1 if it cannot be written
 // #2832: THE ADDRESS OVERRIDE, if any worker moved and was identified. `install` makes the per-unit file hold
 // exactly this run's override or nothing, and a failure to write it ENDS the command (`|| exit 1`): a `;`
 // after an `&&` chain would carry on and start the unit without the override it was meant to have.
@@ -990,7 +1026,7 @@ try {
   // from your code and `served_code` from theirs, and the deploy fails with a mismatch that reads like a
   // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
   // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
-  ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
+  deps.ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
     + planeUnitStart(unit)
     + `--setenv=ANSIBLE_CONFIG=ansible.cfg${override.setenv} `
     // NO `-i` HERE. `ansible.cfg` sets `inventory = /etc/a11ign/inventory.yml,inventory.yml` so the
@@ -1006,10 +1042,11 @@ try {
     // dispatch path does not. A verification that exercises a different invocation from the one that ships
     // is this repo's most-recorded defect, and it is the reason to remove the flag rather than to point it
     // at the new path: one source of truth, in the file every playbook already honours.
-    // The COMMIT that ref resolves to here, so each guest can assert it landed on it rather than the
-    // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
-    // the guests fetch; this catches the fetch silently not taking.
-    + `ansible-playbook ${chosen}${guestCommitVars({ chosen, ref, expected })}`
+    // The CORE commit `deploy-pins.json` declares (#5515), not the one control's checkout resolves the ref to: control's
+    // sha is not an object in the core's repository. Each guest asserts it landed on this one rather than inferring
+    // success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref the guests fetch; this catches the
+    // fetch silently not taking.
+    + `ansible-playbook ${chosen}${guestCommitVars({ chosen, ref, core })}`
     // The pair's second half: each layer that lives in its own repository, pinned to ITS commit (#3395).
     + layerCommitsExtraVars(layerCommits)
     // The control-plane address ALREADY resolved above (env var or its installed file, #285), so
@@ -2314,7 +2351,6 @@ async function main() {
   // the remote's resolved SHA against the branch NAME, which can never match, and refused a control plane
   // that was already correct.
   const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
-
   refuseCommitShapedRef(ref);
 
   // #971: WHAT THAT REF MEANS ON ORIGIN, asked before anything is shipped. `null` when `origin/<ref>`
@@ -2329,7 +2365,7 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
-  ssh(controlPlaneCheckout(ref, expected, layerCommits));
+  moveControlPlane({ ref, expected, layerCommits });
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report
   // success — this project's most expensive recurring shape, and the reason `deploy.yml` verifies each
@@ -2353,7 +2389,7 @@ async function main() {
   // whole command line and whose stack is node's internals, which buries "which box failed" under twelve
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
-  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+  const unit = startPlaybookUnit({ chosen, ref, limitFlag, serialFlag, allowEdgeDowngrade, apply,
     displayMode, layerCommits, patchTarget: patchGate.target, followBudgetMs: patchGate.followBudgetMs, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`

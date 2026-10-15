@@ -1,5 +1,5 @@
 {
-  "//": "WHAT CONTROL DEPLOYS, DECLARED BY CONTROL (ADR 0045, cut 7, a11ign/a11ign#5085). `layers` are the PUBLISHED worker and fleet: the exact release and the `integrity` of that release's tarball, which `fleet:deploy` fetches with `npm pack`, compares and refuses on BEFORE anything is unpacked or shipped (`src/layer-pins.ts`). The commit a host's checkout is put on is the one the release's tag names on `remote`. `path` is where a host holds the layer, beside the core's checkout. `lab` is the release the lab host holds laid (the lab is private and no registry serves it); it is a second declaration of what the core lays and `lab-laid-copy.ts` refuses a lab host that does not match it, so a lab bump in the core is a change here too. Moving a pin is a pull request that changes the version and the integrity together: `npm view <package>@<version> dist.integrity` prints the second.",
+  "//": "WHAT CONTROL DEPLOYS, DECLARED BY CONTROL (ADR 0045, cut 7, a11ign/a11ign#5085). `layers` are the PUBLISHED worker and fleet: the exact release and the `integrity` of that release's tarball, which `fleet:deploy` fetches with `npm pack`, compares and refuses on BEFORE anything is unpacked or shipped (`src/layer-pins.ts`). The commit a host's checkout is put on is the one the release's tag names on `remote`. `path` is where a host holds the layer, beside the core's checkout. `lab` is the release the lab host holds laid (the lab is private and no registry serves it); it is a second declaration of what the core lays and `lab-laid-copy.ts` refuses a lab host that does not match it, so a lab bump in the core is a change here too. Moving a pin is a pull request that changes the version and the integrity together: `npm view <package>@<version> dist.integrity` prints the second. `core` is the core commit `deploy.yml` and `provision-role.yml` put every guest on (#5515). It is a COMMIT, not a tag, because the core's branch moves while a `--serial` run is in flight and the pin is what keeps every box on one commit. Moving it is a pull request that changes `commit` alone.",
   "layers": {
     "nvda-worker": {
       "package": "@a11ign/screenreader-worker",
@@ -15,6 +15,10 @@
       "path": "packages/worker-fleet",
       "remote": "https://github.com/a11ign/screenreader-fleet.git"
     }
+  },
+  "core": {
+    "remote": "https://github.com/a11ign/a11ign.git",
+    "commit": "7e751f5682c1ad35280e24ca424bab3023fc3a40"
   },
   "lab": {
     "path": "packages/lab",

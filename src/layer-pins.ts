@@ -29,7 +29,9 @@ import { fileURLToPath } from "node:url";
 export type PublishedLayer = { package: string; version: string; integrity: string; path: string; remote: string; source?: string; };
 /** The lab's release, which the lab host holds laid beside the core's checkout (and which no registry serves: `lab` is private). */
 export type LabPin = { path: string; remote: string; tag: string; lays?: string[]; source?: string; };
-export type DeployPins = { layers: Record<string, PublishedLayer>; lab?: LabPin; };
+/** The core's commit the guests are put on (#5515): a full sha, which is what `commit` must be, because a branch or a tag is not a pin. */
+export type CorePin = { remote: string; commit: string; };
+export type DeployPins = { layers: Record<string, PublishedLayer>; lab?: LabPin; core?: CorePin; };
 
 /** Where the declaration lives: beside `package.json`, one directory up from `src/`. */
 export const DEPLOY_PINS_PATH = fileURLToPath(new URL("../deploy-pins.json", import.meta.url));
@@ -41,6 +43,8 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 const INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
 const PLAIN_PATH = /^[A-Za-z0-9._/-]{1,100}$/;
 const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const GITHUB_REMOTE = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\.git$/;
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const plainPath = (value: unknown): value is string => typeof value === "string" && PLAIN_PATH.test(value) && !value.includes("..") && !value.startsWith("/");
@@ -69,6 +73,14 @@ function labRefusal(lab: unknown): string | null {
   return null;
 }
 
+function coreRefusal(core: unknown): string | null {
+  if (!isObject(core)) return "deploy-pins.json core is not an object";
+  const { remote, commit } = core;
+  if (typeof remote !== "string" || !GITHUB_REMOTE.test(remote)) return `deploy-pins.json core.remote is ${JSON.stringify(remote)}, not an https github.com clone URL ending .git`;
+  if (typeof commit !== "string" || !FULL_SHA.test(commit)) return `deploy-pins.json core.commit is ${JSON.stringify(commit)}, not a full 40-hex commit: a branch or a short sha is not a pin`;
+  return null;
+}
+
 /** The declaration as text, or the refusal naming the first thing wrong with it. A pin that cannot be read is never a default. */
 export function parseDeployPins(text: string): { pins: DeployPins; } | { refusal: string; } {
   let parsed: unknown;
@@ -88,7 +100,15 @@ export function parseDeployPins(text: string): { pins: DeployPins; } | { refusal
     const refusal = labRefusal(parsed.lab);
     if (refusal !== null) return { refusal };
   }
-  return { pins: { layers: parsed.layers as Record<string, PublishedLayer>, ...(parsed.lab === undefined ? {} : { lab: parsed.lab as LabPin }) } };
+  if (parsed.core !== undefined) {
+    const refusal = coreRefusal(parsed.core);
+    if (refusal !== null) return { refusal };
+  }
+  return { pins: {
+    layers: parsed.layers as Record<string, PublishedLayer>,
+    ...(parsed.lab === undefined ? {} : { lab: parsed.lab as LabPin }),
+    ...(parsed.core === undefined ? {} : { core: parsed.core as CorePin }),
+  } };
 }
 
 /** `parseDeployPins` over the file, throwing the refusal: the readers of the real file have no useful way to go on without it. */

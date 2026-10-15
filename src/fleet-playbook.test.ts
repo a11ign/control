@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { validRef, guestCommitVars, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+import { validRef, guestCommitVars, startPlaybookUnit, moveControlPlane, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
   displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
@@ -820,7 +820,7 @@ test("#1313: main() CALLS the layer-2 gate, on the inventory, before the control
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /await enforceLinkGate\(chosen\)/, "a perfect gate that no run reaches refuses nothing");
-  assert.ok(mainBody.indexOf("await enforceLinkGate(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
+  assert.ok(mainBody.indexOf("await enforceLinkGate(") < mainBody.indexOf("moveControlPlane({"),
     "the gate must run before the control plane's checkout moves");
   assert.match(source, /"--allow-offline="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
   assert.match(source, /inventorySources\(ansibleCfgText\)/, "the fleet comes from the sources ansible.cfg lists");
@@ -1267,7 +1267,7 @@ test("#1839: main() CALLS the fleet-hold gate, before the control plane is asked
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /await enforceSequenceHold\(chosen, \{ limitFlag \}\)/,
     "a perfect gate that no run reaches refuses nothing, and #928's own narrowing needs this operation's --limit");
-  assert.ok(mainBody.indexOf("await enforceSequenceHold(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
+  assert.ok(mainBody.indexOf("await enforceSequenceHold(") < mainBody.indexOf("moveControlPlane({"),
     "the gate must run before the control plane's checkout moves");
   assert.match(source, /"--allow-hold="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
   assert.match(source, /"issue", "list", "--state", "open", "--label", "fleet-gated"/,
@@ -1602,7 +1602,7 @@ test("#2832: the refusal is acted on BEFORE anything is staged or started, in ma
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /const aim = await enforceWriteIdentity\(chosen, \{ moved, limitFlag \}\)/, "a perfect gate that no run reaches refuses nothing");
-  assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("ssh(controlPlaneCheckout("), "before the control plane's checkout moves");
+  assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("moveControlPlane({"), "before the control plane's checkout moves");
   assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("startPlaybookUnit({"), "and before the unit is started");
   assert.match(mainBody, /startPlaybookUnit\(\{[^}]*\baim \}\)/, "the override that unit gets is the one the check produced");
   const enforce = source.slice(source.indexOf("async function enforceWriteIdentity"), source.indexOf("async function enforceWriteIdentity") + 2400);
@@ -1758,8 +1758,8 @@ test("#5014 the wiring: the lock is taken before the unit starts, from the budge
   const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const start = source.slice(source.indexOf("function startPlaybookUnit("));
-  assert.ok(start.indexOf("takeFleetLockOrExit({ chosen, followBudgetMs })") > 0
-    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("planeUnitStart(unit)"), "taken before the unit's start exists");
+  assert.ok(start.indexOf("deps.takeLock({ chosen, followBudgetMs })") > 0
+    && start.indexOf("deps.takeLock(") < start.indexOf("planeUnitStart(unit)"), "taken before the unit's start exists");
   assert.match(source, /function takeFleetLockOrExit[\s\S]*?lockTakeStep\(\{ chosen, followBudgetMs, now: Date\.now\(\) \}\)[\s\S]*?process\.exit\(2\)/,
     "a refusal exits 2, as every other gate here does");
   assert.match(source, /followBudgetMs: patchGate\.followBudgetMs, aim \}\)/, "main hands it the SAME budget followUnit is given: no run length is copied");
@@ -1869,17 +1869,66 @@ test("#5030 2: the take-over is BOUNDED: a wake lock that is somehow always fres
 // #5512: `fleet:provision` asked every guest to fast-forward to a CONTROL commit, which a guest (a clone of the core)
 // does not hold, and nothing asserted the guest landed on anything.
 
-test("#5512: provision-role.yml sends no control commit to guests that hold the core; every other play still gets the pair", () => {
-  const given = { ref: "HEAD", expected: "aa3db0764634f8ea3d0112ace0f90c4223dabfd4" };
-  assert.equal(guestCommitVars({ chosen: "provision-role.yml", ...given }), "",
-    "a control sha is not an object in a guest's repository, so naming it there is the defect");
-  // The positive control: the emptiness above would also pass if the helper returned "" for everything.
-  assert.equal(guestCommitVars({ chosen: "deploy.yml", ...given }),
-    ` -e a11y_git_ref=HEAD -e a11y_expected_commit=${given.expected}`);
+// #5515: the core commit both core plays are handed is the one deploy-pins.json DECLARES, not control's own `rev-parse`.
+test("#5512/#5515: both core plays are handed the declared core commit, never control's; every other play still gets the pair", () => {
+  const core = "7e751f5682c1ad35280e24ca424bab3023fc3a40";
+  // The control sha the pre-#5515 helper was handed: a control object is not in a guest's repository, so it must never reach a guest.
+  const control = "aa3db0764634f8ea3d0112ace0f90c4223dabfd4";
+  assert.equal(guestCommitVars({ chosen: "provision-role.yml", ref: "HEAD", core }), ` -e a11y_expected_commit=${core}`,
+    "provision-role.yml reads the SAME pin deploy.yml does, so the two cannot land different core commits (#5515)");
+  // The positive control: the assertion above would also pass if the helper ignored `core` and returned a fixed string.
+  assert.equal(guestCommitVars({ chosen: "deploy.yml", ref: "HEAD", core }),
+    ` -e a11y_git_ref=HEAD -e a11y_expected_commit=${core}`);
+  assert.equal(guestCommitVars({ chosen: "deploy.yml", ref: "HEAD", core }).includes(control), false,
+    "control's sha is never handed to a guest");
   const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
   assert.equal(source.split("-e a11y_expected_commit=").length - 1, 1,
     "the dispatcher builds that pair in ONE place (guestCommitVars), so no play can bypass the rule");
-  assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, expected \}\)\}/);
+  // `main` carries no core value onward: the one that reaches the guests is read where it is used. (The ORDER of the pin's
+  // refusal and the first write is run, not read, in the `moveControlPlane` test below.)
+  const main = source.slice(source.indexOf("async function main() {"));
+  assert.doesNotMatch(main, /\bcore\b/, "main carries no core value onward");
+});
+
+test("#5515: a missing core pin refuses BEFORE the control plane is written to (observed by running moveControlPlane)", () => {
+  const asked: string[] = [];
+  const ssh = (command: string) => { asked.push(command); return ""; };
+  const refusal = new Error("deploy-pins.json declares no core commit");
+  assert.throws(() => moveControlPlane({ ref: "HEAD", expected: "a".repeat(40), layerCommits: {} },
+    { ssh, declaredCore: () => { throw refusal; } }), refusal);
+  assert.deepEqual(asked, [], "the control plane was not asked for anything");
+  // The positive control: with a pin the same call DOES write, once, so the empty list above is the refusal and not a no-op.
+  const order: string[] = [];
+  moveControlPlane({ ref: "HEAD", expected: "a".repeat(40), layerCommits: {} },
+    { ssh: (command) => { order.push("ssh"); return command; }, declaredCore: () => { order.push("pin"); return "7".repeat(40); } });
+  assert.deepEqual(order, ["pin", "ssh"], "the pin is read, then the control plane is written to");
+});
+
+/** Runs `startPlaybookUnit` for real with the three outside reaches replaced, and returns what it asked of each, in order. */
+function startUnitObserved({ chosen, pin }: { chosen: string; pin: string }) {
+  const calls: string[] = [];
+  const unit = startPlaybookUnit({ chosen, ref: "HEAD", limitFlag: undefined, serialFlag: undefined, allowEdgeDowngrade: false,
+    apply: false, displayMode: undefined, layerCommits: {}, aim: { addresses: {}, workers: [] }, patchTarget: null, followBudgetMs: 1000 },
+  { ssh: (command) => { calls.push(`ssh ${command}`); return ""; },
+    takeLock: ({ chosen: held }) => { calls.push(`lock ${held}`); },
+    declaredCore: () => { calls.push("pin"); return pin; } });
+  return { unit, calls, command: calls.find((call) => call.startsWith("ssh ")) ?? "" };
+}
+
+test("#5515: the command the dispatcher sends carries the DECLARED core commit for every core play, observed by running it", () => {
+  const pin = "7e751f5682c1ad35280e24ca424bab3023fc3a40";
+  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+    const { command, calls, unit } = startUnitObserved({ chosen, pin });
+    assert.match(command, new RegExp(`ansible-playbook ${chosen.replace(".", "\\.")} .*-e a11y_expected_commit=${pin}( |$)`), `${chosen} is handed the pin`);
+    assert.equal(command.split("-e a11y_expected_commit=").length - 1, 1, "once, so no second value can win");
+    assert.equal(unit, `a11y-fleet-${chosen.replace(/\.yml$/, "")}`);
+    assert.deepEqual(calls.map((call) => call.split(" ")[0]), ["pin", "lock", "ssh"], "pin read, then the lock, then the control plane is asked");
+  }
+});
+
+test("#5515: a DIFFERENT pin gives a different command (positive control: the pin is what reaches the guests, not a constant or control's sha)", () => {
+  const other = "0123456789abcdef0123456789abcdef01234567";
+  assert.match(startUnitObserved({ chosen: "provision-role.yml", pin: other }).command, new RegExp(`a11y_expected_commit=${other}`));
 });
 
 /** The play's own tasks, by name, parsed with PyYAML (this package takes no npm dependency, ADR 0012). `provision.yml` keeps its fast-forward under `tasks:`, `provision-role.yml` under `pre_tasks:`. */
