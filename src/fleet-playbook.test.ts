@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { validRef, guestCommitVars, startPlaybookUnit, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+import { validRef, guestCommitVars, startPlaybookUnit, moveControlPlane, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
   displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
@@ -820,7 +820,7 @@ test("#1313: main() CALLS the layer-2 gate, on the inventory, before the control
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /await enforceLinkGate\(chosen\)/, "a perfect gate that no run reaches refuses nothing");
-  assert.ok(mainBody.indexOf("await enforceLinkGate(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
+  assert.ok(mainBody.indexOf("await enforceLinkGate(") < mainBody.indexOf("moveControlPlane({"),
     "the gate must run before the control plane's checkout moves");
   assert.match(source, /"--allow-offline="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
   assert.match(source, /inventorySources\(ansibleCfgText\)/, "the fleet comes from the sources ansible.cfg lists");
@@ -1267,7 +1267,7 @@ test("#1839: main() CALLS the fleet-hold gate, before the control plane is asked
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /await enforceSequenceHold\(chosen, \{ limitFlag \}\)/,
     "a perfect gate that no run reaches refuses nothing, and #928's own narrowing needs this operation's --limit");
-  assert.ok(mainBody.indexOf("await enforceSequenceHold(") < mainBody.indexOf("ssh(controlPlaneCheckout("),
+  assert.ok(mainBody.indexOf("await enforceSequenceHold(") < mainBody.indexOf("moveControlPlane({"),
     "the gate must run before the control plane's checkout moves");
   assert.match(source, /"--allow-hold="/, "the flag guard must know the flag, or refuseUnknownFlags kills the run first");
   assert.match(source, /"issue", "list", "--state", "open", "--label", "fleet-gated"/,
@@ -1602,7 +1602,7 @@ test("#2832: the refusal is acted on BEFORE anything is staged or started, in ma
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const mainBody = source.slice(source.indexOf("async function main() {"));
   assert.match(mainBody, /const aim = await enforceWriteIdentity\(chosen, \{ moved, limitFlag \}\)/, "a perfect gate that no run reaches refuses nothing");
-  assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("ssh(controlPlaneCheckout("), "before the control plane's checkout moves");
+  assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("moveControlPlane({"), "before the control plane's checkout moves");
   assert.ok(mainBody.indexOf("await enforceWriteIdentity(") < mainBody.indexOf("startPlaybookUnit({"), "and before the unit is started");
   assert.match(mainBody, /startPlaybookUnit\(\{[^}]*\baim \}\)/, "the override that unit gets is the one the check produced");
   const enforce = source.slice(source.indexOf("async function enforceWriteIdentity"), source.indexOf("async function enforceWriteIdentity") + 2400);
@@ -1884,12 +1884,24 @@ test("#5512/#5515: both core plays are handed the declared core commit, never co
   const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
   assert.equal(source.split("-e a11y_expected_commit=").length - 1, 1,
     "the dispatcher builds that pair in ONE place (guestCommitVars), so no play can bypass the rule");
-  // The ORDER is the one thing still read from source text: `main` reads the pin for its refusal before the control plane is written to.
+  // `main` carries no core value onward: the one that reaches the guests is read where it is used. (The ORDER of the pin's
+  // refusal and the first write is run, not read, in the `moveControlPlane` test below.)
   const main = source.slice(source.indexOf("async function main() {"));
-  const read = main.indexOf("declaredCoreCommit();");
-  assert.ok(read > 0 && read < main.indexOf("ssh(controlPlaneCheckout("), "a missing pin refuses before the control plane moves");
-  assert.doesNotMatch(main.replace("declaredCoreCommit();", ""), /\bcore\b/,
-    "and main carries no core value onward: the one that reaches the guests is read where it is used");
+  assert.doesNotMatch(main, /\bcore\b/, "main carries no core value onward");
+});
+
+test("#5515: a missing core pin refuses BEFORE the control plane is written to (observed by running moveControlPlane)", () => {
+  const asked: string[] = [];
+  const ssh = (command: string) => { asked.push(command); return ""; };
+  const refusal = new Error("deploy-pins.json declares no core commit");
+  assert.throws(() => moveControlPlane({ ref: "HEAD", expected: "a".repeat(40), layerCommits: {} },
+    { ssh, declaredCore: () => { throw refusal; } }), refusal);
+  assert.deepEqual(asked, [], "the control plane was not asked for anything");
+  // The positive control: with a pin the same call DOES write, once, so the empty list above is the refusal and not a no-op.
+  const order: string[] = [];
+  moveControlPlane({ ref: "HEAD", expected: "a".repeat(40), layerCommits: {} },
+    { ssh: (command) => { order.push("ssh"); return command; }, declaredCore: () => { order.push("pin"); return "7".repeat(40); } });
+  assert.deepEqual(order, ["pin", "ssh"], "the pin is read, then the control plane is written to");
 });
 
 /** Runs `startPlaybookUnit` for real with the three outside reaches replaced, and returns what it asked of each, in order. */

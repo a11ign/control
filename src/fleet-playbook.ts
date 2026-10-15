@@ -957,6 +957,18 @@ export interface StartPlaybookDeps {
 const REAL_START_DEPS: StartPlaybookDeps = { ssh, takeLock: takeFleetLockOrExit, declaredCore: declaredCoreCommit };
 
 /**
+ * The first WRITE to the control plane (#5515): it is put on the commit the run is for, and only after the guests' core pin has been
+ * read, so a deploy that declares none refuses with the control plane untouched. The value is not kept: `startPlaybookUnit` reads the
+ * pin again where it is used, so none travels between the two. A function of its own so a test can observe that the refusal comes
+ * BEFORE the write, by what `ssh` was asked, rather than by where two lines sit in `main`.
+ */
+export function moveControlPlane({ ref, expected, layerCommits }: { ref: string; expected: string; layerCommits: Record<string, string>; },
+  deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> = REAL_START_DEPS): void {
+  deps.declaredCore();
+  deps.ssh(controlPlaneCheckout(ref, expected, layerCommits));
+}
+
+/**
  * Start the playbook on the control plane as a named systemd unit, and return that unit's name.
  *
  * A PHASE, not a name restating its code: "get it running somewhere it will survive me" is a distinct
@@ -2339,10 +2351,6 @@ async function main() {
   // the remote's resolved SHA against the branch NAME, which can never match, and refused a control plane
   // that was already correct.
   const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
-  // The guests' core commit is declared, not resolved here (#5515). Read now only so a missing pin refuses BEFORE the control plane
-  // moves; the value is read again where it is used (`startPlaybookUnit`), so none is carried between the two.
-  declaredCoreCommit();
-
   refuseCommitShapedRef(ref);
 
   // #971: WHAT THAT REF MEANS ON ORIGIN, asked before anything is shipped. `null` when `origin/<ref>`
@@ -2357,7 +2365,7 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
-  ssh(controlPlaneCheckout(ref, expected, layerCommits));
+  moveControlPlane({ ref, expected, layerCommits });
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report
   // success — this project's most expensive recurring shape, and the reason `deploy.yml` verifies each
