@@ -98,9 +98,13 @@
       ansible.windows.win_powershell:
         script: |
           $repo = '{{ a11y_repo_path }}'
+          # The worker and fleet files are the PUBLISHED ones (ADR 0045), the files the release launcher runs and the
+          # provision stamp hashes; the laid packages\ trees are orphans and a clean result from them says nothing.
           $need = @('node_modules\tsx\dist\cli.mjs', 'packages\cli\src\auth\leak-check.ts', 'scripts\auth-leak-check.mjs',
-                    'scripts\auth-leak-fixtures.mjs', 'packages\worker-fleet\dist\cli-flags.mjs',
-                    'packages\worker-fleet\dist\worker-http.mjs', 'packages\nvda-worker\src\run-server.cmd')
+                    'scripts\auth-leak-fixtures.mjs', 'node_modules\@a11ign\screenreader-fleet\dist\cli-flags.mjs',
+                    'node_modules\@a11ign\screenreader-fleet\dist\worker-http.mjs',
+                    'node_modules\@a11ign\screenreader-worker\dist\server.mjs',
+                    'node_modules\@a11ign\screenreader-worker\launcher\run-server.cmd')
           $missing = @($need | Where-Object { -not (Test-Path (Join-Path $repo $_)) })
           $Ansible.Changed = $false
           if ($missing.Count -gt 0) {
@@ -153,8 +157,10 @@
                   # which the worker below inherits and the leak check reads by NAME.
                   $env:FAKE_USER = '{{ leak_fake_user }}'
                   $env:FAKE_SECRET = '{{ leak_fake_secret }}'
-                  $launcher = Join-Path $repo 'packages\nvda-worker\src\run-server.cmd'
-                  $worker = Start-Process -FilePath $launcher -ArgumentList ('"' + $node + '"') -WorkingDirectory $repo -PassThru
+                  # The published launcher, the same file the a11ysrv task runs (#5551). Argument 2 is the working
+                  # directory, which the launcher refuses to start without.
+                  $launcher = Join-Path $repo 'node_modules\@a11ign\screenreader-worker\launcher\run-server.cmd'
+                  $worker = Start-Process -FilePath $launcher -ArgumentList ('"' + $node + '" "' + $repo + '"') -WorkingDirectory $repo -PassThru
                   $up = $false
                   for ($i = 0; $i -lt 60 -and -not $up; $i++) {
                     try { $h = Invoke-RestMethod -Uri 'http://127.0.0.1:{{ a11y_port }}/health' -TimeoutSec 5; $up = $true } catch { Start-Sleep -Seconds 2 }
