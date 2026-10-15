@@ -45,7 +45,9 @@
   # "abort on any host", which is what this directive says and what `serial` only implies at batch size 1.
   any_errors_fatal: true
   vars:
-    a11y_repo_root: "{{ playbook_dir }}/../../.."
+    # control IS its repository root since #4217, so the playbook sits ONE level below it (it was three
+    # below the core's root when the playbook lived at packages/control/ansible/): #5532.
+    a11y_repo_root: "{{ playbook_dir }}/.."
 
   pre_tasks:
     - name: Work out the code version this checkout expects
@@ -65,7 +67,7 @@
       # a second copy. Verified identical: d1c98aa032198754 either way.
       ansible.builtin.command:
         cmd: >-
-          node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs --input-type=module -e 'const m = await import("./packages/control/src/layer-checkouts.ts");
+          node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs --input-type=module -e 'const m = await import("./src/layer-checkouts.ts");
           process.stdout.write(await m.layerCodeVersion("nvda-worker"))'
         chdir: "{{ a11y_repo_root }}"
       delegate_to: localhost
