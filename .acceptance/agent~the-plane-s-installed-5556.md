@@ -2,7 +2,7 @@ Row a11ign/a11ign#5556 (found on the a11ign#5155 canary). Region is `src/fleet-p
 
 Acceptance: `bash -c 'git grep -q frozen-lockfile -- src/fleet-playbook.ts'`
 
-**As run (measured, 2026-10-15):** the Acceptance exits 0 at this head. `pnpm run typecheck` clean. `pnpm test` reports `failedFiles: 0, failedTests: 0`. `pnpm exec tsx --test src/layer-installed-lag.test.ts`: 12 pass, 0 fail.
+**As run (measured, 2026-10-15):** the Acceptance exits 0 at this head. `pnpm run typecheck` clean. `pnpm test` reports `failedFiles: 0, failedTests: 0`. `pnpm exec tsx --test src/layer-installed-lag.test.ts`: 13 pass, 0 fail.
 
 **Done-when 1 and 3:** `installedLayersRefusal` (called by `moveControlPlane`, before its `ssh` of the move) reads each published layer's installed release and the lockfile's importer entry, and refuses naming both and the declared release. Positive control in `src/layer-installed-lag.test.ts`: lockfile 0.13.1, installed 0.13.0.
 
@@ -12,6 +12,8 @@ Acceptance: `bash -c 'git grep -q frozen-lockfile -- src/fleet-playbook.ts'`
 - Refusal never fires (`row.locked === published.version` replaced by `false`): the 0.13.0/0.13.1 positive control and the no-installed-release case fail, and no other.
 - Refusal always fires (replaced by `true`): the lockfile-behind note case and the notes case fail, and no other.
 - Review rework (reviewer-control-111): the unknown-state branch (`row.locked === "none"`) made dead: the `none none` judgement test and the `none none` move test fail, and no other. `moveControlPlane` made not to read: the lagging, in-step and unreadable move tests and the #5515 positive control fail, and no other.
+
+**Second review rework (reviewer-control-111 at `cdad62f0`):** a lockfile that cannot be read refuses even where the installed release EQUALS the declaration (it had returned early as in step, before the lockfile was looked at). Mutation: the early `row.held === published.version` return restored ahead of the lockfile check fails the new test (`an unreadable lockfile is refused even where the installed release equals the declaration`) and no other; restored by copy-back, `cmp` identical.
 
 **Review rework:** an unreadable plane (`none none`) now refuses instead of reading as behind, and the ordering is tested by RUNNING `moveControlPlane` with a recording `ssh` (the read is its first command, the move its second, and the move is never asked when the layers lag) rather than by reading `main`'s text. `src/fleet-playbook.test.ts`'s #5515 positive control now answers the read.
 

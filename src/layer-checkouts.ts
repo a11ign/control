@@ -326,11 +326,12 @@ export function installedLayersJudged(manifest: Manifest, output: string): { ref
     const row = rows.get(name);
     const label = `layer ${name} (${published.package})`;
     if (!row) { refusals.push(`${label}: the read of ${CONTROL_PLANE_CHECKOUT_PATH} returned no line for it, so its installed release is not known`); continue; }
-    if (row.held === "-" || row.held === published.version) continue;
+    if (row.held === "-") continue;
     const said = `${label}: ${row.held === "none" ? "no release is installed" : `installed ${row.held}`} under ${CONTROL_PLANE_CHECKOUT_PATH}/node_modules, `
       + `the plane's lockfile resolves ${row.locked === "none" ? "no release" : row.locked}, deploy-pins.json declares ${published.version}`;
-    if (row.locked === published.version) refusals.push(said);
-    else if (row.locked === "none") refusals.push(`${said}: the lockfile names no release for it (or could not be read), so whether the plane is behind or merely not installed is not known`);
+    if (row.locked === "none") refusals.push(`${said}: the lockfile names no release for it (or could not be read), so whether what is installed is what it resolves is not known`);
+    else if (row.held === published.version) continue;
+    else if (row.locked === published.version) refusals.push(said);
     else notes.push(`${said}: the plane's checkout is behind the declaration, so the move comes first and its layer judgement will then refuse until pnpm install --frozen-lockfile is run in ${CONTROL_PLANE_CHECKOUT_PATH}`);
   }
   if (refusals.length === 0) return { refusal: null, notes };

@@ -115,6 +115,16 @@ test("#5556 an unreadable plane (no lockfile entry, no installed release) is ref
   assert.match(halfRead ?? "", /installed 0\.13\.0 under .* the plane's lockfile resolves no release/, "an unreadable lockfile alone is also unknown");
 });
 
+test("#5556 an unreadable lockfile is refused even where the installed release equals the declaration", () => {
+  const core = planeOf({ installed: BOTH });
+  assert.deepEqual(readOf(core).trim().split("\n").map((line) => line.split(" ").slice(1).join(" ")), [`${BOTH.worker} none`, `${BOTH.fleet} none`], "the read really printed installed-equals-declared beside an unknown lockfile");
+  const { refusal, notes } = judged(core);
+  assert.match(refusal ?? "", /layer nvda-worker .* installed 0\.13\.1 under .* the plane's lockfile resolves no release, deploy-pins\.json declares 0\.13\.1: the lockfile names no release for it \(or could not be read\)/);
+  assert.match(refusal ?? "", /layer screenreader-fleet/, "each layer whose lockfile cannot be read is named");
+  assert.deepEqual(notes, []);
+  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [] }, "the same installed layers WITH a readable lockfile are in step");
+});
+
 test("#5556 installedLayersRefusal asks with a read-only command and prints notes", () => {
   const core = planeOf({ installed: { worker: "0.13.0", fleet: "0.10.2" }, locked: { worker: "0.13.0", fleet: "0.10.2" } });
   const asked: string[] = [];
