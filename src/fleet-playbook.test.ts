@@ -1882,11 +1882,11 @@ test("#5512: provision-role.yml sends no control commit to guests that hold the 
   assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, expected \}\)\}/);
 });
 
-/** The play's own tasks, by name, parsed with PyYAML (this package takes no npm dependency, ADR 0012). */
-function playTasks(names: string[]): Record<string, unknown>[] {
+/** The play's own tasks, by name, parsed with PyYAML (this package takes no npm dependency, ADR 0012). `provision.yml` keeps its fast-forward under `tasks:`, `provision-role.yml` under `pre_tasks:`. */
+function playTasks(names: string[], file = "provision-role.yml"): Record<string, unknown>[] {
   const script = "import sys,json,yaml\nplay=yaml.safe_load(open(sys.argv[1]))[0]\n"
-    + "print(json.dumps([t for t in play['pre_tasks'] if t.get('name') in sys.argv[2:]]))";
-  const out = execFileSync("python3", ["-I", "-c", script, fileURLToPath(new URL("../ansible/provision-role.yml", import.meta.url)), ...names],
+    + "print(json.dumps([t for t in (play.get('pre_tasks') or []) + (play.get('tasks') or []) if t.get('name') in sys.argv[2:]]))";
+  const out = execFileSync("python3", ["-I", "-c", script, fileURLToPath(new URL(`../ansible/${file}`, import.meta.url)), ...names],
     { encoding: "utf8" });
   return JSON.parse(out) as Record<string, unknown>[];
 }
@@ -1895,14 +1895,17 @@ const HAVE_PROVISION_TOOLS = ["ansible-playbook", "pwsh"].every((tool) => spawnS
 const NO_PROVISION_TOOLS = "ansible-playbook or pwsh is not installed on this machine, so the play's guest script cannot be run (the control plane has both)";
 const FAST_FORWARD = "Fast-forward the guest checkout so the role acts on THIS version";
 const LANDED = "The guest is ON the commit it was told to be on";
+// The two plays that fast-forward a guest's core checkout, and the task names each one asserts under (#5515 is the second).
+const ROLE_PLAY = { file: "provision-role.yml", fastForward: FAST_FORWARD, landed: LANDED };
+const MANUAL_PLAY = { file: "provision.yml", fastForward: "Fast-forward the guest checkout so provisioning runs THIS version", landed: LANDED };
 
 /**
- * Runs the REAL fast-forward script and the REAL assertion out of provision-role.yml against a throwaway guest: only the module
+ * Runs the REAL fast-forward script and the REAL assertion out of the play against a throwaway guest: only the module
  * is swapped (`win_shell` -> `shell` under `pwsh`, because this machine is not Windows) and nothing else of either task is touched.
  * The core is a local repository of two commits; the guest is a clone of it parked on the first, or on a commit of its own.
  */
-function provisionGuest({ guestAt, expect, extra = {} }: { guestAt: "behind" | "diverged"; expect?: "first" | "second"; extra?: Record<string, string> }):
-  { status: number | null; out: string; head: string; first: string; second: string; } {
+function provisionGuest({ guestAt, expect, extra = {}, play = ROLE_PLAY }: { guestAt: "behind" | "diverged"; expect?: "first" | "second"; extra?: Record<string, string>;
+  play?: typeof ROLE_PLAY; }): { status: number | null; out: string; head: string; first: string; second: string; } {
   const dir = mkdtempSync(join(tmpdir(), "provision-role-"));
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args],
     { cwd, encoding: "utf8", env: sandboxGitEnv({ GIT_CONFIG_GLOBAL: "/dev/null" }) }).trim();
@@ -1915,7 +1918,7 @@ function provisionGuest({ guestAt, expect, extra = {} }: { guestAt: "behind" | "
   git(core, "commit", "-q", "--allow-empty", "-m", "second");
   const second = git(core, "rev-parse", "HEAD");
   if (guestAt === "diverged") git(guest, "commit", "-q", "--allow-empty", "-m", "committed on the guest");
-  const [fastForward, landed] = [FAST_FORWARD, LANDED].map((name) => playTasks([name])[0]!);
+  const [fastForward, landed] = [play.fastForward, play.landed].map((name) => playTasks([name], play.file)[0]!);
   const shellTask: Record<string, unknown> = { ...fastForward, "ansible.builtin.shell": fastForward["ansible.windows.win_shell"], args: { ...(fastForward.args as object), executable: "pwsh" } };
   delete shellTask["ansible.windows.win_shell"];
   const playbook = join(dir, "play.json");
@@ -1962,4 +1965,48 @@ test("#5512: nothing that acts on the checkout runs before the assertion", () =>
   const executable = play.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
   assert.ok(executable.indexOf(LANDED) > executable.indexOf(FAST_FORWARD) && executable.indexOf(LANDED) < executable.indexOf("tasks/layer-checkouts.yml"));
   assert.doesNotMatch(executable, /rev-parse --short/, "a short sha is not comparable to a full one");
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// #5515: `provision.yml` (the UTM/hand path, not reachable from `fleet:provision`) ran the same unchecked fast-forward
+// `provision-role.yml` did under #5512: `fetch`, `merge --ff-only` and `rev-parse` in one shell, exit status of the last.
+
+test("#5515: provision.yml asserts the guest landed on its commit, and that runs before anything acts on the checkout", () => {
+  const play = readFileSync(fileURLToPath(new URL("../ansible/provision.yml", import.meta.url)), "utf8");
+  const executable = play.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  const at = (text: string) => executable.indexOf(text);
+  assert.ok(at(MANUAL_PLAY.fastForward) > 0 && at(MANUAL_PLAY.landed) > at(MANUAL_PLAY.fastForward),
+    "the assertion must follow the fast-forward it asserts");
+  assert.ok(at(MANUAL_PLAY.landed) < at("tasks/layer-checkouts.yml") && at(MANUAL_PLAY.landed) < at("tasks/run-interactive.yml"),
+    "nothing that acts on the checkout (the layer checkouts, the provisioning script) runs before the assertion");
+  assert.doesNotMatch(executable, /rev-parse --short/, "a short sha is not comparable to a full one");
+  assert.match(executable, /\$LASTEXITCODE -ne 0\) \{ throw "git \$what failed/, "each git call is checked, not only the last one");
+});
+
+test("#5515: provision.yml's real fast-forward lands the guest on the commit it resolved, and the assertion passes", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  const ran = provisionGuest({ guestAt: "behind", extra: { a11y_git_ref: "main" }, play: MANUAL_PLAY });
+  assert.equal(ran.status, 0, ran.out);
+  assert.equal(ran.head, ran.second, "the guest moved from the first commit to the core's tip");
+});
+
+test("#5515: provision.yml fails the box that holds no such commit, naming it, and leaves the checkout where it was", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  const control = "aa3db0764634f8ea3d0112ace0f90c4223dabfd4";
+  const ran = provisionGuest({ guestAt: "behind", extra: { a11y_expected_commit: control }, play: MANUAL_PLAY });
+  assert.notEqual(ran.status, 0, ran.out);
+  assert.match(ran.out, new RegExp(`${control} is not a commit in this guest's repository`));
+  assert.equal(ran.head, ran.first, "and the checkout was left where it was");
+});
+
+test("#5515: provision.yml fails a guest that cannot fast-forward, instead of reporting its stale HEAD", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  const ran = provisionGuest({ guestAt: "diverged", play: MANUAL_PLAY });
+  assert.notEqual(ran.status, 0, ran.out);
+  assert.match(ran.out, /git merge failed with/);
+  assert.notEqual(ran.head, ran.second, "the positive control above lands on the tip, so this guest really did not");
+});
+
+test("#5515: provision.yml's assertion fails a guest whose HEAD is not the commit it resolved", { skip: HAVE_PROVISION_TOOLS ? false : NO_PROVISION_TOOLS }, () => {
+  // As the #5512 test above: the merge succeeds ("already up to date") and HEAD is elsewhere, which only the assertion can see.
+  const ran = provisionGuest({ guestAt: "diverged", expect: "first", play: MANUAL_PLAY });
+  assert.notEqual(ran.status, 0, ran.out);
+  assert.match(ran.out, /is on [0-9a-f]{40}, not [0-9a-f]{40}/);
 });
