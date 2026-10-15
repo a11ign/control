@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { validRef, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+import { validRef, guestCommitVars, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
   displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
@@ -1862,4 +1862,35 @@ test("#5030 2: the take-over is BOUNDED: a wake lock that is somehow always fres
   assert.match(step.refusal ?? "", /^REFUSING patch\.yml: the fleet lock is held by wake/);
   assert.equal(ended.length, 2);
   assert.equal(takes, 3, "one take, then one after each end");
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// #5512: `fleet:provision` asked every guest to fast-forward to a CONTROL commit, which a guest (a clone of the core)
+// does not hold, and nothing asserted the guest landed on anything.
+
+test("#5512: provision-role.yml sends no control commit to guests that hold the core; every other play still gets the pair", () => {
+  const given = { ref: "HEAD", expected: "aa3db0764634f8ea3d0112ace0f90c4223dabfd4" };
+  assert.equal(guestCommitVars({ chosen: "provision-role.yml", ...given }), "",
+    "a control sha is not an object in a guest's repository, so naming it there is the defect");
+  // The positive control: the emptiness above would also pass if the helper returned "" for everything.
+  assert.equal(guestCommitVars({ chosen: "deploy.yml", ...given }),
+    ` -e a11y_git_ref=HEAD -e a11y_expected_commit=${given.expected}`);
+  const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+  assert.equal(source.split("-e a11y_expected_commit=").length - 1, 1,
+    "the dispatcher builds that pair in ONE place (guestCommitVars), so no play can bypass the rule");
+  assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, expected \}\)\}/);
+});
+
+test("#5512: provision-role.yml checks each git call and asserts the guest landed on the commit it resolved", () => {
+  const play = readFileSync(fileURLToPath(new URL("../ansible/provision-role.yml", import.meta.url)), "utf8");
+  const executable = play.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  assert.match(executable, /throw "git \$what failed with \$LASTEXITCODE"/, "a failed fetch or merge ends the script, not just prints");
+  assert.match(executable, /Run "merge" merge --ff-only --quiet \$target/);
+  assert.match(executable, /ansible\.builtin\.assert:\s+that:\s+- role_head\.stdout_lines \| last \| trim == role_head\.stdout_lines \| first \| trim/,
+    "the HEAD the box reports is compared with the commit it resolved");
+  assert.match(executable, /a11y_expected_commit is not defined or role_head\.stdout_lines \| last \| trim == a11y_expected_commit/,
+    "and with the commit a hand run named, when one was");
+  assert.ok(executable.indexOf("The guest is ON the commit it was told to be on") < executable.indexOf("tasks/layer-checkouts.yml"),
+    "the assertion precedes everything that acts on the checkout");
+  assert.doesNotMatch(executable, /rev-parse --short/, "a short sha is not comparable to a full one");
 });
