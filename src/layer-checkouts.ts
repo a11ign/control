@@ -312,9 +312,9 @@ export function installedLayersRead(manifest: Manifest): string {
 /**
  * What `installedLayersRead`'s output says, as the move will judge it. A REFUSAL only where the plane's HEAD already holds the lockfile that
  * declares the release and `node_modules/` does not: that is the state `pnpm install` repairs and the move cannot, so the run would be spent
- * for nothing. Where the plane's HEAD is itself behind (its lockfile is not the declared release, or names none), the move is what brings it
+ * for nothing. Where the plane's HEAD is itself behind (its lockfile names ANOTHER release), the move is what brings it
  * forward and an install before it would install the OLD lockfile, so that is a NOTE and the run proceeds to the move's own judgement.
- * A layer the read gave no line for is refused rather than read as in step: absence is not agreement.
+ * A layer the read gave no line for, or whose lockfile entry could not be read, is refused rather than read as behind or in step: absence is not agreement.
  */
 export function installedLayersJudged(manifest: Manifest, output: string): { refusal: string | null; notes: string[]; } {
   const rows = new Map(output.split("\n").map((line) => line.trim().split(/\s+/)).filter((cells) => cells.length === 3).map(([name, held, locked]) => [name, { held, locked }]));
@@ -330,6 +330,7 @@ export function installedLayersJudged(manifest: Manifest, output: string): { ref
     const said = `${label}: ${row.held === "none" ? "no release is installed" : `installed ${row.held}`} under ${CONTROL_PLANE_CHECKOUT_PATH}/node_modules, `
       + `the plane's lockfile resolves ${row.locked === "none" ? "no release" : row.locked}, deploy-pins.json declares ${published.version}`;
     if (row.locked === published.version) refusals.push(said);
+    else if (row.locked === "none") refusals.push(`${said}: the lockfile names no release for it (or could not be read), so whether the plane is behind or merely not installed is not known`);
     else notes.push(`${said}: the plane's checkout is behind the declaration, so the move comes first and its layer judgement will then refuse until pnpm install --frozen-lockfile is run in ${CONTROL_PLANE_CHECKOUT_PATH}`);
   }
   if (refusals.length === 0) return { refusal: null, notes };

@@ -963,32 +963,40 @@ const REAL_START_DEPS: StartPlaybookDeps = { ssh, takeLock: takeFleetLockOrExit,
  * BEFORE the write, by what `ssh` was asked, rather than by where two lines sit in `main`.
  */
 export function moveControlPlane({ ref, expected, layerCommits }: { ref: string; expected: string; layerCommits: Record<string, string>; },
-  deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> = REAL_START_DEPS): void {
+  deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> & PlaneRefusal = REAL_START_DEPS): void {
   deps.declaredCore();
+  // #5556: the installed layers are READ here, in the function every run's first write goes through, so the order is observable by what `ssh` is asked.
+  const lagging = installedLayersRefusal(deps);
+  if (lagging) {
+    (deps.refuse ?? refuseWithExit)(lagging);
+    return;
+  }
   deps.ssh(controlPlaneCheckout(ref, expected, layerCommits));
 }
 
+/** How a refusal is said and ended: the notes go to stderr and the run exits 2. A test replaces both, and `refuse` may throw. */
+interface PlaneRefusal {
+  say?: (line: string) => void;
+  refuse?: (text: string) => never;
+}
+function refuseWithExit(text: string): never {
+  process.stderr.write(`${text}\n`);
+  return process.exit(2);
+}
+
 /**
- * The plane's installed layers against its own lockfile, asked BEFORE `moveControlPlane` and only read (#5556). A merged pin bump reaches the
+ * The plane's installed layers against its own lockfile, asked by `moveControlPlane` BEFORE it writes, and only read (#5556). A merged pin bump reaches the
  * plane's HEAD by `git merge --ff-only` and nothing installs afterwards, so HEAD can hold a lockfile that `node_modules/` does not: the move's
  * own judgement then refuses AFTER the merge, spending the first write of a covered run on a fact one read could have named. Where the plane is
  * in that state this says both release numbers and that `pnpm install --frozen-lockfile` is the remedy, which is a write to the control plane
  * and is NOT made here (it waits on a ruling, #5155). Returns the refusal to print, or null; notes are printed either way.
  */
-export function installedLayersRefusal(deps: Pick<StartPlaybookDeps, "ssh"> & { say?: (line: string) => void } = { ...REAL_START_DEPS, say: (line) => process.stderr.write(`${line}\n`) }): string | null {
+export function installedLayersRefusal(deps: Pick<StartPlaybookDeps, "ssh"> & Pick<PlaneRefusal, "say"> = REAL_START_DEPS): string | null {
   const manifest = manifestOf(readDeployPins());
   const read = String(deps.ssh(installedLayersRead(manifest), { capture: true }));
   const { refusal, notes } = installedLayersJudged(manifest, read);
-  for (const note of notes) deps.say?.(`  note: ${note}`);
+  for (const note of notes) (deps.say ?? ((line) => process.stderr.write(`${line}\n`)))(`  note: ${note}`);
   return refusal;
-}
-
-/** `installedLayersRefusal`'s verdict as an exit: nothing has been written to the plane when it refuses (#5556). */
-function exitOnLaggingInstall(): void {
-  const lagging = installedLayersRefusal();
-  if (!lagging) return;
-  process.stderr.write(`${lagging}\n`);
-  process.exit(2);
 }
 
 /**
@@ -2388,7 +2396,6 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
-  exitOnLaggingInstall(); // #5556: a read, BEFORE the first write to the plane
   moveControlPlane({ ref, expected, layerCommits });
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report

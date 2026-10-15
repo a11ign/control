@@ -9,15 +9,14 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { installedLayersJudged, installedLayersRead, manifestOf } from "./layer-checkouts.ts";
 import { readDeployPins } from "./layer-pins.ts";
-import { installedLayersRefusal } from "./fleet-playbook.ts";
+import { installedLayersRefusal, moveControlPlane } from "./fleet-playbook.ts";
 
 const MANIFEST = manifestOf(readDeployPins());
 const WORKER = MANIFEST.layers["nvda-worker"];
@@ -107,6 +106,15 @@ test("#5556 a layer the read printed no line for is refused, not read as in step
   assert.match(refusal ?? "", /returned no line for it/);
 });
 
+test("#5556 an unreadable plane (no lockfile entry, no installed release) is refused, never read as merely behind", () => {
+  const { refusal, notes } = judged(planeOf({}));
+  assert.deepEqual(readOf(planeOf({})).trim().split("\n").map((line) => line.split(" ").slice(1).join(" ")), ["none none", "none none"], "the read really printed the unknown state");
+  assert.match(refusal ?? "", /the lockfile names no release for it \(or could not be read\)/);
+  assert.deepEqual(notes, []);
+  const { refusal: halfRead } = judged(planeOf({ installed: { worker: "0.13.0", fleet: BOTH.fleet } }));
+  assert.match(halfRead ?? "", /installed 0\.13\.0 under .* the plane's lockfile resolves no release/, "an unreadable lockfile alone is also unknown");
+});
+
 test("#5556 installedLayersRefusal asks with a read-only command and prints notes", () => {
   const core = planeOf({ installed: { worker: "0.13.0", fleet: "0.10.2" }, locked: { worker: "0.13.0", fleet: "0.10.2" } });
   const asked: string[] = [];
@@ -121,12 +129,39 @@ test("#5556 installedLayersRefusal asks with a read-only command and prints note
   assert.equal(said.length, 2);
 });
 
-test("#5556 main asks BEFORE the first write to the plane, and the ask refuses with exit 2", () => {
-  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fleet-playbook.ts"), "utf8");
-  const asked = source.indexOf("  exitOnLaggingInstall();");
-  const moved = source.indexOf("  moveControlPlane({ ref, expected, layerCommits });");
-  assert.ok(asked > 0 && moved > 0, "both calls are in main");
-  assert.ok(asked < moved, "the read comes first");
-  const body = source.slice(source.indexOf("function exitOnLaggingInstall"));
-  assert.match(body.slice(0, body.indexOf("\n}\n")), /installedLayersRefusal\(\)[\s\S]*process\.exit\(2\)/);
+/** `moveControlPlane` run for real with the plane's answers replaced, recording every command it asked and every refusal it ended on. */
+function moveObserved({ plane }: { plane: string }) {
+  const asked: string[] = [];
+  const refused: string[] = [];
+  const refuse = (text: string): never => { refused.push(text); throw new Error("refused"); };
+  const ssh = (command: string) => { asked.push(command); return plane; };
+  let threw = false;
+  try {
+    moveControlPlane({ ref: "main", expected: "a".repeat(40), layerCommits: {} }, { ssh, declaredCore: () => "7".repeat(40), say: () => undefined, refuse });
+  } catch { threw = true; }
+  return { asked, refused, threw };
+}
+const isMove = (command: string) => command.includes("git merge --ff-only");
+
+test("#5556 the first write is never asked when the installed layers lag: the plane saw ONE command, and it was the read", () => {
+  const { asked, refused, threw } = moveObserved({ plane: `nvda-worker 0.13.0 ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n` });
+  assert.equal(threw, true);
+  assert.equal(refused.length, 1);
+  assert.match(refused[0], /installed 0\.13\.0 .* resolves 0\.13\.1/);
+  assert.equal(asked.length, 1, "only the read reached the plane");
+  assert.equal(asked.some(isMove), false);
+});
+
+test("#5556 positive control: with the layers in step the same call reads, THEN writes", () => {
+  const { asked, threw } = moveObserved({ plane: `nvda-worker ${BOTH.worker} ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n` });
+  assert.equal(threw, false);
+  assert.equal(asked.length, 2);
+  assert.equal(isMove(asked[0]), false, "the first command is the read");
+  assert.equal(isMove(asked[1]), true, "the second is the move");
+});
+
+test("#5556 an unreadable plane stops the first write too", () => {
+  const { asked, threw } = moveObserved({ plane: "nvda-worker none none\nscreenreader-fleet none none\n" });
+  assert.equal(threw, true);
+  assert.equal(asked.some(isMove), false);
 });
