@@ -264,7 +264,8 @@
   vars:
     # Handed down, not read through `lab_pull`: the register is this file's, and `playbook-variables.test.ts` holds a
     # task file to the variables its own text or its include site provides. A pull that changed the checkout is
-    # followed by the install that re-lays a LAID layer at the new lockfile's tag (#3819).
+    # followed by the install, which does not re-lay a laid tree at the core commit in use (#5546). So a laid tree is judged
+    # AFTER the install, by the release the install resolved, and not by its tag.
     lab_core_moved: "{{ lab_pull is defined and lab_pull is changed }}"
 
 - name: "Say why the checkout was left alone"
@@ -339,38 +340,45 @@
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
   changed_when: true
 
-- name: "Read each layer's commit AFTER the install"
-  # THE INSTALL IS WHAT LAYS A LAYER (#3819, #3826), and `lab-layer-checkouts.yml` does not judge a laid tag when the
-  # pull moved the core, because this install replaces the tree at the NEW lockfile's tag. Nothing judged what the
-  # install laid, so a tag the lockfile pins that is not the commit the job named would have run unremarked. Same gate
-  # as the install: when it did not run, `lab-layer-checkouts.yml` has already judged the tree that will run.
+- name: "Which release deploy-pins.json names for each layer"
+  # THE PIN A LAID LAYER IS JUDGED AGAINST (#5548, the guest's twin in `ansible/deploy.yml`, #5546). A laid tree keeps the tag it
+  # was laid at, so that tag names nothing the install is on; the release the install resolved is what the core runs.
+  when: lab_pull is defined and lab_pull is changed
+  ansible.builtin.set_fact:
+    lab_layer_pins: "{{ (lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json).layers }}"
+
+- name: "Read each layer AFTER the install"
+  # THE INSTALL IS WHAT LAYS A LAYER'S RELEASE (#3819, #3826), and `lab-layer-checkouts.yml` does not judge a laid tree when the
+  # pull moved the core. At the core commit in use the install does NOT re-lay the tree (#5546): it resolves the layer from
+  # the registry into `node_modules/<package>`, and the laid tree keeps its old tag. So a laid tree is judged here by that
+  # release, and the commit its tag names is no reading of anything. Same gate as the install: when it did not run,
+  # `lab-layer-checkouts.yml` has already judged the tree that will run.
   #
-  # A clone is read at `HEAD`. A laid tree has no `.git`, so it is read as `lab-layer-checkouts.yml` reads it: the
-  # commit its `.layer-ref` tag names on the layer's own remote, the LAST `ls-remote` line for an annotated or a
-  # lightweight tag. Anything else at the layer's path (the core's `src/` with no `.layer-ref`) has no pin to read and
-  # REFUSES: `git` run there would walk up into the core and answer for it. The paths go in as arguments, not text.
+  # The reading has the guest's shape (`deploy.yml`): a clone is read at `HEAD` as `commit <sha>`; a laid tree (`.layer-ref`
+  # beside `src/`, no `.git`) as `version <semver>` from `node_modules/<package>/package.json`, and no remote is asked. Anything
+  # else at the layer's path (the core's `src/` with no `.layer-ref`) has no pin to read and REFUSES: `git` run there would walk
+  # up into the core and answer for it. The paths go in as arguments, not text.
   when: lab_pull is defined and lab_pull is changed
   ansible.builtin.command:
     argv:
       - /bin/sh
       - -ceu
       - |
-        layer="$1"; remote="$2"
+        layer="$1"; manifest="$2"
         if [ -e "$layer/.git" ]; then
-          git -C "$layer" rev-parse HEAD
+          sha=$(git -C "$layer" rev-parse HEAD)
+          printf 'commit %s\n' "$sha"
         elif [ -f "$layer/.layer-ref" ] && [ -d "$layer/src" ]; then
-          tag=$(cat "$layer/.layer-ref")
-          printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,99}$' && case "$tag" in *..*) false;; esac \
-            || { echo "$layer/.layer-ref does not hold a tag: $tag" >&2; exit 1; }
-          refs=$(git ls-remote --tags "$remote" "refs/tags/$tag" "refs/tags/$tag^{}")
-          printf '%s\n' "$refs" | tail -n 1 | cut -f 1
+          [ -f "$manifest" ] || { echo "$layer is a laid tree, and $manifest does not exist: the install put no release of it under node_modules, so nothing stands in for the layer" >&2; exit 1; }
+          release=$(node -p 'require(process.argv[1]).version' "$manifest")
+          printf 'version %s\n' "$release"
         else
           echo "$layer is neither a clone nor a laid tree (.layer-ref beside src/): nothing here stands in for the layer" >&2
           exit 1
         fi
       - sh
       - "{{ lab_repo_path }}/{{ item.value.path }}"
-      - "{{ item.value.remote }}"
+      - "{{ lab_repo_path }}/node_modules/{{ lab_layer_pins[item.key].package }}/package.json"
   loop: "{{ a11y_layer_checkouts }}"
   loop_control:
     label: "{{ item.key }}"
@@ -378,15 +386,17 @@
   register: lab_layer_after_install
 
 - name: "Each layer is ON its pin after the install, laid or cloned"
-  # `lab_layer_commits` is the commit a clone was moved to; a layer that was laid when the job began has none, so its
-  # pin is what the job named (`layer_refs`), which a branch name can never equal: a laid tree cannot be compared to one.
+  # A clone is judged by commit and a laid tree by release (above): the reading says which it is, so each is compared with its
+  # own kind of pin and never with the other's. `lab_layer_commits` is the commit a clone was moved to; a clone the job did not
+  # move has none, so its pin is what the job named (`layer_refs`), which a branch name can never equal.
   when: lab_pull is defined and lab_pull is changed
+  # `fail_msg` cannot see a task's `vars:` (the assert finalizes it first), so the reading and its pin are written out in full.
   ansible.builtin.assert:
-    that: (item.stdout | default('') | trim) == (lab_layer_commits[item.item.key] | default(layer_refs[item.item.key]))
+    that: (item.stdout | default('') | trim) == (('version ' ~ lab_layer_pins[item.item.key].version) if (item.stdout | default('') | trim).startswith('version ') else ('commit ' ~ (lab_layer_commits[item.item.key] | default(layer_refs[item.item.key]))))
     fail_msg: >-
-      layer {{ item.item.key }} is at '{{ item.stdout | default('') | trim }}' after the install, not
-      {{ lab_layer_commits[item.item.key] | default(layer_refs[item.item.key]) }}, which the job named. The
-      install lays a layer at the tag the lockfile pins, and that tag is not this commit: nothing has run.
+      layer {{ item.item.key }} is at '{{ item.stdout | default('') | trim }}' after the install, not {{ ('version ' ~ lab_layer_pins[item.item.key].version) if (item.stdout | default('') | trim).startswith('version ') else ('commit ' ~ (lab_layer_commits[item.item.key] | default(layer_refs[item.item.key]))) }}, which the job named.
+      {% if (item.stdout | default('') | trim).startswith('version ') %}A laid tree is judged by the release the install put under node_modules,
+      against deploy-pins.json layers.{{ item.item.key }}.version: move the lockfile and the pin to match in a pull request.{% endif %}
   loop: "{{ lab_layer_after_install.results | default([]) }}"
   loop_control:
     label: "{{ item.item.key }}"
