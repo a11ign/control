@@ -474,7 +474,7 @@ function releaseOnlyPlane(stamp: string | null): string {
 }
 
 const publishedLayer = { path: "packages/nvda-worker", package: PUBLISHED_PACKAGE, version: PUBLISHED_VERSION };
-const codeVersionOn = (root: string, layer: Record<string, string>) => layersFrom({ manifest: { layers: { "nvda-worker": layer } }, root }).layerCodeVersion("nvda-worker");
+const codeVersionOn = (root: string, layer: { path: string; package?: string; version?: string; }) => layersFrom({ manifest: { layers: { "nvda-worker": layer } }, root }).layerCodeVersion("nvda-worker");
 
 test("#5540 a published layer with no packages/<layer> checkout answers with the release's own stamp", async () => {
   const root = releaseOnlyPlane("dbe7c8cf55f930ba");
