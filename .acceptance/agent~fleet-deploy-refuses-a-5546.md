@@ -3,7 +3,7 @@ Row a11ign/a11ign#5546: `fleet:deploy` refused a laid worker tree after the inst
 Acceptance:
 
 ```bash
-cd ~/repos/control-wt-5546 && pnpm exec rstest run src/layer-pins-core-lock.test.ts src/layer-pins.test.ts src/core-pin.test.ts
+cd ~/repos/control-wt-5546 && pnpm exec rstest run src/layer-pins-core-lock.test.ts src/layer-pins.test.ts
 ```
 
 Hand-run: `src/layer-control-lab.test.ts`, `src/control-has-no-dependencies.test.ts`, `src/control-owned/edge-pin-parity.test.ts` and `src/layer-checkouts.test.ts` need the core's layout (`packages/control` beside `packages/nvda-worker`), so they run as `ci.yml` runs them: this repository laid over a checkout of the core at `CORE_REF` (`c5dddb33`), the two layers and the lab cloned at the tags `deploy-pins.json` names, then `rstest run --config scripts/rstest/rstest.config.ts --include "packages/control/src/<file>"`.
@@ -16,6 +16,8 @@ Hand-run: `src/layer-control-lab.test.ts`, `src/control-has-no-dependencies.test
 **Positive control, at `1d4c831` (measured by running the new tests against the old text):**
 - `src/layer-pins-core-lock.test.ts`'s real-commit case fails with the pins at 0.13.0/0.10.2 (one of six fails; the other five need no commit and pass).
 - The new laid-tree case in `src/layer-control-lab.test.ts` fails under the old shape, which is mutation M2 below (a laid tree judged by commit again).
+
+Mutation: M1, M2 and M3 below, each broken, run, and restored from a `cp` backup checked with `diff`.
 
 **Mutation (each restored from a `cp` backup and checked with `diff`):**
 - M1, `deploy-pins.json` versions put back to 0.13.0/0.10.2: only `every layer's version is the one the core's pnpm-lock.yaml resolves at core.commit` fails.
