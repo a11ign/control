@@ -408,6 +408,30 @@ test("#5506: the RENDERED patch-window unit carries the key path it was given, a
   assert.doesNotMatch(unit, /a11y-witness\/packages\/control/);
 });
 
-test("#5506: the first play refuses an empty key path (the guard, read off the file; its negative control is the render above)", () => {
-  assert.match(SCHEDULE_YML, /patch_plane_key \| default\('', true\) \| length > 0/);
+// The guard's own task is lifted out of the real first play and run by the real `ansible-playbook`, with and without the
+// variable: the refusal is executed, and the passing run is its negative control.
+function runKeyGuard(extraVars: Record<string, string>): { status: number | null; output: string } {
+  const dir = mkdtempSync(join(tmpdir(), "patch-guard-"));
+  const lift = spawnSync("python3", ["-I", "-c",
+    "import sys,json,yaml;plays=yaml.safe_load(open(sys.argv[1]));"
+    + "print(json.dumps([t for t in plays[0]['tasks'] if 'patch_plane_key' in json.dumps(t)]))",
+    fileURLToPath(new URL("../ansible/patch-schedule.yml", import.meta.url))], { encoding: "utf8" });
+  assert.equal(lift.status, 0, lift.stderr);
+  const tasks = JSON.parse(lift.stdout);
+  assert.equal(tasks.length, 1, "exactly one task in the first play guards patch_plane_key");
+  writeFileSync(join(dir, "play.json"), JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false, tasks }]));
+  const run = spawnSync("ansible-playbook", ["-i", "localhost,", "-e", JSON.stringify(extraVars), join(dir, "play.json")],
+    { encoding: "utf8", env: { ...process.env, ANSIBLE_LOCALHOST_WARNING: "false" } });
+  rmSync(dir, { recursive: true, force: true });
+  return { status: run.status, output: run.stdout + run.stderr };
+}
+
+test("#5506: the first play REFUSES an empty or absent key path, and passes a given one", () => {
+  const empty = runKeyGuard({ patch_plane_key: "" });
+  assert.notEqual(empty.status, 0, empty.output);
+  assert.match(empty.output, /patch_plane_key. is empty/);
+  const absent = runKeyGuard({});
+  assert.notEqual(absent.status, 0, absent.output);
+  const given = runKeyGuard({ patch_plane_key: "/plane/key_for_test" });
+  assert.equal(given.status, 0, given.output);
 });
