@@ -3,7 +3,7 @@ Row a11ign/a11ign#5504: the gate heartbeat unit still runs `gate-heartbeat.ts` f
 Acceptance:
 
 ```bash
-cd /home/agent/repos/wt-5504-control && test "$(grep -c 'a11y-witness/packages/control' ansible/files/a11y-gate-heartbeat.service)" = 0 && grep -q '^ExecStart=.* /root/control/src/gate-heartbeat.ts$' ansible/files/a11y-gate-heartbeat.service && node --test src/gate-heartbeat.test.ts
+cd /home/agent/repos/wt-5504-control && ! grep -q 'a11y-witness/packages/control' ansible/files/a11y-gate-heartbeat.service && grep -q '^ExecStart=.* /root/control/src/gate-heartbeat.ts$' ansible/files/a11y-gate-heartbeat.service && node --test src/gate-heartbeat.test.ts
 ```
 
 The first two clauses prove the unit names control's own program and no longer names the laid copy. The `node --test` line runs the file that pins the literal (27 tests, plain `node:test`, no loader).
