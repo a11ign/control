@@ -60,6 +60,13 @@
     - name: The control-plane key must be supplied
       ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
 
+    - name: The unit's key path must be supplied, or the 02:00 run dies on `A11Y_PVE_KEY is required` (#5506)
+      ansible.builtin.assert:
+        that: patch_plane_key | default('', true) | length > 0
+        fail_msg: >-
+          `patch_plane_key` is empty. Pass `-e patch_plane_key=<path of the control-plane key, on the plane>`: the unit
+          inherits no operator environment and the path is deliberately not committed (#85).
+
 - name: Install and enable the patch window timer on the control plane (#4446)
   hosts: a11y_control
   gather_facts: false
@@ -74,6 +81,11 @@
     # lays a copy of it (ADR 0045 cut 8, #5086). The loader is as `a11y-fleet-auto-off.service` names it (#4292, #4341).
     patch_checkout: /root/control
     patch_node_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
+    # THE KEY THE COMMAND REACHES THE PLANE WITH, AS A PATH ON THE PLANE (#5506). `fleet-playbook.ts` calls
+    # `requireControlPlaneKey()` before anything else and a systemd unit inherits no operator environment, so the
+    # unit failed at 02:00 on `A11Y_PVE_KEY is required` every day. Deliberately NO default and not a committed
+    # value (#85): the operator passes `-e patch_plane_key=<path>`, and the first play refuses without it.
+    patch_plane_key: ""
     patch_units:
       - a11y-fleet-patch-window.service
       - a11y-fleet-patch-window.timer
@@ -88,6 +100,7 @@
       # `ansible-playbook` lives in /root/.local/bin on the control plane, which systemd's default PATH omits
       # (#2725: the same omission made auto-off dispatch nothing, silently, on every tick).
       Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+      Environment=A11Y_PVE_KEY={{ patch_plane_key }}
       WorkingDirectory={{ patch_checkout }}
       # THE CHECKOUT FOLLOWS `main` BEFORE THE RUN, OR A STALE ONE REFUSES EVERY DAY OF THE WINDOW. `fleet-playbook.ts` refuses a
       # checkout that differs from `origin/main` (`staleRefRefusal`) and nothing else moves `{{ patch_checkout }}` between
