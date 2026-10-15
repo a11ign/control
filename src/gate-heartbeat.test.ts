@@ -369,7 +369,7 @@ test("the timer fires every 5 minutes or less (done-when 1)", () => {
 test("the service says in its header that it does not need the agents host (done-when 3), runs the script, and has a state directory", () => {
   const service = text("files/a11y-gate-heartbeat.service");
   assert.match(service.split("[Service]")[0], /DOES NOT NEED THE AGENTS HOST TO RUN/);
-  assert.match(service, /^ExecStart=\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/a11y-witness\/packages\/control\/src\/gate-heartbeat\.ts$/m);
+  assert.match(service, /^ExecStart=\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/gate-heartbeat\.ts$/m);
   assert.match(service, /^StateDirectory=a11y-gate-heartbeat$/m);
   assert.match(service, /^Type=oneshot$/m);
 });
