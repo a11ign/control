@@ -1,8 +1,8 @@
-Hand-run: the claimer, in ~/repos/control, because the loader there is tsx and this host's node has no type stripping. It exits 0 in a checkout holding the layer only as node_modules/@a11ign/screenreader-worker and prints the release's codeVersion(); a checked-out layer is hashed from src/ as before; a layer with neither refuses naming both (three `#5540` tests in src/layer-checkouts.test.ts).
+Hand-run: the claimer, from this branch's checkout, with `root` pointing at ~/repos/control, which holds the layer only as node_modules/@a11ign/screenreader-worker (no packages/nvda-worker). It prints the release's codeVersion(), 16 hex characters (dbe7c8cf55f930ba for 0.13.0). A checked-out layer is hashed from src/ as before and a layer with neither refuses naming both (three `#5540` tests in src/layer-checkouts.test.ts).
 
 Acceptance:
 ```
-cd ~/repos/control && node --import tsx --input-type=module -e 'const m = await import("./src/layer-checkouts.ts"); process.stdout.write(await m.layerCodeVersion("nvda-worker"))'
+node --input-type=module -e 'const m = await import("./src/layer-checkouts.ts"); const r = m.layersFrom({ manifest: m.manifestOf((await import("./src/layer-pins.ts")).readDeployPins()), root: process.env.HOME + "/repos/control" }); process.stdout.write(await r.layerCodeVersion("nvda-worker"))'
 ```
 
 Mutation: none -- not run; the three cases were exercised by a standalone script, no mutant was broken.
