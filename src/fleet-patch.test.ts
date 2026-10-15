@@ -376,3 +376,9 @@ test("#4905: the dispatch CALLS the target's extra vars and the gate's budget --
   assert.match(PLAYBOOK_SOURCE, /startPlaybookUnit\(\{[^}]*patchTarget: patchGate\.target[^}]*\}\)/);
   assert.match(PLAYBOOK_SOURCE, /followUnit\(unit, patchGate\.followBudgetMs\)/);
 });
+
+test("#5506: the patch-window unit carries A11Y_PVE_KEY from a required variable, never a committed value", () => {
+  assert.match(SCHEDULE_YML, /Environment=A11Y_PVE_KEY=\{\{ patch_plane_key \}\}/);
+  assert.match(SCHEDULE_YML, /patch_plane_key \| default\('', true\) \| length > 0/);
+  assert.match(SCHEDULE_YML, /^ {4}patch_plane_key: ""$/m);
+});
