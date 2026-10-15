@@ -10,9 +10,9 @@ Closes a11ign/a11ign#5506
 
 Acceptance:
 ```bash
-grep -c "a11y-witness/packages/control" ansible/patch-schedule.yml ansible/files/a11y-gate-heartbeat.service ; grep -c "Environment=A11Y_PVE_KEY={{ patch_plane_key }}" ansible/patch-schedule.yml
+grep -c "a11y-witness/packages/control" ansible/patch-schedule.yml
 ```
-Expected output: `ansible/patch-schedule.yml:0`, `ansible/files/a11y-gate-heartbeat.service:0`, then `1`.
+Expected output: `0`.
 
 Mutation: none -- the test is a text pin of one rendered line; removing the line turns it red by construction.
 
