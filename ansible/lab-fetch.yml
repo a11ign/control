@@ -319,14 +319,15 @@
     - name: Name it after what it actually is
       ansible.builtin.set_fact:
         lab_fetch_dest: >-
-          {{ playbook_dir }}/../../../runs/fetched/{{ out | default('candidate') }}.{{ artifact
+          {{ playbook_dir }}/../runs/fetched/{{ out | default('candidate') }}.{{ artifact
              }}{{ (lab_fetch_src | splitext)[1] | default('.json', true) }}
 
     # AND THE DIRECTORY MUST EXIST BEFORE ANYTHING TOUCHES IT — the first fetch in a checkout, which is
     # exactly the case a new session is in, had none.
     #
-    # `runs/` is gitignored, so `runs/fetched/` exists in the primary checkout and in every worktree that
-    # has fetched once, and is absent nowhere else. The stale-sibling task below runs `find` over it, and
+    # `runs/` is gitignored and belongs to whichever checkout runs the play, so `runs/fetched/` is that
+    # checkout's own: present in the primary checkout, and in a worktree only after it has fetched once.
+    # A fresh worktree does not have it. The stale-sibling task below runs `find` over it, and
     # `find` exits 1 on a directory that is not there — so the task fails AFTER the slurp has already
     # succeeded, and the artefact is read off the lab and then thrown away. Measured 2026-09-22 in a fresh
     # worktree mid-#1929; the message is `No such file or directory`, which reads as a broken playbook
