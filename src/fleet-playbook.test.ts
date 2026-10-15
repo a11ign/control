@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { validRef, guestCommitVars, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
+import { validRef, guestCommitVars, startPlaybookUnit, PLAYBOOKS, LIMIT_PATTERN, SERIAL_PATTERN, DISPLAY_MODE_PATTERN,
   displayModeRefusal, displayModeExtraVars, PLAYBOOK_TIMEOUT_MS, DEFAULT_PLAYBOOK_TIMEOUT_MS,
   onTheControlPlane, journalScope, controlPlaneCheckout, osRollbackRefusal, staleRefRefusal,
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
@@ -1758,8 +1758,8 @@ test("#5014 the wiring: the lock is taken before the unit starts, from the budge
   const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const start = source.slice(source.indexOf("function startPlaybookUnit("));
-  assert.ok(start.indexOf("takeFleetLockOrExit({ chosen, followBudgetMs })") > 0
-    && start.indexOf("takeFleetLockOrExit(") < start.indexOf("planeUnitStart(unit)"), "taken before the unit's start exists");
+  assert.ok(start.indexOf("deps.takeLock({ chosen, followBudgetMs })") > 0
+    && start.indexOf("deps.takeLock(") < start.indexOf("planeUnitStart(unit)"), "taken before the unit's start exists");
   assert.match(source, /function takeFleetLockOrExit[\s\S]*?lockTakeStep\(\{ chosen, followBudgetMs, now: Date\.now\(\) \}\)[\s\S]*?process\.exit\(2\)/,
     "a refusal exits 2, as every other gate here does");
   assert.match(source, /followBudgetMs: patchGate\.followBudgetMs, aim \}\)/, "main hands it the SAME budget followUnit is given: no run length is copied");
@@ -1884,8 +1884,39 @@ test("#5512/#5515: both core plays are handed the declared core commit, never co
   const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
   assert.equal(source.split("-e a11y_expected_commit=").length - 1, 1,
     "the dispatcher builds that pair in ONE place (guestCommitVars), so no play can bypass the rule");
-  assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, core \}\)\}/);
-  assert.match(source, /const core = declaredCoreCommit\(\);/, "the pin is read before the control plane is written to");
+  // The ORDER is the one thing still read from source text: `main` reads the pin for its refusal before the control plane is written to.
+  const main = source.slice(source.indexOf("async function main() {"));
+  const read = main.indexOf("declaredCoreCommit();");
+  assert.ok(read > 0 && read < main.indexOf("ssh(controlPlaneCheckout("), "a missing pin refuses before the control plane moves");
+  assert.doesNotMatch(main.replace("declaredCoreCommit();", ""), /\bcore\b/,
+    "and main carries no core value onward: the one that reaches the guests is read where it is used");
+});
+
+/** Runs `startPlaybookUnit` for real with the three outside reaches replaced, and returns what it asked of each, in order. */
+function startUnitObserved({ chosen, pin }: { chosen: string; pin: string }) {
+  const calls: string[] = [];
+  const unit = startPlaybookUnit({ chosen, ref: "HEAD", limitFlag: undefined, serialFlag: undefined, allowEdgeDowngrade: false,
+    apply: false, displayMode: undefined, layerCommits: {}, aim: { addresses: {}, workers: [] }, patchTarget: null, followBudgetMs: 1000 },
+  { ssh: (command) => { calls.push(`ssh ${command}`); return ""; },
+    takeLock: ({ chosen: held }) => { calls.push(`lock ${held}`); },
+    declaredCore: () => { calls.push("pin"); return pin; } });
+  return { unit, calls, command: calls.find((call) => call.startsWith("ssh ")) ?? "" };
+}
+
+test("#5515: the command the dispatcher sends carries the DECLARED core commit for every core play, observed by running it", () => {
+  const pin = "7e751f5682c1ad35280e24ca424bab3023fc3a40";
+  for (const chosen of ["deploy.yml", "provision-role.yml"]) {
+    const { command, calls, unit } = startUnitObserved({ chosen, pin });
+    assert.match(command, new RegExp(`ansible-playbook ${chosen.replace(".", "\\.")} .*-e a11y_expected_commit=${pin}( |$)`), `${chosen} is handed the pin`);
+    assert.equal(command.split("-e a11y_expected_commit=").length - 1, 1, "once, so no second value can win");
+    assert.equal(unit, `a11y-fleet-${chosen.replace(/\.yml$/, "")}`);
+    assert.deepEqual(calls.map((call) => call.split(" ")[0]), ["pin", "lock", "ssh"], "pin read, then the lock, then the control plane is asked");
+  }
+});
+
+test("#5515: a DIFFERENT pin gives a different command (positive control: the pin is what reaches the guests, not a constant or control's sha)", () => {
+  const other = "0123456789abcdef0123456789abcdef01234567";
+  assert.match(startUnitObserved({ chosen: "provision-role.yml", pin: other }).command, new RegExp(`a11y_expected_commit=${other}`));
 });
 
 /** The play's own tasks, by name, parsed with PyYAML (this package takes no npm dependency, ADR 0012). */

@@ -946,6 +946,17 @@ function declaredCoreCommit(): string {
 }
 
 /**
+ * What `startPlaybookUnit` reaches outside the process for, so a test can run it and read the command it built (#5515): the
+ * ssh to the control plane, the fleet lock it takes, and the core pin it reads. The defaults are the real ones.
+ */
+export interface StartPlaybookDeps {
+  ssh: (command: string, options?: { capture?: boolean; timeoutMs?: number }) => unknown;
+  takeLock: (call: { chosen: string; followBudgetMs: number }) => void;
+  declaredCore: () => string;
+}
+const REAL_START_DEPS: StartPlaybookDeps = { ssh, takeLock: takeFleetLockOrExit, declaredCore: declaredCoreCommit };
+
+/**
  * Start the playbook on the control plane as a named systemd unit, and return that unit's name.
  *
  * A PHASE, not a name restating its code: "get it running somewhere it will survive me" is a distinct
@@ -962,14 +973,17 @@ function declaredCoreCommit(): string {
  *   `aim` is where each MOVED worker is aimed this run, already identity-checked (#2832); empty for a healthy fleet.
  * @returns {string} the unit name
  */
-function startPlaybookUnit({ chosen, ref, core, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+export function startPlaybookUnit({ chosen, ref, limitFlag, serialFlag, allowEdgeDowngrade, apply,
   displayMode, layerCommits, aim, patchTarget, followBudgetMs }: {
-        chosen: string; ref: string; core: string; limitFlag: string | undefined;
+        chosen: string; ref: string; limitFlag: string | undefined;
         serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean;
         displayMode: string | undefined; layerCommits: Record<string, string>;
         aim: { addresses: Record<string, string>; workers: string[]; };
         patchTarget: PatchTarget | null; followBudgetMs: number;
-    }): string {
+    }, deps: StartPlaybookDeps = REAL_START_DEPS): string {
+  // The guests' core commit, read HERE where it is used (#5515): no value travels from `main` to this call, so there is no
+  // call site that can hand a guest control's own commit. `main` still reads it first, for the refusal, before the control plane moves.
+  const core = deps.declaredCore();
   // SUPERVISED, NOT FOREGROUND — and this is the whole reason a deploy can no longer be half-done.
 //
 // It used to be one synchronous `ssh ... ansible-playbook`, so the ten-machine reboot was only as
@@ -988,7 +1002,7 @@ function startPlaybookUnit({ chosen, ref, core, limitFlag, serialFlag, allowEdge
 // `systemd-run` refuses a name that is still loaded — a SUCCEEDED run keeps its name just as a failed
 // one does.
 const unit = `a11y-fleet-${chosen.replace(/\.yml$/, "")}`;
-takeFleetLockOrExit({ chosen, followBudgetMs }); // #5014: before the unit exists; exits 2 on a refusal and 1 if it cannot be written
+deps.takeLock({ chosen, followBudgetMs }); // #5014: before the unit exists; exits 2 on a refusal and 1 if it cannot be written
 // #2832: THE ADDRESS OVERRIDE, if any worker moved and was identified. `install` makes the per-unit file hold
 // exactly this run's override or nothing, and a failure to write it ENDS the command (`|| exit 1`): a `;`
 // after an `&&` chain would carry on and start the unit without the override it was meant to have.
@@ -1000,7 +1014,7 @@ try {
   // from your code and `served_code` from theirs, and the deploy fails with a mismatch that reads like a
   // corrupted guest checkout. Measured 2026-08-24: all four workers held 1f7cb7e88070235d against an
   // expected c6e66caa481b76c0, having faithfully fetched a branch nobody had changed.
-  ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
+  deps.ssh(`${override.install} || exit 1; systemctl stop ${unit} 2>/dev/null; systemctl reset-failed ${unit} 2>/dev/null; `
     + planeUnitStart(unit)
     + `--setenv=ANSIBLE_CONFIG=ansible.cfg${override.setenv} `
     // NO `-i` HERE. `ansible.cfg` sets `inventory = /etc/a11ign/inventory.yml,inventory.yml` so the
@@ -2325,8 +2339,9 @@ async function main() {
   // the remote's resolved SHA against the branch NAME, which can never match, and refused a control plane
   // that was already correct.
   const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
-  // The guests' core commit, declared rather than resolved here (#5515): read BEFORE the control plane moves, so a missing pin refuses first.
-  const core = declaredCoreCommit();
+  // The guests' core commit is declared, not resolved here (#5515). Read now only so a missing pin refuses BEFORE the control plane
+  // moves; the value is read again where it is used (`startPlaybookUnit`), so none is carried between the two.
+  declaredCoreCommit();
 
   refuseCommitShapedRef(ref);
 
@@ -2366,7 +2381,7 @@ async function main() {
   // whole command line and whose stack is node's internals, which buries "which box failed" under twelve
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
-  const unit = startPlaybookUnit({ chosen, ref, core, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+  const unit = startPlaybookUnit({ chosen, ref, limitFlag, serialFlag, allowEdgeDowngrade, apply,
     displayMode, layerCommits, patchTarget: patchGate.target, followBudgetMs: patchGate.followBudgetMs, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`

@@ -12,15 +12,20 @@ Acceptance: `A11Y_CHECK_CORE_PIN=1 node --test src/core-pin.test.ts`
 **As run (measured, 2026-10-15, on this branch):**
 - `A11Y_CHECK_CORE_PIN=1 node --test src/core-pin.test.ts` (the Acceptance): 3 passed, 0 failed, 0 skipped. The same with `pnpm exec tsx --test` also passed 3 of 3. The network test fetched the pinned commit from the core's remote and then fetched a sha nobody has pushed (`1234567890abcdef1234567890abcdef12345678`), which was refused: the positive control.
 - `pnpm exec tsx --test src/core-pin.test.ts` (no env var): 2 passed, 1 skipped. The skip is the network half, by design (see below).
-- `pnpm exec tsx --test src/fleet-playbook.test.ts`: 132 passed, 0 failed, 0 skipped.
 - `pnpm exec rstest run src/layer-pins.test.ts`: exit 0, no failed tests.
 - `pnpm run typecheck`: exit 0. `pnpm run layout-check`: `ok (377 files read ...)`, exit 0. `pnpm test`: exit 0, 45 passed in 8 files.
 
 **Pre-existing failures, not caused by this change (the files are identical to origin/main):** `src/layer-guests.test.ts` and `src/layer-control-lab.test.ts` fail with ENOENT on `packages/control/ansible/tasks/read-layer-checkouts.yml`, the core's layout, which this standalone checkout does not have (they run in the core's CI). `src/layer-checkouts.test.ts` fails with `ERR_PACKAGE_PATH_NOT_EXPORTED` for `@a11ign/toolchain/lib/git-sandbox`.
 
-**Mutation (measured, both directions, each restored from a `cp` backup and checked with `cmp`):**
-- (a) the reader's sha pattern loosened to `[0-9a-f]{7,40}`: `the reader refuses a core pin that cannot name one commit, and says which field` fails (a 12-character sha is accepted).
-- (b) `main` passes control's own sha as the core pin (`const core = expected;`): `#5512/#5515: both core plays are handed the declared core commit, never control's` fails, and 131 of the other tests pass.
+**Rework at the review's `not convinced` (reviewer-control-103 at `8d8b1dcf`): the dispatcher wiring is now run, not regex-matched.** `startPlaybookUnit` takes its three outside reaches (ssh, the fleet lock, the core pin) as an injectable second argument, defaulting to the real ones, and reads the pin itself where it is used, so `main` carries no core value and has no call site that could hand a guest control's own commit. Two tests run it and read the command it built: `#5515: the command the dispatcher sends carries the DECLARED core commit for every core play, observed by running it` (both core plays; the pin appears once; pin, then lock, then ssh) and `#5515: a DIFFERENT pin gives a different command` (the positive control). `main`'s early read (a missing pin refuses before the control plane moves) is still an ORDER read from source text, in `#5512/#5515: both core plays are handed...`: that one property is not executed, because running `main` reaches the fleet.
+
+**As run on the rework (measured, 2026-10-15, on this branch):** `node --test src/fleet-playbook.test.ts`: 134 passed, 0 failed. `A11Y_CHECK_CORE_PIN=1 node --test src/core-pin.test.ts`: 3 passed, 0 failed. `pnpm run typecheck`: exit 0.
+
+**Mutation (measured, each restored from a `cp` backup and checked with `diff`):**
+- (a) the reader's sha pattern loosened to `[0-9a-f]{7,40}`: `the reader refuses a core pin that cannot name one commit, and says which field` fails.
+- (b) the dispatcher's call handed control's ref as the core (`guestCommitVars({ chosen, ref, core: ref })`): both `#5515` execution tests fail, and no other test.
+- (c) the pin read replaced by control's value (`const core = ref;` in `startPlaybookUnit`): the same two fail, and no other.
+- (d) `main` stops reading the pin early, and (e) the early read moved after `ssh(controlPlaneCheckout(`: each fails `#5512/#5515: both core plays are handed...` only, which is the one order assertion.
 
 **Why the network half is gated:** repository policy is that no test fails when the network does (`layer-pins.test.ts` header). So CI runs only the offline half. The existence of the pinned commit is therefore checked by hand, with `A11Y_CHECK_CORE_PIN=1`, before a pin moves. A commit force-pushed away after the pin was set is caught only by that gated run, not live.
 
