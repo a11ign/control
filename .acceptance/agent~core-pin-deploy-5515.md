@@ -3,12 +3,14 @@ Row a11ign/a11ign#5515, the `deploy.yml` half: the core commit every guest is pu
 Region is `ansible/provision.yml` and `src/fleet-playbook.test.ts`, as the row says.
 Outside-Region: `deploy-pins.json`, `src/layer-pins.ts`, `src/fleet-playbook.ts` and `src/core-pin.test.ts`. The ruling's build shape (steps 1 to 3) cannot be made without the pin's declaration, its reader, the playbook call that hands it to the core plays, and a test that the pinned object exists on the core's remote. No `ansible/*.yml` changed: `provision-role.yml` (step 4) already reads `a11y_expected_commit | default(origin/<ref>)`, so the same `-e` pin satisfies it.
 
-Acceptance: `A11Y_CHECK_CORE_PIN=1 pnpm exec tsx --test src/core-pin.test.ts`
+Acceptance: `A11Y_CHECK_CORE_PIN=1 node --test src/core-pin.test.ts`
+
+(`node` strips the types itself, Node 24; `tsx` is not a dependency of this tool, so `pnpm exec tsx` is refused by `agent-org pr:open`.)
 
 **Seed (measured, 2026-10-15T11:12:54Z):** `git ls-remote https://github.com/a11ign/a11ign.git main` gives `7e751f5682c1ad35280e24ca424bab3023fc3a40`. That is the value in `deploy-pins.json` `core.commit`.
 
 **As run (measured, 2026-10-15, on this branch):**
-- `A11Y_CHECK_CORE_PIN=1 pnpm exec tsx --test src/core-pin.test.ts`: 3 passed, 0 failed, 0 skipped. The network test fetched the pinned commit from the core's remote and then fetched a sha nobody has pushed (`1234567890abcdef1234567890abcdef12345678`), which was refused: the positive control.
+- `A11Y_CHECK_CORE_PIN=1 node --test src/core-pin.test.ts` (the Acceptance): 3 passed, 0 failed, 0 skipped. The same with `pnpm exec tsx --test` also passed 3 of 3. The network test fetched the pinned commit from the core's remote and then fetched a sha nobody has pushed (`1234567890abcdef1234567890abcdef12345678`), which was refused: the positive control.
 - `pnpm exec tsx --test src/core-pin.test.ts` (no env var): 2 passed, 1 skipped. The skip is the network half, by design (see below).
 - `pnpm exec tsx --test src/fleet-playbook.test.ts`: 132 passed, 0 failed, 0 skipped.
 - `pnpm exec rstest run src/layer-pins.test.ts`: exit 0, no failed tests.
