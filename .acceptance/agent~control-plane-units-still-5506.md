@@ -11,7 +11,7 @@ Closes a11ign/a11ign#5506
 Acceptance:
 
 ```bash
-cd /home/agent/repos/control-wt-5506 && test "$(grep -c "a11y-witness/packages/control" ansible/patch-schedule.yml)" -eq 0 && grep -q "Environment=.*{{ patch_plane_key }}" ansible/patch-schedule.yml
+cd /home/agent/repos/control-wt-5506 && node --import tsx --test src/fleet-patch.test.ts
 ```
 
 Mutation: none -- the test is a text pin of one rendered line; removing the line turns it red by construction.
