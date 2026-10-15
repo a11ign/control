@@ -1916,7 +1916,7 @@ function provisionGuest({ guestAt, expect, extra = {} }: { guestAt: "behind" | "
   const second = git(core, "rev-parse", "HEAD");
   if (guestAt === "diverged") git(guest, "commit", "-q", "--allow-empty", "-m", "committed on the guest");
   const [fastForward, landed] = [FAST_FORWARD, LANDED].map((name) => playTasks([name])[0]!);
-  const shellTask = { ...fastForward, "ansible.builtin.shell": fastForward["ansible.windows.win_shell"], args: { ...(fastForward.args as object), executable: "pwsh" } };
+  const shellTask: Record<string, unknown> = { ...fastForward, "ansible.builtin.shell": fastForward["ansible.windows.win_shell"], args: { ...(fastForward.args as object), executable: "pwsh" } };
   delete shellTask["ansible.windows.win_shell"];
   const playbook = join(dir, "play.json");
   writeFileSync(playbook, JSON.stringify([{ hosts: "all", gather_facts: false, vars: { a11y_repo_path: guest }, tasks: [shellTask, landed] }]));
