@@ -12,23 +12,24 @@
 # held to the SAME pattern as `lab_ref`; and a layer whose checkout is not there, which stops the job naming the
 # layer and the path. The core's tree never stands in for a layer that is missing.
 #
-# A LAYER MAY ALSO BE HELD LAID, NOT CHECKED OUT (#3819). `pnpm install` runs `prepare`, which runs
-# `scripts/lay-layer.ts`, and that REPLACES the layer's directory with its `src/` at the tag the lockfile pins, plus
-# `.layer-ref` naming the tag, and no `.git`. So a host that has installed holds the layer as a laid tree, and a check
+# A LAYER MAY ALSO BE HELD LAID, NOT CHECKED OUT (#3819). `scripts/lay-layer.ts` (the core's `prepare`) laid a layer as its
+# `src/` plus `.layer-ref` naming the tag, and no `.git`; at the core commit in use the install no longer re-lays it (#5546).
+# So a host that installed then holds the layer as a laid tree, and a check
 # that wanted a `.git` refused every job the day the second layer left the core (#3504). A laid tree is accepted ONLY
 # as `.layer-ref` beside `src/` with no `.git`: the core's own tree at that path (`src/` and no `.layer-ref`) is still
 # refused, because it is not the layer. It has no history to move, so the ref the job named must be a FULL COMMIT and
 # the commit the laid tag names on the layer's own `remote` (`git ls-remote`): a laid tree at another tag, or a branch
-# name that cannot be compared, refuses. WHEN THE CORE JUST MOVED (`lab_core_moved`, which `run-job.yml` hands down from its `lab_pull`) the install that follows
-# re-lays the tree at the NEW lockfile's tag, so the stale tag here is not what will run and is not judged: a bump of
-# the layer's version in the lockfile would otherwise be refused by the very install that would fix it.
+# name that cannot be compared, refuses. WHEN THE CORE JUST MOVED (`lab_core_moved`, which `run-job.yml` hands down from its `lab_pull`)
+# the tag here is not judged: the install that follows resolves the layer's release into `node_modules`, and `run-job.yml`'s
+# read AFTER the install judges the laid tree by that release (#5548). A bump of the layer's version in the lockfile would
+# otherwise be refused before the install that resolves it.
 #
 # A LAYER THE INSTALL HAS NOT LAID YET IS NOT A MISSING ONE (#3920). `run-job.yml` includes this file BEFORE the install, and a pull that
 # crosses the commit that took a layer out of the core deletes the directory the core used to track at its path, so a lab that has not
 # installed since holds NOTHING there: no clone, no `.layer-ref`, no `src/`. Refusing that refused every `--qualify-sha` run at the first
 # post-split sha (measured on `layer-control-lab.test.ts`, which plays this file as `run-job.yml` does), before the install that would have
 # laid it. So when the core just moved (`lab_core_moved`) and the path holds no `src/`, the layer is left to the install and not judged here;
-# `run-job.yml`'s read AFTER the install judges what it laid against `layer_refs`, and refuses a tree that is not the layer. A directory with
+# `run-job.yml`'s read AFTER the install judges what it laid, and refuses a tree that is not the layer. A directory with
 # `src/` and no `.layer-ref` is the core's own tree and still refuses, and so does an absent layer when the core did NOT move: nothing lays it.
 # NOT EVERY LAYER IS LAID BY THE INSTALL: the core's `prepare` lays `screenreader-fleet`, `lab` and `control`, and no `lay-layer.ts` call names
 # `nvda-worker`, so an absent `nvda-worker` is deferred here and then REFUSED by that read after the install, naming the layer and the path.
@@ -189,8 +190,8 @@
     label: "{{ item.item.item.key }}"
 
 - name: "A laid layer is the commit the job named, or the job says it is not"
-  # Strict when nothing will re-lay it. When the core's checkout just moved the install that follows replaces the
-  # tree at the new lockfile's tag (the header says why), so what is laid now is not what will run.
+  # Strict when the core did not move. When it did, the header says why: the laid tree is judged after the install by the
+  # release that install resolved, so the tag held here is not the reading that decides.
   when: not (lab_core_moved | default(false) | bool)
   ansible.builtin.assert:
     that:
