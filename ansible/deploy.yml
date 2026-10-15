@@ -254,24 +254,39 @@
         chdir: "{{ a11y_repo_path }}"
       changed_when: true
 
-    - name: Read each layer's commit AFTER the install
-      # THE CHECK `tasks/layer-checkouts.yml` CANNOT MAKE (#3819, #3826). A laid tree is not judged against its pin before the
-      # install, because the install re-lays it at the tag the lockfile pins and judging the old one would refuse the very
-      # bump that fixes it. So THIS is where a laid layer meets its pin: the commit its `.layer-ref` tag names on the layer's
-      # own remote (`git ls-remote`, which peels an annotated tag to the commit: the LAST line is the commit either way), or
-      # HEAD for a layer still held as a clone. A path that is neither is refused by name, with the core's `src/` at it
-      # the case that must not pass. The tag is held to the lab's pattern (`lab-layer-checkouts.yml`) before it is asked for.
+    - name: Which release deploy-pins.json names for each layer
+      # Control's own declaration (`deploy-pins.json`, ADR 0045), read from the checkout this play runs from -- the same file
+      # `fleet:deploy` fetched and compared by `integrity` before any box was touched -- so the number the guest is judged
+      # against is the one the operator's run already verified, and no second list of versions can drift from it.
+      ansible.builtin.set_fact:
+        a11y_layer_pins: "{{ (lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json).layers }}"
+
+    - name: Read each layer AFTER the install
+      # THE CHECK `tasks/layer-checkouts.yml` CANNOT MAKE (#3819, #3826, #5546). A laid tree is not judged against its pin before
+      # the install, because the install is what moves what the guest runs and judging the old one would refuse the very bump
+      # that applies it. So THIS is where a laid layer meets its pin -- and the install does NOT re-lay the tree to do it
+      # (#5546: at the core's pinned commit nothing writes `.layer-ref` or moves `packages/<layer>`; the core resolves the layer
+      # from the registry into `node_modules/@a11ign/<package>`). The laid tree keeps its old tag, so its tag is no reading of
+      # anything: comparing the commit it names with the commit of a release it was never moved to can never pass.
+      #
+      # WHAT IS READ, BY SHAPE (`ceo`, a11ign#5155, option b):
+      #   - a CLONE (`.git`) holds the layer's own history, so the commit is read: `commit <sha>`, judged against
+      #     `a11y_layer_commits`, as before;
+      #   - a LAID tree (`.layer-ref` beside `src/`, no `.git`) is judged by the RELEASE the install resolved: `version
+      #     <semver>` from `node_modules/<package>/package.json`, which is what `deploy-pins.json` names and what `/health.code`
+      #     is a hash of. The laid tree's own tag is not read and no remote is asked, so this read needs no network;
+      #   - a path that is neither is refused by name, with the core's `src/` at it the case that must not pass.
       ansible.windows.win_shell: |
         $ErrorActionPreference = "Stop"
         $layer = '{{ a11y_repo_path }}/{{ item.value.path }}'
         if (Test-Path "$layer/.git") {
-          git -c core.hooksPath=a11y-no-hooks -C $layer rev-parse HEAD
+          $head = git -c core.hooksPath=a11y-no-hooks -C $layer rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD in $layer failed with $LASTEXITCODE" }
+          "commit $head"
         } elseif ((Test-Path "$layer/.layer-ref") -and (Test-Path "$layer/src")) {
-          $tag = (Get-Content -Raw "$layer/.layer-ref").Trim()
-          if (($tag -notmatch '^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,99}$') -or $tag.Contains('..')) { throw "$layer/.layer-ref does not hold a tag: $tag" }
-          $refs = git -c core.hooksPath=a11y-no-hooks ls-remote --tags '{{ item.value.remote }}' "refs/tags/$tag" "refs/tags/$tag^{}"
-          if ($LASTEXITCODE -ne 0) { throw "git ls-remote of {{ item.key }} failed with $LASTEXITCODE" }
-          ($refs | Select-Object -Last 1) -split '\s+' | Select-Object -First 1
+          $manifest = '{{ a11y_repo_path }}/node_modules/{{ a11y_layer_pins[item.key].package }}/package.json'
+          if (-not (Test-Path $manifest)) { throw "$layer is a laid tree, and $manifest does not exist: the install put no release of {{ a11y_layer_pins[item.key].package }} under node_modules, so nothing stands in for the layer" }
+          "version $((Get-Content -Raw $manifest | ConvertFrom-Json).version)"
         } else {
           throw "$layer is neither a clone of {{ item.key }} nor a laid tree (.layer-ref beside src/): nothing here stands in for it"
         }
@@ -282,13 +297,25 @@
       changed_when: false
 
     - name: Each layer is ON its pin after the install, laid or cloned
+      # A clone is judged by commit and a laid tree by release (above); the reading says which it is, so each is compared with
+      # its own kind of pin and never with the other's.
       ansible.builtin.assert:
-        that: (item.stdout | default('') | trim) == a11y_layer_commits[item.item.key]
+        that: reading == expected
         fail_msg: >-
-          {{ inventory_hostname }}: layer {{ item.item.key }} is at '{{ item.stdout | default('') | trim }}' after the
-          install, not {{ a11y_layer_commits[item.item.key] }}. Empty means its laid tag names no commit on
-          {{ item.item.value.remote }}. The lockfile's pin for the layer and `--layer-ref={{ item.item.key }}=` name two
-          builds: bump one to match the other, then deploy again.
+          {{ inventory_hostname }}: layer {{ item.item.key }}
+          {% if reading.startswith('version ') %}is a laid tree and the install put release
+          '{{ reading | replace('version ', '') }}' of {{ a11y_layer_pins[item.item.key].package }} under node_modules, not
+          {{ a11y_layer_pins[item.item.key].version }} (the pin: deploy-pins.json layers.{{ item.item.key }}.version, which
+          fleet:deploy verified by integrity). The release is what the lockfile at the core commit the guest was put on
+          resolves (deploy-pins.json core.commit); move one to match the other in a pull request and deploy again.
+          {% else %}is at '{{ reading | replace('commit ', '') }}' after the install, not
+          {{ a11y_layer_commits[item.item.key] }} (the commit `--layer-ref={{ item.item.key }}=` named, or the one the
+          pinned release's tag names on {{ item.item.value.remote }}). Empty means the clone reported no HEAD. The lockfile's
+          pin for the layer and `--layer-ref={{ item.item.key }}=` name two builds: bump one to match the other, then deploy
+          again.{% endif %}
+      vars:
+        reading: "{{ item.stdout | default('') | trim }}"
+        expected: "{{ ('version ' ~ a11y_layer_pins[item.item.key].version) if reading.startswith('version ') else ('commit ' ~ a11y_layer_commits[item.item.key]) }}"
       loop: "{{ layer_after_install.results }}"
       loop_control:
         label: "{{ item.item.key }}"

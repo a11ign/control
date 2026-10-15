@@ -3,15 +3,15 @@
   "layers": {
     "nvda-worker": {
       "package": "@a11ign/screenreader-worker",
-      "version": "0.13.0",
-      "integrity": "sha512-hX62pfnZehLPUYmeQnR9nTTMtvtQ1tWioF1xFGg4Aet/1DKpUus2B369F1OlOyj1SIDwtqHy825TPZwK6rziig==",
+      "version": "0.13.1",
+      "integrity": "sha512-DG1Ws9bkEt3Hxqeh45bMg5o/jTWbg1ybwnMfS8HWnsln7Et6ZPce4b2Lrs1TPdtkhUf802lmw0GRWDKN2n0jfw==",
       "path": "packages/nvda-worker",
       "remote": "https://github.com/a11ign/screenreader-worker.git"
     },
     "screenreader-fleet": {
       "package": "@a11ign/screenreader-fleet",
-      "version": "0.10.2",
-      "integrity": "sha512-rlyo5VXW/+MPKXQWwdOAlNLQvvcHuvtHFmKAO14DLAqcbatqna7pJgKSIcBt24k0SkuVcb5x6Ks3pG614tCpZw==",
+      "version": "0.11.0",
+      "integrity": "sha512-V4fNZjEToXfX2seAqgb2mAwKTf8/oRPBLsO8EEhnHDJzD/bLGe3jtB4lmtd9vbxQrLRKZW7OcdjUS80NBnmdvQ==",
       "path": "packages/worker-fleet",
       "remote": "https://github.com/a11ign/screenreader-fleet.git"
     }
