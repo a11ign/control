@@ -73,7 +73,7 @@ import { sandboxGitEnv } from "./git-safe-env.ts";
 // code-drift and pnpm helpers above are — but ADR 0012's surface rule stands for anything else:
 // `control-has-no-dependencies.test.ts` allows no other package-name import, and asserts it transitively.
 import { refuseUnknownFlags, flagValue, WORKER_GROUP, groupPerLine } from "./worker-fleet-carried.ts";
-import { LAYER_PINNED, installedLayersJudged, installedLayersRead, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
+import { LAYER_PINNED, installedLayersJudged, installedLayersRead, manifestOf, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
@@ -976,10 +976,19 @@ export function moveControlPlane({ ref, expected, layerCommits }: { ref: string;
  * and is NOT made here (it waits on a ruling, #5155). Returns the refusal to print, or null; notes are printed either way.
  */
 export function installedLayersRefusal(deps: Pick<StartPlaybookDeps, "ssh"> & { say?: (line: string) => void } = { ...REAL_START_DEPS, say: (line) => process.stderr.write(`${line}\n`) }): string | null {
-  const read = String(deps.ssh(installedLayersRead(), { capture: true }));
-  const { refusal, notes } = installedLayersJudged(read);
+  const manifest = manifestOf(readDeployPins());
+  const read = String(deps.ssh(installedLayersRead(manifest), { capture: true }));
+  const { refusal, notes } = installedLayersJudged(manifest, read);
   for (const note of notes) deps.say?.(`  note: ${note}`);
   return refusal;
+}
+
+/** `installedLayersRefusal`'s verdict as an exit: nothing has been written to the plane when it refuses (#5556). */
+function exitOnLaggingInstall(): void {
+  const lagging = installedLayersRefusal();
+  if (!lagging) return;
+  process.stderr.write(`${lagging}\n`);
+  process.exit(2);
 }
 
 /**
@@ -2379,12 +2388,7 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
-  // #5556: a read, BEFORE the first write to the plane. Nothing has been written when it refuses.
-  const lagging = installedLayersRefusal();
-  if (lagging) {
-    process.stderr.write(`${lagging}\n`);
-    process.exit(2);
-  }
+  exitOnLaggingInstall(); // #5556: a read, BEFORE the first write to the plane
   moveControlPlane({ ref, expected, layerCommits });
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report

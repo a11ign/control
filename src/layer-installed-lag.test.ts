@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layersFrom, manifestOf } from "./layer-checkouts.ts";
+import { installedLayersJudged, installedLayersRead, manifestOf } from "./layer-checkouts.ts";
 import { readDeployPins } from "./layer-pins.ts";
 import { installedLayersRefusal } from "./fleet-playbook.ts";
 
@@ -55,14 +55,14 @@ function planeOf({ installed = {}, locked, clone = false }: Plane) {
 
 /** The read, run for real against the fixture, and what it printed. */
 function readOf(core: string): string {
-  const command = layersFrom({ manifest: MANIFEST, root: core }).installedLayersRead();
+  const command = installedLayersRead(MANIFEST);
   const local = command.replaceAll(CONTROL_PLANE_CHECKOUT_PATH, core);
   const run = spawnSync("bash", ["-c", local], { encoding: "utf8", env: { PATH: process.env.PATH } });
   assert.equal(run.status, 0, run.stderr);
   return run.stdout;
 }
 
-const judged = (core: string) => layersFrom({ manifest: MANIFEST, root: core }).installedLayersJudged(readOf(core));
+const judged = (core: string) => installedLayersJudged(MANIFEST, readOf(core));
 const BOTH = { worker: WORKER.version as string, fleet: FLEET.version as string };
 
 test("#5556 positive control: HEAD resolves 0.13.1 and 0.13.0 is installed -> refused, naming both numbers and the remedy", () => {
@@ -103,7 +103,7 @@ test("#5556 a layer held as a clone is judged by the move's own branch, not by n
 });
 
 test("#5556 a layer the read printed no line for is refused, not read as in step", () => {
-  const { refusal } = layersFrom({ manifest: MANIFEST, root: tmpdir() }).installedLayersJudged("");
+  const { refusal } = installedLayersJudged(MANIFEST, "");
   assert.match(refusal ?? "", /returned no line for it/);
 });
 
@@ -121,11 +121,12 @@ test("#5556 installedLayersRefusal asks with a read-only command and prints note
   assert.equal(said.length, 2);
 });
 
-test("#5556 main asks BEFORE the first write to the plane, and refuses with exit 2", () => {
+test("#5556 main asks BEFORE the first write to the plane, and the ask refuses with exit 2", () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fleet-playbook.ts"), "utf8");
-  const asked = source.indexOf("installedLayersRefusal();");
+  const asked = source.indexOf("  exitOnLaggingInstall();");
   const moved = source.indexOf("  moveControlPlane({ ref, expected, layerCommits });");
   assert.ok(asked > 0 && moved > 0, "both calls are in main");
   assert.ok(asked < moved, "the read comes first");
-  assert.match(source.slice(asked, moved), /process\.exit\(2\)/);
+  const body = source.slice(source.indexOf("function exitOnLaggingInstall"));
+  assert.match(body.slice(0, body.indexOf("\n}\n")), /installedLayersRefusal\(\)[\s\S]*process\.exit\(2\)/);
 });

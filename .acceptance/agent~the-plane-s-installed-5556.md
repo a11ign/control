@@ -4,7 +4,7 @@ Acceptance: `bash -c 'git grep -q frozen-lockfile -- src/fleet-playbook.ts'`
 
 **As run (measured, 2026-10-15):** the Acceptance exits 0 at this head. `pnpm run typecheck` clean. `pnpm test` reports `failedFiles: 0, failedTests: 0`. `pnpm exec tsx --test src/layer-installed-lag.test.ts`: 9 pass, 0 fail.
 
-**Done-when 1 and 3:** `installedLayersRefusal` (called in `main` before `moveControlPlane`) reads each published layer's installed release and the lockfile's importer entry, and refuses naming both and the declared release. Positive control in `src/layer-installed-lag.test.ts`: lockfile 0.13.1, installed 0.13.0.
+**Done-when 1 and 3:** `installedLayersRefusal` (called through `exitOnLaggingInstall` in `main` before `moveControlPlane`) reads each published layer's installed release and the lockfile's importer entry, and refuses naming both and the declared release. Positive control in `src/layer-installed-lag.test.ts`: lockfile 0.13.1, installed 0.13.0.
 
 **Done-when 2:** the remedy is `pnpm install --frozen-lockfile` in `/root/control`. It is a write to the control plane that `ceo` has not covered (a11ign#5155 is `answer:ceo`), so this change reports the lag and does not make the install, per product-manager's promotion comment. `fleet:status` was not extended (outside the Region).
 

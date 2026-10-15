@@ -188,10 +188,6 @@ export function layersFrom({ manifest, root }: { manifest: Manifest; root: strin
   /** @param {Record<string, string>} pins a value that has passed `layerPins` */
   const layerCheckoutMove = (pins: Record<string, string>) => checkoutMoveFor(manifest, pins);
 
-  /** The read-only command, run on the control plane BEFORE it is moved (#5556), and the judgement of what it printed. */
-  const installedLayersRead = () => installedReadFor(manifest);
-  const installedLayersJudged = (output: string) => installedJudged(manifest, output);
-
   /**
    * The layer whose directory holds `path` (repo-relative): a separate layer, or null when it is the core's.
    * A file of a layer's is not tracked by this repository, so "does `git ls-files` list it" cannot be the question asked of it (#3845).
@@ -201,8 +197,7 @@ export function layersFrom({ manifest, root }: { manifest: Manifest; root: strin
     return owningLayer(path, separate);
   }
 
-  return { layerDeclaration, layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove, layerOwning,
-    installedLayersRead, installedLayersJudged };
+  return { layerDeclaration, layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove, layerOwning };
 }
 
 /** What a published layer's release answers for its code version: its own build stamp, read from `node_modules/<package>/dist/code-version.mjs`. */
@@ -298,7 +293,7 @@ function installedJudgement({ name, published }: { name: string; published: { pa
  * another way (a clone, a laid tree), `none` for no installed release, and `locked` is `none` when the lockfile names none. The lockfile's
  * IMPORTER entry answers, not a grep for `<package>@`, because a transitive `screenreader-worker@0.9.0` sits in the same file.
  */
-function installedReadFor(manifest: Manifest): string {
+export function installedLayersRead(manifest: Manifest): string {
   const reads = Object.entries(manifest.layers).flatMap(([name, layer]) => {
     const published = publishedOf(name, layer);
     if (!published || !LAYER_REF.test(layer.path) || layer.path.includes("..")) return [];
@@ -315,13 +310,13 @@ function installedReadFor(manifest: Manifest): string {
 }
 
 /**
- * What `installedReadFor`'s output says, as the move will judge it. A REFUSAL only where the plane's HEAD already holds the lockfile that
+ * What `installedLayersRead`'s output says, as the move will judge it. A REFUSAL only where the plane's HEAD already holds the lockfile that
  * declares the release and `node_modules/` does not: that is the state `pnpm install` repairs and the move cannot, so the run would be spent
  * for nothing. Where the plane's HEAD is itself behind (its lockfile is not the declared release, or names none), the move is what brings it
  * forward and an install before it would install the OLD lockfile, so that is a NOTE and the run proceeds to the move's own judgement.
  * A layer the read gave no line for is refused rather than read as in step: absence is not agreement.
  */
-function installedJudged(manifest: Manifest, output: string): { refusal: string | null; notes: string[]; } {
+export function installedLayersJudged(manifest: Manifest, output: string): { refusal: string | null; notes: string[]; } {
   const rows = new Map(output.split("\n").map((line) => line.trim().split(/\s+/)).filter((cells) => cells.length === 3).map(([name, held, locked]) => [name, { held, locked }]));
   const refusals: string[] = [];
   const notes: string[] = [];
@@ -394,8 +389,6 @@ export const separateLayers: ReturnType<typeof layersFrom>["separateLayers"] = (
 export const layerPins: ReturnType<typeof layersFrom>["layerPins"] = (given) => declared().layerPins(given);
 export const layerCheckoutMove: ReturnType<typeof layersFrom>["layerCheckoutMove"] = (pins) => declared().layerCheckoutMove(pins);
 export const layerOwning: ReturnType<typeof layersFrom>["layerOwning"] = (path) => declared().layerOwning(path);
-export const installedLayersRead: ReturnType<typeof layersFrom>["installedLayersRead"] = () => declared().installedLayersRead();
-export const installedLayersJudged: ReturnType<typeof layersFrom>["installedLayersJudged"] = (output) => declared().installedLayersJudged(output);
 
 /**
  * Every `--layer-ref=<name>=<sha>`, in order. REPEATABLE, which `flagValue` (first match only) is not: one
