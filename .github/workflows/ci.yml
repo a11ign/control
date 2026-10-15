@@ -145,6 +145,11 @@ jobs:
       - name: Every module invocation matches what the module actually documents
         working-directory: ansible
         run: python3 check-modules.py
+      # The fetch destination is RENDERED by ansible, not read as text (a11ign/a11ign#5521): the real set_fact task runs on localhost in a probe laid out like this checkout, and the path it
+      # computes must land under the checkout. It needs ansible-core, which is why it is here and not in `checks`.
+      - name: The fetch destination lands inside the checkout
+        working-directory: ansible
+        run: python3 check-lab-fetch-destination.py
 
   # A PULL REQUEST THAT CHANGES HOW THIS TREE INSTALLS DRY-RUNS THE RELEASE'S VERSION STEP (a11ign/a11ign#5066; a11ign/agent-org#888, #885 class 3 and a11ign/a11ign#4988, the job of a11ign/agent-org#967). A change to
   # `package.json`, the lockfile or a workflow that breaks the install passes `checks` and shows first as a failed release on `main`: nothing on the pull request ran the path `release.yml` takes (the shared
