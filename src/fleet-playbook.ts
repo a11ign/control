@@ -923,16 +923,26 @@ function endFleetLock(chosen: string) {
  * `merge --ff-only` one, `provision-role.yml` failed inside a one-shell script whose exit status was its last command's, and
  * all 15 boxes said `provisioning from 5fcf95e0a` while sitting on a checkout five days stale (read 2026-10-15).
  *
- * So a play that fast-forwards the CORE sends neither: the guest's own default (`origin/main`) is the core's tip, and the play
- * resolves and ASSERTS it on the guest, where the object is. `deploy.yml` is not in this set: it asserts the pair it is handed
- * and fails loudly, and what a core pin for it should be is a decision of its own.
+ * So a play that fast-forwards the CORE is never handed a control commit. Until #5515 it was handed nothing, and the guest
+ * resolved its own `origin/main`, which moves while a `--serial` run is in flight. Now both core plays are handed the core commit
+ * `deploy-pins.json` declares, so every guest in a run lands on the same one (`deploy.yml` also gets `a11y_git_ref`, which it checks out first).
  */
 const CORE_FAST_FORWARD_PLAYBOOKS = ["provision-role.yml"];
 
-/** The `-e` pair every other play gets (`a11y_git_ref`, `a11y_expected_commit`), and nothing for a core-fast-forward one. */
-export function guestCommitVars({ chosen, ref, expected }: { chosen: string; ref: string; expected: string; }): string {
-  if (CORE_FAST_FORWARD_PLAYBOOKS.includes(chosen)) return "";
-  return ` -e a11y_git_ref=${ref} -e a11y_expected_commit=${expected}`;
+/** The `-e` pair a guest's core checkout is put on: the DECLARED core commit (#5515), and the ref only for a play that checks one out. */
+export function guestCommitVars({ chosen, ref, core }: { chosen: string; ref: string; core: string; }): string {
+  const expected = ` -e a11y_expected_commit=${core}`;
+  return CORE_FAST_FORWARD_PLAYBOOKS.includes(chosen) ? expected : ` -e a11y_git_ref=${ref}${expected}`;
+}
+
+/** The core commit `deploy-pins.json` declares: read at the start of a run, and refused by name when it declares none. */
+function declaredCoreCommit(): string {
+  const { core } = readDeployPins();
+  if (core === undefined) {
+    process.stderr.write("deploy-pins.json declares no core commit, so there is no commit to put a guest's core checkout on (#5515).\n");
+    process.exit(2);
+  }
+  return core.commit;
 }
 
 /**
@@ -952,9 +962,9 @@ export function guestCommitVars({ chosen, ref, expected }: { chosen: string; ref
  *   `aim` is where each MOVED worker is aimed this run, already identity-checked (#2832); empty for a healthy fleet.
  * @returns {string} the unit name
  */
-function startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+function startPlaybookUnit({ chosen, ref, core, limitFlag, serialFlag, allowEdgeDowngrade, apply,
   displayMode, layerCommits, aim, patchTarget, followBudgetMs }: {
-        chosen: string; ref: string; expected: string; limitFlag: string | undefined;
+        chosen: string; ref: string; core: string; limitFlag: string | undefined;
         serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean;
         displayMode: string | undefined; layerCommits: Record<string, string>;
         aim: { addresses: Record<string, string>; workers: string[]; };
@@ -1006,10 +1016,11 @@ try {
     // dispatch path does not. A verification that exercises a different invocation from the one that ships
     // is this repo's most-recorded defect, and it is the reason to remove the flag rather than to point it
     // at the new path: one source of truth, in the file every playbook already honours.
-    // The COMMIT that ref resolves to here, so each guest can assert it landed on it rather than the
-    // deploy inferring success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref
-    // the guests fetch; this catches the fetch silently not taking.
-    + `ansible-playbook ${chosen}${guestCommitVars({ chosen, ref, expected })}`
+    // The CORE commit `deploy-pins.json` declares (#5515), not the one control's checkout resolves the ref to: control's
+    // sha is not an object in the core's repository. Each guest asserts it landed on this one rather than inferring
+    // success from a shell that exited 0. The 2026-08-24 note above fixed WHICH ref the guests fetch; this catches the
+    // fetch silently not taking.
+    + `ansible-playbook ${chosen}${guestCommitVars({ chosen, ref, core })}`
     // The pair's second half: each layer that lives in its own repository, pinned to ITS commit (#3395).
     + layerCommitsExtraVars(layerCommits)
     // The control-plane address ALREADY resolved above (env var or its installed file, #285), so
@@ -2314,6 +2325,8 @@ async function main() {
   // the remote's resolved SHA against the branch NAME, which can never match, and refused a control plane
   // that was already correct.
   const expected = execFileSync("git", ["rev-parse", ref], { encoding: "utf8", env: sandboxGitEnv() }).trim();
+  // The guests' core commit, declared rather than resolved here (#5515): read BEFORE the control plane moves, so a missing pin refuses first.
+  const core = declaredCoreCommit();
 
   refuseCommitShapedRef(ref);
 
@@ -2353,7 +2366,7 @@ async function main() {
   // whole command line and whose stack is node's internals, which buries "which box failed" under twelve
   // lines of module loader — and the wrapper around it then reported success. Ansible has already printed
   // its own PLAY RECAP by this point; the job here is to exit with its status and say so in one line.
-  const unit = startPlaybookUnit({ chosen, ref, expected, limitFlag, serialFlag, allowEdgeDowngrade, apply,
+  const unit = startPlaybookUnit({ chosen, ref, core, limitFlag, serialFlag, allowEdgeDowngrade, apply,
     displayMode, layerCommits, patchTarget: patchGate.target, followBudgetMs: patchGate.followBudgetMs, aim });
 
   process.stdout.write(`  started as ${unit} on ${CONTROL_PLANE}. It now outlives this terminal.\n`

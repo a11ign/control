@@ -1869,17 +1869,23 @@ test("#5030 2: the take-over is BOUNDED: a wake lock that is somehow always fres
 // #5512: `fleet:provision` asked every guest to fast-forward to a CONTROL commit, which a guest (a clone of the core)
 // does not hold, and nothing asserted the guest landed on anything.
 
-test("#5512: provision-role.yml sends no control commit to guests that hold the core; every other play still gets the pair", () => {
-  const given = { ref: "HEAD", expected: "aa3db0764634f8ea3d0112ace0f90c4223dabfd4" };
-  assert.equal(guestCommitVars({ chosen: "provision-role.yml", ...given }), "",
-    "a control sha is not an object in a guest's repository, so naming it there is the defect");
-  // The positive control: the emptiness above would also pass if the helper returned "" for everything.
-  assert.equal(guestCommitVars({ chosen: "deploy.yml", ...given }),
-    ` -e a11y_git_ref=HEAD -e a11y_expected_commit=${given.expected}`);
+// #5515: the core commit both core plays are handed is the one deploy-pins.json DECLARES, not control's own `rev-parse`.
+test("#5512/#5515: both core plays are handed the declared core commit, never control's; every other play still gets the pair", () => {
+  const core = "7e751f5682c1ad35280e24ca424bab3023fc3a40";
+  // The control sha the pre-#5515 helper was handed: a control object is not in a guest's repository, so it must never reach a guest.
+  const control = "aa3db0764634f8ea3d0112ace0f90c4223dabfd4";
+  assert.equal(guestCommitVars({ chosen: "provision-role.yml", ref: "HEAD", core }), ` -e a11y_expected_commit=${core}`,
+    "provision-role.yml reads the SAME pin deploy.yml does, so the two cannot land different core commits (#5515)");
+  // The positive control: the assertion above would also pass if the helper ignored `core` and returned a fixed string.
+  assert.equal(guestCommitVars({ chosen: "deploy.yml", ref: "HEAD", core }),
+    ` -e a11y_git_ref=HEAD -e a11y_expected_commit=${core}`);
+  assert.equal(guestCommitVars({ chosen: "deploy.yml", ref: "HEAD", core }).includes(control), false,
+    "control's sha is never handed to a guest");
   const source = readFileSync(new URL("./fleet-playbook.ts", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
   assert.equal(source.split("-e a11y_expected_commit=").length - 1, 1,
     "the dispatcher builds that pair in ONE place (guestCommitVars), so no play can bypass the rule");
-  assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, expected \}\)\}/);
+  assert.match(source, /ansible-playbook \$\{chosen\}\$\{guestCommitVars\(\{ chosen, ref, core \}\)\}/);
+  assert.match(source, /const core = declaredCoreCommit\(\);/, "the pin is read before the control plane is written to");
 });
 
 /** The play's own tasks, by name, parsed with PyYAML (this package takes no npm dependency, ADR 0012). */
