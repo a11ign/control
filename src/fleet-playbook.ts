@@ -73,7 +73,7 @@ import { sandboxGitEnv } from "./git-safe-env.ts";
 // code-drift and pnpm helpers above are — but ADR 0012's surface rule stands for anything else:
 // `control-has-no-dependencies.test.ts` allows no other package-name import, and asserts it transitively.
 import { refuseUnknownFlags, flagValue, WORKER_GROUP, groupPerLine } from "./worker-fleet-carried.ts";
-import { LAYER_PINNED, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
+import { LAYER_PINNED, installedLayersJudged, installedLayersRead, layerCheckoutMove, layerCommitsExtraVars, layerPinsFor, layerRefValues } from "./layer-checkouts.ts";
 import { makeStage, readDeployPins, resolvePublished, type GitRun } from "./layer-pins.ts";
 // #1204: the guests' own report of their OS, the same reading `fleet:status` takes.
 import { fleetToProbe, probeWorker, fleetStatus } from "./fleet-status.ts";
@@ -966,6 +966,20 @@ export function moveControlPlane({ ref, expected, layerCommits }: { ref: string;
   deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> = REAL_START_DEPS): void {
   deps.declaredCore();
   deps.ssh(controlPlaneCheckout(ref, expected, layerCommits));
+}
+
+/**
+ * The plane's installed layers against its own lockfile, asked BEFORE `moveControlPlane` and only read (#5556). A merged pin bump reaches the
+ * plane's HEAD by `git merge --ff-only` and nothing installs afterwards, so HEAD can hold a lockfile that `node_modules/` does not: the move's
+ * own judgement then refuses AFTER the merge, spending the first write of a covered run on a fact one read could have named. Where the plane is
+ * in that state this says both release numbers and that `pnpm install --frozen-lockfile` is the remedy, which is a write to the control plane
+ * and is NOT made here (it waits on a ruling, #5155). Returns the refusal to print, or null; notes are printed either way.
+ */
+export function installedLayersRefusal(deps: Pick<StartPlaybookDeps, "ssh"> & { say?: (line: string) => void } = { ...REAL_START_DEPS, say: (line) => process.stderr.write(`${line}\n`) }): string | null {
+  const read = String(deps.ssh(installedLayersRead(), { capture: true }));
+  const { refusal, notes } = installedLayersJudged(read);
+  for (const note of notes) deps.say?.(`  note: ${note}`);
+  return refusal;
 }
 
 /**
@@ -2365,6 +2379,12 @@ async function main() {
   process.stdout.write(`\n  control plane: ${CONTROL_PLANE}   playbook: ${chosen}\n`
     + `  ref: ${ref} (${expected.slice(0, 12)})\n\n`);
   requireCommitIsOnOrigin(ref, expected);
+  // #5556: a read, BEFORE the first write to the plane. Nothing has been written when it refuses.
+  const lagging = installedLayersRefusal();
+  if (lagging) {
+    process.stderr.write(`${lagging}\n`);
+    process.exit(2);
+  }
   moveControlPlane({ ref, expected, layerCommits });
 
   // READ BACK, never infer. A control plane left on an older commit would deploy that commit and report
