@@ -137,8 +137,17 @@ export function layersFrom({ manifest, root }: { manifest: Manifest; root: strin
   /** The layer's source directory, the one `codeVersion` hashes. Trailing slash, as `workerSourceDir()`. */
   const layerSourceDir = (name: string) => `${join(layerRoot(name), "src")}/`;
 
-  /** The layer's code hash, computed by the layer's own hasher. */
+  /**
+   * The layer's code hash, computed by the layer's own hasher. A layer with a checkout is hashed from its `src/`. A layer that declares a
+   * published release and has NO checkout (the plane, #5445) answers with the release's own `dist/code-version.mjs`, called with no directory,
+   * which returns the version the build stamped. A layer that declares neither refuses, naming the checkout and the release both.
+   */
   async function layerCodeVersion(name: string) {
+    const { dir: checkout, path } = layerDeclaration(name);
+    const release = Object.hasOwn(manifest.layers, name) ? manifest.layers[name] : undefined;
+    if (!existsSync(checkout) && release?.package !== undefined && release.version !== undefined) {
+      return installedReleaseCodeVersion({ name, path, root, package: release.package });
+    }
     const dir = layerSourceDir(name);
     const hasher = await import(pathToFileURL(layerHasherFile(dir)).href);
     return hasher.codeVersion(dir);
@@ -189,6 +198,16 @@ export function layersFrom({ manifest, root }: { manifest: Manifest; root: strin
   }
 
   return { layerDeclaration, layerRoot, layerSourceDir, layerCodeVersion, separateLayers, layerPins, layerCheckoutMove, layerOwning };
+}
+
+/** What a published layer's release answers for its code version: its own build stamp, read from `node_modules/<package>/dist/code-version.mjs`. */
+async function installedReleaseCodeVersion({ name, path, root, package: pkg }: { name: string; path: string; root: string; package: string; }) {
+  const hasher = join(root, "node_modules", pkg, "dist", "code-version.mjs");
+  if (!existsSync(hasher)) {
+    throw new Error(`layer "${name}" is declared at ${path}, which does not exist under ${root}, and its published release ${pkg} is not installed `
+      + `(${hasher} is missing): check it out at ${path}, or run pnpm install --frozen-lockfile`);
+  }
+  return (await import(pathToFileURL(hasher).href)).codeVersion();
 }
 
 /**
