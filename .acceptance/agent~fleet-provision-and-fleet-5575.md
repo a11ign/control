@@ -1,0 +1,5 @@
+Row a11ign/a11ign#5575 (a11ign#5155). Region is `src/fleet-playbook.ts` and `src/fleet-playbook.test.ts` only. No `fleet:*`, `lab:*`, `worker:*` or capture command was run (resource ban); the manager read is exercised through `readFleetGatedIssues` with injected `run` and `readSnapshot`, and once through the real `agent-org gate-snapshot-read rows --json` with no injected reader (no `gh` call on that path).
+
+Acceptance: `node --test src/fleet-playbook.test.ts`
+
+**As run (measured, 2026-10-16, in this worktree):** `ℹ tests 149`, `ℹ pass 149`, `ℹ fail 0` (140 before, plus 9 `#5575` tests). Against main's `fleet-playbook.ts` with the new tests kept: 7 fail (controls a, b, c, e, f, and the null-labels and non-gated rows), and the 2 non-manager controls pass, as they pin unchanged behaviour. Mutations, each guard removed in turn and restored from a scratchpad copy checked byte-identical: manager branch off gives 7 failing; staleness bound off gives 1; null-body pass-through gives 1; null-labels pass-through gives 1; non-manager errors swallowed gives 1. `pnpm run typecheck` exit 0.

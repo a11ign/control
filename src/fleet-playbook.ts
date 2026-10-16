@@ -1837,8 +1837,11 @@ const ROWS_REPO = "a11ign/a11ign";
  * `ghEnvironment`'s own answer, not a second derivation of it, so a blank token file (which `ghEnvironment`
  * and bootstrap's `[ ! -s ]` both treat as absent) is tokenless here too. The earlier `existsSync` called
  * it credentialed and passed gh's `gh auth login` hint through (reviewer-2 on #1910).
+ *
+ * A MANAGER'S LIST IS READ FROM THE GATE'S SNAPSHOT (#5575). The host's `gh` refuses a manager's `issue list --json body` before any call
+ * is made, and says so; that refusal is the answer to "read it from the snapshot", not a failed read, so it is followed rather than refused.
  */
-export function readFleetGatedIssues({ env = process.env, readToken = readGhTokenFile, run = execFileSync }: { env?: NodeJS.ProcessEnv; readToken?: () => string; run?: typeof execFileSync; } = {}): { number: number; body: string; }[] {
+export function readFleetGatedIssues({ env = process.env, readToken = readGhTokenFile, run = execFileSync, readSnapshot = readGateSnapshot }: { env?: NodeJS.ProcessEnv; readToken?: () => string; run?: typeof execFileSync; readSnapshot?: () => GateSnapshot; } = {}): { number: number; body: string; }[] {
   const ghEnv = ghEnvironment(env, readToken);
   try {
     return JSON.parse(String(run("gh",
@@ -1847,8 +1850,41 @@ export function readFleetGatedIssues({ env = process.env, readToken = readGhToke
       // login", which is the wrong advice for a root box (#1875) -- `fleetHoldReadRefusal` says what to do.
       { encoding: "utf8", env: ghEnv, stdio: ["ignore", "pipe", "pipe"] })));
   } catch (error) {
+    if (MANAGER_LIST_REFUSAL.test(String((error as { stderr?: unknown }).stderr ?? ""))) return gatedRowsFromSnapshot(readSnapshot());
     throw Object.assign((error as Error), { tokenSet: Boolean(ghEnv.GH_TOKEN) });
   }
+}
+
+/** The longest a gate snapshot may be before a hold read from it is "could not ask". The gate's tick is two minutes (`work-tick.timer.in`), so a snapshot inside this bound is a few ticks old at most; past it the list may be missing a hold, and it is not trusted. */
+const SNAPSHOT_MAX_AGE_MS = 15 * 60 * 1000;
+
+/** The wrapper's refusal of a manager's list. Matched on its words because the wrapper alone decides who is a manager: re-deriving that here from `GH_CONFIG_DIR` misses a manager routed by `workspaces.txt`. */
+const MANAGER_LIST_REFUSAL = /a manager's list is read from the gate's snapshot/;
+
+type GateSnapshot = { ageMs: number; rows: { number: number; labels: string[] | null; body: string | null; }[]; };
+
+/** `agent-org gate-snapshot-read rows --json`, the command the wrapper's refusal names. It makes no `gh` call. A reader that cannot run or cannot parse throws, and the caller refuses: an unreadable snapshot is "could not ask". */
+function readGateSnapshot(): GateSnapshot {
+  return JSON.parse(execFileSync("agent-org", ["gate-snapshot-read", "rows", "--repo", ROWS_REPO, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+}
+
+/**
+ * The open `fleet-gated` rows the gate last stored, shaped as the live read returns them. FAILS CLOSED, every way the answer can be missing:
+ * a snapshot older than `SNAPSHOT_MAX_AGE_MS`; a row whose labels the store lacks (it cannot be told from a fleet-gated one); and a
+ * fleet-gated row whose body the store lacks (a `null` body is "could not ask", never "no hold", #1839).
+ */
+function gatedRowsFromSnapshot(snapshot: GateSnapshot): { number: number; body: string; }[] {
+  if (snapshot.ageMs > SNAPSHOT_MAX_AGE_MS) {
+    throw new Error(`the gate's snapshot is ${Math.floor(snapshot.ageMs / 60_000)} min old, past its ${SNAPSHOT_MAX_AGE_MS / 60_000} min bound`);
+  }
+  const gated: { number: number; body: string; }[] = [];
+  for (const row of snapshot.rows) {
+    if (row.labels === null) throw new Error(`the gate's snapshot lists #${row.number} without its labels, so it cannot say whether that row is fleet-gated`);
+    if (!row.labels.includes("fleet-gated")) continue;
+    if (row.body === null) throw new Error(`the gate's snapshot lists fleet-gated #${row.number} without its body`);
+    gated.push({ number: row.number, body: row.body });
+  }
+  return gated;
 }
 
 /**

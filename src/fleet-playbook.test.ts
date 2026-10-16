@@ -1344,6 +1344,97 @@ test("#5307: the hold read names the repository its rows live in, whichever chec
   assert.equal(argvs[0][repo + 1], "a11ign/a11ign");
 });
 
+// #5575: a manager's list is read from the gate's snapshot. The host's `gh` refuses a manager's `issue list --json body`
+// on stderr BEFORE any call, and the refusal is followed to the snapshot, which FAILS CLOSED three ways (stale, a row
+// without labels, a fleet-gated row without its body). These drive `readFleetGatedIssues` through its injected `run`
+// and `readSnapshot`; the manager stub is the only thing that ever answers "this is a manager".
+const MANAGER_LIST_REFUSAL = "gh: refusing 'issue list' for a manager with '--json body': a manager's list is read from the gate's snapshot, not the API\n";
+const MINUTE_MS = 60_000;
+const SNAPSHOT_BOUND_MINUTES = 15;
+
+/** gh as the host's wrapper runs it for a manager: refused on stderr, no call made. */
+function managerGh(): typeof execFileSync {
+  return (() => { throw Object.assign(new Error("Command failed: gh issue list"), { stderr: MANAGER_LIST_REFUSAL }); }) as never;
+}
+
+/** The snapshot `gate-snapshot-read rows --json` prints, as `readSnapshot` returns it. */
+function snapshotOf(rows: { number: number; labels: string[] | null; body: string | null; }[], ageMs = MINUTE_MS): never {
+  return { ageMs, rows } as never;
+}
+
+const managerEnv = { env: { PATH: "/usr/bin" }, readToken: () => "token", run: managerGh() };
+
+/** What `enforceSequenceHold` prints when the read throws; fails the test when the read returns instead. */
+function refusalFrom(read: () => unknown): string {
+  try {
+    read();
+  } catch (error) {
+    return fleetHoldReadRefusal({ chosen: "deploy.yml", error: error as never, tokenSet: tokenSetOf(error) });
+  }
+  throw new Error("the read was expected to refuse, and it returned");
+}
+
+test("#5575 (a): a manager's read with a fresh snapshot and no fleet-gated row is an empty list, not a refusal", () => {
+  const rows = readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([{ number: 5101, labels: ["lane:any"], body: "no hold" }]) });
+  assert.deepEqual(rows, []);
+});
+
+test("#5575 (b): a manager's snapshot older than its bound is could-not-ask, with its age on the line; the bound itself is fresh", () => {
+  const fresh = readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([], SNAPSHOT_BOUND_MINUTES * MINUTE_MS) });
+  assert.deepEqual(fresh, [], `${SNAPSHOT_BOUND_MINUTES} min old is still within the bound`);
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([], (SNAPSHOT_BOUND_MINUTES + 1) * MINUTE_MS) }));
+  assert.match(line, /could not ask/);
+  assert.match(line, /the gate's snapshot is 16 min old, past its 15 min bound/);
+  assert.match(line, /Could not ask is not may proceed\.$/);
+});
+
+test("#5575 (c): a manager's fresh snapshot with a live Fleet-hold-until row refuses as a hold", () => {
+  const rows = readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([{ number: 5101, labels: ["fleet-gated"], body: "Fleet-hold-until: 2099-01-01T00:00:00Z" }]) });
+  assert.deepEqual(rows, [{ number: 5101, body: "Fleet-hold-until: 2099-01-01T00:00:00Z" }]);
+  const { refusal } = sequenceHoldGate({ chosen: "deploy.yml", holds: activeFleetHolds(rows, Date.now()), allowHold: [] });
+  assert.match(refusal ?? "", /a fleet-hold sequence is active/);
+  assert.match(refusal ?? "", /held by #5101 until 2099-01-01T00:00:00Z/);
+});
+
+test("#5575 (d): any other caller runs the live read with the same argv as before, and never opens the snapshot", () => {
+  const argvs: string[][] = [];
+  let snapshotReads = 0;
+  const run = ((_cmd: string, args: string[]) => { argvs.push(args); return "[]"; }) as never;
+  readFleetGatedIssues({ env: { PATH: "/usr/bin" }, readToken: () => "token", run, readSnapshot: () => { snapshotReads += 1; return snapshotOf([]); } });
+  assert.deepEqual(argvs, [["issue", "list", "--state", "open", "--label", "fleet-gated", "--json", "number,body", "--limit", "100", "--repo", "a11ign/a11ign"]]);
+  assert.equal(snapshotReads, 0, "a caller the wrapper did not refuse must not be routed to the snapshot");
+});
+
+test("#5575 (d): another gh refusal from a non-manager still propagates, and never reads the snapshot", () => {
+  let snapshotReads = 0;
+  const run = (() => { throw Object.assign(new Error("Command failed: gh issue list"), { stderr: GH_UNAUTHENTICATED }); }) as never;
+  const line = refusalFrom(() => readFleetGatedIssues({ env: { PATH: "/usr/bin" }, readToken: () => "token", run, readSnapshot: () => { snapshotReads += 1; return snapshotOf([]); } }));
+  assert.equal(snapshotReads, 0);
+  assert.match(line, /could not ask/);
+});
+
+test("#5575 (e): an unreadable snapshot is could-not-ask, in the words the refusal already uses", () => {
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => { throw Object.assign(new Error("Command failed: node gate-snapshot-read.ts"), { stderr: "no snapshot store at /x\n" }); } }));
+  assert.match(line, /^REFUSING deploy\.yml: could not ask whether a fleet-hold sequence is active \(no snapshot store at \/x\)\. Could not ask is not may proceed\.$/);
+});
+
+test("#5575 (f): a fleet-gated row the snapshot lists without its body is could-not-ask, naming the row, never no-hold", () => {
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([{ number: 5101, labels: ["fleet-gated"], body: null }]) }));
+  assert.match(line, /could not ask/);
+  assert.match(line, /fleet-gated #5101 without its body/);
+});
+
+test("#5575: a row the snapshot lists without its labels is could-not-ask, since it cannot be told from a fleet-gated one", () => {
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([{ number: 5102, labels: null, body: "Fleet-hold-until: 2099-01-01T00:00:00Z" }]) }));
+  assert.match(line, /could not ask/);
+  assert.match(line, /#5102 without its labels/);
+});
+
+test("#5575: a row that is not fleet-gated may have no body at all -- only the gated rows must be readable", () => {
+  const rows = readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([{ number: 5103, labels: ["lane:any"], body: null }]) });
+  assert.deepEqual(rows, []);
+});
+
 // reviewer-2 on #1910, 6d466546: `enforceSequenceHold` derived `tokenSet` from `existsSync`, so a blank token
 // file -- no token by `ghEnvironment`'s own reading, absent by bootstrap's `[ ! -s ]` -- took the credentialed
 // branch and passed gh's `gh auth login` hint through. Driven through the REAL reader, so the flag the
