@@ -1,6 +1,6 @@
 Row a11ign/a11ign#5596. A pin bump merges, the plane's HEAD holds the new lockfile, and `node_modules/` still holds the release before it: `fleet:deploy` refused, and a human ran `pnpm install --frozen-lockfile` by hand (a ruling each time). The play now repairs that one state itself.
 
-Acceptance: `cd ~/repos/control && node --test src/layer-installed-lag.test.ts`
+Acceptance: `node --test src/layer-installed-lag.test.ts` (run in the PR's own checkout; `~/repos/control` is the primary checkout, detached at main, and does not carry this change)
 
 The row's own check, that the removed wording is gone from `src/layer-checkouts.ts` (`! git grep -q "that this command does not make" -- src/layer-checkouts.ts`), exits 0 at this head.
 
