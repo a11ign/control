@@ -27,7 +27,7 @@ import { validRef, guestCommitVars, startPlaybookUnit, moveControlPlane, PLAYBOO
   pinnedBuild, buildOf, buildStates, buildAssertion, buildGate, guestBuilds, linkGate, allowOfflineNames, linkGateFor,
   inventorySources, inventoryReadScript, parseInventoryReads, protocolGuardVerdict,
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
-  GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, tokenSetOf,
+  GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, readGateSnapshot, tokenSetOf,
   writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange,
   lockTakeStep, lockEndStep, patchTargetReadCommand, ANSIBLE_ON_THE_PLANE, planeUnitStart }
   from "./fleet-playbook.ts";
@@ -1433,6 +1433,49 @@ test("#5575: a row the snapshot lists without its labels is could-not-ask, since
 test("#5575: a row that is not fleet-gated may have no body at all -- only the gated rows must be readable", () => {
   const rows = readFleetGatedIssues({ ...managerEnv, readSnapshot: () => snapshotOf([{ number: 5103, labels: ["lane:any"], body: null }]) });
   assert.deepEqual(rows, []);
+});
+
+// #5586: a snapshot read that fails names the child's FIRST stderr line. agent-org writes the cause there and the stack below it, so
+// the LAST line -- what `fleetHoldReadRefusal` quotes for gh -- is Node's `Node.js v24.21.0` footer and names nothing. These drive the
+// REAL `readGateSnapshot` through an injected child, so what the refusal quotes is what the reader made of the child's stderr.
+const AGENT_ORG_HOST_LINE = "ProjectDeclarationRefusal: field AGENT_ORG_HOST REFUSED: it is unset, and the checkout it would have guessed, /home/agent, holds no .agent-org/project.json";
+
+/** A snapshot child that exits `status` with `stderr`, as `execFileSync` reports it. */
+function snapshotChild(stderr: string, status = 1): typeof execFileSync {
+  return (() => { throw Object.assign(new Error("Command failed: agent-org gate-snapshot-read rows"), { status, stderr }); }) as never;
+}
+
+test("#5586 (a): a failed snapshot read quotes the child's first stderr line, not Node's footer, and still refuses", () => {
+  const stderr = `${AGENT_ORG_HOST_LINE}\n    at ProjectDeclaration (file:///x.ts:1:1)\n    at main (file:///y.ts:2:2)\n\nNode.js v24.21.0\n`;
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => readGateSnapshot(snapshotChild(stderr)) }));
+  assert.match(line, /^REFUSING deploy\.yml: could not ask whether a fleet-hold sequence is active \(agent-org gate-snapshot-read exited 1: "ProjectDeclarationRefusal: field AGENT_ORG_HOST REFUSED: /);
+  assert.doesNotMatch(line, /Node\.js v24\.21\.0/);
+  assert.match(line, /Could not ask is not may proceed\.$/);
+});
+
+test("#5586 (b): a failed snapshot read with nothing on stderr says its exit status and invents no cause", () => {
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => readGateSnapshot(snapshotChild("", 3)) }));
+  assert.equal(line, "REFUSING deploy.yml: could not ask whether a fleet-hold sequence is active (agent-org gate-snapshot-read exited 3 and printed nothing on stderr). Could not ask is not may proceed.");
+});
+
+test("#5586 (c): a snapshot read that succeeds is read exactly as before", () => {
+  const stdout = JSON.stringify({ ageMs: MINUTE_MS, rows: [{ number: 5101, labels: ["fleet-gated"], body: "Fleet-hold-until: 2099-01-01T00:00:00Z" }] });
+  const rows = readFleetGatedIssues({ ...managerEnv, readSnapshot: () => readGateSnapshot((() => stdout) as never) });
+  assert.deepEqual(rows, [{ number: 5101, body: "Fleet-hold-until: 2099-01-01T00:00:00Z" }]);
+});
+
+test("#5586 (d): a first stderr line longer than the bound is cut at it, and marked cut", () => {
+  const long = `ProjectDeclarationRefusal: ${"x".repeat(400)}`;
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => readGateSnapshot(snapshotChild(`${long}\nNode.js v24.21.0\n`)) }));
+  const quoted = /"(ProjectDeclarationRefusal: x+)\.\.\. \(cut\)"/.exec(line);
+  assert.ok(quoted, `the cut line is quoted and marked: ${line}`);
+  assert.ok(quoted[1].length < long.length, "the quoted line is shorter than the line the child wrote");
+  assert.doesNotMatch(line, /Node\.js v24\.21\.0/);
+});
+
+test("#5586 (e): a snapshot that exits 0 with unparseable stdout is refused as before", () => {
+  const line = refusalFrom(() => readFleetGatedIssues({ ...managerEnv, readSnapshot: () => readGateSnapshot((() => "not json") as never) }));
+  assert.match(line, /^REFUSING deploy\.yml: could not ask whether a fleet-hold sequence is active \(Unexpected token /);
 });
 
 // reviewer-2 on #1910, 6d466546: `enforceSequenceHold` derived `tokenSet` from `existsSync`, so a blank token
