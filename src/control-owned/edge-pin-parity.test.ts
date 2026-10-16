@@ -27,13 +27,19 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const REPO = resolve(import.meta.dirname, "../../../..");
-const DEFAULTS = readFileSync(resolve(REPO, "packages/control/ansible/roles/worker/defaults/main.yml"), "utf8");
-const BOOTSTRAP = readFileSync(
-  resolve(REPO, "packages/worker-fleet/src/provisioning/bootstrap-windows-worker.ps1"), "utf8");
+// Located from THIS file, not from a guessed repository root: the same test runs in control's own checkout (the layer installed under
+// `node_modules`) and in the core's lay of it (`packages/control`, the layer laid beside it at `packages/worker-fleet`). A root four levels up
+// is only right in the second, so from control's checkout it read `/home/agent/packages/control` and the row's Acceptance could not pass (#5660).
+const CONTROL = resolve(import.meta.dirname, "../..");
+const BOOTSTRAP_AT = "src/provisioning/bootstrap-windows-worker.ps1";
+const BOOTSTRAP_HOMES = [resolve(CONTROL, "node_modules/@a11ign/screenreader-fleet", BOOTSTRAP_AT), resolve(CONTROL, "../worker-fleet", BOOTSTRAP_AT)];
+const DEFAULTS = readFileSync(resolve(CONTROL, "ansible/roles/worker/defaults/main.yml"), "utf8");
+const BOOTSTRAP_PATH = BOOTSTRAP_HOMES.find((path) => existsSync(path));
+if (BOOTSTRAP_PATH === undefined) throw new Error(`the fleet layer's bootstrap is in neither place this test looks: ${BOOTSTRAP_HOMES.join(", ")}`);
+const BOOTSTRAP = readFileSync(BOOTSTRAP_PATH, "utf8");
 
 const fromRole = (key: string) =>
   new RegExp(`^${key}:\\s*["']?([^"'\\n]+)["']?\\s*$`, "m").exec(DEFAULTS)?.[1]?.trim();

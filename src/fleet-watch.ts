@@ -647,11 +647,40 @@ function edgeUpdaterLines(status: { rows: FleetRow[], mismatches?: Drift[], repo
 }
 
 /**
- * Every box off the fleet's Windows build or display mode, or with its Edge updater back on, in this reading: one line per box.
- * Pure: the drift it reads is what `fleetStatus` returns, so a fleet that agrees (or a field nobody reports) draws nothing.
+ * Every reachable box whose OWN reported Edge version is not the pin (`worker_edge_version`), one line each: `edge-pin: <box> <version> (pin <pin>)` (#5660).
+ * Unlike build and display the reference is not the fleet's majority but the pin, so a fleet that agrees on the wrong build is still odd, and the
+ * reading is `fleetStatus`' `browserVersions` (what each box said) and never the pin file's. An unreachable box, a box that reported nothing and the
+ * `unknown` placeholder are no reading, and a status with no `browserVersions` (a reader that predates it) claims nothing was read.
  */
-export function offFleetLines(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }): Oddity[] {
-  return [...OFF_FLEET_FIELDS.flatMap((spec) => oddBoxes(spec, status)), ...edgeUpdaterLines(status)];
+export function edgePinLines(status: { rows: FleetRow[], browserVersions?: Record<string, string | null> }, pin: string): Oddity[] {
+  const reported = status.browserVersions ?? {};
+  return status.rows
+    .flatMap((row) => {
+      const version = row.url && row.state !== "unreachable" ? reported[row.url] : null;
+      const known = typeof version === "string" && version !== NOT_YET_SAMPLED;
+      return known && version !== pin ? [{ box: workerKey(row.name), version }] : [];
+    })
+    .sort((a, b) => a.box.localeCompare(b.box))
+    .map(({ box, version }) => ({ box, line: `${EDGE_PIN_PREFIX}${box} ${version} (pin ${pin})` }));
+}
+
+const EDGE_PIN_PREFIX = "edge-pin: ";
+const EDGE_PIN_DEFAULTS = new URL("../ansible/roles/worker/defaults/main.yml", import.meta.url);
+
+/** The Edge build the role pins, read from the role defaults beside this file; a defaults file that declares none THROWS, because no pin would read as no finding. */
+export function readEdgePin(read: (url: URL) => string = (url) => readFileSync(url, "utf8")): string {
+  const pin = /^worker_edge_version:\s*["']?([^"'\s]+)["']?\s*$/m.exec(read(EDGE_PIN_DEFAULTS))?.[1];
+  if (pin === undefined) throw new Error(`${EDGE_PIN_DEFAULTS.pathname} declares no worker_edge_version, so no box can be compared to the pin`);
+  return pin;
+}
+
+/**
+ * Every box off the fleet's Windows build or display mode, with its Edge updater back on, or off the Edge pin, in this reading: one line per box.
+ * Pure: the drift it reads is what `fleetStatus` returns, so a fleet that agrees (or a field nobody reports) draws nothing. `edgePin` absent
+ * means the pin was not read, and no Edge-pin line is drawn.
+ */
+export function offFleetLines(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[], browserVersions?: Record<string, string | null> }, edgePin?: string): Oddity[] {
+  return [...OFF_FLEET_FIELDS.flatMap((spec) => oddBoxes(spec, status)), ...edgeUpdaterLines(status), ...(edgePin === undefined ? [] : edgePinLines(status, edgePin))];
 }
 
 /**
@@ -689,7 +718,7 @@ export function advanceOffFleet(found: Oddity[], previous: SinceState, { now, ke
 /** The comment body for lines not posted before. */
 export function offFleetBody(lines: string[]): string {
   return [
-    `**${lines.length} new on the fleet watch, ahead of capture** (#4447, #5022, #4405).`,
+    `**${lines.length} new on the fleet watch, ahead of capture** (#4447, #5022, #4405, #5660).`,
     ...lines.map((line) => `- ${line}`),
     "`npm run fleet:status` for the live reading.",
   ].join("\n");
@@ -807,6 +836,8 @@ export type WatchDeps = {
     buildIncident?: (status: BuildStatus) => BuildIncidentTick;
     /** The fleet lock on the control plane at this tick's clock (see `readFleetLock`). Absent: not read this tick, and the lock line stands. */
     fleetLock?: (now: number) => FleetLockReading;
+    /** The Edge build the role pins (see `readEdgePin`). Absent: the role defaults beside this file. */
+    edgePin?: () => string;
     /** Where the off-fleet ledger is written when it is not `write`: a dry run must not use up the lines a posting run will say. */
     writeOffFleet?: (path: string, data: string) => void;
 };
@@ -838,12 +869,12 @@ export async function watchFleet(deps: WatchDeps = {}): Promise<WatchFound> {
 export type WatchFound = { overdue: OverdueEntry[], offFleet: string[], unitDrift: { fresh: string[], notShipped: string[], cannotTell: string | null }, buildIncident: BuildIncidentTick };
 
 /** The off-fleet and unit-drift lines this tick that were not posted before; the one ledger is read and rewritten here. */
-function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[] }, at: number, deps: WatchDeps) {
+function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[], browserVersions?: Record<string, string | null> }, at: number, deps: WatchDeps) {
   const path = deps.offFleetPath ?? DEFAULT_OFF_FLEET_STATE_PATH;
   const patch = patchReading(deps.lastPatchRunAt, at);
   const drift = unitDriftReading(deps.unitDrift);
   const lock = fleetLockTick(deps.fleetLock, at);
-  const { state, fresh } = advanceOffFleet([...offFleetLines(status), ...patch.found, ...drift.tick.found, ...lock.found], readState(path, deps.read),
+  const { state, fresh } = advanceOffFleet([...offFleetLines(status, (deps.edgePin ?? readEdgePin)()), ...patch.found, ...drift.tick.found, ...lock.found], readState(path, deps.read),
     { now: at, keep: carriesEntry(status.rows, { patch: patch.carry, unitDrift: drift.carry, fleetLock: lock.carry }) });
   writeState(path, state, deps.writeOffFleet ?? deps.write);
   const isDrift = (line: string) => line.startsWith(UNIT_DRIFT_LINE_PREFIX);
@@ -931,7 +962,8 @@ function fleetLockTick(read: ((now: number) => FleetLockReading) | undefined, no
 
 /** The box a ledger line is about: `a11y-worker-3: build ...` and `edge-updater: a11y-worker-3 drift` name it in different places. */
 function boxOfLine(line: string): string {
-  return line.startsWith(EDGE_UPDATER_PREFIX) ? line.slice(EDGE_UPDATER_PREFIX.length).split(" ")[0] : line.split(": ")[0];
+  const prefix = [EDGE_UPDATER_PREFIX, EDGE_PIN_PREFIX].find((candidate) => line.startsWith(candidate));
+  return prefix ? line.slice(prefix.length).split(" ")[0] : line.split(": ")[0];
 }
 
 /** Entries about a box that did not answer, or about a patch run, the control host's units or the fleet lock that could not be read, are not cleared by silence. */

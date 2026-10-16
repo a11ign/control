@@ -1093,9 +1093,22 @@ export function renderHead(status: { rows: WorkerRow[]; linkLayer: { lines: stri
  * claim as the placeholder (an older worker, or no `environment` at all), and an unreachable box is not here.
  */
 export function windowsBuildsOf(guests: { worker: string, environment?: { windowsBuild?: unknown } | null }[]): Record<string, string | null> {
-  const reported = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
-  return Object.fromEntries(guests.map((guest) => [guest.worker, reported(guest.environment?.windowsBuild)]));
+  return Object.fromEntries(guests.map((guest) => [guest.worker, reportedString(guest.environment?.windowsBuild)]));
 }
+
+/**
+ * The Edge version each reachable box reported, keyed by the guest's URL, whether or not they agree (#5660).
+ *
+ * The same seam as `windowsBuildsOf`, for the same reason: `browserVersion` is MUST_MATCH, so `mismatches` names it only where boxes DIFFER from each
+ * other. A fleet that agrees on the WRONG Edge has no drift entry, and the pin (`worker_edge_version`) is a different question from agreement: every
+ * box can read one value and none of them the pinned one. The watch compares these readings to the pin, so the value is what each box said about
+ * itself and never the pin file's. `null` is a box that answered without reporting one.
+ */
+export function browserVersionsOf(guests: { worker: string, environment?: { browserVersion?: unknown } | null }[]): Record<string, string | null> {
+  return Object.fromEntries(guests.map((guest) => [guest.worker, reportedString(guest.environment?.browserVersion)]));
+}
+
+const reportedString = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
 
 /**
  *   injectable ONLY so a
@@ -1158,7 +1171,7 @@ export async function fleetStatus(deps?: {
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
     fields, reportedOnly });
   return { rows, linkLayer, switch: switchReading, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
-    reportedOnly, windowsBuilds: windowsBuildsOf(guests), reachable: guests.length, total: workers.length,
+    reportedOnly, windowsBuilds: windowsBuildsOf(guests), browserVersions: browserVersionsOf(guests), reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
     // Removing it outright fails SILENTLY: `undefined` is falsy, so `if (status.consistent)` would read
