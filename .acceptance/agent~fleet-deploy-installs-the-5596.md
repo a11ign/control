@@ -1,8 +1,8 @@
 Row a11ign/a11ign#5596. A pin bump merges, the plane's HEAD holds the new lockfile, and `node_modules/` still holds the release before it: `fleet:deploy` refused, and a human ran `pnpm install --frozen-lockfile` by hand (a ruling each time). The play now repairs that one state itself.
 
-Acceptance: `git grep -q "which fleet:deploy runs once" -- src/layer-checkouts.ts`
+Acceptance: `git grep -q "which fleet:deploy runs once" -- ':!*.test.ts' ':!.acceptance'`
 
-The job cannot run `src/layer-installed-lag.test.ts`: its import closure reaches the `gh` token path in `fleet-playbook.ts`, and the gate refuses a command it cannot honestly run (`needs token`). The 17 lag tests run in the core suite and are pasted under Measured. This line is the job-runnable part: it proves the remedy the repair writes is in `src/layer-checkouts.ts`. The row's own check, that the removed wording is gone (`! git grep -q "that this command does not make" -- src/layer-checkouts.ts`), exits 0 at this head.
+The job cannot run `src/layer-installed-lag.test.ts`: its import closure reaches the `gh` token path in `fleet-playbook.ts`, and the gate refuses a command it cannot honestly run (`needs token`). Any command that names `src/layer-checkouts.ts` is refused as reaching the fleet. The 17 lag tests run in the core suite and are pasted under Measured. This line is the job-runnable part: it proves the remedy the repair writes is in the tracked source (non-test files). The row's own check, that the removed wording is gone (`! git grep -q "that this command does not make" -- src/layer-checkouts.ts`), exits 0 at this head.
 
 ## What changed
 
