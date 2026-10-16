@@ -2,31 +2,30 @@ Row a11ign/a11ign#5596. A pin bump merges, the plane's HEAD holds the new lockfi
 
 Acceptance: `git grep -q "the repair is pnpm install --frozen-lockfile in" -- ':!*.test.ts' ':!.acceptance'`
 
-The job cannot run `src/layer-installed-lag.test.ts`: its import closure reaches the `gh` token path in `fleet-playbook.ts`, and the gate refuses a command it cannot honestly run (`needs token`). Any command that names `src/layer-checkouts.ts` is refused as reaching the fleet. The 17 lag tests run in the core suite and are pasted under Measured. This line is the job-runnable part: it proves the remedy the repair writes is in the tracked source (non-test files). The row's own check, that the removed wording is gone (`! git grep -q "that this command does not make" -- src/layer-checkouts.ts`), exits 0 at this head.
+The job cannot run the Region's test files from its acceptance block: the gate refuses a command it cannot honestly run (`needs token` for the `fleet-playbook.ts` import closure, and any command naming `src/layer-checkouts.ts` is refused as reaching the fleet). The controls are measured under Evidence. This line is the job-runnable part: it proves the remedy the repair writes is in the tracked source (non-test files).
 
 ## What changed
 
-- `src/fleet-playbook.ts`: `moveControlPlane` judges the installed layers through `installedLayersReading`. When the judgement is repairable it runs `installLayersAndReread`: it says so on stdout, runs `pnpm install --frozen-lockfile` in the plane's checkout once, reads again, and refuses (naming the install that ran) if the layers still disagree. Nothing is written to the plane on a disagreement.
-- `src/layer-checkouts.ts`: `installedLayersJudged` returns `repairable`. Repairable is exactly `locked === declared && held !== declared`, and only when nothing else refuses. No release installed, a lockfile naming none, and a plane whose own lockfile is behind the declaration are unchanged (refusal, refusal, note).
-- `src/layer-installed-lag.test.ts`: the #5155 controls beside the #5556 ones. (a) lagging then in-step: one `--frozen-lockfile` install, then the move; (b) lag that the install does not repair: one install, a refusal, no move; (c) unreadable plane: no install, refused; (d) plane behind its own lockfile: no install, the move proceeds with its note; (e) dry read `installedLayersRefusal`: read-only, installs nothing.
+- `src/fleet-playbook.ts`: `moveControlPlane` judges the installed layers through `installedLayersJudged`. When the judgement is repairable it runs `installLayersAndReread`: it says so on stdout, runs `pnpm install --frozen-lockfile` in the plane's checkout once, reads again, and refuses (naming the install that ran) if the layers still disagree. Nothing is written to the plane on a disagreement.
+- `src/layer-checkouts.ts`: `installedLayersJudged` returns `repairable`. Repairable is `locked === declared && held !== declared`, and only when nothing else refuses AND nothing is noted (`notes.length === 0`). A layer behind its own lockfile means an install would lay the OLD lockfile for it too, so a mixed state (one layer lagging its declaration beside another layer behind its own plane) is refused, not repaired. Fixes the NOT CONVINCED verdict on control#115.
+- Tests live in the two Region files, as the row requires:
+  - `src/layer-checkouts.test.ts` (11 judgement controls): positive control (repairable), read names the importer's release, equal not reported, no release installed with the lockfile declaring it (repairable), no release installed and the lockfile naming none (refused), behind-plane note (not repairable), mixed state (not repairable, the lag still named), clone, no line, unreadable plane, unreadable lockfile.
+  - `src/fleet-playbook.test.ts` (9 move controls): dry read is read-only, lag repaired by ONE frozen install then moved, install that does not bring layers into step is refused with no move, unreadable plane not repaired, plane behind its own lockfile not repaired (move proceeds), mixed state refused before any write with no install, positive control in step (read then write), unreadable plane stops the first write.
+- `src/layer-installed-lag.test.ts`: deleted; its tests now sit in the Region files. Main's #5556 test "the first write is never asked when the installed layers lag" is replaced by the repair control, because a lockfile that declares the release now gets one frozen install before the move, so "only the read reached the plane" is no longer the rule.
 - `.changeset/fleet-deploy-installs-the-layers-5596.md`: patch.
 
 ## Decisions
 
-- The dry read (`--apply` off) never reaches `moveControlPlane` for `patch.yml` (it returns first), and `deploy.yml` has no dry-run path, so control (d) of the row is the read-only `installedLayersRefusal`: it names the repair and asks nothing but the read.
-- Only `--frozen-lockfile` is ever run. `--no-frozen-lockfile` is refused by the test that pins the frozen form (mutation below).
-- The controls are in `src/layer-installed-lag.test.ts`, beside the existing `installedLayersRefusal` tests, not in the two files the Region names.
+- Only `--frozen-lockfile` is ever run. `--no-frozen-lockfile` is refused by the test that pins the frozen form.
+- The dry read (`--apply` off) never reaches `moveControlPlane` for `patch.yml`, and `deploy.yml` has no dry-run path, so the read-only `installedLayersRefusal` is the dry-read control: it names the repair and asks nothing but the read.
 
-## Evidence (measured 2026-10-16, worktree `~/repos/control-wt-5596`, commit 2b10684)
+## Evidence (measured 2026-10-16, worktree `~/repos/control-wt-5596`)
 
-- `node --test src/layer-installed-lag.test.ts` run from the worktree: `ℹ tests 17 / ℹ pass 17 / ℹ fail 0`.
-- `pnpm exec tsc --noEmit`: exit 0.
-- Full `node --import tsx --test "src/*.test.ts"`: 969 tests, 957 pass, 11 files fail. The same 11 files fail on untouched `origin/main` in a scratch worktree, with the same error set: the core's `packages/control` layout and a toolchain subpath (`@a11ign/toolchain/lib/git-sandbox`) this checkout does not provide. No failure is new.
-- `src/layer-checkouts.test.ts` cannot run in this checkout (the toolchain subpath above, on main too), so its assertions are not re-run here. No test pins the phrase this change removed.
-- Fails before the change (positive control (a) and the dry-run and install-does-not-repair controls, run against `origin/main` with the new test file): `ℹ pass 12 / ℹ fail 5`. Two of those five (`equal … not reported`, `unreadable lockfile`) fail only because their `deepEqual` now carries `repairable`.
-- Mutation: `--frozen-lockfile` swapped for `--no-frozen-lockfile` in `installLayersAndReread`: the repair controls fail (2 of 17); restored from a scratchpad copy, `diff`-identical, 17 of 17 again.
+- `node --import tsx --test src/fleet-playbook.test.ts`: `ℹ tests 163 / ℹ pass 163 / ℹ fail 0`.
+- `pnpm run typecheck`: exit 0. `pnpm run layout-check`: ok (410 files).
+- `src/layer-checkouts.test.ts` cannot run as a whole in this checkout: its top level needs `packages/nvda-worker` (absent here) and imports `@a11ign/toolchain/lib/git-sandbox`, which the lockfile's `@a11ign/toolchain@0.1.7` does not provide. Pre-existing on main; not changed here. Its 11 judgement controls were run through a temporary harness built from the file's tail (removed afterwards): `ℹ pass 11 / ℹ fail 0`.
+- Mutation, `notes.length === 0` removed from line 340: the judgement file fails 1 (the mixed-state control); the move file fails 1 (the mixed-state move control). Restored from a scratchpad copy, `diff`-identical.
+- Mutation, `--frozen-lockfile` swapped for `--no-frozen-lockfile` in `installLayersAndReread`: the repair controls fail. Restored, `diff`-identical.
 - Not run: `fleet:deploy` against any box (resource ban). The next pin bump's `fleet:deploy` log is the proof of the done-when.
 
 Closes a11ign/a11ign#5596
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)

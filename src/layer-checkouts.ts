@@ -335,8 +335,9 @@ export function installedLayersJudged(manifest: Manifest, output: string): { ref
     else if (row.locked === published.version) repairs.push(said);
     else notes.push(`${said}: the plane's checkout is behind the declaration, so the move comes first and its layer judgement will then refuse until pnpm install --frozen-lockfile is run in ${CONTROL_PLANE_CHECKOUT_PATH}`);
   }
-  // #5155 follow-up: the one state an install repairs is the only one repaired, and only when nothing else refuses. A frozen install lays what the tracked lockfile names.
-  const repairable = refusals.length === 0 && repairs.length > 0;
+  // #5155 follow-up: the one state an install repairs is the only one repaired, and only when nothing else refuses or is behind. A frozen install lays what the tracked lockfile names,
+  // so with a layer behind its own lockfile an install before the move would lay the OLD lockfile for that layer as well.
+  const repairable = refusals.length === 0 && notes.length === 0 && repairs.length > 0;
   const blocked = [...refusals, ...repairs];
   if (blocked.length === 0) return { refusal: null, notes, repairable };
   const remedy = repairable
