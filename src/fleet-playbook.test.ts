@@ -1354,7 +1354,7 @@ const SNAPSHOT_BOUND_MINUTES = 15;
 
 /** gh as the host's wrapper runs it for a manager: refused on stderr, no call made. */
 function managerGh(): typeof execFileSync {
-  return ((_cmd: string) => { throw Object.assign(new Error("Command failed: gh issue list"), { stderr: MANAGER_LIST_REFUSAL }); }) as never;
+  return (() => { throw Object.assign(new Error("Command failed: gh issue list"), { stderr: MANAGER_LIST_REFUSAL }); }) as never;
 }
 
 /** The snapshot `gate-snapshot-read rows --json` prints, as `readSnapshot` returns it. */
