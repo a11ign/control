@@ -1,4 +1,4 @@
-Row a11ign/control#5596. A pin bump merges, the plane's HEAD holds the new lockfile, and `node_modules/` still holds the release before it: `fleet:deploy` refused, and a human ran `pnpm install --frozen-lockfile` by hand (a ruling each time). The play now repairs that one state itself.
+Row a11ign/a11ign#5596. A pin bump merges, the plane's HEAD holds the new lockfile, and `node_modules/` still holds the release before it: `fleet:deploy` refused, and a human ran `pnpm install --frozen-lockfile` by hand (a ruling each time). The play now repairs that one state itself.
 
 Acceptance: `cd ~/repos/control && ! git grep -q "that this command does not make" -- src/layer-checkouts.ts && node --test src/layer-installed-lag.test.ts`
 
@@ -25,6 +25,6 @@ Acceptance: `cd ~/repos/control && ! git grep -q "that this command does not mak
 - Mutation: `--frozen-lockfile` swapped for `--no-frozen-lockfile` in `installLayersAndReread`: the repair controls fail (2 of 17); restored from a scratchpad copy, `diff`-identical, 17 of 17 again.
 - Not run: `fleet:deploy` against any box (resource ban). The next pin bump's `fleet:deploy` log is the proof of the done-when.
 
-Closes a11ign/control#5596
+Closes a11ign/a11ign#5596
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
