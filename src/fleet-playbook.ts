@@ -1864,8 +1864,34 @@ const MANAGER_LIST_REFUSAL = /a manager's list is read from the gate's snapshot/
 type GateSnapshot = { ageMs: number; rows: { number: number; labels: string[] | null; body: string | null; }[]; };
 
 /** `agent-org gate-snapshot-read rows --json`, the command the wrapper's refusal names. It makes no `gh` call. A reader that cannot run or cannot parse throws, and the caller refuses: an unreadable snapshot is "could not ask". */
-function readGateSnapshot(): GateSnapshot {
-  return JSON.parse(execFileSync("agent-org", ["gate-snapshot-read", "rows", "--repo", ROWS_REPO, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+export function readGateSnapshot(run: typeof execFileSync = execFileSync): GateSnapshot {
+  let stdout: string;
+  try {
+    stdout = String(run("agent-org", ["gate-snapshot-read", "rows", "--repo", ROWS_REPO, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  } catch (error) {
+    throw gateSnapshotReadFailure(error);
+  }
+  return JSON.parse(stdout);
+}
+
+/** The longest first stderr line of a failed snapshot read that is quoted into the refusal (#5586). Past it the line is cut and marked. */
+const SNAPSHOT_STDERR_LINE_MAX = 200;
+
+/**
+ * #5586: a failed snapshot read says WHAT failed in the child's FIRST stderr line. `agent-org` writes the cause there and its stack below
+ * it, and the LAST line -- what `fleetHoldReadRefusal` quotes for gh -- is Node's `Node.js v24.21.0` footer, which names nothing. The
+ * message carries the child's own words (the exit status too), so nothing is invented: with no stderr it says the status and stops there.
+ */
+function gateSnapshotReadFailure(error: unknown): Error {
+  const failure = error as { status?: number | null; stderr?: string | Buffer; message?: string };
+  const exit = typeof failure.status === "number" ? `exited ${failure.status}` : "failed";
+  const firstLine = String(failure.stderr ?? "").split("\n").map((line) => line.trim()).find(Boolean);
+  if (firstLine !== undefined) {
+    const quoted = firstLine.length > SNAPSHOT_STDERR_LINE_MAX ? `${firstLine.slice(0, SNAPSHOT_STDERR_LINE_MAX)}... (cut)` : firstLine;
+    return new Error(`agent-org gate-snapshot-read ${exit}: "${quoted}"`, { cause: error });
+  }
+  const detail = typeof failure.status === "number" ? `${exit} and printed nothing on stderr` : `${exit}: ${String(failure.message ?? "").split("\n")[0]}`;
+  return new Error(`agent-org gate-snapshot-read ${detail}`, { cause: error });
 }
 
 /**
