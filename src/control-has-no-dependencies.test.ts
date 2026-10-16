@@ -166,7 +166,7 @@ function productionClosure(lock: string): string[] {
  */
 const PRODUCTION_CLOSURE = [
     "@a11ign/evidence@0.3.2", "@a11ign/judge@0.5.1", "@a11ign/scorer@0.3.3", "@a11ign/screenreader-fleet@0.11.0",
-    "@a11ign/screenreader-worker@0.13.1", "@a11ign/screenreader-worker@0.9.0", "@a11ign/toolchain@0.5.0",
+    "@a11ign/screenreader-worker@0.13.4", "@a11ign/screenreader-worker@0.9.0", "@a11ign/toolchain@0.5.0",
     "@emnapi/core@1.11.3", "@emnapi/runtime@1.11.3", "@emnapi/wasi-threads@1.2.3", "@guidepup/guidepup@0.31.0",
     "@napi-rs/wasm-runtime@1.1.6", "@rsbuild/core@2.2.12", "@rspack/binding-darwin-arm64@2.2.8",
     "@rspack/binding-darwin-x64@2.2.8", "@rspack/binding-linux-arm64-gnu@2.2.8",
