@@ -966,7 +966,9 @@ export function moveControlPlane({ ref, expected, layerCommits }: { ref: string;
   deps: Pick<StartPlaybookDeps, "ssh" | "declaredCore"> & PlaneRefusal = REAL_START_DEPS): void {
   deps.declaredCore();
   // #5556: the installed layers are READ here, in the function every run's first write goes through, so the order is observable by what `ssh` is asked.
-  const lagging = installedLayersRefusal(deps);
+  // #5155 follow-up: the one lag a frozen install repairs is repaired here, and the read is asked again after it before anything is written.
+  const first = installedLayersReading(deps);
+  const lagging = first.repairable ? installLayersAndReread(deps) : first.refusal;
   if (lagging) {
     (deps.refuse ?? refuseWithExit)(lagging);
     return;
@@ -989,14 +991,31 @@ function refuseWithExit(text: string): never {
  * plane's HEAD by `git merge --ff-only` and nothing installs afterwards, so HEAD can hold a lockfile that `node_modules/` does not: the move's
  * own judgement then refuses AFTER the merge, spending the first write of a covered run on a fact one read could have named. Where the plane is
  * in that state this says both release numbers and that `pnpm install --frozen-lockfile` is the remedy, which is a write to the control plane
- * and is NOT made here (it waits on a ruling, #5155). Returns the refusal to print, or null; notes are printed either way.
+ * and is NOT made here. Returns the refusal to print, or null; notes are printed either way.
  */
 export function installedLayersRefusal(deps: Pick<StartPlaybookDeps, "ssh"> & Pick<PlaneRefusal, "say"> = REAL_START_DEPS): string | null {
+  return installedLayersReading(deps).refusal;
+}
+
+/** The read and its judgement together, so `moveControlPlane` can tell a repairable lag from a refusal (#5155). Notes are printed here. */
+function installedLayersReading(deps: Pick<StartPlaybookDeps, "ssh"> & Pick<PlaneRefusal, "say">): ReturnType<typeof installedLayersJudged> {
   const manifest = manifestOf(readDeployPins());
   const read = String(deps.ssh(installedLayersRead(manifest), { capture: true }));
-  const { refusal, notes } = installedLayersJudged(manifest, read);
-  for (const note of notes) (deps.say ?? ((line) => process.stderr.write(`${line}\n`)))(`  note: ${note}`);
-  return refusal;
+  const judged = installedLayersJudged(manifest, read);
+  for (const note of judged.notes) (deps.say ?? ((line) => process.stderr.write(`${line}\n`)))(`  note: ${note}`);
+  return judged;
+}
+
+/**
+ * The repair (#5155): `pnpm install --frozen-lockfile` on the plane, for a lockfile that declares the release and a `node_modules/` that does not hold it.
+ * It lays only what the tracked lockfile already names, and changes no tracked file. Returns the refusal after the install, or null once the layers agree:
+ * an install that does not bring them into step is still a refusal, so nothing is written to the plane on a disagreement.
+ */
+function installLayersAndReread(deps: Pick<StartPlaybookDeps, "ssh"> & Pick<PlaneRefusal, "say">): string | null {
+  process.stdout.write(`  installed layers lag the plane's lockfile: running pnpm install --frozen-lockfile in ${CHECKOUT} (lays only what the tracked lockfile names)\n`);
+  deps.ssh(`cd ${CHECKOUT} && pnpm install --frozen-lockfile`);
+  const again = installedLayersReading(deps).refusal;
+  return again && `fleet:deploy ran pnpm install --frozen-lockfile in ${CHECKOUT} and the layers still disagree. ${again}`;
 }
 
 /**

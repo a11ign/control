@@ -82,7 +82,7 @@ test("#5556 the read prints the importer's release, not the transitive 0.9.0 ent
 });
 
 test("#5556 installed layers equal to the declaration are not reported", () => {
-  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [] });
+  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [], repairable: false });
 });
 
 test("#5556 no installed release, with HEAD on the declared lockfile, is refused as 'no release is installed'", () => {
@@ -124,7 +124,7 @@ test("#5556 an unreadable lockfile is refused even where the installed release e
   assert.match(refusal ?? "", new RegExp(String.raw`layer nvda-worker .* installed ${DECLARED} under .* the plane's lockfile resolves no release, deploy-pins\.json declares ${DECLARED}: the lockfile names no release for it \(or could not be read\)`));
   assert.match(refusal ?? "", /layer screenreader-fleet/, "each layer whose lockfile cannot be read is named");
   assert.deepEqual(notes, []);
-  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [] }, "the same installed layers WITH a readable lockfile are in step");
+  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [], repairable: false }, "the same installed layers WITH a readable lockfile are in step");
 });
 
 test("#5556 installedLayersRefusal asks with a read-only command and prints notes", () => {
@@ -141,12 +141,18 @@ test("#5556 installedLayersRefusal asks with a read-only command and prints note
   assert.equal(said.length, 2);
 });
 
-/** `moveControlPlane` run for real with the plane's answers replaced, recording every command it asked and every refusal it ended on. */
-function moveObserved({ plane }: { plane: string }) {
+/**
+ * `moveControlPlane` run for real. Each read of the plane answers from `reads` in turn, so a test can say what the plane shows before and after
+ * an install; every other command is recorded and answered empty. Returns what was asked, what was refused, and whether the refusal ended the call.
+ */
+function moveObserved({ reads }: { reads: string[] }) {
   const asked: string[] = [];
   const refused: string[] = [];
   const refuse = (text: string): never => { refused.push(text); throw new Error("refused"); };
-  const ssh = (command: string) => { asked.push(command); return plane; };
+  const ssh = (command: string) => {
+    asked.push(command);
+    return command === installedLayersRead(MANIFEST) ? (reads.shift() ?? "") : "";
+  };
   let threw = false;
   try {
     moveControlPlane({ ref: "main", expected: "a".repeat(40), layerCommits: {} }, { ssh, declaredCore: () => "7".repeat(40), say: () => undefined, refuse });
@@ -154,18 +160,52 @@ function moveObserved({ plane }: { plane: string }) {
   return { asked, refused, threw };
 }
 const isMove = (command: string) => command.includes("git merge --ff-only");
+const isRead = (command: string) => command === installedLayersRead(MANIFEST);
+const isInstall = (command: string) => /^cd \S+ && pnpm install --frozen-lockfile$/.test(command);
+const LAGGING = `nvda-worker 0.13.0 ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n`;
+const IN_STEP = `nvda-worker ${BOTH.worker} ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n`;
 
-test("#5556 the first write is never asked when the installed layers lag: the plane saw ONE command, and it was the read", () => {
-  const { asked, refused, threw } = moveObserved({ plane: `nvda-worker 0.13.0 ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n` });
+test("#5155 a lockfile that declares the release, with node_modules behind it, is repaired by ONE frozen install, then moved", () => {
+  const { asked, refused, threw } = moveObserved({ reads: [LAGGING, IN_STEP] });
+  assert.equal(threw, false, `the repaired plane must reach the move, refused: ${refused.join(" | ")}`);
+  assert.deepEqual(asked.map((command) => (isRead(command) ? "read" : isInstall(command) ? "install" : isMove(command) ? "move" : "other")), ["read", "install", "read", "move"]);
+  assert.doesNotMatch(asked[1], /no-frozen-lockfile/, "the install is frozen: it lays only what the tracked lockfile names");
+});
+
+test("#5155 an install that does not bring the layers into step is still a refusal, and nothing is written", () => {
+  const { asked, refused, threw } = moveObserved({ reads: [LAGGING, LAGGING] });
   assert.equal(threw, true);
   assert.equal(refused.length, 1);
-  assert.match(refused[0], new RegExp(String.raw`installed 0\.13\.0 .* resolves ${DECLARED}`));
-  assert.equal(asked.length, 1, "only the read reached the plane");
+  assert.match(refused[0], new RegExp(String.raw`installed 0\.13\.0 .* resolves ${DECLARED}, deploy-pins\.json declares ${DECLARED}`));
+  assert.match(refused[0], /^fleet:deploy ran pnpm install --frozen-lockfile in \S+ and the layers still disagree\./);
+  assert.equal(asked.filter(isInstall).length, 1, "the install is run once, never looped");
+  assert.equal(asked.some(isMove), false, "the plane is not written to after a disagreement");
+});
+
+test("#5155 an unreadable plane is not repaired: no install is asked, and the first write is refused", () => {
+  const { asked, threw } = moveObserved({ reads: ["nvda-worker none none\nscreenreader-fleet none none\n"] });
+  assert.equal(threw, true);
+  assert.equal(asked.some(isInstall), false);
   assert.equal(asked.some(isMove), false);
 });
 
+test("#5155 a plane whose own lockfile is behind is not repaired: no install, and the move proceeds with its note", () => {
+  const behind = `nvda-worker 0.13.0 0.13.0\nscreenreader-fleet ${FLEET.version} ${FLEET.version}\n`;
+  const { asked, threw } = moveObserved({ reads: [behind] });
+  assert.equal(threw, false);
+  assert.equal(asked.some(isInstall), false, "an install before the move would lay the OLD lockfile");
+  assert.equal(isMove(asked[1]), true);
+});
+
+test("#5155 the dry read says what would be installed and installs nothing", () => {
+  const asked: string[] = [];
+  const refusal = installedLayersRefusal({ ssh: (command) => { asked.push(command); return LAGGING; }, say: () => undefined });
+  assert.match(refusal ?? "", /the repair is pnpm install --frozen-lockfile in \/root\/control, which fleet:deploy runs once/);
+  assert.deepEqual(asked.map((command) => (isRead(command) ? "read" : "other")), ["read"], "only the read reached the plane");
+});
+
 test("#5556 positive control: with the layers in step the same call reads, THEN writes", () => {
-  const { asked, threw } = moveObserved({ plane: `nvda-worker ${BOTH.worker} ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n` });
+  const { asked, threw } = moveObserved({ reads: [IN_STEP] });
   assert.equal(threw, false);
   assert.equal(asked.length, 2);
   assert.equal(isMove(asked[0]), false, "the first command is the read");
@@ -173,7 +213,7 @@ test("#5556 positive control: with the layers in step the same call reads, THEN 
 });
 
 test("#5556 an unreadable plane stops the first write too", () => {
-  const { asked, threw } = moveObserved({ plane: "nvda-worker none none\nscreenreader-fleet none none\n" });
+  const { asked, threw } = moveObserved({ reads: ["nvda-worker none none\nscreenreader-fleet none none\n"] });
   assert.equal(threw, true);
   assert.equal(asked.some(isMove), false);
 });
