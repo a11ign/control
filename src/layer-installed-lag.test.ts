@@ -63,11 +63,13 @@ function readOf(core: string): string {
 
 const judged = (core: string) => installedLayersJudged(MANIFEST, readOf(core));
 const BOTH = { worker: WORKER.version as string, fleet: FLEET.version as string };
+/** The declared worker release as regex source: the refusals quote it, and a pin bump must move these assertions with it rather than break them. */
+const DECLARED = BOTH.worker.replaceAll(".", "\\.");
 
 test("#5556 positive control: HEAD resolves 0.13.1 and 0.13.0 is installed -> refused, naming both numbers and the remedy", () => {
   const { refusal, notes } = judged(planeOf({ installed: { worker: "0.13.0", fleet: BOTH.fleet }, locked: BOTH }));
   assert.ok(refusal, "the plane that stopped the canary must be reported");
-  assert.match(refusal, /layer nvda-worker \(@a11ign\/screenreader-worker\): installed 0\.13\.0 under \/root\/control\/node_modules, the plane's lockfile resolves 0\.13\.1, deploy-pins\.json declares 0\.13\.1/);
+  assert.match(refusal, new RegExp(String.raw`layer nvda-worker \(@a11ign\/screenreader-worker\): installed 0\.13\.0 under \/root\/control\/node_modules, the plane's lockfile resolves ${DECLARED}, deploy-pins\.json declares ${DECLARED}`));
   assert.match(refusal, /pnpm install --frozen-lockfile in \/root\/control/);
   assert.doesNotMatch(refusal, /screenreader-fleet/, "the layer that is in step is not named");
   assert.deepEqual(notes, []);
@@ -85,7 +87,7 @@ test("#5556 installed layers equal to the declaration are not reported", () => {
 
 test("#5556 no installed release, with HEAD on the declared lockfile, is refused as 'no release is installed'", () => {
   const { refusal } = judged(planeOf({ installed: { fleet: BOTH.fleet }, locked: BOTH }));
-  assert.match(refusal ?? "", /no release is installed under \/root\/control\/node_modules, the plane's lockfile resolves 0\.13\.1/);
+  assert.match(refusal ?? "", new RegExp(String.raw`no release is installed under \/root\/control\/node_modules, the plane's lockfile resolves ${DECLARED}`));
 });
 
 test("#5556 a plane whose own lockfile is behind is a NOTE, never a refusal: the move is what brings it forward", () => {
@@ -93,7 +95,7 @@ test("#5556 a plane whose own lockfile is behind is a NOTE, never a refusal: the
   const { refusal, notes } = judged(planeOf({ installed: behind, locked: behind }));
   assert.equal(refusal, null, "refusing here would make the move, and so the install after it, unreachable");
   assert.equal(notes.length, 2);
-  assert.match(notes[0], /installed 0\.13\.0 .* resolves 0\.13\.0, deploy-pins\.json declares 0\.13\.1: the plane's checkout is behind/);
+  assert.match(notes[0], new RegExp(String.raw`installed 0\.13\.0 .* resolves 0\.13\.0, deploy-pins\.json declares ${DECLARED}: the plane's checkout is behind`));
 });
 
 test("#5556 a layer held as a clone is judged by the move's own branch, not by node_modules", () => {
@@ -119,7 +121,7 @@ test("#5556 an unreadable lockfile is refused even where the installed release e
   const core = planeOf({ installed: BOTH });
   assert.deepEqual(readOf(core).trim().split("\n").map((line) => line.split(" ").slice(1).join(" ")), [`${BOTH.worker} none`, `${BOTH.fleet} none`], "the read really printed installed-equals-declared beside an unknown lockfile");
   const { refusal, notes } = judged(core);
-  assert.match(refusal ?? "", /layer nvda-worker .* installed 0\.13\.1 under .* the plane's lockfile resolves no release, deploy-pins\.json declares 0\.13\.1: the lockfile names no release for it \(or could not be read\)/);
+  assert.match(refusal ?? "", new RegExp(String.raw`layer nvda-worker .* installed ${DECLARED} under .* the plane's lockfile resolves no release, deploy-pins\.json declares ${DECLARED}: the lockfile names no release for it \(or could not be read\)`));
   assert.match(refusal ?? "", /layer screenreader-fleet/, "each layer whose lockfile cannot be read is named");
   assert.deepEqual(notes, []);
   assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [] }, "the same installed layers WITH a readable lockfile are in step");
@@ -157,7 +159,7 @@ test("#5556 the first write is never asked when the installed layers lag: the pl
   const { asked, refused, threw } = moveObserved({ plane: `nvda-worker 0.13.0 ${BOTH.worker}\nscreenreader-fleet ${BOTH.fleet} ${BOTH.fleet}\n` });
   assert.equal(threw, true);
   assert.equal(refused.length, 1);
-  assert.match(refused[0], /installed 0\.13\.0 .* resolves 0\.13\.1/);
+  assert.match(refused[0], new RegExp(String.raw`installed 0\.13\.0 .* resolves ${DECLARED}`));
   assert.equal(asked.length, 1, "only the read reached the plane");
   assert.equal(asked.some(isMove), false);
 });
