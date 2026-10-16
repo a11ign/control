@@ -15,7 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
-import { layersFrom, manifestOf, releaseTag, layerSourceDir as realLayerSourceDir } from "./layer-checkouts.ts";
+import { installedLayersJudged, installedLayersRead, layersFrom, manifestOf, releaseTag, layerSourceDir as realLayerSourceDir } from "./layer-checkouts.ts";
 import { parseDeployPins, pinnedTag, readDeployPins } from "./layer-pins.ts";
 import { workerSourceDirty } from "@a11ign/screenreader-fleet/code-drift";
 import { sandboxGitEnv } from "./git-safe-env.ts";
@@ -494,4 +494,131 @@ test("#5540 a layer declaring neither a checkout nor an installed release refuse
     await assert.rejects(codeVersionOn(undeclared, { path: "packages/nvda-worker" }), /does not exist: check it out there/);
     await assert.rejects(codeVersionOn(undeclared, publishedLayer), new RegExp(`packages/nvda-worker.*${PUBLISHED_PACKAGE} is not installed`));
   } finally { rmSync(undeclared, { recursive: true, force: true }); }
+});
+
+// #5556 / #5155: the plane's installed layers, judged from a read of a plane held as a directory. The move's own tests are in fleet-playbook.test.ts.
+const WORKER = MANIFEST.layers["nvda-worker"];
+const FLEET = MANIFEST.layers["screenreader-fleet"];
+assert.ok(WORKER.version && FLEET.version, "the positive control: the declaration holds two published releases");
+const judgedRoots: string[] = [];
+after(() => { for (const root of judgedRoots) rmSync(root, { recursive: true, force: true }); });
+
+/** The lockfile's shape for the two importer entries, with the transitive `screenreader-worker@0.9.0` entry pnpm writes beside them. */
+const lockfile = ({ worker, fleet }: { worker: string; fleet: string }) => [
+  "lockfileVersion: '9.0'", "", "importers:", "", "  .:", "    dependencies:",
+  "      '@a11ign/screenreader-fleet':", `        specifier: ${fleet}`, `        version: ${fleet}(@a11ign/scorer@0.3.3)(typescript@7.0.2)`,
+  "      '@a11ign/screenreader-worker':", `        specifier: ${worker}`, `        version: ${worker}`,
+  "    devDependencies:", "      '@a11ign/toolchain':", "        specifier: ^0.1.7", "        version: 0.1.7", "",
+  "packages:", "", `  '@a11ign/screenreader-worker@${worker}':`, "    resolution: {}", "  '@a11ign/screenreader-worker@0.9.0':", "    resolution: {}", "",
+].join("\n");
+
+type Plane = { installed?: { worker?: string; fleet?: string }; locked?: { worker: string; fleet: string }; clone?: boolean };
+
+/** A plane as a directory: `node_modules/<package>/package.json` at the installed releases, a `pnpm-lock.yaml`, and optionally a clone at a layer's path. */
+function planeOf({ installed = {}, locked, clone = false }: Plane) {
+  const core = mkdtempSync(join(tmpdir(), "plane-5556-"));
+  judgedRoots.push(core);
+  for (const [layer, version] of [[WORKER, installed.worker], [FLEET, installed.fleet]] as const) {
+    if (version === undefined) continue;
+    const dir = join(core, "node_modules", layer.package as string);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), `{\n  "name": "${layer.package}",\n  "version": "${version}"\n}\n`);
+  }
+  if (locked) writeFileSync(join(core, "pnpm-lock.yaml"), lockfile(locked));
+  if (clone) mkdirSync(join(core, WORKER.path, ".git"), { recursive: true });
+  return core;
+}
+
+/** The read, run for real against the fixture, and what it printed. */
+function readOf(core: string): string {
+  const command = installedLayersRead(MANIFEST);
+  const local = command.replaceAll(CONTROL_PLANE_CHECKOUT_PATH, core);
+  const run = spawnSync("bash", ["-c", local], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(run.status, 0, run.stderr);
+  return run.stdout;
+}
+
+const judged = (core: string) => installedLayersJudged(MANIFEST, readOf(core));
+const BOTH = { worker: WORKER.version as string, fleet: FLEET.version as string };
+/** The declared worker release as regex source: the refusals quote it, and a pin bump must move these assertions with it rather than break them. */
+const DECLARED = BOTH.worker.replaceAll(".", "\\.");
+
+test("#5556 positive control: HEAD resolves the declared worker and 0.13.0 is installed -> refused, naming both numbers and the remedy, and REPAIRABLE", () => {
+  const { refusal, notes, repairable } = judged(planeOf({ installed: { worker: "0.13.0", fleet: BOTH.fleet }, locked: BOTH }));
+  assert.ok(refusal, "the plane that stopped the canary must be reported");
+  assert.match(refusal, new RegExp(String.raw`layer nvda-worker \(@a11ign\/screenreader-worker\): installed 0\.13\.0 under \/root\/control\/node_modules, the plane's lockfile resolves ${DECLARED}, deploy-pins\.json declares ${DECLARED}`));
+  assert.match(refusal, /the repair is pnpm install --frozen-lockfile in \/root\/control, which fleet:deploy runs once/);
+  assert.doesNotMatch(refusal, /screenreader-fleet/, "the layer that is in step is not named");
+  assert.deepEqual(notes, []);
+  assert.equal(repairable, true);
+});
+
+test("#5556 the read prints the importer's release, not the transitive 0.9.0 entry beside it", () => {
+  const out = readOf(planeOf({ installed: BOTH, locked: BOTH }));
+  assert.match(out, new RegExp(`^nvda-worker ${BOTH.worker} ${BOTH.worker}$`, "m"));
+  assert.match(out, new RegExp(`^screenreader-fleet ${BOTH.fleet} ${BOTH.fleet}$`, "m"), "a version with peer suffixes is read as its release");
+});
+
+test("#5556 installed layers equal to the declaration are not reported", () => {
+  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [], repairable: false });
+});
+
+test("#5556 no installed release, with HEAD on the declared lockfile, is refused as 'no release is installed' and REPAIRABLE: the frozen install lays what the lockfile names", () => {
+  const { refusal, repairable } = judged(planeOf({ installed: { fleet: BOTH.fleet }, locked: BOTH }));
+  assert.match(refusal ?? "", new RegExp(String.raw`no release is installed under \/root\/control\/node_modules, the plane's lockfile resolves ${DECLARED}`));
+  assert.match(refusal ?? "", /the repair is pnpm install --frozen-lockfile in \/root\/control/);
+  assert.equal(repairable, true);
+});
+
+test("#5556 no release installed AND the lockfile names none is NOT repairable: an install has nothing it can lay", () => {
+  const { refusal, repairable } = judged(planeOf({ installed: { fleet: BOTH.fleet }, locked: { worker: "none", fleet: BOTH.fleet } }));
+  assert.match(refusal ?? "", /fleet:deploy does not install for this/);
+  assert.equal(repairable, false);
+});
+
+test("#5556 a plane whose own lockfile is behind is a NOTE, never a refusal: the move is what brings it forward", () => {
+  const behind = { worker: "0.13.0", fleet: "0.10.2" };
+  const { refusal, notes, repairable } = judged(planeOf({ installed: behind, locked: behind }));
+  assert.equal(refusal, null, "refusing here would make the move, and so the install after it, unreachable");
+  assert.equal(notes.length, 2);
+  assert.equal(repairable, false, "an install here would lay the OLD lockfile");
+  assert.match(notes[0], new RegExp(String.raw`installed 0\.13\.0 .* resolves 0\.13\.0, deploy-pins\.json declares ${DECLARED}: the plane's checkout is behind`));
+});
+
+test("#5155 a lag BESIDE a layer behind its own lockfile is NOT repairable: an install before the move would lay the old lockfile for that layer too", () => {
+  const mixed = judged(planeOf({ installed: { worker: "0.13.0", fleet: "0.10.2" }, locked: { worker: BOTH.worker, fleet: "0.10.2" } }));
+  assert.equal(mixed.repairable, false, "the repairable lag is not repaired while another layer is behind");
+  assert.match(mixed.refusal ?? "", new RegExp(String.raw`layer nvda-worker .*installed 0\.13\.0 .* resolves ${DECLARED}`), "the lag is still named");
+  assert.doesNotMatch(mixed.refusal ?? "", /the repair is pnpm install/);
+  assert.equal(mixed.notes.length, 1, "the layer behind is a note, as it is alone");
+  assert.match(mixed.notes[0], /layer screenreader-fleet .*installed 0\.10\.2 .* resolves 0\.10\.2/);
+});
+
+test("#5556 a layer held as a clone is judged by the move's own branch, not by node_modules", () => {
+  const { refusal, notes } = judged(planeOf({ installed: { fleet: BOTH.fleet }, locked: BOTH, clone: true }));
+  assert.deepEqual({ refusal, notes }, { refusal: null, notes: [] });
+});
+
+test("#5556 a layer the read printed no line for is refused, not read as in step", () => {
+  const { refusal } = installedLayersJudged(MANIFEST, "");
+  assert.match(refusal ?? "", /returned no line for it/);
+});
+
+test("#5556 an unreadable plane (no lockfile entry, no installed release) is refused, never read as merely behind", () => {
+  const { refusal, notes } = judged(planeOf({}));
+  assert.deepEqual(readOf(planeOf({})).trim().split("\n").map((line) => line.split(" ").slice(1).join(" ")), ["none none", "none none"], "the read really printed the unknown state");
+  assert.match(refusal ?? "", /the lockfile names no release for it \(or could not be read\)/);
+  assert.deepEqual(notes, []);
+  const { refusal: halfRead } = judged(planeOf({ installed: { worker: "0.13.0", fleet: BOTH.fleet } }));
+  assert.match(halfRead ?? "", /installed 0\.13\.0 under .* the plane's lockfile resolves no release/, "an unreadable lockfile alone is also unknown");
+});
+
+test("#5556 an unreadable lockfile is refused even where the installed release equals the declaration", () => {
+  const core = planeOf({ installed: BOTH });
+  assert.deepEqual(readOf(core).trim().split("\n").map((line) => line.split(" ").slice(1).join(" ")), [`${BOTH.worker} none`, `${BOTH.fleet} none`], "the read really printed installed-equals-declared beside an unknown lockfile");
+  const { refusal, notes } = judged(core);
+  assert.match(refusal ?? "", new RegExp(String.raw`layer nvda-worker .* installed ${DECLARED} under .* the plane's lockfile resolves no release, deploy-pins\.json declares ${DECLARED}: the lockfile names no release for it \(or could not be read\)`));
+  assert.match(refusal ?? "", /layer screenreader-fleet/, "each layer whose lockfile cannot be read is named");
+  assert.deepEqual(notes, []);
+  assert.deepEqual(judged(planeOf({ installed: BOTH, locked: BOTH })), { refusal: null, notes: [], repairable: false }, "the same installed layers WITH a readable lockfile are in step");
 });
