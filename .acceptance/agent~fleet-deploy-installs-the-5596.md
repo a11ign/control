@@ -19,7 +19,7 @@ The job cannot run `src/layer-installed-lag.test.ts`: its import closure reaches
 
 ## Evidence (measured 2026-10-16, worktree `~/repos/control-wt-5596`, commit 2b10684)
 
-- Acceptance chain above, run from the worktree: `ℹ tests 17 / ℹ pass 17 / ℹ fail 0`.
+- `node --test src/layer-installed-lag.test.ts` run from the worktree: `ℹ tests 17 / ℹ pass 17 / ℹ fail 0`.
 - `pnpm exec tsc --noEmit`: exit 0.
 - Full `node --import tsx --test "src/*.test.ts"`: 969 tests, 957 pass, 11 files fail. The same 11 files fail on untouched `origin/main` in a scratch worktree, with the same error set: the core's `packages/control` layout and a toolchain subpath (`@a11ign/toolchain/lib/git-sandbox`) this checkout does not provide. No failure is new.
 - `src/layer-checkouts.test.ts` cannot run in this checkout (the toolchain subpath above, on main too), so its assertions are not re-run here. No test pins the phrase this change removed.
