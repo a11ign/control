@@ -70,6 +70,15 @@ test("a run whose recap shows a host that ran is NOT refused, whatever the inven
     "positive control: the same warnings with an empty recap are still refused");
 });
 
+test("an ok= count outside a PLAY RECAP is not proof of a host", () => {
+  // reviewer-control-117: `noise: ok=1` anywhere in the journal used to lift the refusal.
+  assert.ok(deployedToNothing("skipping: no hosts matched\nnoise: ok=1"), "no recap at all: still refused");
+  assert.ok(deployedToNothing("skipping: no hosts matched\nnoise: ok=1\nPLAY RECAP\n"),
+    "an ok= line ABOVE an empty recap is still refused");
+  assert.equal(deployedToNothing("skipping: no hosts matched\nPLAY RECAP\na11y-worker-12 : ok=18 changed=4 failed=0"), null,
+    "positive control: the same shape under the heading is accepted");
+});
+
 test("a healthy deploy is NOT refused", () => {
   // The half that makes the guard usable: a real run must pass, or it gets bypassed within a day.
   assert.equal(deployedToNothing("PLAY RECAP\na11y-worker-2 : ok=18 changed=5 unreachable=0 failed=0"), null);
