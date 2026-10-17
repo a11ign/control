@@ -2568,6 +2568,10 @@ function journalScope(unit: string, invocation: string): string {
 export function deployedToNothing(log: string): string | null {
   const text = String(log ?? "");
   if (!/skipping: no hosts matched|provided hosts list is empty/.test(text)) return null;
+  // A host in the PLAY RECAP that ran tasks IS a run that reached hosts: the warning and the "no hosts matched" belong to
+  // the in-tree fallback inventory being absent (or one play whose pattern was empty), and the installed inventory matched.
+  // Measured 2026-10-17: `patch.yml --limit` one box finished ok=18 failed=0 and the wrapper exited 5 anyway.
+  if (/^\S+\s*:\s*ok=[1-9]\d*\b/m.test(text)) return null;
   const unparseable = text.match(/Unable to parse (\S+) as an inventory source/);
   if (unparseable) {
     return `the inventory at ${unparseable[1]} could not be parsed — on the CONTROL PLANE, not here. `

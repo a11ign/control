@@ -55,6 +55,21 @@ test("each cause is named separately — they need different fixes", () => {
     /does not say why/, "an unexplained zero-host run is still refused, and says it is unexplained");
 });
 
+test("a run whose recap shows a host that ran is NOT refused, whatever the inventory warned first", () => {
+  // 2026-10-17, patch.yml --limit a11y-worker-12: the in-tree fallback inventory was absent, the installed one matched,
+  // the box patched (ok=18 failed=0) and the wrapper still called it a run that reached no hosts, so the window went unrecorded.
+  const log = [
+    "[WARNING]: Unable to parse /root/control/ansible/inventory.yml as an inventory source",
+    "skipping: no hosts matched",
+    "PLAY [Install the pending quality updates on every worker, one box at a time]",
+    "PLAY RECAP",
+    "a11y-worker-12             : ok=18   changed=4    unreachable=0    failed=0    skipped=8    rescued=0    ignored=0",
+  ].join("\n");
+  assert.equal(deployedToNothing(log), null);
+  assert.ok(deployedToNothing("[WARNING]: Unable to parse /x/inventory.yml as an inventory source\nskipping: no hosts matched\nPLAY RECAP\n"),
+    "positive control: the same warnings with an empty recap are still refused");
+});
+
 test("a healthy deploy is NOT refused", () => {
   // The half that makes the guard usable: a real run must pass, or it gets bypassed within a day.
   assert.equal(deployedToNothing("PLAY RECAP\na11y-worker-2 : ok=18 changed=5 unreachable=0 failed=0"), null);
