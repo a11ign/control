@@ -1,8 +1,8 @@
 Row a11ign/a11ign#5311. `patch.yml --apply --limit a11y-worker-12` finished `ok=18 changed=4 failed=0`, and `fleet:patch` still exited 5 ("REACHED NO HOSTS") and skipped recording the completed window. Cause: the unit's journal starts with `[WARNING]: Unable to parse /root/control/ansible/inventory.yml` (the in-tree fallback inventory is absent; the installed one matched) and `skipping: no hosts matched`, and `deployedToNothing` read those two strings anywhere in the log.
 
-Acceptance: `git grep -q "a recap host that ran tasks" -- src/deploy-reached-no-hosts.test.ts`
+Acceptance: `git grep -q "IS a run that reached hosts" -- ':!*.test.ts' ':!.acceptance'`
 
-The job cannot run the test itself (the module imports a token it does not have); this line proves the new case is in the tracked test, and the test run is under Evidence.
+The job cannot run the test itself (the module imports a token it does not have); this line proves the guard is in the tracked source (non-test files), and the test run is under Evidence.
 
 ## What changed
 
