@@ -3,8 +3,8 @@
   "layers": {
     "nvda-worker": {
       "package": "@a11ign/screenreader-worker",
-      "version": "0.13.4",
-      "integrity": "sha512-LjaRCrewIoVJmnhYgLJd0ZBOzSGuyL96Lzt4oy9lGk8IL0tO57UhTiMHdh//2aO5vvJKR8vBYiN2E9I8RIFoBg==",
+      "version": "0.13.13",
+      "integrity": "sha512-/23YCeJdUWTsN7bgbCwnzuDDJlELGyg3edgewvoAhj00RpfM2JmlVfXuSqCsSkbmI6//BzpylsZiWhBRpaK5Kw==",
       "path": "packages/nvda-worker",
       "remote": "https://github.com/a11ign/screenreader-worker.git"
     },
@@ -18,7 +18,7 @@
   },
   "core": {
     "remote": "https://github.com/a11ign/a11ign.git",
-    "commit": "e1beb9034967a8660533350859576b2a737f0e81"
+    "commit": "721e2b88e7a05b6b6fe88d5673a9f3c3a17aa796"
   },
   "lab": {
     "path": "packages/lab",
