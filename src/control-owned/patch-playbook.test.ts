@@ -352,10 +352,10 @@ const isReboot = (task: Task): boolean => "ansible.windows.win_reboot" in task;
  * Space, fetch (with the signature check inside it), launch, wait for Setup, close the connection, restart -- in that
  * order, each of the first four only on a feature pass, and the restart on `patch_restart_wanted`, which is true for one.
  */
+const ROUTE_STEPS = ["A feature update needs room", "Fetch the Installation Assistant", "Start the Installation Assistant", "Wait for Setup to finish", "Close the connection", "Reboot, only"];
 function featureRouteInOrder(play: Play): boolean {
   const block = FEATURE_BLOCK(play);
-  const at = ["A feature update needs room", "Fetch the Installation Assistant", "Start the Installation Assistant", "Wait for Setup to finish", "Close the connection", "Reboot, only"]
-    .map((prefix) => indexWhere(block, nameStarts(prefix)));
+  const at = ROUTE_STEPS.map((prefix) => indexWhere(block, nameStarts(prefix)));
   const ordered = at.every((index, i) => index > -1 && (i === 0 || index > at[i - 1]));
   const gated = at.slice(0, 4).every((index) => index > -1 && gatedOnFeature(block[index]));
   const restartsOnWanted = at[4] > -1 && at[5] > -1 && [block[at[4]], block[at[5]]].every((task) => /patch_restart_wanted/.test(JSON.stringify(task.when ?? "")));
@@ -365,7 +365,7 @@ function featureRouteInOrder(play: Play): boolean {
 
 test("A11-31: the Assistant route runs space, fetch, launch, wait and ONE restart, in that order, only on a feature pass", () => {
   assert.ok(featureRouteInOrder(PATCH_PLAY));
-  for (const prefix of ["A feature update needs room", "Fetch the Installation Assistant", "Start the Installation Assistant", "Wait for Setup to finish", "Close the connection"]) {
+  for (const prefix of ROUTE_STEPS.slice(0, 5)) {
     const without = clone(PATCH_PLAY);
     without.tasks.find((task: Task) => task.block).block = FEATURE_BLOCK(PATCH_PLAY).filter((task) => !nameStarts(prefix)(task));
     assert.ok(!featureRouteInOrder(without), `without "${prefix}" the route must be caught`);
@@ -395,6 +395,8 @@ test("A11-31: Setup is waited for by its own log, written after the launch -- ne
   const launch = String(block.find(nameStarts("Start the Installation Assistant"))?.["ansible.windows.win_powershell"]?.script ?? "");
   assert.match(launch, /Win32_Process/, "detached from the SSH session");
   assert.match(launch, /launched\.txt/, "the clock the wait is held against");
+  assert.match(launch, /Get-Process -Name [^\n]*SetupHost[^\n]*\n[^\n]*\$Ansible\.Failed = \$true[^\n]*already running/, "a second Setup is refused");
+  assert.ok(launch.indexOf("already running") < launch.indexOf("Win32_Process"), "the refusal comes before the launch");
   assert.match(JSON.stringify(PATCH_PLAY.vars.patch_feature_installer_args), /\/QuietInstall \/SkipEULA \/Auto Upgrade/);
   assert.match(String(PATCH_PLAY.vars.patch_feature_installer_url), /^https:\/\/go\.microsoft\.com\/fwlink\/\?linkid=2171764$/);
 });

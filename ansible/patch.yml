@@ -29,7 +29,8 @@
 # ## It reboots only a box that INSTALLED something
 #
 # `reboot: false` on `win_updates`, always: the reboot is this play's own `win_reboot`, visible as a task, and
-# it fires only when updates were installed AND Windows asks for it. A pending reboot left by something else
+# it fires only when updates were installed AND Windows asks for it, or for a feature pass, whose one restart is
+# the commit (below). A pending reboot left by something else
 # is reported and left alone; rebooting a box that installed nothing is a restart nobody asked for, on a
 # machine that may be holding a capture.
 #
@@ -257,7 +258,6 @@
                  else 'unreadable' }}
 
         - name: A feature update needs room for Setup, and a box short of it is refused before anything is fetched
-          tags: [patch_feature_space]
           when:
             - patch_feature_pending | bool
             - not ansible_check_mode
@@ -291,7 +291,6 @@
                 timeout: 600
 
             - name: Refuse anything that is not validly signed by Microsoft Corporation
-              tags: [patch_feature_signature]
               ansible.windows.win_powershell:
                 parameters:
                   Installer: "{{ patch_feature_workdir }}\\Windows11InstallationAssistant.exe"
@@ -317,6 +316,9 @@
               Arguments: "{{ patch_feature_installer_args }}"
             script: |
               param($Dir, $Arguments)
+              # A re-run after the wait below gave up must not start a second Setup beside one still running.
+              $running = Get-Process -Name Windows11InstallationAssistant, SetupHost, SetupPrep -ErrorAction SilentlyContinue
+              if ($running) { $Ansible.Failed = $true; "Setup is already running: " + (($running | ForEach-Object { $_.ProcessName }) -join ', '); return }
               Remove-Item -LiteralPath "$Dir\exit.txt" -ErrorAction SilentlyContinue
               $cmd = "cmd /c `"`"$Dir\Windows11InstallationAssistant.exe`" $Arguments /copylogs $Dir\logs & echo EXIT %ERRORLEVEL% > $Dir\exit.txt`""
               $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $Dir }
@@ -328,7 +330,6 @@
         - name: Wait for Setup to finish, which is SetupPhasePostFinalize written after the launch
           # Not the build: it changes at the restart below, not when Setup is done, so waiting on `windowsBuild`
           # waits for a restart nobody has made (A11-31: that read cost two hours on worker 6).
-          tags: [patch_feature_wait]
           when:
             - patch_feature_pending | bool
             - not ansible_check_mode
@@ -393,8 +394,8 @@
         - name: Reboot, only for the feature update's commit, or because updates were installed and Windows asked
           when: patch_restart_wanted | bool
           become: true
-          # `timeout` bounds the whole task: a stuck connection is not ended by `reboot_timeout`, which is only
-          # read between the module's own attempts (ten boxes sat in this task for 2 h 10 min with the box ready).
+          # `timeout` bounds the whole task. `reboot_timeout` did not: ten boxes sat in this task for over 2 h 10 min
+          # with `reboot_timeout: 7200` and the box already back and ready. Why is not known.
           timeout: "{{ (patch_reboot_timeout | int) + 300 }}"
           ansible.windows.win_reboot:
             # A feature update's servicing reboots run longer than a cumulative's; only a feature pass lengthens it.
