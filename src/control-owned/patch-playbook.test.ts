@@ -414,13 +414,52 @@ test("A11-31: the Assistant is refused unless validly signed by Microsoft Corpor
   assert.ok(indexWhere(block, nameStarts("Fetch the Installation Assistant")) < indexWhere(block, nameStarts("Start the Installation Assistant")));
 });
 
-test("A11-31: the steps that did not switch a box stay gone", () => {
-  const code = readFileSync(PATCH, "utf8").split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
-  assert.doesNotMatch(code, /UsoClient/i, "UsoClient.exe StartInstall did not commit the switch");
-  assert.doesNotMatch(code, /bcdedit|staged but not switched|patch_safeos|patch_switch/i, "the BCD wait and the refusal were built on it");
-  assert.doesNotMatch(code, /state:\s*downloaded/, "the Upgrades pre-download staged media that nothing committed");
-  assert.doesNotMatch(code, /\bUpgrades\b/, "win_updates marks a feature update installed without running Setup");
-  assert.doesNotMatch(code, /reboot_timeout:\s*"\{\{\s*7200/, "the 7200 s guess is replaced by patch_reboot_timeout and a task timeout");
+/** What each removed step looked like in the parsed playbook, found in module arguments and vars, never in comments or task names. */
+function staleSteps(plays: Play[]): string[] {
+  const found: string[] = [];
+  for (const play of plays) {
+    const vars = JSON.stringify(play.vars ?? {});
+    if (/Upgrades/.test(vars)) found.push("the Upgrades category in a var");
+    for (const name of Object.keys(play.vars ?? {})) {
+      if (/^patch_(safeos|switch)/.test(name)) found.push(`var ${name}, the BCD wait's`);
+    }
+    for (const task of allTasks(play.tasks ?? [])) {
+      const { name: _name, when: _when, ...args } = task;
+      const body = JSON.stringify(args);
+      if (/UsoClient/i.test(body)) found.push("UsoClient, which did not commit the switch");
+      if (/bcdedit/i.test(body)) found.push("bcdedit, the BCD wait");
+      if (/"category_names":[^\]]*Upgrades/.test(body)) found.push("win_updates with Upgrades, which marks a feature update installed without Setup");
+      if (/"state":"downloaded"/.test(body)) found.push("the pre-download, which staged media nothing committed");
+      if (/staged but not switched/.test(body)) found.push("the staged-but-not-switched refusal");
+      if (/"(reboot_timeout|timeout)":(7200|"7200")/.test(body) || /"reboot_timeout":"\{\{\s*7200/.test(body)) found.push("the 7200 s restart");
+    }
+  }
+  return found;
+}
+
+test("A11-31: the steps that did not switch a box stay gone, read from the parsed playbook", () => {
+  assert.deepEqual(staleSteps(PLAYS), []);
+});
+
+test("A11-31: the removed-steps check sees each step when it is put back", () => {
+  const withTask = (task: Task): Play[] => { const plays = clone(PLAYS); plays[1].tasks.push(task); return plays; };
+  const usoClient = { name: "x", "ansible.windows.win_powershell": { script: "UsoClient.exe StartInstall" } };
+  const bcd = { name: "x", "ansible.windows.win_powershell": { script: "bcdedit /enum all" } };
+  const upgrades = { name: "x", "ansible.windows.win_updates": { category_names: ["Upgrades"], state: "installed" } };
+  const download = { name: "x", "ansible.windows.win_updates": { category_names: ["Updates"], state: "downloaded" } };
+  const refusal = { name: "x", "ansible.builtin.fail": { msg: "staged but not switched" } };
+  const slowReboot = { name: "x", "ansible.windows.win_reboot": { reboot_timeout: 7200 } };
+  for (const task of [usoClient, bcd, upgrades, download, refusal, slowReboot]) {
+    assert.equal(staleSteps(withTask(task)).length, 1, JSON.stringify(task));
+  }
+  const viaVar = clone(PLAYS);
+  viaVar[1].vars.patch_categories = [...viaVar[1].vars.patch_categories, "Upgrades"];
+  assert.equal(staleSteps(viaVar).length, 1, "Upgrades back in patch_categories");
+  const renamed = clone(PLAYS);
+  renamed[1].vars.patch_switch_pending = "{{ true }}";
+  assert.equal(staleSteps(renamed).length, 1, "the BCD wait's var");
+  const named = { name: "UsoClient and bcdedit and Upgrades, mentioned only in the task name", "ansible.builtin.debug": { msg: "gone" } };
+  assert.deepEqual(staleSteps(withTask(named)), [], "a name is not a step");
 });
 
 // --- the route's decisions, templated by the real Ansible --------------------------------------------------------
