@@ -40,7 +40,7 @@
 # (a11ign#4795) is "a box below the target is patched, never excluded". So the play takes a TARGET, and only
 # when one is given:
 #
-#     ansible-playbook patch.yml -e patch_target_release=25H2 -e patch_target_build=26200.9457
+#     ansible-playbook patch.yml -e patch_target_release=26H2 -e patch_target_build=26300.9711
 #
 #   - `patch_target_release` is the release NAME (`TargetReleaseVersionInfo`), `patch_target_build` the
 #     `<CurrentBuild>.<UBR>` the boxes must reach. Both are read from the fleet by the CALLER and never written
@@ -48,36 +48,48 @@
 #     play exactly as it was: same categories, same deferral, same reboot rule.
 #   - Lifted for the window: the feature deferral (days to 0, the same lift the quality deferral gets),
 #     `TargetReleaseVersion` = 1, `TargetReleaseVersionInfo`, and `ProductVersion` (`Windows 11`, which the
-#     policy writes with the other two); `Upgrades` joins the categories.
+#     policy writes with the other two). Every box that switched had these set; no box was run without them, so
+#     whether the Installation Assistant needs them is not known. The target does NOT steer it: asked for 25H2,
+#     worker 6 went to 26H2 (build 26300), the build the Assistant offers.
 #   - Put back in the `always`: the role's whole list, AND the target values REMOVED, because "as provisioned"
 #     has none. The removal runs on every run, target or not: a target left by a process that was killed
 #     (an `always` cannot run then) would otherwise stay a standing lever for a feature update, which is
 #     the drift #921 closed, and the next window of any kind heals it.
-#   - The reboot is unchanged and still this play's own `win_reboot`, conditional on an install that asked for
-#     one: a box already on the target is offered no `Upgrades`, so it installs nothing and is not restarted.
 #   - The last task of the box fails it, by worker number, when its build is below the target or cannot be read.
 #     A window that moved nothing must not read as success (#4733). A box that needed a second pass (the new
 #     build's own cumulative) fails here and is re-run with `--limit`; `any_errors_fatal` halts the rest.
 #
-# ## A feature update must be SWITCHED, not just staged -- a11ign#4979, under #4405
+# ## A feature update goes through Microsoft's Windows 11 Installation Assistant -- A11-31, under #4405
 #
-# Worker 6 staged 25H2 to the end (`$WINDOWS.~BT` built, Setup's `DelayedSwitch: 1`, `win_updates` Succeeded with
-# RebootRequired) and three plain restarts came back on the same build: the switch was never committed. So a pass
-# that installed an `Upgrades` item and asked for a restart (`patch_switch_pending`; any other pass is untouched):
+# `win_updates` cannot move a box across a release. With the `Upgrades` category it marks the feature update
+# "installed" in about twenty seconds without Setup ever running, and a restart after that comes back on the
+# same build (worker 6, a11ign#4979 and #5052: `$WINDOWS.~BT` built, Setup's `DelayedSwitch` serialised, three
+# restarts, nothing switched). `Setup /PreDownload` stages the same plan and nothing executes it unless Setup
+# runs to its last phase and the box is then restarted. Nor did `UsoClient.exe StartInstall` commit it (the BCD
+# never held a SafeOS entry). Those steps, and the BCD wait and the `staged but not switched` refusal built on
+# them, are gone.
 #
-#   1. runs `UsoClient.exe StartInstall`, the Update Orchestrator's own install step, before the restart;
-#   2. reads `bcdedit /enum all` and waits up to three minutes for a SafeOS entry;
-#   3. FAILS the box, by worker number, `staged but not switched`, with the entries, and never restarts it.
+# What committed the switch, on 11 boxes (workers 2, 3, 4, 7, 8, 9, 10, 12, 13, 15, 16; A11-31; worker 6 went the
+# same way but was restarted by a different step):
 #
-# The restart stays this play's own `win_reboot`. Whether step 1 is what commits the switch is the live window's
-# to say: if the box still has no entry, that is the next row (the installer from the staged media), not this one.
+#   1. a box whose `CurrentBuild` is below the target's has the Assistant fetched from Microsoft
+#      (`patch_feature_installer_url`), its Authenticode signature checked as valid and Microsoft's, and is run
+#      DETACHED (`Win32_Process.Create`) with `/QuietInstall /SkipEULA /Auto Upgrade`, so the SSH session is
+#      not what Setup lives or dies with;
+#   2. the play waits for Setup to finish: `SetupPhasePostFinalize` in `$WINDOWS.~BT\Sources\Panther\setupact.log`,
+#      written AFTER the launch. The Assistant never restarts the box ("Rebooting system... prevented by
+#      command line override"), so Setup then sits there until something does. The wait took 1 h 38 min with
+#      ten boxes running at once;
+#   3. ONE `win_reboot`, this play's own, commits it. The box comes back on the new build.
 #
-# ## Not read here
+# A pass that does this does nothing else: the Assistant lands the box on the release's current build, and the
+# closing task fails a box that is still below the target, to be re-run with `--limit` for the cumulative.
 #
-# That `win_updates` works on this fleet's Windows edition has not been read: the first run is row E's, with
-# `--check --limit <one idle box>` first. Neither has the `Upgrades` path: that the feature update installs
-# through `win_updates`, that `ProductVersion` is honoured beside the two named values, and how long a
-# feature update's reboot takes on these boxes (the timeout below is a guess, longer than the cumulative's).
+# Not read, said plainly. (a) A `win_reboot` after the 1 h 38 min wait hung on ten boxes for over two hours
+# while the boxes were back and ready. A reused SSH connection that did not survive the restart is the suspect
+# (`ansible.cfg` warns of exactly that) and is NOT proven; `meta: reset_connection` before the restart and a
+# `timeout:` on the restart task are the guard against it either way. (b) `patch_feature_min_free_gb` is a floor
+# this fleet chose, not a Microsoft figure; the ten boxes rolled together held 72 GB or more.
 
 - name: The workers must be in the inventory
   # A run that matches no host prints "skipping: no hosts matched" and EXITS 0, so a patch window could "pass"
@@ -125,25 +137,37 @@
           {'path': patch_policy_path, 'name': 'ProductVersion', 'value': 'Windows 11', 'type': 'string'}]
          if patch_target_set | bool else [] }}
     patch_window_values: "{{ patch_lifted_values + patch_target_values }}"
-    patch_base_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
-    patch_categories: "{{ patch_base_categories + (['Upgrades'] if patch_target_set | bool else []) }}"
-    # True only for a pass whose install actually installed an `Upgrades` item and asked for a restart: the
-    # one pass whose restart must be a SWITCH (a11ign#4979). Everything else is the play as it was.
-    patch_switch_pending: >-
-      {{ (patch_updates.reboot_required | default(false) | bool)
-         and (patch_updates.updates | default({}) is mapping)
-         and ((patch_updates.updates | default({}) | dict2items
-               | selectattr('value.installed', 'defined') | selectattr('value.installed')
-               | selectattr('value.categories', 'defined')
-               | map(attribute='value.categories') | flatten
-               | select('equalto', 'Upgrades') | list | length) > 0) }}
-    # What a committed switch leaves in the BCD: Setup's "Add safe OS boot entry" writes a WinPE entry whose
-    # device is the staged media under `$WINDOWS.~BT`. Taken from Setup's own log text and the shape of a
-    # WinPE entry, NOT yet read off a box that committed one (the live window is the VERIFY row), so the
-    # pattern stays narrow and the evidence is printed whole when it does not match. ONLY the staged media's
-    # path counts: `winpe Yes` is on the Windows Recovery Environment entry EVERY Windows 11 BCD carries, and
-    # a pattern with it passed a box that never staged a switch (a11ign#5052, found at a11ign#4405).
-    patch_safeos_pattern: '\$WINDOWS\.~BT'
+    # Cumulative updates only: `Upgrades` is not a category here. `win_updates` marks a feature update installed
+    # without running Setup (see the header), so the feature update has its own route below.
+    patch_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
+    # The box's `<CurrentBuild>.<UBR>` before the window changes anything, set by a task below; `unreadable` until then.
+    patch_build_before: unreadable
+    # True for a pass on a box whose `CurrentBuild` is BELOW the target's: the one pass that runs the Installation
+    # Assistant and restarts once Setup has finished. A box on the target's `CurrentBuild` (any UBR) is never sent
+    # to it: a lower UBR is a cumulative's, and an unreadable box is left for the closing task to fail.
+    patch_feature_pending: >-
+      {{ (patch_target_set | bool)
+         and ((patch_build_before | string) is match('^[0-9]+\.[0-9]+$'))
+         and ((((patch_build_before | string).split('.') | first) | int)
+              < (((patch_target_build | string).split('.') | first) | int)) }}
+    # Microsoft's Windows 11 Installation Assistant, the fwlink Microsoft publishes for it. The Authenticode check
+    # below refuses anything that is not validly signed by Microsoft Corporation.
+    patch_feature_installer_url: 'https://go.microsoft.com/fwlink/?linkid=2171764'
+    patch_feature_workdir: 'C:\Windows\Temp\a11y-feature-update'
+    # `/QuietInstall /SkipEULA /Auto Upgrade` is the unattended upgrade; the Assistant restarts nothing by itself.
+    patch_feature_installer_args: '/QuietInstall /SkipEULA /Auto Upgrade'
+    # Free space on C: below which the Assistant is not started. A floor this fleet chose, not Microsoft's figure.
+    patch_feature_min_free_gb: 40
+    # Setup is waited for once a minute, up to this many times: 1 h 38 min was measured, 3 h is the limit.
+    patch_feature_wait_retries: 180
+    patch_feature_wait_delay: 60
+    # The one restart: the feature pass's commit, or a cumulative's. Only a feature pass lengthens it, and the
+    # task's own `timeout` is a bound on a hang the module's `reboot_timeout` did not bound (see the header).
+    patch_reboot_timeout: "{{ 3600 if patch_feature_pending | bool else 1800 }}"
+    patch_restart_wanted: >-
+      {{ (patch_feature_pending | bool)
+         or ((patch_updates.installed_update_count | default(0) | int) > 0
+             and (patch_updates.reboot_required | default(false) | bool)) }}
   tasks:
     - name: The deferrals to lift are declared and the target is given whole, or the window would do nothing
       # A lift that matches no entry "succeeds" and installs nothing -- a green result vouching for an inert
@@ -210,54 +234,132 @@
               if ($wrong.Count -gt 0) { $Ansible.Failed = $true; "deferral did not read back: " + ($wrong -join '; ') }
               else { "$($Wanted.Count) deferral value(s) read back" }
 
-        - name: Stage the feature update's download before the install, on a target pass
-          # a11ign#5314: on a box with nothing staged, the install below met the feature update at download and failed it
-          # with HRESULT 0, so no media was staged for a switch to commit. `state: downloaded` fetches the Upgrades
-          # category and installs nothing. `ignore_errors` lets the verdict below name WUA's own result; the `always`
-          # still puts the deferral back. A box that already holds the download reports no failure and is not refused.
-          # `reboot: false` as the install has it: every win_updates here never reboots, and the restart is the play's win_reboot.
-          when:
-            - patch_target_set | bool
-            - not ansible_check_mode
-          become: true
-          ansible.windows.win_updates:
-            category_names: [Upgrades]
-            state: downloaded
-            reboot: false
-            log_path: 'C:\Windows\Temp\a11y-patch-updates.log'
-          register: patch_predownload
-          ignore_errors: true
-
-        - name: A feature update that did not download fails the box, with WUA's own download result
-          # The module reports only the HRESULT, which is 0 when WUA never began the download. Its log holds WUA's
-          # ResultCode and HRESULT per update (`Download result for ...`), so the verdict reads the last of those lines.
-          when:
-            - patch_target_set | bool
-            - not ansible_check_mode
-            - patch_predownload.failed | default(false) | bool
+        - name: Read the build before anything is installed
+          # The feature route is chosen on this, so it is read once, from the registry, as the closing task reads it.
+          # A read, so it runs under `--check` too. Unreadable leaves `patch_build_before` as `unreadable`.
           become: true
           ansible.windows.win_powershell:
             script: |
               $Ansible.Changed = $false
-              Select-String -LiteralPath 'C:\Windows\Temp\a11y-patch-updates.log' -Pattern 'Download result' |
-                Select-Object -Last 5 | ForEach-Object { $_.Line }
-          register: patch_download_result
+              $v = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+              "$($v.CurrentBuild).$($v.UBR)"
           changed_when: false
           failed_when: false
+          check_mode: false
+          register: patch_build_before_read
 
-        - name: A feature update that did not stage fails the box before the install runs
+        - name: Record the build before, or that it could not be read
+          ansible.builtin.set_fact:
+            patch_build_before: >-
+              {{ (patch_build_before_read.output | default([]) | first | default('', true) | trim)
+                 if (patch_build_before_read.failed is not defined or not patch_build_before_read.failed)
+                    and (patch_build_before_read.output | default([]) | first | default('', true) | trim) is match('^[0-9]+\.[0-9]+$')
+                 else 'unreadable' }}
+
+        - name: A feature update needs room for Setup, and a box short of it is refused before anything is fetched
+          tags: [patch_feature_space]
           when:
-            - patch_target_set | bool
+            - patch_feature_pending | bool
             - not ansible_check_mode
-            - patch_predownload.failed | default(false) | bool
-          ansible.builtin.fail:
-            msg: >-
-              {{ inventory_hostname }}: the feature update did not download, so nothing is staged for a switch.
-              Module: {{ patch_predownload.msg | default('no message') }}. Updates: {{ patch_predownload.updates | default({}) | to_json }}.
-              WUA's download results: {{ patch_download_result.output | default([]) | join(' | ') | default('none logged', true) }}
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              MinFreeGb: "{{ patch_feature_min_free_gb }}"
+            script: |
+              param($MinFreeGb)
+              $Ansible.Changed = $false
+              $free = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
+              "FREE_GB: $free (needs $MinFreeGb)"
+              if ($free -lt [double]$MinFreeGb) { $Ansible.Failed = $true; "less than $MinFreeGb GB free on C:" }
+
+        - name: Fetch the Installation Assistant
+          when:
+            - patch_feature_pending | bool
+            - not ansible_check_mode
+          become: true
+          block:
+            - name: The working directory exists
+              ansible.windows.win_file:
+                path: "{{ patch_feature_workdir }}"
+                state: directory
+
+            - name: Download it from Microsoft
+              ansible.windows.win_get_url:
+                url: "{{ patch_feature_installer_url }}"
+                dest: "{{ patch_feature_workdir }}\\Windows11InstallationAssistant.exe"
+                force: true
+                timeout: 600
+
+            - name: Refuse anything that is not validly signed by Microsoft Corporation
+              tags: [patch_feature_signature]
+              ansible.windows.win_powershell:
+                parameters:
+                  Installer: "{{ patch_feature_workdir }}\\Windows11InstallationAssistant.exe"
+                script: |
+                  param($Installer)
+                  $Ansible.Changed = $false
+                  $s = Get-AuthenticodeSignature -LiteralPath $Installer
+                  "STATUS: $($s.Status) SIGNER: $($s.SignerCertificate.Subject)"
+                  if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+                    $Ansible.Failed = $true; "not validly signed by Microsoft Corporation"
+                  }
+
+        - name: Start the Installation Assistant, detached
+          # `Win32_Process.Create`, so Setup is a child of WMI and not of this SSH session. `launched.txt` is the
+          # clock the wait below holds Setup's log against: a PostFinalize from an earlier attempt must not count.
+          when:
+            - patch_feature_pending | bool
+            - not ansible_check_mode
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Dir: "{{ patch_feature_workdir }}"
+              Arguments: "{{ patch_feature_installer_args }}"
+            script: |
+              param($Dir, $Arguments)
+              Remove-Item -LiteralPath "$Dir\exit.txt" -ErrorAction SilentlyContinue
+              $cmd = "cmd /c `"`"$Dir\Windows11InstallationAssistant.exe`" $Arguments /copylogs $Dir\logs & echo EXIT %ERRORLEVEL% > $Dir\exit.txt`""
+              $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $Dir }
+              $at = (Get-Date).ToUniversalTime().ToString('o')
+              Set-Content -LiteralPath "$Dir\launched.txt" -Value $at
+              "CREATE: ReturnValue=$($r.ReturnValue) at $at"
+              if ($r.ReturnValue -ne 0) { $Ansible.Failed = $true; "Win32_Process.Create refused: $($r.ReturnValue)" }
+
+        - name: Wait for Setup to finish, which is SetupPhasePostFinalize written after the launch
+          # Not the build: it changes at the restart below, not when Setup is done, so waiting on `windowsBuild`
+          # waits for a restart nobody has made (A11-31: that read cost two hours on worker 6).
+          tags: [patch_feature_wait]
+          when:
+            - patch_feature_pending | bool
+            - not ansible_check_mode
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Dir: "{{ patch_feature_workdir }}"
+            script: |
+              param($Dir)
+              $Ansible.Changed = $false
+              $launched = [datetime]::Parse((Get-Content -LiteralPath "$Dir\launched.txt")).ToUniversalTime()
+              $log = 'C:\$WINDOWS.~BT\Sources\Panther\setupact.log'
+              $done = $false
+              if (Test-Path -LiteralPath $log) {
+                $item = Get-Item -LiteralPath $log
+                if ($item.LastWriteTimeUtc -gt $launched) {
+                  $done = [bool]((Get-Content -LiteralPath $log -Tail 80) -match 'SetupPhasePostFinalize')
+                }
+              }
+              "SETUP_DONE: $done at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss'))"
+          register: patch_setup_wait
+          changed_when: false
+          until: "'SETUP_DONE: True' in (patch_setup_wait.output | default([]) | join(' '))"
+          retries: "{{ patch_feature_wait_retries }}"
+          delay: "{{ patch_feature_wait_delay }}"
 
         - name: Install the pending quality updates, WITHOUT letting the module reboot
           # `reboot: false` is load-bearing: the reboot below is this play's own, visible and conditional.
+          # Not on a feature pass: the Assistant lands the box on the release's current build, and a restart
+          # while Setup is waiting for one is the commit, so nothing is installed beside it.
+          when: not (patch_feature_pending | bool)
           become: true
           ansible.windows.win_updates:
             category_names: "{{ patch_categories }}"
@@ -282,68 +384,26 @@
             {{ patch_updates.updates | default({}) | dict2items
                | selectattr('value.installed', 'defined') | selectattr('value.installed') | list }}
 
-        - name: Commit the staged feature update's switch through the Update Orchestrator
-          # a11ign#4979: the module reported `Succeeded, RebootRequired` with the media built and Setup's
-          # `DelayedSwitch: 1` serialised, and three plain `shutdown.exe` restarts came back on the same build
-          # because nothing had committed the switch. Hypothesis (NOT established): a feature update wants the
-          # Update Orchestrator's own install step before the restart. `UsoClient.exe StartInstall` is that
-          # step; it is asynchronous and silent, and not Microsoft-documented (third-party guides list it), so
-          # the BCD read below is what says whether it worked. Only a pass that installed an `Upgrades` item
-          # runs it.
-          when:
-            - not ansible_check_mode
-            - patch_switch_pending | bool
-          become: true
-          ansible.windows.win_shell: UsoClient.exe StartInstall
-          register: patch_switch_commit
+        - name: Close the connection a long wait or an install left open, before the restart
+          # The restart drops it anyway; a connection that outlives the restart is the suspect for the hang in the
+          # header, and a fresh one is cheap. Only where a restart is coming.
+          when: patch_restart_wanted | bool
+          ansible.builtin.meta: reset_connection
 
-        - name: Read the BCD, waiting for the staged switch to appear
-          # `until`, because StartInstall returns before it has written anything. `failed_when: false`: the
-          # verdict is the next task's, which names the box and prints the entries.
-          when:
-            - not ansible_check_mode
-            - patch_switch_pending | bool
+        - name: Reboot, only for the feature update's commit, or because updates were installed and Windows asked
+          when: patch_restart_wanted | bool
           become: true
-          ansible.windows.win_powershell:
-            script: |
-              $Ansible.Changed = $false
-              bcdedit /enum all
-          register: patch_bcd
-          changed_when: false
-          failed_when: false
-          until: (patch_bcd.output | default([]) | join('\n')) is search(patch_safeos_pattern, ignorecase=true)
-          retries: 18
-          delay: 10
-
-        - name: A feature update staged but not switched fails the box, before any restart
-          # The restart below would otherwise come back on the same build and the pass would read as
-          # `installed`. Failing HERE sends the run through the `always` (deferral and target put back)
-          # and halts the rest (`any_errors_fatal`).
-          tags: [patch_switch_verdict]
-          when:
-            - not ansible_check_mode
-            - patch_switch_pending | bool
-            - not ((patch_bcd.output | default([]) | join('\n')) is search(patch_safeos_pattern, ignorecase=true))
-          ansible.builtin.fail:
-            msg: >-
-              {{ inventory_hostname }}: staged but not switched. The feature update was installed to the end
-              of staging and Windows asked for a restart, but the BCD has no SafeOS entry, so a restart would
-              come back on the same build. BCD entries: {{ patch_bcd.output | default([]) | map('trim') | reject('equalto', '') | join(' | ') }}
-
-        - name: Reboot, only because updates were installed and Windows asked
-          when:
-            - patch_updates.installed_update_count | default(0) | int > 0
-            - patch_updates.reboot_required | default(false)
-          become: true
+          # `timeout` bounds the whole task: a stuck connection is not ended by `reboot_timeout`, which is only
+          # read between the module's own attempts (ten boxes sat in this task for 2 h 10 min with the box ready).
+          timeout: "{{ (patch_reboot_timeout | int) + 300 }}"
           ansible.windows.win_reboot:
-            # A feature update's servicing reboots run longer than a cumulative's; only a target lengthens it.
-            reboot_timeout: "{{ 7200 if patch_target_set | bool else 1800 }}"
+            # A feature update's servicing reboots run longer than a cumulative's; only a feature pass lengthens it.
+            reboot_timeout: "{{ patch_reboot_timeout }}"
+            msg: "{{ 'A11-31 commit of the feature update' if patch_feature_pending | bool else 'patch window' }}"
 
         - name: Wait for the worker to be READY again
           # `ready`, not `ok` -- see the busy check above. Only after a reboot we made.
-          when:
-            - patch_updates.installed_update_count | default(0) | int > 0
-            - patch_updates.reboot_required | default(false)
+          when: patch_restart_wanted | bool
           delegate_to: localhost
           become: false
           ansible.builtin.uri:
