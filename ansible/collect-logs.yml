@@ -61,6 +61,20 @@
         fail_on_missing: false
       loop: "{{ nvda_logs.stdout_lines | default([]) }}"
 
+    - name: Fetch Setup's own logs for a feature update in progress (a11ign#5311, A11-31)
+      # A feature update's install phase writes here, and nothing else on the control plane can read it: the
+      # Panther logs are the only record of whether Setup switched the box or failed on a line. READ-ONLY on
+      # the guest, like the fetches above. `fail_on_missing: false`: a box that never staged an upgrade has
+      # no Panther directory, and that is an answer, not a failure of this play.
+      ansible.builtin.fetch:
+        src: "{{ item.src }}"
+        dest: "{{ a11y_log_dir }}/{{ item.dest }}"
+        flat: true
+        fail_on_missing: false
+      loop:
+        - { src: 'C:\$WINDOWS.~BT\Sources\Panther\setupact.log', dest: setup-setupact.log }
+        - { src: 'C:\$WINDOWS.~BT\Sources\Panther\setuperr.log', dest: setup-setuperr.log }
+
     - name: Say where they went
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} logs in {{ a11y_log_dir }}"

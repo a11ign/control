@@ -10,6 +10,10 @@
  *     local connections carrying invented readings. It reaches no worker. It needs Ansible installed, which
  *     the control plane always has; where it is absent the tests say so by name rather than pass.
  *
+ * A11-31: a feature update goes through the Installation Assistant, not `win_updates`' `Upgrades` category and not
+ * `UsoClient.exe StartInstall`. The tests that pinned those (a11ign#4979's commit/BCD/refusal order, a11ign#5314's
+ * pre-download) are replaced by tests of the route that switched 11 boxes, and by a test that the old steps stay gone.
+ *
  * The YAML is parsed by PyYAML in a subprocess because this package takes no npm dependency (ADR 0012) and
  * `check-modules.py` already requires PyYAML on the machine that edits playbooks.
  */
@@ -69,7 +73,10 @@ function rebootsOnlyItself(play: Play): boolean {
   const reboots = tasksUsing(play, "ansible.windows.win_reboot");
   if (updates.length === 0 || reboots.length !== 1) return false;
   const neverModuleReboot = updates.every((task: Task) => task["ansible.windows.win_updates"].reboot === false);
-  const onlyAfterInstalling = /installed_update_count/.test(JSON.stringify(reboots[0].when ?? ""));
+  // The condition is `patch_restart_wanted`, defined once in the play's vars: it must be there, and it must name the install count.
+  const when = JSON.stringify(reboots[0].when ?? "");
+  const condition = /patch_restart_wanted/.test(when) ? String(play.vars?.patch_restart_wanted ?? "") : when;
+  const onlyAfterInstalling = when !== '""' && /installed_update_count/.test(condition);
   return neverModuleReboot && onlyAfterInstalling && !updates.includes(reboots[0]);
 }
 
@@ -196,9 +203,9 @@ test("the verdict play exists and is tagged, so the behavioural tests cannot sil
 
 // --- #4897: a box below the target build is brought up to it, a feature update included ---------------------
 
-const TARGET = { patch_target_release: "25H2", patch_target_build: "26200.9457" };
+const TARGET = { patch_target_release: "26H2", patch_target_build: "26300.9711" };
 const NO_TARGET = {};
-type Extra = Record<string, string>;
+type Extra = Record<string, unknown>;
 
 /** Run `ansible-playbook` on `playbook` in a scratch directory over the given hosts' local connections. */
 function runLocal(opts: { playbook: string, hosts: Record<string, Record<string, unknown>>, extra: Extra, tags?: string }):
@@ -215,22 +222,27 @@ function runLocal(opts: { playbook: string, hosts: Record<string, Record<string,
 }
 
 interface WindowValue { path: string, name: string, value: string | number, type?: string }
-interface Evaluated { categories: string[], lifted: WindowValue[], window: WindowValue[], targetValues: WindowValue[], timeout: number }
+interface Evaluated {
+  categories: string[], lifted: WindowValue[], window: WindowValue[], targetValues: WindowValue[],
+  pending: boolean, restart: boolean, rebootTimeout: number,
+}
 
 /**
  * The patch play's OWN vars, templated by the real Ansible over the role's real defaults, with `extra` as the
- * caller's `-e`. Reads what the play would hand `win_updates` and `win_regedit`, and reaches no box.
+ * caller's `-e` (and, for the per-box facts the play sets itself, `patch_build_before` / `patch_updates`). Reads what the
+ * play would hand `win_updates` and `win_regedit` and whether it would take the feature route; reaches no box.
  */
-function evaluatedVars(extra: Extra): Evaluated {
+function evaluatedVars(extra: Record<string, unknown>): Evaluated {
   const dir = mkdtempSync(join(tmpdir(), "patch-vars-"));
   const out = join(dir, "out.json");
   const playbook = join(dir, "vars.yml");
   const result = "{'categories': patch_categories, 'lifted': patch_lifted_values, 'window': patch_window_values, "
-    + "'targetValues': patch_target_values, 'timeout': (7200 if patch_target_set | bool else 1800)}";
+    + "'targetValues': patch_target_values, 'pending': patch_feature_pending | bool, 'restart': patch_restart_wanted | bool, "
+    + "'rebootTimeout': patch_reboot_timeout | int}";
   writeFileSync(playbook, JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false,
     vars_files: [join(ANSIBLE, "roles/worker/defaults/main.yml")], vars: PATCH_PLAY.vars,
     tasks: [{ "ansible.builtin.copy": { dest: out, content: `{{ ${result} | to_json }}` } }] }]));
-  const run = runLocal({ playbook, hosts: { localhost: {} }, extra });
+  const run = runLocal({ playbook, hosts: { localhost: {} }, extra: extra as Extra });
   assert.equal(run.status, 0, run.out);
   return JSON.parse(readFileSync(out, "utf8"));
 }
@@ -244,24 +256,24 @@ test("#4897 negative control: with no target the categories, the deferral and th
   assert.deepEqual(none.window.map((v) => `${v.name}=${v.value}`), ["DeferQualityUpdatesPeriodInDays=0"],
     "the window lifts the quality deferral and nothing else, and writes no target release");
   assert.deepEqual(none.targetValues, []);
-  assert.equal(none.timeout, 1800, "the reboot timeout is the cumulative one");
+  assert.equal(none.rebootTimeout, 1800, "the reboot timeout is the cumulative one");
+  assert.equal(none.pending, false, "no target, no feature route");
   assert.ok(rebootsOnlyItself(PATCH_PLAY));
   // The reboot rule never mentions the target: a box already on it installs nothing, so it is not restarted.
   assert.doesNotMatch(JSON.stringify(tasksUsing(PATCH_PLAY, "ansible.windows.win_reboot")[0].when), /patch_target/);
 });
 
-test("#4897: with a target the feature deferral is lifted for the window, the target is set, and Upgrades is a category", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+test("#4897: with a target the feature deferral is lifted for the window, the target is set, and Upgrades is NOT a category", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
   const set = evaluatedVars(TARGET);
-  assert.deepEqual(set.categories, [...BASE_CATEGORIES, "Upgrades"]);
+  assert.deepEqual(set.categories, BASE_CATEGORIES, "win_updates cannot switch a feature update (A11-31), so it is not asked to");
   assert.equal(valueOf(set.window, "DeferFeatureUpdatesPeriodInDays"), 0, "feature deferral lifted");
   assert.equal(valueOf(set.window, "DeferQualityUpdatesPeriodInDays"), 0, "quality deferral still lifted");
   assert.equal(valueOf(set.window, "TargetReleaseVersion"), 1);
-  assert.equal(valueOf(set.window, "TargetReleaseVersionInfo"), "25H2");
+  assert.equal(valueOf(set.window, "TargetReleaseVersionInfo"), "26H2");
   assert.equal(valueOf(set.window, "ProductVersion"), "Windows 11");
   assert.equal(set.window.find((v) => v.name === "TargetReleaseVersionInfo")?.type, "string", "a release name is not a dword");
   assert.ok(!names(set.window).includes("DeferFeatureUpdates"), "the on/off flag is the role's and stays on");
   assert.ok(set.window.every((v) => v.path.startsWith("HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate")));
-  assert.equal(set.timeout, 7200);
 });
 
 /** The restore (in `always`) removes every target name the window can write, and reads the removal back. */
@@ -294,10 +306,10 @@ const targetVerdict = (readings: Record<string, string>, extra: Extra): { status
     hosts: Object.fromEntries(Object.entries(readings).map(([name, reading]) => [name, { patch_build_reading: reading }])) });
 
 test("#4897: the closing task fails a box whose build is below the target, by worker number", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const below = targetVerdict({ "a11y-worker-7": "26100.9457" }, TARGET);
+  const below = targetVerdict({ "a11y-worker-7": "26200.9711" }, TARGET);
   assert.notEqual(below.status, 0, below.out);
-  assert.match(below.out, /a11y-worker-7 is on 26100\.9457, below\s+the target build 26200\.9457/);
-  const lowerRevision = targetVerdict({ "a11y-worker-8": "26200.9000" }, TARGET);
+  assert.match(below.out, /a11y-worker-7 is on 26200\.9711, below\s+the target build 26300\.9711/);
+  const lowerRevision = targetVerdict({ "a11y-worker-8": "26300.9000" }, TARGET);
   assert.notEqual(lowerRevision.status, 0, "the same release at an older revision is still below");
   const unreadable = targetVerdict({ "a11y-worker-9": "unreadable" }, TARGET);
   assert.notEqual(unreadable.status, 0, "a box nobody could read has not been shown to have reached the target");
@@ -305,9 +317,9 @@ test("#4897: the closing task fails a box whose build is below the target, by wo
 });
 
 test("#4897: the closing task passes a box at or above the target, compares numbers not text, and is inert without one", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  assert.equal(targetVerdict({ "a11y-worker-2": "26200.9457" }, TARGET).status, 0, "exactly on the target");
-  assert.equal(targetVerdict({ "a11y-worker-3": "26200.10000" }, TARGET).status, 0, "10000 is above 9457; as text it would sort below");
-  assert.equal(targetVerdict({ "a11y-worker-4": "26300.1" }, TARGET).status, 0, "a later release is above");
+  assert.equal(targetVerdict({ "a11y-worker-2": "26300.9711" }, TARGET).status, 0, "exactly on the target");
+  assert.equal(targetVerdict({ "a11y-worker-3": "26300.10000" }, TARGET).status, 0, "10000 is above 9457; as text it would sort below");
+  assert.equal(targetVerdict({ "a11y-worker-4": "26400.1" }, TARGET).status, 0, "a later release is above");
   // negative control: no target given is the play as it was. The unreadable box is the discriminating one: a
   // below-target reading alone would pass even with the target guard removed, an empty build comparing as 0.
   assert.equal(targetVerdict({ "a11y-worker-5": "22631.1", "a11y-worker-6": "unreadable" }, NO_TARGET).status, 0, "no target, no verdict");
@@ -320,75 +332,164 @@ const targetInputs = (extra: Extra): number | null =>
 test("#4897: a target is given whole and well-formed, or not at all", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
   assert.equal(targetInputs(TARGET), 0);
   assert.equal(targetInputs(NO_TARGET), 0, "the default is no target");
-  assert.notEqual(targetInputs({ patch_target_release: "25H2" }), 0, "a release with no build could never be checked");
-  assert.notEqual(targetInputs({ patch_target_build: "26200.9457" }), 0, "a build with no release would change nothing");
-  assert.notEqual(targetInputs({ patch_target_release: "Windows 11", patch_target_build: "26200.9457" }), 0, "a release is NNHn");
-  assert.notEqual(targetInputs({ patch_target_release: "25H2", patch_target_build: "26200" }), 0, "a build is <build>.<UBR>");
+  assert.notEqual(targetInputs({ patch_target_release: "26H2" }), 0, "a release with no build could never be checked");
+  assert.notEqual(targetInputs({ patch_target_build: "26300.9711" }), 0, "a build with no release would change nothing");
+  assert.notEqual(targetInputs({ patch_target_release: "Windows 11", patch_target_build: "26300.9711" }), 0, "a release is NNHn");
+  assert.notEqual(targetInputs({ patch_target_release: "26H2", patch_target_build: "26300" }), 0, "a build is <build>.<UBR>");
 });
 
-// --- a11ign#4979: a staged feature update is SWITCHED, and a box that staged without switching fails --------
+// --- A11-31: a feature update goes through the Installation Assistant, then ONE restart once Setup has finished ----
 
-const SWITCH_BLOCK = (play: Play): Task[] => play.tasks.find((task: Task) => Array.isArray(task.block))?.block ?? [];
+const FEATURE_BLOCK = (play: Play): Task[] => play.tasks.find((task: Task) => Array.isArray(task.block))?.block ?? [];
+const nameStarts = (prefix: string) => (task: Task): boolean => typeof task.name === "string" && task.name.startsWith(prefix);
 const indexWhere = (tasks: Task[], pick: (task: Task) => boolean): number => tasks.findIndex(pick);
-const isCommit = (task: Task): boolean => /UsoClient\.exe\s+StartInstall/i.test(String(task["ansible.windows.win_shell"] ?? ""));
-const readsBcd = (task: Task): boolean => /bcdedit\s+\/enum\s+all/.test(JSON.stringify(task["ansible.windows.win_powershell"] ?? ""));
-const failsStaged = (task: Task): boolean => "ansible.builtin.fail" in task && /staged but not switched/.test(JSON.stringify(task));
+const gatedOnFeature = (task: Task | undefined): boolean => /patch_feature_pending/.test(JSON.stringify(task?.when ?? ""));
+const fetchBlock = (tasks: Task[]): Task | undefined => tasks.find(nameStarts("Fetch the Installation Assistant"));
+const isReset = (task: Task): boolean => task["ansible.builtin.meta"] === "reset_connection";
 const isReboot = (task: Task): boolean => "ansible.windows.win_reboot" in task;
 
-/** Commit, then read the BCD, then fail on no entry, ALL before the restart, each only for a pending switch. */
-function switchesBeforeRestarting(play: Play): boolean {
-  const block = SWITCH_BLOCK(play);
-  const [commit, read, fail, reboot] = [isCommit, readsBcd, failsStaged, isReboot].map((pick) => indexWhere(block, pick));
-  const ordered = commit > -1 && commit < read && read < fail && fail < reboot;
-  const gated = [commit, read, fail].every((at) => at > -1 && /patch_switch_pending/.test(JSON.stringify(block[at].when)));
-  return ordered && gated;
+/**
+ * Space, fetch (with the signature check inside it), launch, wait for Setup, close the connection, restart -- in that
+ * order, each of the first four only on a feature pass, and the restart on `patch_restart_wanted`, which is true for one.
+ */
+const ROUTE_STEPS = ["A feature update needs room", "Fetch the Installation Assistant", "Start the Installation Assistant", "Wait for Setup to finish", "Close the connection", "Reboot, only"];
+function featureRouteInOrder(play: Play): boolean {
+  const block = FEATURE_BLOCK(play);
+  const at = ROUTE_STEPS.map((prefix) => indexWhere(block, nameStarts(prefix)));
+  const ordered = at.every((index, i) => index > -1 && (i === 0 || index > at[i - 1]));
+  const gated = at.slice(0, 4).every((index) => index > -1 && gatedOnFeature(block[index]));
+  const restartsOnWanted = at[4] > -1 && at[5] > -1 && [block[at[4]], block[at[5]]].every((task) => /patch_restart_wanted/.test(JSON.stringify(task.when ?? "")));
+  const rebootIsOurOwn = at[4] > -1 && at[5] > -1 && isReboot(block[at[5]]) && isReset(block[at[4]]);
+  return ordered && gated && restartsOnWanted && rebootIsOurOwn;
 }
 
-test("a11ign#4979: the Orchestrator commit, the BCD read and the staged-but-not-switched refusal all precede the restart", () => {
-  assert.ok(switchesBeforeRestarting(PATCH_PLAY));
-  const withoutCommit = clone(PATCH_PLAY);
-  withoutCommit.tasks.find((task: Task) => task.block).block = SWITCH_BLOCK(PATCH_PLAY).filter((task) => !isCommit(task));
-  assert.ok(!switchesBeforeRestarting(withoutCommit), "no commit must be caught");
-  const withoutRefusal = clone(PATCH_PLAY);
-  withoutRefusal.tasks.find((task: Task) => task.block).block = SWITCH_BLOCK(PATCH_PLAY).filter((task) => !failsStaged(task));
-  assert.ok(!switchesBeforeRestarting(withoutRefusal), "no refusal must be caught");
+test("A11-31: the Assistant route runs space, fetch, launch, wait and ONE restart, in that order, only on a feature pass", () => {
+  assert.ok(featureRouteInOrder(PATCH_PLAY));
+  for (const prefix of ROUTE_STEPS.slice(0, 5)) {
+    const without = clone(PATCH_PLAY);
+    without.tasks.find((task: Task) => task.block).block = FEATURE_BLOCK(PATCH_PLAY).filter((task) => !nameStarts(prefix)(task));
+    assert.ok(!featureRouteInOrder(without), `without "${prefix}" the route must be caught`);
+  }
   const ungated = clone(PATCH_PLAY);
-  delete SWITCH_BLOCK(ungated).find(isCommit)?.when;
-  assert.ok(!switchesBeforeRestarting(ungated), "a commit that runs for every pass must be caught");
-  // The restart is still the play's own win_reboot, and the restore still sits in the `always`.
-  assert.ok(rebootsOnlyItself(PATCH_PLAY));
+  delete FEATURE_BLOCK(ungated).find(nameStarts("Start the Installation Assistant"))?.when;
+  assert.ok(!featureRouteInOrder(ungated), "a launch that runs for every pass must be caught");
+  assert.equal(tasksUsing(PATCH_PLAY, "ansible.windows.win_reboot").length, 1, "one restart, this play's own");
+  // The restart is bounded: `reboot_timeout` is not read while a connection hangs, so the task carries its own `timeout`.
+  assert.match(String(FEATURE_BLOCK(PATCH_PLAY).find(isReboot)?.timeout), /patch_reboot_timeout/);
+  // The restore still sits in the `always`, and the install is not asked to do the feature pass's job.
   assert.ok(restoresFromRolesList(PATCH_PLAY));
   assert.ok(removesTargetThenReadsBack(PATCH_PLAY));
-  assert.ok(!SWITCH_BLOCK(PATCH_PLAY).some((task) => /RestartDevice/i.test(JSON.stringify(task))), "the restart is win_reboot, never UsoClient's");
+  const install = FEATURE_BLOCK(PATCH_PLAY).find(nameStarts("Install the pending quality updates"));
+  assert.match(JSON.stringify(install?.when), /not \(patch_feature_pending/, "a feature pass installs nothing beside the Assistant");
 });
 
-const UPGRADE = { "KB5129195": { title: "Windows 11, version 25H2", categories: ["Upgrades"], installed: true } };
-const CUMULATIVE = { "KB5000001": { title: "Cumulative", categories: ["SecurityUpdates", "UpdateRollups"], installed: true } };
-const BCD_WITH_SAFEOS = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Setup", "identifier {a1}", "device ramdisk=[C:]\\$WINDOWS.~BT\\Sources\\boot.wim"];
-// Every Windows 11 BCD carries the recovery entry, `winpe Yes` included (a11ign#5052, read off a11y-worker-6).
-const RECOVERY_ENTRY = ["Windows Boot Loader", "identifier {rec}", "description Windows Recovery Environment", "device ramdisk=[C:]\\Recovery\\WindowsRE\\Winre.wim", "winpe Yes"];
-const BCD_WITHOUT = ["Windows Boot Manager", "identifier {bootmgr}", "Windows Boot Loader", "identifier {current}", "description Windows 11", ...RECOVERY_ENTRY];
+test("A11-31: Setup is waited for by its own log, written after the launch -- never by the build, which changes at the restart", () => {
+  const block = FEATURE_BLOCK(PATCH_PLAY);
+  const wait = block.find(nameStarts("Wait for Setup to finish"));
+  const script = String(wait?.["ansible.windows.win_powershell"]?.script ?? "");
+  assert.match(script, /SetupPhasePostFinalize/);
+  assert.match(script, /Panther\\setupact\.log/);
+  assert.match(script, /LastWriteTimeUtc -gt \$launched/, "a PostFinalize from an earlier attempt must not end the wait");
+  assert.doesNotMatch(script, /windowsBuild|CurrentBuild/, "the build moves at the restart, so waiting on it waits for nobody");
+  assert.match(String(wait?.until), /SETUP_DONE: True/);
+  const launch = String(block.find(nameStarts("Start the Installation Assistant"))?.["ansible.windows.win_powershell"]?.script ?? "");
+  assert.match(launch, /Win32_Process/, "detached from the SSH session");
+  assert.match(launch, /launched\.txt/, "the clock the wait is held against");
+  assert.match(launch, /Get-Process -Name [^\n]*SetupHost[^\n]*\n[^\n]*\$Ansible\.Failed = \$true[^\n]*already running/, "a second Setup is refused");
+  assert.ok(launch.indexOf("already running") < launch.indexOf("Win32_Process"), "the refusal comes before the launch");
+  assert.match(JSON.stringify(PATCH_PLAY.vars.patch_feature_installer_args), /\/QuietInstall \/SkipEULA \/Auto Upgrade/);
+  assert.match(String(PATCH_PLAY.vars.patch_feature_installer_url), /^https:\/\/go\.microsoft\.com\/fwlink\/\?linkid=2171764$/);
+});
 
-/** The refusal alone, over an invented install result and an invented BCD reading. */
-function switchVerdict(host: { updates: object, reboot: boolean, bcd: string[] }): { status: number | null, out: string } {
-  return runLocal({ playbook: PATCH, tags: "patch_switch_verdict", extra: NO_TARGET, hosts: { "a11y-worker-6": {
-    patch_updates: { reboot_required: host.reboot, updates: host.updates, installed_update_count: Object.keys(host.updates).length },
-    patch_bcd: { output: host.bcd } } } });
+test("A11-31: the Assistant is refused unless validly signed by Microsoft Corporation, before it is launched", () => {
+  const block = FEATURE_BLOCK(PATCH_PLAY);
+  const inner: Task[] = fetchBlock(block)?.block ?? [];
+  const download = inner.findIndex((task) => "ansible.windows.win_get_url" in task);
+  const signature = inner.findIndex((task) => /Authenticode/.test(JSON.stringify(task)));
+  assert.ok(download > -1 && signature > download, "download, then the signature check, inside the fetch");
+  const check = JSON.stringify(inner[signature]);
+  assert.match(check, /\$s\.Status -ne 'Valid'/);
+  assert.match(check, /O=Microsoft Corporation/);
+  assert.match(check, /Ansible\.Failed = \$true/);
+  assert.ok(indexWhere(block, nameStarts("Fetch the Installation Assistant")) < indexWhere(block, nameStarts("Start the Installation Assistant")));
+});
+
+/** What each removed step looks like in a task's module arguments (name and when left out) once the playbook is parsed. */
+const STALE_IN_TASK: Array<[RegExp, string]> = [
+  [/UsoClient/i, "UsoClient, which did not commit the switch"],
+  [/bcdedit/i, "bcdedit, the BCD wait"],
+  [/"category_names":[^\]]*Upgrades/, "win_updates with Upgrades, which marks a feature update installed without Setup"],
+  [/"state":"downloaded"/, "the pre-download, which staged media nothing committed"],
+  [/staged but not switched/, "the staged-but-not-switched refusal"],
+  [/"(reboot_timeout|timeout)":"?(7200|\{\{\s*7200)/, "the 7200 s restart"],
+];
+const STALE_VAR_NAME = /^patch_(safeos|switch)/;
+
+const argumentsOf = (task: Task): string => JSON.stringify(Object.fromEntries(Object.entries(task).filter(([key]) => key !== "name" && key !== "when")));
+
+function staleSteps(plays: Play[]): string[] {
+  const found: string[] = [];
+  for (const play of plays) {
+    if (/Upgrades/.test(JSON.stringify(play.vars ?? {}))) found.push("the Upgrades category in a var");
+    found.push(...Object.keys(play.vars ?? {}).filter((name) => STALE_VAR_NAME.test(name)).map((name) => `var ${name}, the BCD wait's`));
+    for (const task of allTasks(play.tasks ?? [])) {
+      found.push(...STALE_IN_TASK.filter(([pattern]) => pattern.test(argumentsOf(task))).map(([, label]) => label));
+    }
+  }
+  return found;
 }
 
-test("a11ign#4979 POSITIVE: an Upgrades item staged with no SafeOS entry fails the box, by worker number, with the entries", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const staged = switchVerdict({ updates: UPGRADE, reboot: true, bcd: BCD_WITHOUT });
-  assert.notEqual(staged.status, 0, staged.out);
-  assert.match(staged.out, /a11y-worker-6: staged but not switched/);
-  assert.match(staged.out, /Windows Boot Loader/, "the evidence is the entry list");
-  assert.equal(switchVerdict({ updates: UPGRADE, reboot: true, bcd: BCD_WITH_SAFEOS }).status, 0, "a committed switch passes");
-  assert.equal(switchVerdict({ updates: UPGRADE, reboot: true, bcd: [...BCD_WITHOUT, ...BCD_WITH_SAFEOS] }).status, 0, "the recovery entry plus a Setup entry on the staged media passes");
+test("A11-31: the steps that did not switch a box stay gone, read from the parsed playbook", () => {
+  assert.deepEqual(staleSteps(PLAYS), []);
 });
 
-test("a11ign#4979 NEGATIVE: a pass with no Upgrades item is not refused, however the BCD reads", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  assert.equal(switchVerdict({ updates: CUMULATIVE, reboot: true, bcd: BCD_WITHOUT }).status, 0, "a cumulative needs no SafeOS entry");
-  assert.equal(switchVerdict({ updates: {}, reboot: false, bcd: BCD_WITHOUT }).status, 0, "nothing installed, nothing to switch");
-  assert.equal(switchVerdict({ updates: UPGRADE, reboot: false, bcd: BCD_WITHOUT }).status, 0, "no restart asked, no switch owed");
-  // the other half of the controls: the window's own variables are those of a pass with no Upgrades item
-  assert.deepEqual(evaluatedVars(NO_TARGET).categories, BASE_CATEGORIES);
+test("A11-31: the removed-steps check sees each step when it is put back", () => {
+  const withTask = (task: Task): Play[] => { const plays = clone(PLAYS); plays[1].tasks.push(task); return plays; };
+  const usoClient = { name: "x", "ansible.windows.win_powershell": { script: "UsoClient.exe StartInstall" } };
+  const bcd = { name: "x", "ansible.windows.win_powershell": { script: "bcdedit /enum all" } };
+  const upgrades = { name: "x", "ansible.windows.win_updates": { category_names: ["Upgrades"], state: "installed" } };
+  const download = { name: "x", "ansible.windows.win_updates": { category_names: ["Updates"], state: "downloaded" } };
+  const refusal = { name: "x", "ansible.builtin.fail": { msg: "staged but not switched" } };
+  const slowReboot = { name: "x", "ansible.windows.win_reboot": { reboot_timeout: 7200 } };
+  for (const task of [usoClient, bcd, upgrades, download, refusal, slowReboot]) {
+    assert.equal(staleSteps(withTask(task)).length, 1, JSON.stringify(task));
+  }
+  const viaVar = clone(PLAYS);
+  viaVar[1].vars.patch_categories = [...viaVar[1].vars.patch_categories, "Upgrades"];
+  assert.equal(staleSteps(viaVar).length, 1, "Upgrades back in patch_categories");
+  const renamed = clone(PLAYS);
+  renamed[1].vars.patch_switch_pending = "{{ true }}";
+  assert.equal(staleSteps(renamed).length, 1, "the BCD wait's var");
+  const named = { name: "UsoClient and bcdedit and Upgrades, mentioned only in the task name", "ansible.builtin.debug": { msg: "gone" } };
+  assert.deepEqual(staleSteps(withTask(named)), [], "a name is not a step");
+});
+
+// --- the route's decisions, templated by the real Ansible --------------------------------------------------------
+
+const UPDATES_AND_REBOOT = { installed_update_count: 1, reboot_required: true };
+const UPDATES_NO_REBOOT = { installed_update_count: 1, reboot_required: false };
+const REBOOT_NO_UPDATES = { installed_update_count: 0, reboot_required: true };
+
+test("A11-31: a box whose CurrentBuild is below the target's takes the feature route; any other box does not", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const on = (build: string, extra: Record<string, unknown> = TARGET): Evaluated => evaluatedVars({ ...extra, patch_build_before: build });
+  assert.equal(on("22631.6199").pending, true, "a 22631 box");
+  assert.equal(on("26200.9711").pending, true, "the previous release");
+  assert.equal(on("26300.9000").pending, false, "the target's release, an older UBR: the cumulative's job");
+  assert.equal(on("26300.9711").pending, false, "on the target");
+  assert.equal(on("26400.1").pending, false, "above the target");
+  assert.equal(on("26300.10000").pending, false, "numbers, not text");
+  assert.equal(on("unreadable").pending, false, "a box nobody could read is left for the closing task to fail");
+  assert.equal(on("22631.6199", NO_TARGET).pending, false, "no target, no feature route (the play as it was)");
+  assert.equal(on("22631.6199").rebootTimeout, 3600, "only a feature pass lengthens the restart");
+  assert.equal(on("26300.9711").rebootTimeout, 1800);
+});
+
+test("A11-31: the restart fires for a feature pass, or for an install Windows asked a restart for -- and for nothing else", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const restart = (build: string, updates: Record<string, unknown> | undefined): boolean =>
+    evaluatedVars({ ...TARGET, patch_build_before: build, ...(updates ? { patch_updates: updates } : {}) }).restart;
+  assert.equal(restart("26200.9711", undefined), true, "a feature pass installs nothing else and still restarts");
+  assert.equal(restart("26300.9000", UPDATES_AND_REBOOT), true, "a cumulative that asked");
+  assert.equal(restart("26300.9000", UPDATES_NO_REBOOT), false, "a cumulative that did not ask");
+  assert.equal(restart("26300.9000", REBOOT_NO_UPDATES), false, "a pending restart this run did not cause is left alone");
+  assert.equal(restart("26300.9000", undefined), false, "nothing installed");
 });
