@@ -414,24 +414,26 @@ test("A11-31: the Assistant is refused unless validly signed by Microsoft Corpor
   assert.ok(indexWhere(block, nameStarts("Fetch the Installation Assistant")) < indexWhere(block, nameStarts("Start the Installation Assistant")));
 });
 
-/** What each removed step looked like in the parsed playbook, found in module arguments and vars, never in comments or task names. */
+/** What each removed step looks like in a task's module arguments (name and when left out) once the playbook is parsed. */
+const STALE_IN_TASK: Array<[RegExp, string]> = [
+  [/UsoClient/i, "UsoClient, which did not commit the switch"],
+  [/bcdedit/i, "bcdedit, the BCD wait"],
+  [/"category_names":[^\]]*Upgrades/, "win_updates with Upgrades, which marks a feature update installed without Setup"],
+  [/"state":"downloaded"/, "the pre-download, which staged media nothing committed"],
+  [/staged but not switched/, "the staged-but-not-switched refusal"],
+  [/"(reboot_timeout|timeout)":"?(7200|\{\{\s*7200)/, "the 7200 s restart"],
+];
+const STALE_VAR_NAME = /^patch_(safeos|switch)/;
+
+const argumentsOf = (task: Task): string => JSON.stringify(Object.fromEntries(Object.entries(task).filter(([key]) => key !== "name" && key !== "when")));
+
 function staleSteps(plays: Play[]): string[] {
   const found: string[] = [];
   for (const play of plays) {
-    const vars = JSON.stringify(play.vars ?? {});
-    if (/Upgrades/.test(vars)) found.push("the Upgrades category in a var");
-    for (const name of Object.keys(play.vars ?? {})) {
-      if (/^patch_(safeos|switch)/.test(name)) found.push(`var ${name}, the BCD wait's`);
-    }
+    if (/Upgrades/.test(JSON.stringify(play.vars ?? {}))) found.push("the Upgrades category in a var");
+    found.push(...Object.keys(play.vars ?? {}).filter((name) => STALE_VAR_NAME.test(name)).map((name) => `var ${name}, the BCD wait's`));
     for (const task of allTasks(play.tasks ?? [])) {
-      const { name: _name, when: _when, ...args } = task;
-      const body = JSON.stringify(args);
-      if (/UsoClient/i.test(body)) found.push("UsoClient, which did not commit the switch");
-      if (/bcdedit/i.test(body)) found.push("bcdedit, the BCD wait");
-      if (/"category_names":[^\]]*Upgrades/.test(body)) found.push("win_updates with Upgrades, which marks a feature update installed without Setup");
-      if (/"state":"downloaded"/.test(body)) found.push("the pre-download, which staged media nothing committed");
-      if (/staged but not switched/.test(body)) found.push("the staged-but-not-switched refusal");
-      if (/"(reboot_timeout|timeout)":(7200|"7200")/.test(body) || /"reboot_timeout":"\{\{\s*7200/.test(body)) found.push("the 7200 s restart");
+      found.push(...STALE_IN_TASK.filter(([pattern]) => pattern.test(argumentsOf(task))).map(([, label]) => label));
     }
   }
   return found;
