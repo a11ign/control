@@ -62,7 +62,7 @@
     "@a11ign/toolchain": "^0.1.7",
     "@changesets/cli": "3.0.3",
     "@rstest/core": "^0.12.3",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
