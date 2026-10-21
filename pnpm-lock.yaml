@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@a11ign/screenreader-fleet':
-        specifier: 0.11.0
-        version: 0.11.0(@a11ign/scorer@0.3.3)(@rstest/core@0.12.3)(typescript@7.0.2)
+        specifier: 0.13.1
+        version: 0.13.1(@a11ign/scorer@0.3.6)(@rstest/core@0.12.3)(typescript@7.0.2)
       '@a11ign/screenreader-worker':
         specifier: 0.13.13
         version: 0.13.13
@@ -36,15 +36,15 @@ importers:
 
 packages:
 
-  '@a11ign/evidence@0.3.2':
-    resolution: {integrity: sha512-E2LQAAMMmZwmSI2GkOW7JrC3IWx8JQTvRZfoKW3tJZzAWcaWQ3+t7u75KXQzoXmXtIgab2jCIUwD12ATtq+tNg==}
+  '@a11ign/evidence@0.5.0':
+    resolution: {integrity: sha512-zBLSWIRjPj/oFv0lKVOiy7fOrKnzWhbVyz2eUR9tHAGuFpFAw8lFmZI1qlobF3j+65nfODHbJb9ltOrz22N2vA==}
     engines: {node: '>=20'}
 
-  '@a11ign/judge@0.5.1':
-    resolution: {integrity: sha512-SnUqM0hkPiuGjMWtFx0o2X1FUCoYqBz6uhm+/sGCIWodk7HShf2zgJnm9Qsf4yW2qk6SNp+V2nsROlxmA5DBTA==}
+  '@a11ign/judge@0.5.6':
+    resolution: {integrity: sha512-djeuiVgdjyNN9pM8TPqp9R//6mvcgd47/beQ6/4x/JpRpr/1DXzKqb4m4DoE0zi58120d+9GK5svzaIn03eA0g==}
     engines: {node: '>=20'}
     peerDependencies:
-      '@a11ign/scorer': 0.3.3
+      '@a11ign/scorer': 0.3.6
       '@anthropic-ai/sdk': '>=0.106.0 <0.132.0'
       '@huggingface/transformers': '>=3.0.0'
     peerDependenciesMeta:
@@ -53,14 +53,14 @@ packages:
       '@huggingface/transformers':
         optional: true
 
-  '@a11ign/scorer@0.3.3':
-    resolution: {integrity: sha512-LT4O63IlzGsiT2Jx8DDDd7GCEBDbGOoLRzyFQI/vHe6kvU7K8OlDFWg5nmbA024df2SczxcSvdfw4QbW340NeA==}
+  '@a11ign/scorer@0.3.6':
+    resolution: {integrity: sha512-d2lZx5Bwovdo1MUCIU17uJnJkH4+BTONsSKm4zTCE7z88dEC7g7CaU4stO1/b5r2JfqW906yaqsDIdyPlCb1VA==}
     engines: {node: '>=20'}
     hasBin: true
 
-  '@a11ign/screenreader-fleet@0.11.0':
-    resolution: {integrity: sha512-V4fNZjEToXfX2seAqgb2mAwKTf8/oRPBLsO8EEhnHDJzD/bLGe3jtB4lmtd9vbxQrLRKZW7OcdjUS80NBnmdvQ==}
-    engines: {node: '>=20'}
+  '@a11ign/screenreader-fleet@0.13.1':
+    resolution: {integrity: sha512-L9qARbggccwE2TA9J43hDr3Hx+/NxV3kFtuvYhCwDXvcoWOs0fbnWZdnsWxBhkNHYNEUppIXi6YzEzy8BtbGAQ==}
+    engines: {node: '>=22.15.0'}
     hasBin: true
 
   '@a11ign/screenreader-worker@0.13.13':
@@ -68,8 +68,8 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
-  '@a11ign/screenreader-worker@0.9.0':
-    resolution: {integrity: sha512-b9W+zh5H8BF2lVaLe8WhDWTdUxFPZehTaM4tsrzwZkzwODC4hCqshxOe6D3qhmYBGP7lWWReoKzz8xw0DEgYAw==}
+  '@a11ign/screenreader-worker@0.13.2':
+    resolution: {integrity: sha512-Hc93Olx7Kmv4ak0HfDXweX25zikIMiM8I/P4tS6/8S3Flo+MJKL2wNh08mD1rXnPWe+AlOqsqSQfbVM/OBRD/A==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -87,8 +87,8 @@ packages:
       '@rstest/coverage-v8':
         optional: true
 
-  '@a11ign/toolchain@0.5.0':
-    resolution: {integrity: sha512-+6+vTWgfpmi8CQ6uxJ6XZvFFVBVaSrr6eF3nM5S8T4ZwX9yrWEk7ZhiyHIEufAwDLFTb58ShnRtVwXd5TpNuFg==}
+  '@a11ign/toolchain@0.9.0':
+    resolution: {integrity: sha512-uCAcAXaQamVsfCXKV9b3iwCelZC5Ua65UVP6oDYB4Lz0IkuOHBgKSQRNUXEIlS3D42NmoyXqO6FQxLCdcEMVyQ==}
     engines: {node: '>=22.15.0'}
     hasBin: true
     peerDependencies:
@@ -733,22 +733,22 @@ packages:
 
 snapshots:
 
-  '@a11ign/evidence@0.3.2': {}
+  '@a11ign/evidence@0.5.0': {}
 
-  '@a11ign/judge@0.5.1(@a11ign/scorer@0.3.3)':
+  '@a11ign/judge@0.5.6(@a11ign/scorer@0.3.6)':
     dependencies:
-      '@a11ign/evidence': 0.3.2
-      '@a11ign/scorer': 0.3.3
+      '@a11ign/evidence': 0.5.0
+      '@a11ign/scorer': 0.3.6
 
-  '@a11ign/scorer@0.3.3':
+  '@a11ign/scorer@0.3.6':
     dependencies:
-      '@a11ign/evidence': 0.3.2
+      '@a11ign/evidence': 0.5.0
 
-  '@a11ign/screenreader-fleet@0.11.0(@a11ign/scorer@0.3.3)(@rstest/core@0.12.3)(typescript@7.0.2)':
+  '@a11ign/screenreader-fleet@0.13.1(@a11ign/scorer@0.3.6)(@rstest/core@0.12.3)(typescript@7.0.2)':
     dependencies:
-      '@a11ign/judge': 0.5.1(@a11ign/scorer@0.3.3)
-      '@a11ign/screenreader-worker': 0.9.0
-      '@a11ign/toolchain': 0.5.0(@rstest/core@0.12.3)(typescript@7.0.2)
+      '@a11ign/judge': 0.5.6(@a11ign/scorer@0.3.6)
+      '@a11ign/screenreader-worker': 0.13.2
+      '@a11ign/toolchain': 0.9.0(@rstest/core@0.12.3)(typescript@7.0.2)
     transitivePeerDependencies:
       - '@a11ign/scorer'
       - '@anthropic-ai/sdk'
@@ -762,7 +762,7 @@ snapshots:
     dependencies:
       '@guidepup/guidepup': 0.31.0
 
-  '@a11ign/screenreader-worker@0.9.0':
+  '@a11ign/screenreader-worker@0.13.2':
     dependencies:
       '@guidepup/guidepup': 0.31.0
 
@@ -770,7 +770,7 @@ snapshots:
     dependencies:
       '@rstest/core': 0.12.3
 
-  '@a11ign/toolchain@0.5.0(@rstest/core@0.12.3)(typescript@7.0.2)':
+  '@a11ign/toolchain@0.9.0(@rstest/core@0.12.3)(typescript@7.0.2)':
     dependencies:
       '@rstest/core': 0.12.3
     optionalDependencies:
