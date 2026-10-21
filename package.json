@@ -55,7 +55,7 @@
   },
   "//": "THE DEPENDENCIES ARE EXACTLY THE TWO PUBLISHED LAYERS, each at the version deploy-pins.json names (ADR 0045 cut 9, ceo ruling on a11ign#5312). ADR 0012 kept this package to a raw checkout with no node_modules, because the credential that reconfigures the fleet sat beside the largest supply-chain surface; ADR 0045 item 5 removed that and named the mechanism as this row. control-has-no-dependencies.test.ts is the guarantee: no other declared dependency, and no package-name import outside these two. The plane installs with `pnpm install --frozen-lockfile --ignore-scripts` and nothing else, so the third-party closure beside the key is what the lockfile pins. tsx is a devDependency: the test child runs TypeScript and the plane installs production dependencies only. The `devDependencies` are the repository's own tooling, and a new one is a reviewed change.",
   "dependencies": {
-    "@a11ign/screenreader-fleet": "0.11.0",
+    "@a11ign/screenreader-fleet": "0.13.1",
     "@a11ign/screenreader-worker": "0.13.13"
   },
   "devDependencies": {
