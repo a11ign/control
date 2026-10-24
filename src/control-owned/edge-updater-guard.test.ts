@@ -11,6 +11,12 @@
  * the `MicrosoftEdgeUpdate*` PREFIX, because the set grew once already; it STOPS before it disables (the
  * 2026-08-25 lesson in the same file); it writes the record; and the closing assertion requires the guard.
  *
+ * A11-183 (2026-10-24) found the guard had been failing on twelve boxes for days and nothing said so: it runs as SYSTEM, and the `edgeupdate`
+ * service's security descriptor withholds SERVICE_CHANGE_CONFIG from SYSTEM, so `Set-Service -StartupType Disabled` threw under
+ * `$ErrorActionPreference = 'Stop'` BEFORE the record was written. The guard now writes the start type through the Services registry key, stops
+ * any running `MicrosoftEdgeUpdate*` process, handles each task, service and process on its own, always writes its record, and exits non-zero when
+ * anything stayed on. The closing assertion RUNS the guard and requires result 0, because a guard that is registered but cannot work is not a hold.
+ *
  * Policy was NOT added: the header of `edge-version.yml` records that the EdgeUpdate policies are stored and
  * never honoured on these standalone boxes, so there is no policy assertion here and none is wanted.
  *
@@ -100,8 +106,21 @@ function scriptChecks(text: string): Array<[string, boolean]> {
     ["tasks are not matched by prefix", !script.includes("Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*'")],
     ["the script names tasks instead of matching them", /MicrosoftEdgeUpdateTask(MachineCore|MachineUA)/.test(script)],
     ["a task is disabled before it is stopped", before("Stop-ScheduledTask", "Disable-ScheduledTask")],
-    ["a service is disabled before it is stopped", before("Stop-Service", "Set-Service")],
-    ["services are not set Disabled", !script.includes("-StartupType Disabled")],
+    ["a service's start type is set before it is stopped", before("Stop-Service", "Set-ItemProperty")],
+    ["the start type is not written through the Services registry key as Start 4",
+      !/Set-ItemProperty -LiteralPath \$key -Name Start -Value 4 -Type DWord/.test(script)
+      || !script.includes('$key = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$name"')],
+    // SYSTEM has no SERVICE_CHANGE_CONFIG on `edgeupdate`, so any call through the service manager throws there (A11-183).
+    ["the start type is changed through the service manager, which SYSTEM may not do", /Set-Service|sc(\.exe)?\s+config|-StartupType/.test(script)],
+    ["running MicrosoftEdgeUpdate processes are not stopped",
+      !script.includes("Get-Process -Name 'MicrosoftEdgeUpdate*'") || !/Stop-Process -Id \$p\.Id -Force/.test(script)],
+    ["the first failure aborts the run before the record is written", /\$ErrorActionPreference = 'Stop'/.test(script)],
+    ["an item is not handled on its own: a task, service or process failure is not caught and recorded",
+      (script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length < 4],
+    ["the record does not say what could not be changed", !/failed = @\(\$failed\)/.test(script)],
+    ["the record is written before the items are handled", script.indexOf("Set-Content") < script.lastIndexOf("$failed += ")],
+    ["the script does not exit non-zero when something stayed on",
+      !/Move-Item[^\n]*\n\s*if \(\$failed\.Count -gt 0\) \{ exit 1 \}\s*$/.test(script)],
     ["the record is not written with checkedAt and reenabled",
       !script.includes(RECORD) || !script.includes("checkedAt") || !script.includes("reenabled")],
     ["the record is not written atomically", !script.includes("Move-Item")],
@@ -119,8 +138,20 @@ function scriptChecks(text: string): Array<[string, boolean]> {
 
 function closingAssertionChecks(text: string): Array<[string, boolean]> {
   const closing = taskBlock(text, CLOSING_ASSERTION);
-  return [["the closing assertion does not require the guard task",
-    !closing.includes(`Guard: ${GUARD_TASK_NAME}`) || !/Get-ScheduledTask -TaskName \$Guard/.test(closing)]];
+  return [
+    ["the closing assertion does not require the guard task",
+      !closing.includes(`Guard: ${GUARD_TASK_NAME}`) || !/Get-ScheduledTask -TaskName \$Guard/.test(closing)],
+    ["the closing assertion does not start the guard", !/Start-ScheduledTask -TaskName \$Guard/.test(closing)],
+    ["the closing assertion does not require a record newer than the start",
+      !/\(\[datetime\]\$r\.checkedAt\)\.ToUniversalTime\(\) -gt \$started\)/.test(closing)],
+    ["the closing assertion does not wait for the guard with a bound", !/\$deadline = \(Get-Date\)\.AddSeconds\(120\)/.test(closing)],
+    ["the closing assertion does not require the guard's result to be 0",
+      !/\(Get-ScheduledTaskInfo -TaskName \$Guard\)\.LastTaskResult/.test(closing) || !/if \(\$result -ne 0\) \{ \$wrong \+= /.test(closing)],
+    ["the closing assertion does not require an empty list of what the guard could not change",
+      !/@\(\$fresh\.failed\)\.Count -gt 0/.test(closing)],
+    ["the closing assertion does not require the registry start type of the updater's services to be 4",
+      !/-Name Start -ErrorAction SilentlyContinue\)\.Start/.test(closing) || !/\$start -ne 4/.test(closing)],
+  ];
 }
 
 /** Everything the guard must be, as a list of what is wrong. Empty means the guard holds. */
@@ -166,23 +197,102 @@ test("control: prefix replaced by a two-name list FAILS", () => {
   assert.ok(v.includes("tasks are not matched by prefix") && v.includes("the script names tasks instead of matching them"), v.join("|"));
 });
 
-const STOP_TASK = "if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath; $changed = $true }\n";
-const DISABLE_TASK = "            if ($t.State -ne 'Disabled') {";
-const STOP_SERVICE = "if ($svc.Status -ne 'Stopped') { Stop-Service -Name $name -Force; $changed = $true }\n";
-const DISABLE_SERVICE = "            if ($svc.StartType -ne 'Disabled') {";
+const STOP_TASK_CALL = "Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop";
+const DISABLE_TASK_CALL = "Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop | Out-Null }";
+const STOP_SERVICE_CALL = "Stop-Service -Name $name -Force -ErrorAction Stop";
+const WRITE_START_CALL = "Set-ItemProperty -LiteralPath $key -Name Start -Value 4 -Type DWord -ErrorAction Stop }";
 
 test("control: disabling a task before stopping it FAILS", () => {
-  const stop = "            " + STOP_TASK;
-  const v = guardViolations(mutatedGuard([stop, ""], [DISABLE_TASK, DISABLE_TASK + " Disable-ScheduledTask -TaskName $t.TaskName }\n"
-    + "            if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName }\n            if (0) {"]));
+  const v = guardViolations(mutatedGuard([STOP_TASK_CALL, "$null"], [DISABLE_TASK_CALL, DISABLE_TASK_CALL.replace(" }", "; Stop-ScheduledTask -TaskName $t.TaskName }")]));
   assert.ok(v.includes("a task is disabled before it is stopped"), v.join("|"));
 });
 
-test("control: disabling a service before stopping it FAILS", () => {
-  const stop = "            " + STOP_SERVICE;
-  const v = guardViolations(mutatedGuard([stop, ""], [DISABLE_SERVICE, DISABLE_SERVICE + " Set-Service -Name $name -StartupType Disabled }\n"
-    + "            if ($svc.Status -ne 'Stopped') { Stop-Service -Name $name }\n            if (0) {"]));
-  assert.ok(v.includes("a service is disabled before it is stopped"), v.join("|"));
+test("control: writing a service's start type before stopping it FAILS", () => {
+  const v = guardViolations(mutatedGuard([STOP_SERVICE_CALL, "$null"], [WRITE_START_CALL, WRITE_START_CALL.replace(" }", "; Stop-Service -Name $name -Force }")]));
+  assert.ok(v.includes("a service's start type is set before it is stopped"), v.join("|"));
+});
+
+test("the guard writes the service's start type through the Services registry key, and never through the service manager", () => {
+  const script = guardScript(TASKS);
+  assert.match(script, /\$key = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\\$name"/);
+  assert.match(script, /Set-ItemProperty -LiteralPath \$key -Name Start -Value 4 -Type DWord/);
+  assert.doesNotMatch(script, /Set-Service|-StartupType/, "SYSTEM has no SERVICE_CHANGE_CONFIG on edgeupdate: the call throws there (A11-183)");
+});
+
+test("control: Set-Service -StartupType Disabled in place of the registry write FAILS", () => {
+  const v = guardViolations(mutatedGuard([WRITE_START_CALL, "Set-Service -Name $name -StartupType Disabled -ErrorAction Stop }"]));
+  assert.ok(v.includes("the start type is not written through the Services registry key as Start 4"), v.join("|"));
+  assert.ok(v.includes("the start type is changed through the service manager, which SYSTEM may not do"), v.join("|"));
+});
+
+test("the guard stops any running MicrosoftEdgeUpdate* process", () => {
+  assert.match(guardScript(TASKS), /Get-Process -Name 'MicrosoftEdgeUpdate\*'[\s\S]*Stop-Process -Id \$p\.Id -Force/);
+});
+
+test("control: a guard that leaves the updater process running FAILS", () => {
+  const v = guardViolations(mutatedGuard(["Stop-Process -Id $p.Id -Force", "Get-Process -Id $p.Id"]));
+  assert.ok(v.includes("running MicrosoftEdgeUpdate processes are not stopped"), v.join("|"));
+});
+
+test("the record is written on a failing path: nothing aborts the run, every item is caught, and the record says what could not be changed", () => {
+  const script = guardScript(TASKS);
+  assert.doesNotMatch(script, /\$ErrorActionPreference = 'Stop'/);
+  assert.equal((script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length, 4, "one catch each for the task, the service's stop, its start type and the process");
+  assert.ok(script.indexOf("Set-Content") > script.lastIndexOf("$failed += "), "the record is written after every item had its turn");
+  assert.match(script, /failed = @\(\$failed\)/);
+});
+
+test("control: a guard under `$ErrorActionPreference = 'Stop'`, or one that does not catch an item, FAILS", () => {
+  const aborting = guardViolations(mutatedGuard(["$ErrorActionPreference = 'Continue'", "$ErrorActionPreference = 'Stop'"]));
+  assert.ok(aborting.includes("the first failure aborts the run before the record is written"), aborting.join("|"));
+  const uncaught = guardViolations(mutatedGuard(["catch { $changed = $true; $failed += \"task:", "catch { $changed = $true; $other += \"task:"]));
+  assert.ok(uncaught.includes("an item is not handled on its own: a task, service or process failure is not caught and recorded"), uncaught.join("|"));
+  const silent = guardViolations(mutatedGuard(["reenabled = @($reenabled); failed = @($failed) }", "reenabled = @($reenabled) }"]));
+  assert.ok(silent.includes("the record does not say what could not be changed"), silent.join("|"));
+});
+
+test("the guard exits non-zero when something stayed on, after the record is written", () => {
+  assert.match(guardScript(TASKS), /Move-Item[^\n]*\n\s*if \(\$failed\.Count -gt 0\) \{ exit 1 \}\s*$/);
+});
+
+test("control: a guard that exits 0 whatever stayed on FAILS", () => {
+  const v = guardViolations(mutatedGuard(["if ($failed.Count -gt 0) { exit 1 }", "if ($failed.Count -gt 0) { exit 0 }"]));
+  assert.ok(v.includes("the script does not exit non-zero when something stayed on"), v.join("|"));
+});
+
+/** The closing assertion with one property mutated, asserted to have changed it. */
+function mutatedClosing(...edits: Array<[string, string]>): string {
+  const block = taskBlock(TASKS, CLOSING_ASSERTION);
+  const mutated = edits.reduce((text, [from, to]) => {
+    assert.ok(text.includes(from), `"${from}" is not in the closing assertion, so the control mutates nothing`);
+    return text.replace(from, to);
+  }, block);
+  return TASKS.replace(block, mutated);
+}
+
+test("the closing assertion starts the guard, waits a bounded time for a newer record, and requires result 0 and nothing it could not change", () => {
+  const closing = taskBlock(TASKS, CLOSING_ASSERTION);
+  assert.match(closing, /Start-ScheduledTask -TaskName \$Guard/);
+  assert.match(closing, /\$deadline = \(Get-Date\)\.AddSeconds\(120\)/);
+  assert.match(closing, /\(\[datetime\]\$r\.checkedAt\)\.ToUniversalTime\(\) -gt \$started\)/);
+  assert.match(closing, /\(Get-ScheduledTaskInfo -TaskName \$Guard\)\.LastTaskResult/);
+  assert.match(closing, /if \(\$result -ne 0\) \{ \$wrong \+= "guard task \$Guard ended with result \$result, expected 0" \}/);
+  assert.match(closing, /@\(\$fresh\.failed\)\.Count -gt 0/);
+  assert.match(closing, /\$start -ne 4/);
+});
+
+test("control: a closing assertion that never starts the guard, ignores its result, or accepts an old record FAILS", () => {
+  const cases: Array<[string, string, string]> = [
+    ["Start-ScheduledTask -TaskName $Guard", "Get-ScheduledTask -TaskName $Guard | Out-Null", "does not start the guard"],
+    ["if ($result -ne 0) { $wrong += ", "if ($result -ne 0) { $ignored = ", "does not require the guard's result to be 0"],
+    ["-gt $started", "-gt $started.AddYears(-1)", "does not require a record newer than the start"],
+    ["@($fresh.failed).Count -gt 0", "@($fresh.failed).Count -gt 99", "does not require an empty list of what the guard could not change"],
+    ["$start -ne 4", "$start -ne $null", "does not require the registry start type"],
+    ["$deadline = (Get-Date).AddSeconds(120)", "$deadline = [datetime]::MaxValue", "does not wait for the guard with a bound"],
+  ];
+  for (const [from, to, expected] of cases) {
+    assert.match(guardViolations(mutatedClosing([from, to])).join("|"), new RegExp(expected), `"${from}" mutated was not noticed`);
+  }
 });
 
 test("control: not SYSTEM, no startup trigger, no repetition, no record, not required by the closing assertion each FAIL", () => {

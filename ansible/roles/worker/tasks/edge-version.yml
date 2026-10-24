@@ -324,25 +324,49 @@
       ansible.windows.win_copy:
         dest: "{{ edge_guard_dir }}\\edge-updater-guard.ps1"
         content: |
-          $ErrorActionPreference = 'Stop'
+          # EVERY ITEM IS HANDLED ON ITS OWN (A11-183). This script used to run under `$ErrorActionPreference = 'Stop'`, so the first
+          # failure ended the run BEFORE the record below was written. On 2026-10-24 that was twelve boxes: the guard task read
+          # `LastTaskResult` 1 and a record days old, and nothing said so. Now a failure on one task, service or process is written down and
+          # the rest still run, the record is always written, and the script exits non-zero when anything stayed on.
+          $ErrorActionPreference = 'Continue'
           $services = @('{{ worker_edge_updater_services | to_json }}' | ConvertFrom-Json)
           $reenabled = @()
+          $failed = @()
           # By prefix: the set of tasks grew once already (BrowserReplacementTask).
           foreach ($t in @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
             $changed = $false
-            # Stop BEFORE disable: Disable-ScheduledTask does not terminate an instance already running
-            # (a11y-worker-5, 2026-08-25).
-            if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath; $changed = $true }
-            if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null; $changed = $true }
+            try {
+              # Stop BEFORE disable: Disable-ScheduledTask does not terminate an instance already running
+              # (a11y-worker-5, 2026-08-25).
+              if ($t.State -eq 'Running') { $changed = $true; Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop }
+              if ($t.State -ne 'Disabled') { $changed = $true; Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop | Out-Null }
+            } catch { $changed = $true; $failed += "task:$($t.TaskName): $($_.Exception.Message)" }
             if ($changed) { $reenabled += "task:$($t.TaskName)" }
           }
           foreach ($name in $services) {
             $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
             if (-not $svc) { continue }
             $changed = $false
-            if ($svc.Status -ne 'Stopped') { Stop-Service -Name $name -Force; $changed = $true }
-            if ($svc.StartType -ne 'Disabled') { Set-Service -Name $name -StartupType Disabled; $changed = $true }
+            # SYSTEM may stop the service (it holds WP) but may NOT change its start type through the service manager: the service's
+            # security descriptor gives SERVICE_CHANGE_CONFIG to Administrators alone, so `Set-Service -StartupType` throws here
+            # (measured on a11y-worker-2, -4, -6 and -15, 2026-10-24). The Services registry key does not withhold it, so the start
+            # type is written there: `Start` 4 is Disabled. The service manager reads it again at the next boot, which is what the
+            # guard's startup trigger and the stop above bridge; the provision run sets it through the manager as an administrator.
+            try {
+              if ($svc.Status -ne 'Stopped') { $changed = $true; Stop-Service -Name $name -Force -ErrorAction Stop }
+            } catch { $changed = $true; $failed += "service:${name}: stop: $($_.Exception.Message)" }
+            try {
+              $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+              $start = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction Stop).Start
+              if ($start -ne 4) { $changed = $true; Set-ItemProperty -LiteralPath $key -Name Start -Value 4 -Type DWord -ErrorAction Stop }
+            } catch { $changed = $true; $failed += "service:${name}: start type: $($_.Exception.Message)" }
             if ($changed) { $reenabled += "service:$name" }
+          }
+          # The updater also runs without its tasks or services: `MicrosoftEdgeUpdate.exe /ua /installsource core` ran hourly on boxes whose
+          # tasks were Disabled and whose service was Stopped. Any such process is the updater working, so it is stopped and written down.
+          foreach ($p in @(Get-Process -Name 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
+            $reenabled += "process:$($p.ProcessName)"
+            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { $failed += "process:$($p.ProcessName): $($_.Exception.Message)" }
           }
           $record = '{{ edge_guard_dir }}\edge-updater-guard.json'
           # READ THE PREVIOUS RECORD BEFORE WRITING THIS ONE (a11ign#5048). `reenabled` is THIS run's, so a clean run
@@ -353,7 +377,7 @@
           if (Test-Path -LiteralPath $record) {
             try { $previous = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json } catch { $previous = $null }
           }
-          $entry = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($reenabled) }
+          $entry = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($reenabled); failed = @($failed) }
           if ($reenabled.Count -gt 0) {
             $entry.lastReenabledAt = $entry.checkedAt
             $entry.lastReenabled = @($reenabled)
@@ -366,6 +390,8 @@
           $json = $entry | ConvertTo-Json -Depth 3
           Set-Content -LiteralPath "$record.tmp" -Value $json -Encoding UTF8
           Move-Item -LiteralPath "$record.tmp" -Destination $record -Force
+          # Non-zero when anything stayed on, so the task's `LastTaskResult` says so too and the closing assertion can read it.
+          if ($failed.Count -gt 0) { exit 1 }
 
     - name: Register the guard task, as SYSTEM, at startup and on a repeat
       community.windows.win_scheduled_task:
@@ -398,8 +424,9 @@
       Tasks: "{{ worker_edge_updater_tasks }}"
       Services: "{{ worker_edge_updater_services }}"
       Guard: a11y-edge-updater-guard
+      Record: 'C:\ProgramData\a11ign\edge-updater-guard.json'
     script: |
-      param($Exe, $Want, $Tasks, $Services, $Guard)
+      param($Exe, $Want, $Tasks, $Services, $Guard, $Record)
       $Ansible.Changed = $false
       $wrong = @()
       $have = if (Test-Path -LiteralPath $Exe) { (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion } else { "(absent)" }
@@ -416,13 +443,41 @@
           if ($svc.Status -ne 'Stopped') { $wrong += "service $s is $($svc.Status), expected Stopped" }
           if ($svc.StartType -ne 'Disabled') { $wrong += "service $s start type is $($svc.StartType), expected Disabled" }
         }
+        # The registry value the guard writes (SYSTEM cannot change the start type through the service manager) must agree.
+        $start = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$s" -Name Start -ErrorAction SilentlyContinue).Start
+        if ($svc -and $start -ne 4) { $wrong += "service $s registry Start is $start, expected 4 (Disabled)" }
       }
       # The guard is what keeps the updater off after this run ends, so a box without it is not provisioned.
       $g = Get-ScheduledTask -TaskName $Guard -ErrorAction SilentlyContinue
       if (-not $g) { $wrong += "guard task $Guard is absent" }
       elseif ($g.State -eq 'Disabled') { $wrong += "guard task $Guard is Disabled, expected enabled" }
+      else {
+        # A guard that is registered but cannot do its work is not a hold: on 2026-10-24 it was registered on every box and failed on
+        # twelve, as SYSTEM, with a record days old (A11-183). So RUN it, as the task, and require a newer record, result 0 and nothing
+        # it could not change. The wait is bounded; a guard that never finishes is a failure by name.
+        $started = (Get-Date).ToUniversalTime()
+        Start-ScheduledTask -TaskName $Guard
+        $deadline = (Get-Date).AddSeconds(120)
+        $fresh = $null
+        do {
+          Start-Sleep -Seconds 2
+          $running = (Get-ScheduledTask -TaskName $Guard).State -eq 'Running'
+          $fresh = $null
+          if (Test-Path -LiteralPath $Record) {
+            try { $r = Get-Content -LiteralPath $Record -Raw | ConvertFrom-Json } catch { $r = $null }
+            if ($r -and ([datetime]$r.checkedAt).ToUniversalTime() -gt $started) { $fresh = $r }
+          }
+        } while (($running -or -not $fresh) -and (Get-Date) -lt $deadline)
+        $result = (Get-ScheduledTaskInfo -TaskName $Guard).LastTaskResult
+        if ($running) { $wrong += "guard task $Guard was still running after 120 s" }
+        elseif (-not $fresh) { $wrong += "guard task $Guard wrote no record newer than its start" }
+        else {
+          if ($result -ne 0) { $wrong += "guard task $Guard ended with result $result, expected 0" }
+          if (@($fresh.failed).Count -gt 0) { $wrong += "guard could not change: $(@($fresh.failed) -join ' | ')" }
+        }
+      }
       if ($wrong.Count) { throw ($wrong -join '; ') }
-      "Edge $have, updater disabled"
+      "Edge $have, updater disabled, guard ran clean"
   register: edge_proof
 
 - name: Say what it is on

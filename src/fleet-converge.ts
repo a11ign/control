@@ -38,6 +38,7 @@ import { sandboxGitEnv } from "./git-safe-env.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { inventoryPathFor, sshToControlPlane } from "./control-plane-fleet.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
+import { EXIT as FLEET_STATUS_EXIT } from "./fleet-status.ts";
 import { expireFleetLock, LOCK_GRACE_MS, takeFleetLock } from "./fleet-lock.ts";
 import {
   HEALTH_TIMEOUT_MS, WAKE_DEADLINE_MS, WAKE_LOCK_OPERATION, wakeFailed, wakeFleet, wakeReportLine,
@@ -320,11 +321,22 @@ const lastLine = (text: string) => {
   return (lines.find((l) => /^(REFUSING|refusing)/.test(l)) ?? lines.at(-1) ?? "(no output)").slice(0, 240);
 };
 
-/** `fleet:status`, read once at the end: it is the run's reading, not a gate, and exits non-zero only when no box answers. */
+/** The lines `fleet:status` prints for a build split or an updater that is not held, which are why it exited 3 (A11-183). */
+const splitLinesOf = (output: string) => output.split("\n").map((l) => l.trim()).filter((l) => /^fleet (BUILD SPLIT|Edge updater NOT HELD)/.test(l));
+
+/**
+ * `fleet:status`, read once at the end. It exits 1 when no box answers (an unknown: nothing was read) and 3 when the boxes that answered are split on
+ * Edge, NVDA or the Windows build, or the Edge updater is not held on one (a failure: the run read the fleet and it did not converge, and captures
+ * stop). Any other non-zero code is an unknown.
+ */
 async function statusStep(run: Run): Promise<StepOutcome> {
   const read = await run.effects.runPlay({ script: "fleet-status.ts", args: [] });
   run.fleetStatus = read.output.split("\n").slice(-30).join("\n");
   if (read.status === 0) return { ok: true };
+  if (read.status === FLEET_STATUS_EXIT.BUILD_SPLIT) {
+    const found = splitLinesOf(read.output);
+    return { ok: false, status: "failed", reason: `fleet:status exited ${read.status}: ${found.length > 0 ? found.join(" | ") : lastLine(read.output)}` };
+  }
   return { ok: false, status: "unknown", reason: `fleet:status exited ${read.status}: ${lastLine(read.output)}` };
 }
 
