@@ -1110,6 +1110,9 @@ export function browserVersionsOf(guests: { worker: string, environment?: { brow
 
 const reportedString = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
 
+/** The `fleet BUILD SPLIT` field that reads `/health.code`, named once for the reading and for the advice that branches on it. */
+const WORKER_CODE = "Worker code";
+
 /**
  * THE BUILD SPLIT: one Edge, one NVDA and one Windows build and one worker code across the fleet, and the Edge updater held on every box (A11-183, A11-204).
  *
@@ -1130,9 +1133,6 @@ const reportedString = (value: unknown) => (typeof value === "string" && value !
  *   effect on every box and a deploy gap would otherwise hold the fleet for a cause that is not the updater (`REPORTED_ONLY` says the same, #5021).
  * - The boxes are named by inventory name, not by URL, so the line can be read and acted on.
  */
-/** The `fleet BUILD SPLIT` field that reads `/health.code`, named once for the reading and for the advice that branches on it. */
-const WORKER_CODE = "Worker code";
-
 export type FieldReading = { field: string; values: Record<string, string[]>; unreported: string[]; split: boolean; };
 export type BuildSplit = {
   failed: boolean;

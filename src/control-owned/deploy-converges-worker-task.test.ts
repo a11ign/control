@@ -71,7 +71,8 @@ test("the registration is defined once: worker-task.yml holds it, and tasks.yml 
 function readBackJudgesPublishedLauncher(play: string): boolean {
   const steps = stepsOf(play);
   const converge = indexOfConverge(steps);
-  const read = steps.findIndex((step, at) => at > converge && JSON.stringify(step).includes("Get-ScheduledTask") && JSON.stringify(step).includes(".Actions[0].Execute"));
+  const readsExecute = (step: Step) => /Get-ScheduledTask[\s\S]*\.Actions\[0\]\.Execute/.test(JSON.stringify(step));
+  const read = steps.findIndex((step, at) => at > converge && readsExecute(step));
   const judge = steps.findIndex((step, at) => at > read && read !== -1 && "ansible.builtin.assert" in step);
   if (converge === -1 || read === -1 || judge === -1) return false;
   const assertion = steps[judge];
@@ -93,7 +94,8 @@ test("NEGATIVE CONTROL: a play that restarts without converging, or converges af
   const steps = stepsOf(DEPLOY);
   const converge = steps[indexOfConverge(steps)];
   const late = [...steps.filter((step) => step !== converge), converge];
-  assert.notEqual(indexOfRestart(late) < indexOfConverge(late), false, "the control did not move the convergence after the restart");
+  assert.ok(indexOfConverge(late) > indexOfRestart(late), "the control did not move the convergence after the restart -- it examines nothing");
+  // JSON is YAML, so the reordered steps go back through the same parser the real play does.
   assert.equal(convergesBeforeRestart(JSON.stringify([{ tasks: late }])), false, "a convergence after the restart must not read as passing");
 
   const unjudged = DEPLOY.replace(/- name: The worker task starts the published launcher[\s\S]*?(?=\n {4}- name: Restart the worker task)/, "");
