@@ -1132,10 +1132,11 @@ export type BuildSplit = {
   lines: string[];
 };
 
+/** The three builds that must agree, and the `/health.environment` key each box reports its own under. */
 const BUILD_FIELDS = [
-  { field: "Edge", read: (environment: Record<string, unknown> | undefined) => reportedString(environment?.browserVersion) },
-  { field: "NVDA", read: (environment: Record<string, unknown> | undefined) => reportedString(environment?.screenReaderVersion) },
-  { field: "Windows", read: (environment: Record<string, unknown> | undefined) => reportedString(environment?.windowsBuild) },
+  { field: "Edge", key: "browserVersion" },
+  { field: "NVDA", key: "screenReaderVersion" },
+  { field: "Windows", key: "windowsBuild" },
 ];
 
 const GUARD_HELD = "ok";
@@ -1157,11 +1158,11 @@ export function buildSplitOf(probes: WorkerProbe[]): BuildSplit {
   const reachable = probes.filter((probe) => probe.reachable)
     .map((probe) => ({ box: inventoryName(probe.name), environment: probe.health?.environment }))
     .sort((a, b) => a.box.localeCompare(b.box, "en", { numeric: true }));
-  const fields = BUILD_FIELDS.map(({ field, read }) => {
+  const fields = BUILD_FIELDS.map(({ field, key }) => {
     const values: Record<string, string[]> = {};
     const unreported: string[] = [];
     for (const { box, environment } of reachable) {
-      const value = read(environment);
+      const value = reportedString(environment?.[key]);
       if (value === null) unreported.push(box);
       else (values[value] ??= []).push(box);
     }
@@ -1192,14 +1193,15 @@ function buildSplitLines({ fields, notHeld, boxes }: { fields: FieldReading[]; n
  */
 export function buildSplitAdvice(split: BuildSplit): string {
   if (!split.failed) return "";
+  const differs = (name: string) => split.fields.some(({ field, split: isSplit }) => field === name && isSplit);
   const advice = ["  Captures stop until every box converges forward to the newest value: an oracle on two builds measures noise."];
-  if (split.fields.some(({ field, split: differs }) => field === "Edge" && differs)) {
+  if (differs("Edge")) {
     advice.push("  Edge: move the pin (`worker_edge_version`, URL and hash) to the newest Stable build, then run `npm run fleet:provision` across the WHOLE fleet.");
   }
-  if (split.fields.some(({ field, split: differs }) => field === "Windows" && differs)) {
+  if (differs("Windows")) {
     advice.push("  Windows: `npm run fleet:patch` brings a box to the fleet's target build; a box whose CPU the target does not support stays where it is.");
   }
-  if (split.fields.some(({ field, split: differs }) => field === "NVDA" && differs)) {
+  if (differs("NVDA")) {
     advice.push("  NVDA: `npm run fleet:provision` installs the pinned build; run it across the WHOLE fleet.");
   }
   if (!split.updater.held) {
