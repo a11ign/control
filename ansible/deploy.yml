@@ -320,6 +320,44 @@
       loop_control:
         label: "{{ item.item.key }}"
 
+    - name: Register the worker task on the published launcher, the same way provisioning does
+      # A11-204. A deploy lays the code but the TASK decides which code runs: a restart, and the reboot `verify-code.yml`
+      # escalates to, both start whatever action `a11ysrv` has. A box registered before a11ign#5551 kept the laid
+      # `packages\nvda-worker\src\run-server.cmd` (an orphan since #5546, v0.9.0 on a11y-worker-11), so its deploy laid the pinned
+      # release and the box went on serving the old tree through a restart AND a reboot. Provisioning was the only play that
+      # registered the task, and a fleet is deployed far more often than it is provisioned.
+      #
+      # THE ONE DEFINITION, run here and by the role (`tasks.yml` imports the same file): the install script above is shared for
+      # the reason `worker-install-sites-match.test.ts` pins, and the registration is the same case. On a box already on the
+      # published launcher it reports no change.
+      ansible.builtin.include_role:
+        name: worker
+        tasks_from: worker-task.yml
+      vars:
+        worker_repo_path: "{{ a11y_repo_path }}"
+        worker_task_name: "{{ a11y_task_name }}"
+
+    - name: Read back the action the worker task will start
+      # Registered is not believed (`restart-worker.yml` says why). The action is read from the scheduler, not from this play's
+      # own variables, so a registration that was accepted and not applied fails here and not at the code read-back, a minute later.
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          (Get-ScheduledTask -TaskName '{{ a11y_task_name }}').Actions[0].Execute
+      register: worker_task_action
+
+    - name: The worker task starts the published launcher
+      ansible.builtin.assert:
+        that: found | lower == expected | lower
+        fail_msg: >-
+          {{ inventory_hostname }}: the worker task {{ a11y_task_name }} starts '{{ found }}', not the published launcher
+          '{{ expected }}'. A restart and a reboot start the same action, so the code this deploy laid would not be the code the
+          box serves.
+        success_msg: "{{ inventory_hostname }}: the worker task starts the published launcher"
+      vars:
+        found: "{{ worker_task_action.output | first | default('nothing') | trim }}"
+        expected: "{{ a11y_repo_path }}\\node_modules\\@a11ign\\screenreader-worker\\launcher\\run-server.cmd"
+
     - name: Restart the worker task
       ansible.builtin.import_tasks: tasks/restart-worker.yml
 

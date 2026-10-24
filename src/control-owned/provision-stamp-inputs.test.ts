@@ -94,6 +94,10 @@ const EXEMPT: Record<string, string> = {
     "Registers the scheduled task (LogonType, RunLevel). Getting these wrong makes NVDA fail to start at "
     + "all (\"NVDA is not supported\") or capture nothing (an elevated worker cannot read the browser) — a "
     + "loud, total capture failure, not the silent per-guest evidence drift the stamp exists to catch.",
+  "ansible/roles/worker/tasks/worker-task.yml":
+    "The `a11ysrv` registration, moved out of tasks.yml unchanged so deploy.yml runs the same definition (A11-204); the "
+    + "same reasoning as tasks.yml above. A wrong LogonType or RunLevel is a loud, total capture failure, and the "
+    + "launcher path it names is read back by fleet:deploy and its code hash by fleet:status.",
   "ansible/roles/worker/tasks/bespoke.yml":
     "Power timeouts, NIC wake, Defender and browser-profile directories — reliability and disk. Also "
     + "writes provision-revision.txt itself, which cannot sensibly hash its own input.\n\n"

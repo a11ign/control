@@ -5,64 +5,9 @@
 # them is a default worth "tidying". `win_scheduled_task` expresses all of them declaratively, which is
 # the single clearest module win in the port — but the values are the asset, not the module.
 
-- name: Find the node the task must launch
-  # Baked into the task definition as an ABSOLUTE path rather than derived at launch. The task's
-  # environment has neither %ProgramFiles% set correctly nor node on PATH, and the symptom of getting
-  # that wrong is a console window that opens and closes in two seconds with nothing written anywhere.
-  ansible.windows.win_powershell:
-    script: |
-      $candidates = @(
-        (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
-        'C:\Program Files\nodejs\node.exe',
-        (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe')
-      )
-      $found = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-      if (-not $found) { $found = (Get-Command node -ErrorAction SilentlyContinue).Source }
-      if (-not $found) { throw 'node.exe not found -- refusing to register a task that would fail at launch' }
-      $Ansible.Changed = $false
-      $found
-  register: node_exe
-  changed_when: false
-
-- name: Register the worker task
-  become: true
-  community.windows.win_scheduled_task:
-    name: "{{ worker_task_name }}"
-    description: a11ign NVDA capture worker
-    actions:
-      # The published launcher, the file the provision stamp hashes (ADR 0045 cut 6). Argument 2 is the working
-      # directory, which the launcher refuses to start without: the server writes provision-revision.txt and
-      # worker.log into it, so it is the repo root the laid launcher used to cd to.
-      - path: "{{ worker_repo_path }}\\node_modules\\@a11ign\\screenreader-worker\\launcher\\run-server.cmd"
-        # Quoted because the path contains spaces.
-        arguments: '"{{ node_exe.output | first }}" "{{ worker_repo_path }}"'
-    username: "{{ ansible_user }}"
-    # MANDATORY. A service, or anything launched over plain SSH, has no desktop — and guidepup reports
-    # that as "nvda.start failed: NVDA is not supported", which reads like a broken install and is not
-    # one. NVDA is a GUI application; it needs a real logged-on session.
-    logon_type: interactive_token
-    # `limited`, NOT `highest`, and deliberately so: guidepup drives nvda_noUIAccess.exe, which cannot
-    # read ELEVATED windows at all. An elevated worker captures nothing, silently.
-    run_level: limited
-    triggers:
-      # What makes the worker self-healing across reboots. Without it the task sits at "Ready" forever
-      # and the machine looks dead after a restart.
-      - type: logon
-        username: "{{ ansible_user }}"
-    # The at-logon trigger covers a reboot but NOT a crash: when the worker process died the task went
-    # back to "Ready" and stayed there, so the box answered nothing until someone logged on again.
-    # Observed for real — an NVDA socket error killed the worker and it never came back. This is why
-    # server.mjs exits 1 on an unrecoverable error instead of limping on.
-    restart_count: 5
-    restart_interval: PT1M
-    # No limit. This is a long-running service, not a batch job, and the DEFAULT three-day limit would
-    # silently kill it.
-    execution_time_limit: PT0S
-    # A laptop-class worker must still start and keep running on mains-adjacent power states.
-    disallow_start_if_on_batteries: false
-    stop_if_going_on_batteries: false
-    state: present
-    enabled: true
+- name: Find the node the task must launch, and register the worker task
+  # The two steps live in `worker-task.yml`, which `deploy.yml` runs as well (A11-204).
+  ansible.builtin.import_tasks: worker-task.yml
 
 - name: Register the capture-check task
   # Its own task because `utmctl exec` and SSH land in SESSION 0, and guidepup reports that as
