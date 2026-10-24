@@ -1122,7 +1122,7 @@ const WORKER_CODE = "Worker code";
  * So this reads each reachable box's OWN value for the fields, keyed by inventory name, and groups the boxes by value.
  *
  * The worker code is the fourth field (A11-204): the top-level `/health.code`, the hash `deploy.yml` reads back, not part of `/health.environment`.
- * It used to print as a column and a `fleet SPLIT` line that named no box and exited 0, and a box left on the orphaned laid worker (v0.9.0 on
+ * It used to print only as a column and a `fleet SPLIT` line that named no box and exited 0, and a box left on the orphaned laid worker (v0.9.0 on
  * a11y-worker-11, a fleet part-way to the pinned release) took captures that no other box could match.
  *
  * - More than one value on a field is a split, and a reachable box that reports none is `unreported` and also fails: a field nobody reported is

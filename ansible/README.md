@@ -61,7 +61,8 @@ The UTM VMs keep their own lifecycle through `worker-ctl.sh` and are **not** man
 | `policy.yml` | Edge, Windows Update, notifications, OneDrive, screensaver |
 | `firewall.yml` | the worker port, and the allow-app alert that would block the whole desktop |
 | `nvda.yml` | pnpm install, guidepup, NVDA, and the Speech Viewer |
-| `tasks.yml` | `a11ysrv`, `a11ycheck`, and removing `a11ybootstrap` |
+| `tasks.yml` | `a11ycheck`, the display-mode logon task, and removing `a11ybootstrap`; imports `worker-task.yml` first |
+| `worker-task.yml` | `a11ysrv` on the published launcher. `deploy.yml` runs this same file before it restarts the task, then reads the action back (A11-204) |
 | `bespoke.yml` | sleep/NIC power, Defender and browser profiles — via the `a11y.worker` modules |
 | `verify.yml` | start it and prove it serves |
 
