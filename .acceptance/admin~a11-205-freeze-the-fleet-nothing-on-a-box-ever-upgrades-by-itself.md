@@ -7,7 +7,7 @@ Acceptance:
 ```bash
 set -euo pipefail
 pnpm install --frozen-lockfile
-node --test src/fleet-drift.test.ts src/fleet-patch.test.ts src/fleet-watch.test.ts src/fleet-playbook.test.ts src/wake-on-demand.test.ts \
+node --test src/fleet-drift.test.ts src/fleet-patch.test.ts src/fleet-watch.test.ts src/fleet-playbook.test.ts src/wake-on-demand.test.ts src/fleet-build-incident.test.ts \
   src/control-owned/patch-playbook.test.ts src/control-owned/no-scheduled-install.test.ts src/fleet-pins.test.ts src/fleet-status.test.ts
 # lab-job.test.ts reads the playbook with the `yaml` package, which this repository does not install (it runs laid in the core): run it where `yaml` resolves.
 pnpm typecheck
