@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
   subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive, probeWorker, buildSplitOf, buildSplitAdvice,
-  exitCodeOf, EXIT } from "./fleet-status.ts";
+  exitCodeOf, EXIT, driftOf, driftAdvice } from "./fleet-status.ts";
 import type { requestJson } from "./worker-fleet-carried.ts";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY } from "./worker-fleet-carried.ts";
 import { readFileSync } from "node:fs";
@@ -1443,8 +1443,11 @@ function reading(n: number, box: BoxReading): Parameters<typeof buildSplitOf>[0]
 /** The lines that name a failure, without the line that says which fields agree. */
 const failureLines = (split: Parameters<typeof buildSplitAdvice>[0]) => split.lines.filter((line) => /^fleet (BUILD SPLIT|Edge updater NOT HELD)/.test(line));
 const fleetOf = (boxes: Record<number, BoxReading>) => Object.entries(boxes).map(([n, box]) => reading(Number(n), { ...AGREED, ...box }));
+/** What the manifest wants, for these tests: the fleet AGREED describes, so a case is clean unless it makes a box differ. (A11-205 tests below pass their own.) */
+const AGREED_EXPECTED = { Windows: AGREED.windows, Edge: AGREED.edge, NVDA: AGREED.nvda, "Worker code": AGREED.code };
 /** The REAL fleetStatus over those probes, so `buildSplit` and the exit code are what the command computes. */
-const statusOver = (probes: ReturnType<typeof fleetOf>) => fleetStatus({
+const statusOver = (probes: ReturnType<typeof fleetOf>, expected: typeof AGREED_EXPECTED = AGREED_EXPECTED) => fleetStatus({
+  expected: () => expected,
   workers: () => probes.map(({ name, url }) => ({ name, url })),
   probe: async (worker) => probes.find((p) => p.name === worker.name) as never,
   linkRead: () => new Map(), macRead: () => new Map(), switchRead: async () => ({ lines: [], tripped: false }) as never,
@@ -1469,8 +1472,9 @@ test("A11-183: today's three-way Edge split names each box under its version, an
     ["fleet BUILD SPLIT — Edge: 155.0.4283.62 on a11y-worker-2, a11y-worker-3; 156.0.4314.42 on a11y-worker-4, a11y-worker-15; 155.0.4283.45 on a11y-worker-5"]);
   assert.match(status.buildSplit.lines.at(-1) ?? "", /^fleet builds agree on — NVDA: 2026\.1 on .*; Windows: 26300\.9711 on /, "the fields that agree are said beside the one that does not");
   const advice = buildSplitAdvice(status.buildSplit);
-  assert.match(advice, /Captures stop until every box converges forward to the newest value/);
-  assert.match(advice, /move the pin .* then run `npm run fleet:provision` across the WHOLE fleet/);
+  assert.match(advice, /Captures stop while the boxes differ from each other/);
+  assert.match(advice, /Edge: `npm run fleet:provision` installs the manifest's Edge .* across the WHOLE fleet/);
+  assert.doesNotMatch(advice, /newest|converges forward/, "no remedy follows the newest build: the manifest says which one the fleet is on");
   assert.doesNotMatch(advice, /fleet:patch/, "the Windows remedy is named only when Windows differs");
 });
 
@@ -1586,7 +1590,7 @@ test("A11-204: two worker codes are a split that names each box under its own ha
     [`fleet BUILD SPLIT — Worker code: ${PINNED_CODE} on a11y-worker-2, a11y-worker-3; ${ORPHAN_CODE} on a11y-worker-11`]);
   assert.equal(exitCodeOf(status), 3);
   const advice = buildSplitAdvice(status.buildSplit);
-  assert.match(advice, /Captures stop until every box converges forward/);
+  assert.match(advice, /Captures stop while the boxes differ from each other/);
   assert.match(advice, /Worker code: run `npm run fleet:deploy` across the WHOLE fleet/);
   assert.match(advice, /`a11ysrv` action is read/);
   assert.doesNotMatch(advice, /fleet:provision|fleet:patch/, "the Edge, NVDA and Windows remedies are named only when those differ");
@@ -1626,4 +1630,118 @@ test("A11-204: --json keeps `codes` for the scripts that read it, and `buildSpli
   const json = JSON.parse(JSON.stringify(status));
   assert.deepEqual(json.codes, [PINNED_CODE, ORPHAN_CODE]);
   assert.deepEqual(json.buildSplit.fields[3].values, { [PINNED_CODE]: [boxName(2)], [ORPHAN_CODE]: [boxName(11)] });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A11-205: every box is compared with the manifest, not only with the other boxes. One difference of any kind is exit 3, and the line names the box,
+// the field, what the box has and what the manifest wants.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const DRIFT_LINE = /^fleet OFF THE MANIFEST — /;
+const driftLines = (drift: { lines: string[] }) => drift.lines.filter((line) => DRIFT_LINE.test(line));
+
+test("A11-205: a fleet on the manifest has no difference, says so, and exits 0 (the negative control for every case below)", async () => {
+  const status = await statusOver(fleetOf({ 2: {}, 3: {}, 4: {} }));
+  assert.equal(status.drift.failed, false);
+  assert.deepEqual(status.drift.differences, []);
+  assert.deepEqual(status.drift.expected, AGREED_EXPECTED);
+  assert.deepEqual(status.drift.lines,
+    ["fleet on the manifest — Windows: 26300.9711; Edge: 156.0.4314.42; NVDA: 2026.1; Worker code: 47dcd71db00697b3; all 3 boxes that answered"]);
+  assert.equal(driftAdvice(status.drift, status.buildSplit), "");
+  assert.equal(exitCodeOf(status), EXIT.OK);
+});
+
+// One case per kind of difference. In each, ONE box differs and the others sit on the manifest.
+const KINDS: { kind: string; field: string; box: BoxReading; has: string | null; wants: string; line: string; }[] = [
+  { kind: "Windows build", field: "Windows", box: { windows: "22631.6199" }, has: "22631.6199", wants: "26300.9711",
+    line: "fleet OFF THE MANIFEST — a11y-worker-5 Windows has 22631.6199, the manifest wants 26300.9711" },
+  { kind: "Edge", field: "Edge", box: { edge: "155.0.4283.62" }, has: "155.0.4283.62", wants: "156.0.4314.42",
+    line: "fleet OFF THE MANIFEST — a11y-worker-5 Edge has 155.0.4283.62, the manifest wants 156.0.4314.42" },
+  { kind: "NVDA", field: "NVDA", box: { nvda: "2025.3" }, has: "2025.3", wants: "2026.1",
+    line: "fleet OFF THE MANIFEST — a11y-worker-5 NVDA has 2025.3, the manifest wants 2026.1" },
+  { kind: "worker code", field: "Worker code", box: { code: ORPHAN_CODE }, has: ORPHAN_CODE, wants: PINNED_CODE,
+    line: `fleet OFF THE MANIFEST — a11y-worker-5 Worker code has ${ORPHAN_CODE}, the manifest wants ${PINNED_CODE}` },
+];
+
+for (const { kind, field, box: differing, has, wants, line } of KINDS) {
+  test(`A11-205: one box off the manifest on ${kind} fails, naming the box, the field, what it has and what the manifest wants`, async () => {
+    const status = await statusOver(fleetOf({ 2: {}, 3: {}, 5: differing }));
+    assert.deepEqual(status.drift.differences, [{ box: boxName(5), field, has, wants }]);
+    assert.deepEqual(driftLines(status.drift), [line]);
+    assert.equal(status.drift.failed, true);
+    assert.equal(exitCodeOf(status), 3);
+  });
+}
+
+test("A11-205: a reachable box that reports no value for a field differs from the manifest (has: null), and says `unreported`", async () => {
+  const status = await statusOver([reading(2, AGREED), reading(3, { ...AGREED, code: undefined, nvda: undefined })]);
+  assert.deepEqual(status.drift.differences, [
+    { box: boxName(3), field: "NVDA", has: null, wants: "2026.1" },
+    { box: boxName(3), field: "Worker code", has: null, wants: PINNED_CODE },
+  ]);
+  assert.deepEqual(driftLines(status.drift), [
+    "fleet OFF THE MANIFEST — a11y-worker-3 NVDA unreported, the manifest wants 2026.1",
+    `fleet OFF THE MANIFEST — a11y-worker-3 Worker code unreported, the manifest wants ${PINNED_CODE}`,
+  ]);
+  assert.equal(exitCodeOf(status), 3);
+});
+
+test("A11-205: a fleet whose boxes all AGREE but not with the manifest fails: agreement among boxes is not the manifest (the regression this exists for)", async () => {
+  // Every box reads Edge 155 and nothing differs between them, which is all `buildSplit` can see.
+  const status = await statusOver(fleetOf({ 2: { edge: "155.0.4283.62" }, 3: { edge: "155.0.4283.62" }, 4: { edge: "155.0.4283.62" } }));
+  assert.equal(status.buildSplit.failed, false, "premise: the boxes agree with each other, so the split check passes");
+  assert.deepEqual(status.drift.differences.map(({ box, field }) => `${box} ${field}`), ["a11y-worker-2 Edge", "a11y-worker-3 Edge", "a11y-worker-4 Edge"]);
+  assert.equal(exitCodeOf(status), 3, "and the command still fails");
+});
+
+test("A11-205: every kind at once is one line per box and field, boxes in numeric order, fields in the manifest's order", async () => {
+  const status = await statusOver(fleetOf({ 15: { windows: "22631.6199", edge: "155.0.4283.62" }, 2: { code: ORPHAN_CODE }, 3: {} }));
+  assert.deepEqual(status.drift.differences.map(({ box, field }) => `${box} ${field}`),
+    ["a11y-worker-2 Worker code", "a11y-worker-15 Windows", "a11y-worker-15 Edge"]);
+});
+
+test("A11-205: an unreachable box is no reading and not a difference, and a fleet where nothing answers is exit 1, not 3", async () => {
+  const down = { name: `${boxName(9)}  http://REDACTED-INTERNAL-ADDRESS`, url: "http://REDACTED-INTERNAL-ADDRESS:8765", reachable: false, error: "ECONNREFUSED" };
+  const drift = driftOf([...fleetOf({ 2: {}, 3: {} }), down], { expected: AGREED_EXPECTED });
+  assert.equal(drift.failed, false);
+  assert.match(drift.lines.join("\n"), /all 2 boxes that answered/);
+  const nobody = await statusOver([down] as never);
+  assert.equal(exitCodeOf(nobody), EXIT.NOTHING_ANSWERED);
+  assert.deepEqual(nobody.drift.lines, [], "nothing answered, so there is nothing to compare and nothing to say");
+});
+
+test("A11-205: a manifest that cannot be read FAILS the check with its reason, because a check with no expectation passes every box", async () => {
+  const status = await fleetStatus({
+    workers: () => [{ name: boxName(2), url: "http://REDACTED-INTERNAL-ADDRESS:8765" }],
+    probe: async (worker) => ({ ...reading(2, AGREED), name: worker.name, url: worker.url }) as never,
+    linkRead: () => new Map(), macRead: () => new Map(), switchRead: async () => ({ lines: [], tripped: false }) as never,
+    expected: () => { throw new Error("deploy-pins.json declares no `windows`: the fleet's windows version is written there and nowhere else"); },
+  });
+  assert.equal(status.drift.failed, true);
+  assert.equal(status.drift.expected, null);
+  assert.match(status.drift.unreadable ?? "", /declares no `windows`/);
+  assert.match(driftLines(status.drift)[0], /^fleet OFF THE MANIFEST — cannot compare 1 reachable box\(es\): deploy-pins\.json declares no `windows`/);
+  assert.equal(exitCodeOf(status), 3);
+  assert.match(driftAdvice(status.drift, status.buildSplit), /No box can be shown to be on the manifest/);
+});
+
+test("A11-205: --json carries `drift` beside `buildSplit`, which is kept for the scripts that read it", async () => {
+  const status = await statusOver(fleetOf({ 2: {}, 5: { windows: "22631.6199" } }));
+  const json = JSON.parse(JSON.stringify(status));
+  assert.deepEqual(json.drift.differences, [{ box: boxName(5), field: "Windows", has: "22631.6199", wants: "26300.9711" }]);
+  assert.equal(json.drift.failed, true);
+  assert.equal(json.buildSplit.failed, true, "buildSplit is still there, with the fields it had");
+  assert.deepEqual(json.buildSplit.fields.map(({ field }: { field: string }) => field), ["Edge", "NVDA", "Windows", "Worker code"]);
+});
+
+test("A11-205: the advice names the manifest, never the newest build, and does not say a split field's remedy twice", async () => {
+  const split = await statusOver(fleetOf({ 2: {}, 5: { windows: "22631.6199" } }));
+  const advice = driftAdvice(split.drift, split.buildSplit);
+  assert.match(advice, /Captures stop until every box is on the manifest \(`deploy-pins\.json`\)/);
+  assert.match(advice, /nothing on a box moves itself/);
+  assert.doesNotMatch(advice, /newest value|converges forward/);
+  assert.doesNotMatch(advice, /Windows: /, "the boxes also disagree on Windows, so buildSplitAdvice already says its remedy");
+  // Every box on the same wrong NVDA: no split, so the drift advice carries the remedy.
+  const together = await statusOver(fleetOf({ 2: { nvda: "2025.3" }, 3: { nvda: "2025.3" } }));
+  assert.match(driftAdvice(together.drift, together.buildSplit), /NVDA: `npm run fleet:provision` installs/);
 });

@@ -17,6 +17,10 @@ worker_repo_path: 'C:\Users\witness\a11y-witness'
 # The layers that live in THEIR OWN repository, from the one manifest and not restated (ADR 0039 item 6, #3395). A
 # layer with no `remote` is inside the core checkout above and is not listed, so today this is empty.
 worker_layer_checkouts: "{{ (lookup('file', playbook_dir ~ '/../layers.json') | from_json).layers | dict2items | selectattr('value.remote', 'defined') | list }}"
+# THE VERSIONS THE FLEET RUNS: Edge and Node below are DERIVED from `deploy-pins.json`, the one manifest (A11-205), and are written nowhere else. The same
+# file holds the Windows release and build, NVDA, and the pinned worker release. A bump is a pull request on that file, and `fleet:status` compares every box
+# with it. `worker_layer_checkouts` reads `layers.json` the same way, and a playbook lives in `ansible/`, so the manifest is one directory up.
+worker_fleet_pins: "{{ lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json }}"
 worker_task_name: a11ysrv
 worker_check_task_name: a11ycheck
 worker_port: 8765
@@ -40,8 +44,8 @@ worker_port: 8765
 # reasoning three screens down: five of the ten guests are already on it, so converging costs one
 # install on five boxes instead of ten. Node's current LTS on 2026-09-23 is v24.21.0 (2026-09-08) and
 # NEITHER it nor v24.20.0 is a security release -- the most recent of those is v24.18.1 -- so nothing
-# argues for following forward today. When something does, this is a one-line edit plus its two
-# checksums, and `node-pin-parity.test.ts` refuses the edit that changes only one of the two copies.
+# argues for following forward today. When something does, it is an edit to `node` in `deploy-pins.json` (the version and its two
+# checksums), and `node-pin-parity.test.ts` refuses the edit that changes only one of the two copies.
 #
 # ## Pinned by CHECKSUM, per architecture
 #
@@ -50,10 +54,8 @@ worker_port: 8765
 # `https://nodejs.org/dist/<version>/SHASUMS256.txt`; both were read from there. Two entries because this
 # fleet has both architectures and the zip differs per arch, so one hash could only ever verify one of
 # them.
-worker_node_version: "v24.20.0"
-worker_node_sha256:
-  x64: "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba"
-  arm64: "31c6799744de8a54601643098040c68c3697e56c94e407d61d0e5fa5f34191d7"
+worker_node_version: "{{ worker_fleet_pins.node.version }}"
+worker_node_sha256: "{{ worker_fleet_pins.node.sha256 }}"
 worker_node_home: 'C:\Program Files\nodejs'
 
 # ---------------------------------------------------------------------------------------------------
@@ -178,10 +180,14 @@ worker_edge_policy:
 # is above it, so the converge only goes forward and `worker_edge_allow_downgrade` stays false.
 #
 # THE BOOTSTRAP CARRIES THE SAME PIN and is not in this repository (`bootstrap-windows-worker.ps1`, in
-# screenreader-fleet). `edge-pin-parity.test.ts` holds the two equal, so this value and that script move together.
-worker_edge_version: "156.0.4314.42"
-worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/62209208-6eb6-4f5e-bff5-feb45cfe41d3/MicrosoftEdgeEnterpriseX64.msi"
-worker_edge_msi_sha256: "324d226c5ade08c2776645cfc2a7b12af9c08214abf18c6499410cd8ed92d1b3"
+# screenreader-fleet). `edge-pin-parity.test.ts` holds it equal to the manifest's, so the two move together until the bootstrap reads the manifest itself.
+#
+# FROM THE MANIFEST SINCE A11-205: the version, the MSI's URL and its hash are `edge` in `deploy-pins.json`, and this file derives them and does not restate
+# them. The history above is why each earlier pin moved, and stays as the record. A fleet now moves only when a person edits the manifest and runs the
+# deliberate upgrade: "following forward" is no longer something a box or a scheduled run does.
+worker_edge_version: "{{ worker_fleet_pins.edge.version }}"
+worker_edge_msi_url: "{{ worker_fleet_pins.edge.msiUrl }}"
+worker_edge_msi_sha256: "{{ worker_fleet_pins.edge.msiSha256 }}"
 # The binary is the source of truth for "which Edge is installed", not the registry's recorded version.
 # Same rule the worker itself now follows: it reported a version it was not running for five days because
 # the value was read once and cached, and the file on disk had moved underneath it.
@@ -326,9 +332,14 @@ worker_display_mode:
 # official package instead, sourced and hashed by a person through Intel's real Download Center -- see
 # `tasks/display.yml`'s own header comment for the full reasoning and #1782 for the sourcing record.
 # NOT MANAGED BY RENOVATE (#5223): Intel publishes no machine-readable release feed, and the url and checksum
-# above were sourced and hashed by a person through the Download Center. `renovate.json` manages
-# `worker_edge_version` and `worker_node_version` only; every other key here names a path, a port or a
-# value derived from those two.
+# above were sourced and hashed by a person through the Download Center. `renovate.json` manages the manifest's `edge` and `node` versions only; every
+# other key here names a path, a port or a value derived from those two.
+#
+# THE ONE VERSION THAT STAYS IN THIS FILE, ON PURPOSE (A11-205): every other box version is in `deploy-pins.json`. The driver is not, because `stamp-provision-revision.ps1`
+# hashes THIS file's text into `provisionRevision`, a capture cache key, and does not hash the manifest. Edge, NVDA, Windows and Node are each reported by the box
+# itself (`browserVersion`, `screenReaderVersion`, `windowsBuild`, `nodeVersion` are in `fleet-consistency`'s MUST_MATCH), so they lose nothing by living elsewhere.
+# No box reports its display driver, so moving this value to the manifest would let a driver bump change no cache key at all. It still has ONE source, so
+# nothing is written twice. It moves into the manifest when a box reports it (`fleet-pins.test.ts` names this exception, and fails when a second one appears).
 worker_display_driver_version: "31.0.101.2141"
 worker_display_driver_url: "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe"
 worker_display_driver_sha256: "a88862682e00bc203cf4be9ff6057e400e94a1dcca48e1f07a67718f5b99c423"

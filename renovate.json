@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "a11ign/control's Renovate config (a11ign/a11ign#5223, part of #5153). OFF until the dry run is quoted on the row, then `enabled` is set true. Revert: `enabled: false`. A bump PR changes the VERSION ONLY: the MSI url and the checksums beside each pin are not machine-readable from the pinned version, so a person completes that PR, and `edge-pin-parity.test.ts` / `node-pin-parity.test.ts` keep it red until they do. It never deploys: a worker reaches a new pin only through a `fleet:deploy` the fleet's owner runs.",
+  "description": "a11ign/control's Renovate config (a11ign/a11ign#5223, part of #5153). OFF until the dry run is quoted on the row, then `enabled` is set true. Revert: `enabled: false`. A bump PR changes the VERSION ONLY: the MSI url and the checksums beside each pin are not machine-readable from the pinned version, so a person completes that PR, and `edge-pin-parity.test.ts` / `node-pin-parity.test.ts` keep it red until they do. The pins are in `deploy-pins.json`, the fleet's one manifest (A11-205). A bump is a pull request, and merging it moves no box: a box reaches a new pin only through the deliberate whole-fleet upgrade a person runs.",
   "extends": [
     "local>a11ign/.github"
   ],
@@ -21,12 +21,12 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "worker_edge_version: the Edge build every worker runs",
+      "description": "edge.version in deploy-pins.json: the Edge build every worker runs",
       "managerFilePatterns": [
-        "/^ansible/roles/worker/defaults/main\\.yml$/"
+        "/^deploy-pins\\.json$/"
       ],
       "matchStrings": [
-        "worker_edge_version: \"(?<currentValue>\\d+\\.\\d+\\.\\d+\\.\\d+)\""
+        "\"edge\": \\{\\s*\"version\": \"(?<currentValue>\\d+\\.\\d+\\.\\d+\\.\\d+)\""
       ],
       "depNameTemplate": "microsoft-edge-stable",
       "datasourceTemplate": "custom.edge-stable",
@@ -34,12 +34,12 @@
     },
     {
       "customType": "regex",
-      "description": "worker_node_version: the Node build every worker runs (the `v` stays literal in the file)",
+      "description": "node.version in deploy-pins.json: the Node build every worker runs (the `v` stays literal in the file)",
       "managerFilePatterns": [
-        "/^ansible/roles/worker/defaults/main\\.yml$/"
+        "/^deploy-pins\\.json$/"
       ],
       "matchStrings": [
-        "worker_node_version: \"v(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+        "\"node\": \\{\\s*\"version\": \"v(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
       ],
       "depNameTemplate": "node",
       "datasourceTemplate": "node-version",
@@ -50,7 +50,7 @@
     {
       "description": "A pin here travels with a download url and checksums a version bump cannot fill in, so no bump merges itself.",
       "matchFileNames": [
-        "ansible/roles/worker/defaults/main.yml"
+        "deploy-pins.json"
       ],
       "automerge": false
     }

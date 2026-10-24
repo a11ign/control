@@ -221,6 +221,14 @@ test("A11-183: fleet:status exiting 3 (a build split, or an updater not held) is
   assert.match(wakeMessage(result) ?? "", /the fleet did not converge \(fleet:status exited 3\)/, "and the wake does not claim attempts were exhausted");
 });
 
+test("A11-205: fleet:status exiting 3 for a box off the manifest ALONE is `failed` with that line as the reason, not the advice under it", async () => {
+  const off = "fleet OFF THE MANIFEST — a11y-worker-5 Windows has 22631.6199, the manifest wants 26300.9711";
+  const h = harness({ plays: { status: [{ status: 3, output: ["fleet: 3 of 3 serving", `  ${off}`, "  Captures stop until every box is on the manifest (`deploy-pins.json`).", "  Windows: `npm run fleet:patch` moves a box's build."].join("\n") }] } });
+  const result = await runConverge({ workers: WORKERS, layerRefs: REFS, row: 5023, effects: h.effects });
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, `fleet:status exited 3: ${off}`, "the reason names the box and the field, and is not the last line of the advice");
+});
+
 test("A11-183: fleet:status exiting 1 (nothing answered) stays `unknown`, and a clean 0 stays ok (the controls for the exit-3 case)", async () => {
   const down = harness({ plays: { status: [{ status: 1, output: "fleet: 0 of 3 serving" }] } });
   const unknown = await runConverge({ workers: WORKERS, layerRefs: REFS, effects: down.effects });

@@ -1,5 +1,5 @@
 {
-  "//": "WHAT CONTROL DEPLOYS, DECLARED BY CONTROL (ADR 0045, cut 7, a11ign/a11ign#5085). `layers` are the PUBLISHED worker and fleet: the exact release and the `integrity` of that release's tarball, which `fleet:deploy` fetches with `npm pack`, compares and refuses on BEFORE anything is unpacked or shipped (`src/layer-pins.ts`). The commit a host's checkout is put on is the one the release's tag names on `remote`. `path` is where a host holds the layer, beside the core's checkout. `lab` is the release the lab host holds laid (the lab is private and no registry serves it); it is a second declaration of what the core lays and `lab-laid-copy.ts` refuses a lab host that does not match it, so a lab bump in the core is a change here too. Moving a pin is a pull request that changes the version and the integrity together: `npm view <package>@<version> dist.integrity` prints the second. `core` is the core commit `deploy.yml` and `provision-role.yml` put every guest on (#5515). It is a COMMIT, not a tag, because the core's branch moves while a `--serial` run is in flight and the pin is what keeps every box on one commit. Moving it is a pull request that changes `commit` alone.",
+  "//": "WHAT CONTROL DEPLOYS, DECLARED BY CONTROL (ADR 0045, cut 7, a11ign/a11ign#5085). `layers` are the PUBLISHED worker and fleet: the exact release and the `integrity` of that release's tarball, which `fleet:deploy` fetches with `npm pack`, compares and refuses on BEFORE anything is unpacked or shipped (`src/layer-pins.ts`). The commit a host's checkout is put on is the one the release's tag names on `remote`. `path` is where a host holds the layer, beside the core's checkout. `lab` is the release the lab host holds laid (the lab is private and no registry serves it); it is a second declaration of what the core lays and `lab-laid-copy.ts` refuses a lab host that does not match it, so a lab bump in the core is a change here too. Moving a pin is a pull request that changes the version and the integrity together: `npm view <package>@<version> dist.integrity` prints the second. `core` is the core commit `deploy.yml` and `provision-role.yml` put every guest on (#5515). It is a COMMIT, not a tag, because the core's branch moves while a `--serial` run is in flight and the pin is what keeps every box on one commit. Moving it is a pull request that changes `commit` alone. THE FLEET'S OWN VERSIONS ARE HERE TOO (A11-205): `windows`, `edge`, `nvda` and `node` are what every box runs, and the one place they are written. The worker role derives its Edge and Node installs from them (`ansible/roles/worker/defaults/main.yml`), and `fleet:status` compares every box with them (`src/fleet-pins.ts` is the one reader). The worker CODE a box serves is `layers.nvda-worker` plus `core.commit`, so it is not written again: the expected `/health.code` is `layerCodeVersion(\"nvda-worker\")`. `windows.kb` is the cumulative update that produces `windows.build`, so an upgrade run lands on that build and not on whatever Microsoft published after the edit. Moving any of these is a pull request, and merging it does not move a box: a person then runs the deliberate upgrade. `nvda.version` and `core.commit` move together, because NVDA arrives with guidepup at the core's lockfile.",
   "layers": {
     "nvda-worker": {
       "package": "@a11ign/screenreader-worker",
@@ -32,5 +32,25 @@
       "rule-ownership.json",
       "CLAUDE.md"
     ]
+  },
+  "windows": {
+    "release": "26H2",
+    "build": "26300.9711",
+    "kb": "KB5127648"
+  },
+  "edge": {
+    "version": "156.0.4314.42",
+    "msiUrl": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/62209208-6eb6-4f5e-bff5-feb45cfe41d3/MicrosoftEdgeEnterpriseX64.msi",
+    "msiSha256": "324d226c5ade08c2776645cfc2a7b12af9c08214abf18c6499410cd8ed92d1b3"
+  },
+  "nvda": {
+    "version": "2026.1.1"
+  },
+  "node": {
+    "version": "v24.20.0",
+    "sha256": {
+      "x64": "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba",
+      "arm64": "31c6799744de8a54601643098040c68c3697e56c94e407d61d0e5fa5f34191d7"
+    }
   }
 }

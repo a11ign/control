@@ -187,12 +187,12 @@
       NEWER than the pinned {{ worker_edge_version }}, and Chromium will not install over a newer build.
       THREE remedies, cheapest first — and this message used to name the most expensive one first, which
       sent an operator to reimage a machine that one flag fixes.
-      (1) FOLLOW IT — BUT CHECK THE BUILD EXISTS THERE FIRST. Move `worker_edge_version`,
-      `worker_edge_msi_url` and `worker_edge_msi_sha256` to the newer build from
+      (1) FOLLOW IT — BUT CHECK THE BUILD EXISTS THERE FIRST. Move `edge` in `deploy-pins.json` (the version,
+      `msiUrl` and `msiSha256`) to the newer build from
       https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
       the WHOLE fleet. RE-QUERY THAT API NOW rather than trusting an earlier look, because a box can run
-      AHEAD of the enterprise channel for hours: measured 2026-09-04, a box self-updated to 152.0.4191.66
-      while the newest enterprise Stable x64 was .62 — and .66 was published at 22:28 UTC that same day,
+      AHEAD of the enterprise channel for hours: measured 2026-09-04, a box self-updated to a build the
+      enterprise Stable x64 listing did not yet carry — it was published at 22:28 UTC that same day,
       minutes after that check, while the rollback it appeared to justify was already running. An
       availability check against a moving index expires, so redo it first rather than assuming it.
       This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet

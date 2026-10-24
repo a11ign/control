@@ -321,12 +321,12 @@ const lastLine = (text: string) => {
   return (lines.find((l) => /^(REFUSING|refusing)/.test(l)) ?? lines.at(-1) ?? "(no output)").slice(0, 240);
 };
 
-/** The lines `fleet:status` prints for a build split or an updater that is not held, which are why it exited 3 (A11-183). */
-const splitLinesOf = (output: string) => output.split("\n").map((l) => l.trim()).filter((l) => /^fleet (BUILD SPLIT|Edge updater NOT HELD)/.test(l));
+/** The lines `fleet:status` prints for a build split, an updater that is not held or a box off the manifest, which are why it exited 3 (A11-183, A11-205). */
+const splitLinesOf = (output: string) => output.split("\n").map((l) => l.trim()).filter((l) => /^fleet (BUILD SPLIT|Edge updater NOT HELD|OFF THE MANIFEST)/.test(l));
 
 /**
  * `fleet:status`, read once at the end. It exits 1 when no box answers (an unknown: nothing was read) and 3 when the boxes that answered are split on
- * Edge, NVDA or the Windows build, or the Edge updater is not held on one (a failure: the run read the fleet and it did not converge, and captures
+ * Edge, NVDA or the Windows build, or the Edge updater is not held on one, or a box is off `deploy-pins.json` (a failure: the run read the fleet and it did not converge, and captures
  * stop). Any other non-zero code is an unknown.
  */
 async function statusStep(run: Run): Promise<StepOutcome> {

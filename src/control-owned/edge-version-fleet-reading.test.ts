@@ -4,7 +4,7 @@
  * On 2026-10-10 the fleet was split 12/3 across two Edge builds, and an oracle that runs on two Edge versions measures noise. `browserVersion`
  * is MUST_MATCH, so a capture REFUSES a fleet whose boxes differ from each other -- but that is the gate, raised DURING the capture. Nothing
  * raised it before capture day: the off-fleet watch read Windows build, display mode and the Edge updater, and not the Edge version. And a gate
- * that compares boxes to EACH OTHER cannot see a fleet that agrees on the wrong build: the pin (`worker_edge_version`) is a different question.
+ * that compares boxes to EACH OTHER cannot see a fleet that agrees on the wrong build: the pin (`edge.version` in `deploy-pins.json`) is a different question.
  *
  * So the reading compares each box's OWN reported `browserVersion` to the pin, and a box off it is one `edge-pin: <box> <version> (pin <pin>)`
  * line in the watch's ledger. #4405's convergence step owns the Windows build, the display mode and the Edge UPDATER; the Edge VERSION is this row's.
@@ -12,7 +12,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parse } from "yaml";
 
 import { fleetStatus } from "../fleet-status.ts";
 import { edgePinLines, offFleetLines, readEdgePin, watchFleet } from "../fleet-watch.ts";
@@ -93,11 +92,20 @@ test("offFleetLines draws the Edge-pin line only when it is given the pin", asyn
   assert.deepEqual(lines(offFleetLines(status, PIN)), [`edge-pin: ${nameOf(3)} ${NEWER} (pin ${PIN})`]);
 });
 
-test("readEdgePin reads the role's own pin, and a defaults file that declares none THROWS rather than reading as no finding", () => {
-  const defaults = parse(readFileSync(new URL("../../ansible/roles/worker/defaults/main.yml", import.meta.url), "utf8")) as Record<string, unknown>;
-  assert.equal(readEdgePin(), defaults.worker_edge_version, "the pin is the role defaults' value, parsed independently here");
-  assert.equal(readEdgePin(() => `worker_edge_version: "${OLDER}"\n`), OLDER, "and it follows the file it is given");
-  assert.throws(() => readEdgePin(() => "worker_other: 1\n"), /declares no worker_edge_version/);
+test("readEdgePin reads the manifest's Edge pin, and a manifest that declares none THROWS rather than reading as no finding", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../deploy-pins.json", import.meta.url), "utf8")) as { edge: { version: string } };
+  assert.equal(readEdgePin(), manifest.edge.version, "the pin is the manifest's value, parsed independently here");
+  const withEdge = (version: string) => JSON.stringify({ ...manifest, edge: { ...manifest.edge, version } });
+  assert.equal(readEdgePin(() => withEdge(OLDER)), OLDER, "and it follows the file it is given");
+  assert.throws(() => readEdgePin(() => JSON.stringify({ ...manifest, edge: undefined })), /no box can be compared to the Edge pin: deploy-pins\.json declares no `edge`/);
+  assert.throws(() => readEdgePin(() => withEdge("latest")), /deploy-pins\.json edge\.version is "latest"/);
+});
+
+test("readEdgePin judges only the Edge pin: a fault in another section does not stop the fleet watch's tick", () => {
+  const broken = (path: "nvda" | "node" | "windows") => JSON.stringify({ ...JSON.parse(readFileSync(new URL("../../deploy-pins.json", import.meta.url), "utf8")), [path]: "malformed" });
+  for (const section of ["nvda", "node", "windows"] as const) {
+    assert.equal(readEdgePin(() => broken(section)), readEdgePin(), `a malformed ${section} leaves the Edge pin readable`);
+  }
 });
 
 const memoryStore = () => {

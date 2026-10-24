@@ -71,6 +71,8 @@ import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { fleetStatus } from "./fleet-status.ts";
+import { parseEdgePin } from "./fleet-pins.ts";
+import { DEPLOY_PINS_PATH } from "./layer-pins.ts";
 import { sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
 import { readFleetLock, type FleetLockReading } from "./fleet-lock.ts";
@@ -647,7 +649,7 @@ function edgeUpdaterLines(status: { rows: FleetRow[], mismatches?: Drift[], repo
 }
 
 /**
- * Every reachable box whose OWN reported Edge version is not the pin (`worker_edge_version`), one line each: `edge-pin: <box> <version> (pin <pin>)` (#5660).
+ * Every reachable box whose OWN reported Edge version is not the pin (`edge.version` in `deploy-pins.json`), one line each: `edge-pin: <box> <version> (pin <pin>)` (#5660).
  * Unlike build and display the reference is not the fleet's majority but the pin, so a fleet that agrees on the wrong build is still odd, and the
  * reading is `fleetStatus`' `browserVersions` (what each box said) and never the pin file's. An unreachable box, a box that reported nothing and the
  * `unknown` placeholder are no reading, and a status with no `browserVersions` (a reader that predates it) claims nothing was read.
@@ -665,13 +667,11 @@ export function edgePinLines(status: { rows: FleetRow[], browserVersions?: Recor
 }
 
 const EDGE_PIN_PREFIX = "edge-pin: ";
-const EDGE_PIN_DEFAULTS = new URL("../ansible/roles/worker/defaults/main.yml", import.meta.url);
-
-/** The Edge build the role pins, read from the role defaults beside this file; a defaults file that declares none THROWS, because no pin would read as no finding. */
-export function readEdgePin(read: (url: URL) => string = (url) => readFileSync(url, "utf8")): string {
-  const pin = /^worker_edge_version:\s*["']?([^"'\s]+)["']?\s*$/m.exec(read(EDGE_PIN_DEFAULTS))?.[1];
-  if (pin === undefined) throw new Error(`${EDGE_PIN_DEFAULTS.pathname} declares no worker_edge_version, so no box can be compared to the pin`);
-  return pin;
+/** The Edge build the fleet is pinned to: `edge.version` in `deploy-pins.json`, the one manifest (A11-205). A manifest that declares none THROWS, because no pin would read as no finding. */
+export function readEdgePin(read: () => string = () => readFileSync(DEPLOY_PINS_PATH, "utf8")): string {
+  const pin = parseEdgePin(read());
+  if ("refusal" in pin) throw new Error(`no box can be compared to the Edge pin: ${pin.refusal}`);
+  return pin.edge.version;
 }
 
 /**
@@ -836,7 +836,7 @@ export type WatchDeps = {
     buildIncident?: (status: BuildStatus) => BuildIncidentTick;
     /** The fleet lock on the control plane at this tick's clock (see `readFleetLock`). Absent: not read this tick, and the lock line stands. */
     fleetLock?: (now: number) => FleetLockReading;
-    /** The Edge build the role pins (see `readEdgePin`). Absent: the role defaults beside this file. */
+    /** The Edge build the manifest pins (see `readEdgePin`). Absent: `deploy-pins.json` beside this file. */
     edgePin?: () => string;
     /** Where the off-fleet ledger is written when it is not `write`: a dry run must not use up the lines a posting run will say. */
     writeOffFleet?: (path: string, data: string) => void;

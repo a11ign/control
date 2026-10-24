@@ -31,11 +31,14 @@
  * visibility, already on every box, read by no code anywhere in this repo until now. That is why this
  * command needs no worker-side change and therefore no redeploy.
  *
- * ## The three questions it answers that a per-worker curl cannot
+ * ## The questions it answers that a per-worker curl cannot
  *
  * - **Which box is degrading?** `assessWorker` judges on the RECOVERY RATE, not failures, because the
  *   worker's own retry absorbs faults and `failures` stays 0 while a guest runs at three times the cost
  *   of its neighbours.
+ * - **Is every box on the manifest?** (A11-205) `driftOf` compares each box's Windows build, Edge, NVDA and worker code with `deploy-pins.json`, the one
+ *   place the fleet's versions are written, and names the box, the field, what it has and what the manifest wants. Comparing boxes only with each other
+ *   reads a fleet that drifted together as clean.
  * - **Are these boxes still interchangeable?** `fleetConsistency` compares the fields that are in the
  *   CAPTURE CACHE KEY. A split fleet does not error; it just stops hitting the cache, "which reads as
  *   ordinary churn rather than as a split fleet".
@@ -57,6 +60,9 @@ import { requestJson, configuredWorkers, assessWorker, fleetConsistency, describ
   from "./worker-fleet-carried.ts";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
 import { readControlPlaneFleet } from "./control-plane-fleet.ts";
+// A11-205: what the fleet RUNS is `deploy-pins.json`, read by `fleet-pins.ts` alone; this file compares every box with it and holds no version of its own.
+import { readExpectedFleet, DRIFT_FIELDS } from "./fleet-pins.ts";
+import type { ExpectedFleet, DriftField } from "./fleet-pins.ts";
 // #2752: the MAC fallback below reuses fleet-discover.ts's own `normaliseMac` rather than restating it --
 // two MAC parsers is how a colon-vs-dash disagreement becomes a resolution that silently never matches.
 import { normaliseMac } from "./fleet-discover.ts";
@@ -1111,7 +1117,7 @@ export function browserVersionsOf(guests: { worker: string, environment?: { brow
 const reportedString = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
 
 /** The `fleet BUILD SPLIT` field that reads `/health.code`, named once for the reading and for the advice that branches on it. */
-const WORKER_CODE = "Worker code";
+const WORKER_CODE: DriftField = "Worker code";
 
 /**
  * THE BUILD SPLIT: one Edge, one NVDA and one Windows build and one worker code across the fleet, and the Edge updater held on every box (A11-183, A11-204).
@@ -1145,7 +1151,7 @@ export type BuildSplit = {
 type BoxHealth = { box: string; environment: Record<string, unknown> | undefined; code: unknown; };
 
 /** The builds that must agree, and where in a box's `/health` each one is reported. */
-const BUILD_FIELDS: { field: string; read: (health: BoxHealth) => unknown; }[] = [
+const BUILD_FIELDS: { field: DriftField; read: (health: BoxHealth) => unknown; }[] = [
   { field: "Edge", read: ({ environment }) => environment?.browserVersion },
   { field: "NVDA", read: ({ environment }) => environment?.screenReaderVersion },
   { field: "Windows", read: ({ environment }) => environment?.windowsBuild },
@@ -1166,10 +1172,15 @@ const describeGroups = (values: Record<string, string[]>, unreported: string[]) 
   [...Object.entries(values).map(([value, boxes]) => `${value} on ${boxes.join(", ")}`),
     ...(unreported.length > 0 ? [`unreported on ${unreported.join(", ")}`] : [])].join("; ");
 
-export function buildSplitOf(probes: WorkerProbe[]): BuildSplit {
-  const reachable = probes.filter((probe) => probe.reachable)
+/** The boxes that answered, by inventory name in numeric order. An unreachable box is no reading, and is not here. */
+function reachableBoxes(probes: WorkerProbe[]): BoxHealth[] {
+  return probes.filter((probe) => probe.reachable)
     .map((probe): BoxHealth => ({ box: inventoryName(probe.name), environment: probe.health?.environment, code: probe.health?.code }))
     .sort((a, b) => a.box.localeCompare(b.box, "en", { numeric: true }));
+}
+
+export function buildSplitOf(probes: WorkerProbe[]): BuildSplit {
+  const reachable = reachableBoxes(probes);
   const fields = BUILD_FIELDS.map(({ field, read }) => {
     const values: Record<string, string[]> = {};
     const unreported: string[] = [];
@@ -1207,28 +1218,98 @@ function buildSplitLines({ fields, notHeld, unread, boxes }: {
 }
 
 /**
- * What to DO about a build split, or "" when there is none. The line says captures stop, and names the remedy: the rule is that any build mismatch
- * stops the line until every box converges FORWARD to the newest (ADR 0047, precondition 2: an oracle on two versions measures noise).
+ * What each field's remedy is, said once for the split between boxes and for the drift from the manifest. NONE OF THEM FOLLOWS THE NEWEST BUILD (A11-205):
+ * the manifest says which build the fleet is on, so a box that differs is put on THAT, and a build moves only when a person edits the manifest and
+ * upgrades the whole fleet.
+ */
+const REMEDY: Record<DriftField, string> = {
+  Edge: "  Edge: `npm run fleet:provision` installs the manifest's Edge (`edge` in `deploy-pins.json`); run it across the WHOLE fleet.",
+  Windows: "  Windows: `npm run fleet:patch` moves a box's build; a box whose CPU the manifest's release does not support stays where it is, and stays named here.",
+  NVDA: "  NVDA: `npm run fleet:provision` installs the build the core's lockfile carries (`nvda` in `deploy-pins.json` names it); run it across the WHOLE fleet.",
+  "Worker code": "  Worker code: run `npm run fleet:deploy` across the WHOLE fleet (it is idempotent). A box that fails the deploy's read-back is stopped on, "
+    + "and its `a11ysrv` action is read: the registered launcher decides which code a restart or a reboot starts.",
+};
+
+/**
+ * What to DO about a build split, or "" when there is none. The line says captures stop: an oracle on two builds measures noise (ADR 0047,
+ * precondition 2). The remedy is the manifest's build on every box (`REMEDY`), never the newest.
  */
 export function buildSplitAdvice(split: BuildSplit): string {
   if (!split.failed) return "";
   const differs = (name: string) => split.fields.some(({ field, split: isSplit }) => field === name && isSplit);
-  const advice = ["  Captures stop until every box converges forward to the newest value: an oracle on two builds measures noise."];
-  if (differs("Edge")) {
-    advice.push("  Edge: move the pin (`worker_edge_version`, URL and hash) to the newest Stable build, then run `npm run fleet:provision` across the WHOLE fleet.");
-  }
-  if (differs("Windows")) {
-    advice.push("  Windows: `npm run fleet:patch` brings a box to the fleet's target build; a box whose CPU the target does not support stays where it is.");
-  }
-  if (differs("NVDA")) {
-    advice.push("  NVDA: `npm run fleet:provision` installs the pinned build; run it across the WHOLE fleet.");
-  }
-  if (differs(WORKER_CODE)) {
-    advice.push("  Worker code: run `npm run fleet:deploy` across the WHOLE fleet (it is idempotent). A box that fails the deploy's read-back is stopped on, "
-      + "and its `a11ysrv` action is read: the registered launcher decides which code a restart or a reboot starts.");
-  }
+  const advice = ["  Captures stop while the boxes differ from each other: an oracle on two builds measures noise."];
+  for (const field of DRIFT_FIELDS) if (differs(field)) advice.push(REMEDY[field]);
   if (!split.updater.held) {
     advice.push("  Edge updater: it is not held, so a box can move on its own. `npm run fleet:provision` lays the guard again and proves it runs.");
+  }
+  return `${advice.join("\n")}\n`;
+}
+
+/**
+ * ONE MANIFEST, EVERY BOX COMPARED WITH IT (A11-205).
+ *
+ * `buildSplitOf` compares boxes with EACH OTHER, so a fleet that drifted together, or sat on the wrong build from the day it was provisioned, reads as
+ * clean. This compares each reachable box's own Windows build, Edge, NVDA and worker code with `deploy-pins.json` and names every difference: the box,
+ * the field, what the box has and what the manifest wants.
+ *
+ * - A reachable box that reports no value for a field is a difference too, with `has: null`: a field nobody reported is not agreement (#1997, #2019).
+ * - An unreachable box is no reading, as in `buildSplitOf`: it did not answer, and it is not a difference.
+ * - NO PER-BOX EXCEPTION. A box whose CPU cannot run the manifest's Windows release differs until a person decides what becomes of it (ADR 0001).
+ * - A manifest that cannot be read, or whose worker code cannot be derived, FAILS the check with its reason rather than comparing nothing: a check with
+ *   no expectation would pass every box.
+ */
+export type Difference = { box: string; field: DriftField; has: string | null; wants: string; };
+export type FleetDrift = {
+  failed: boolean;
+  /** What the manifest wants of every box, or `null` when it could not be read. */
+  expected: ExpectedFleet | null;
+  /** Why `expected` is `null`. */
+  unreadable: string | null;
+  differences: Difference[];
+  lines: string[];
+};
+
+export type Expectation = { expected: ExpectedFleet; } | { unreadable: string; };
+
+export function driftOf(probes: WorkerProbe[], expectation: Expectation): FleetDrift {
+  const reachable = reachableBoxes(probes);
+  if ("unreadable" in expectation) {
+    return { failed: true, expected: null, unreadable: expectation.unreadable, differences: [],
+      lines: [`fleet OFF THE MANIFEST — cannot compare ${reachable.length} reachable box(es): ${expectation.unreadable}`] };
+  }
+  const { expected } = expectation;
+  const readers = DRIFT_FIELDS.map((field) => {
+    const build = BUILD_FIELDS.find((candidate) => candidate.field === field);
+    // A field the manifest wants and no reader reads would report every box as `unreported`; that is a defect in this file, not a finding about a box.
+    if (build === undefined) throw new Error(`fleet-status reads no "${field}" from a box, so it cannot be compared with the manifest`);
+    return build;
+  });
+  const differences = reachable.flatMap((health) => readers.flatMap(({ field, read }): Difference[] => {
+    const has = reportedString(read(health));
+    return has === expected[field] ? [] : [{ box: health.box, field, has, wants: expected[field] }];
+  }));
+  const lines = differences.map(({ box, field, has, wants }) =>
+    `fleet OFF THE MANIFEST — ${box} ${field} ${has === null ? "unreported" : `has ${has}`}, the manifest wants ${wants}`);
+  if (differences.length === 0 && reachable.length > 0) {
+    lines.push(`fleet on the manifest — ${DRIFT_FIELDS.map((field) => `${field}: ${expected[field]}`).join("; ")}; all ${reachable.length} boxes that answered`);
+  }
+  return { failed: differences.length > 0, expected, unreadable: null, differences, lines };
+}
+
+/**
+ * What to DO about a box that is off the manifest, or "" when none is. The fields the boxes also disagree on are already advised by `buildSplitAdvice`
+ * and are not said twice.
+ */
+export function driftAdvice(drift: FleetDrift, split: BuildSplit): string {
+  if (!drift.failed) return "";
+  if (drift.unreadable !== null) {
+    return "  No box can be shown to be on the manifest, so captures stop. Check `deploy-pins.json`, and that the pinned layers are installed (`pnpm install --frozen-lockfile`).\n";
+  }
+  const advice = ["  Captures stop until every box is on the manifest (`deploy-pins.json`): nothing on a box moves itself, and the manifest does not follow the newest "
+    + "build. A build changes only when a person edits the manifest and upgrades the whole fleet."];
+  const advised = new Set(split.fields.filter(({ split: isSplit }) => isSplit).map(({ field }) => field));
+  for (const field of DRIFT_FIELDS) {
+    if (drift.differences.some((difference) => difference.field === field) && !advised.has(field)) advice.push(REMEDY[field]);
   }
   return `${advice.join("\n")}\n`;
 }
@@ -1247,6 +1328,8 @@ export async function fleetStatus(deps?: {
         macRead?: (candidates: { name: string; host: string; mac: string; }[]) => Map<string, string> | Promise<Map<string, string>>;
         switchRead?: (workers: { name: string; url: string; mac?: string; }[]) =>
             import("./fleet-switch.ts").SwitchReport | Promise<import("./fleet-switch.ts").SwitchReport>;
+        /** What the manifest wants of every box. Absent, it is `deploy-pins.json` and the pinned worker release (`readExpectedFleet`). */
+        expected?: () => ExpectedFleet | Promise<ExpectedFleet>;
     }) {
   const workers = (deps?.workers ?? fleetToProbe)();
   const probe = deps?.probe ?? probeWorker;
@@ -1262,6 +1345,7 @@ export async function fleetStatus(deps?: {
   // port that is not its own is exactly what the neighbour table cannot say. It never throws and never
   // changes `reachable`, so a switch that does not answer cannot hide the capture-port reading above.
   const switchReading = await (deps?.switchRead ?? readSwitchLive)(workers);
+  const expectation = await expectationOf(deps?.expected ?? readExpectedFleet);
   const guests = probes
     .filter((p) => p.reachable)
     // `policy: undefined`, not null. `fleetConsistency` takes `policy?: Record<string, unknown>` -- an
@@ -1295,7 +1379,7 @@ export async function fleetStatus(deps?: {
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
     fields, reportedOnly });
   return { rows, linkLayer, switch: switchReading, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
-    reportedOnly, windowsBuilds: windowsBuildsOf(guests), browserVersions: browserVersionsOf(guests), buildSplit: buildSplitOf(probes), reachable: guests.length, total: workers.length,
+    reportedOnly, windowsBuilds: windowsBuildsOf(guests), browserVersions: browserVersionsOf(guests), buildSplit: buildSplitOf(probes), drift: driftOf(probes, expectation), reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
     // Removing it outright fails SILENTLY: `undefined` is falsy, so `if (status.consistent)` would read
@@ -1304,6 +1388,15 @@ export async function fleetStatus(deps?: {
     // true only when every box in the inventory was compared and they agree. A legacy consumer gets the
     // fix without changing a line, which is the one thing a compatibility field should do.
     consistent: verdict.state === "CONSISTENT" };
+}
+
+/** The manifest's expectation, or why there is none: a read that throws is a result the drift check reports, and does not take the whole report down. */
+async function expectationOf(read: () => ExpectedFleet | Promise<ExpectedFleet>): Promise<Expectation> {
+  try {
+    return { expected: await read() };
+  } catch (cause) {
+    return { unreadable: cause instanceof Error ? cause.message : String(cause) };
+  }
 }
 
 /**
@@ -1342,12 +1435,12 @@ export const EXIT = Object.freeze({ OK: 0, NOTHING_ANSWERED: 1, BUILD_SPLIT: 3 }
 
 /**
  * 1 when nothing answered. Every worker being down is a fault; ONE being down is not, because a run evicts a dead worker and carries on, the same
- * rule doctor applies. 3 when the boxes that answered are split on Edge, NVDA, the Windows build or the worker code, or the Edge updater is not held on one: the
- * code `capture-fleet-guard` already uses to refuse an inconsistent fleet, so captures stop on both (A11-183).
+ * rule doctor applies. 3 when the boxes that answered are split on Edge, NVDA, the Windows build or the worker code, or the Edge updater is not held on one, or
+ * any box differs from `deploy-pins.json` (`drift`, A11-205): the code `capture-fleet-guard` already uses to refuse an inconsistent fleet, so captures stop on all.
  */
-export function exitCodeOf(status: { reachable: number; buildSplit: BuildSplit; }): number {
+export function exitCodeOf(status: { reachable: number; buildSplit: BuildSplit; drift: FleetDrift; }): number {
   if (status.reachable === 0) return EXIT.NOTHING_ANSWERED;
-  return status.buildSplit.failed ? EXIT.BUILD_SPLIT : EXIT.OK;
+  return status.buildSplit.failed || status.drift.failed ? EXIT.BUILD_SPLIT : EXIT.OK;
 }
 
 async function main() {
@@ -1375,6 +1468,8 @@ async function main() {
     }
     for (const line of status.buildSplit.lines) process.stdout.write(`  ${line}\n`);
     process.stdout.write(buildSplitAdvice(status.buildSplit));
+    for (const line of status.drift.lines) process.stdout.write(`  ${line}\n`);
+    process.stdout.write(driftAdvice(status.drift, status.buildSplit));
     const degraded = degradedAdvice(status.rows);
     if (degraded) process.stdout.write(degraded);
     const warming = warmingAdvice(status.rows);

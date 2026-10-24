@@ -212,6 +212,17 @@ describe("the declaration", () => {
     expect(worker.package).toBe("@a11ign/screenreader-worker");
   });
 
+  test("the fleet's own versions in the same file (windows, edge, nvda, node, A11-205) are not this reader's, and neither read nor refused by it", () => {
+    const withFleet = JSON.parse(REAL_TEXT) as Record<string, unknown>;
+    for (const key of ["windows", "edge", "nvda", "node"]) expect(withFleet[key], `premise: the manifest carries ${key}`).toBeDefined();
+    const read = parseDeployPins(REAL_TEXT);
+    expect("pins" in read).toBe(true);
+    expect(Object.keys((read as { pins: DeployPins }).pins).sort()).toEqual(["core", "lab", "layers"]);
+    // Whatever those keys hold is `fleet-pins.ts`'s to judge: a malformed Edge does not stop control deploying the layers.
+    const broken = JSON.stringify({ ...withFleet, edge: "not an object", node: null });
+    expect("pins" in parseDeployPins(broken)).toBe(true);
+  });
+
   test("releaseTag names the tag a repository really made: v<semver> from its first flat release, the scoped form before", () => {
     expect(releaseTag("@a11ign/screenreader-worker", "0.13.0")).toBe("v0.13.0");
     expect(releaseTag("@a11ign/screenreader-worker", "0.2.0")).toBe("@a11ign/screenreader-worker@0.2.0");
