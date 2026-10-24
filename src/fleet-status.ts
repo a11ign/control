@@ -1186,6 +1186,10 @@ function buildSplitLines({ fields, notHeld, unread, boxes }: {
   if (notHeld.length > 0) lines.push(`fleet Edge updater NOT HELD — ${notHeld.map(({ box, state }) => `${box} ${state}`).join(", ")}`);
   if (split.length === 0 && notHeld.length === 0) {
     lines.push(`fleet builds AGREE — ${fields.map(({ field, values }) => `${field}: ${describeGroups(values, [])}`).join("; ")}; Edge updater held on ${boxes - unread.length} of ${boxes}`);
+  } else if (split.length < fields.length) {
+    // The fields that DO agree are still said, beside the ones that do not: a reader of a failing line should see that the Edge reading was made and
+    // came back as one value, not infer it from its absence.
+    lines.push(`fleet builds agree on — ${fields.filter((field) => !field.split).map(({ field, values }) => `${field}: ${describeGroups(values, [])}`).join("; ")}`);
   }
   if (unread.length > 0) lines.push(`fleet Edge updater UNREAD (not a failure) — ${unread.join(", ")} send no edgeUpdaterGuard: their worker code predates it`);
   return lines;

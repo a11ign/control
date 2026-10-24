@@ -1440,6 +1440,8 @@ function reading(n: number, box: BoxReading): Parameters<typeof buildSplitOf>[0]
   return { name: `${boxName(n)}  http://REDACTED-INTERNAL-ADDRESS`, url: `http://REDACTED-INTERNAL-ADDRESS:8765`, reachable: true,
     health: { ok: true, ready: true, busy: false, code: "abc1234", environment } };
 }
+/** The lines that name a failure, without the line that says which fields agree. */
+const failureLines = (split: Parameters<typeof buildSplitAdvice>[0]) => split.lines.filter((line) => /^fleet (BUILD SPLIT|Edge updater NOT HELD)/.test(line));
 const fleetOf = (boxes: Record<number, BoxReading>) => Object.entries(boxes).map(([n, box]) => reading(Number(n), { ...AGREED, ...box }));
 /** The REAL fleetStatus over those probes, so `buildSplit` and the exit code are what the command computes. */
 const statusOver = (probes: ReturnType<typeof fleetOf>) => fleetStatus({
@@ -1463,8 +1465,9 @@ test("A11-183: today's three-way Edge split names each box under its version, an
   assert.equal(exitCodeOf(status), 3);
   assert.deepEqual(status.buildSplit.fields[0].values, {
     "155.0.4283.62": [boxName(2), boxName(3)], "156.0.4314.42": [boxName(4), boxName(15)], "155.0.4283.45": [boxName(5)] });
-  assert.deepEqual(status.buildSplit.lines,
+  assert.deepEqual(failureLines(status.buildSplit),
     ["fleet BUILD SPLIT — Edge: 155.0.4283.62 on a11y-worker-2, a11y-worker-3; 156.0.4314.42 on a11y-worker-4, a11y-worker-15; 155.0.4283.45 on a11y-worker-5"]);
+  assert.match(status.buildSplit.lines.at(-1) ?? "", /^fleet builds agree on — NVDA: 2026\.1 on .*; Windows: 26300\.9711 on /, "the fields that agree are said beside the one that does not");
   const advice = buildSplitAdvice(status.buildSplit);
   assert.match(advice, /Captures stop until every box converges forward to the newest value/);
   assert.match(advice, /move the pin .* then run `npm run fleet:provision` across the WHOLE fleet/);
@@ -1480,14 +1483,15 @@ test("A11-183: boxes are named by inventory name in numeric order, never by addr
 test("A11-183: a Windows-only split fails with NVDA and Edge agreeing, and names the fleet:patch remedy", async () => {
   const status = await statusOver(fleetOf({ 2: {}, 3: {}, 5: { windows: "22631.6199" } }));
   assert.deepEqual(status.buildSplit.fields.map(({ field, split }) => [field, split]), [["Edge", false], ["NVDA", false], ["Windows", true]]);
-  assert.deepEqual(status.buildSplit.lines, ["fleet BUILD SPLIT — Windows: 26300.9711 on a11y-worker-2, a11y-worker-3; 22631.6199 on a11y-worker-5"]);
+  assert.deepEqual(failureLines(status.buildSplit), ["fleet BUILD SPLIT — Windows: 26300.9711 on a11y-worker-2, a11y-worker-3; 22631.6199 on a11y-worker-5"]);
+  assert.match(status.buildSplit.lines.at(-1) ?? "", /^fleet builds agree on — Edge: 156\.0\.4314\.42 on a11y-worker-2, a11y-worker-3, a11y-worker-5; NVDA: 2026\.1 on a11y-worker-2, a11y-worker-3, a11y-worker-5$/);
   assert.equal(exitCodeOf(status), 3);
   assert.match(buildSplitAdvice(status.buildSplit), /fleet:patch/);
 });
 
 test("A11-183: an NVDA-only split fails", async () => {
   const status = await statusOver(fleetOf({ 2: {}, 3: { nvda: "2025.3" } }));
-  assert.deepEqual(status.buildSplit.lines, ["fleet BUILD SPLIT — NVDA: 2026.1 on a11y-worker-2; 2025.3 on a11y-worker-3"]);
+  assert.deepEqual(failureLines(status.buildSplit), ["fleet BUILD SPLIT — NVDA: 2026.1 on a11y-worker-2; 2025.3 on a11y-worker-3"]);
   assert.equal(exitCodeOf(status), 3);
 });
 
@@ -1495,12 +1499,12 @@ test("A11-183: a reachable box that reports no value for a field is `unreported`
   const probes = [reading(2, AGREED), reading(3, { ...AGREED, edge: undefined }), reading(4, AGREED)];
   const status = await statusOver(probes);
   assert.deepEqual(status.buildSplit.fields[0].unreported, [boxName(3)]);
-  assert.deepEqual(status.buildSplit.lines, ["fleet BUILD SPLIT — Edge: 156.0.4314.42 on a11y-worker-2, a11y-worker-4; unreported on a11y-worker-3"]);
+  assert.deepEqual(failureLines(status.buildSplit), ["fleet BUILD SPLIT — Edge: 156.0.4314.42 on a11y-worker-2, a11y-worker-4; unreported on a11y-worker-3"]);
   assert.equal(exitCodeOf(status), 3);
   // Every box silent on the field draws no values to disagree about and still fails: the shape #1997 and #2019 are about.
   const allSilent = buildSplitOf([reading(2, { ...AGREED, edge: undefined }), reading(3, { ...AGREED, edge: undefined })]);
   assert.equal(allSilent.failed, true);
-  assert.deepEqual(allSilent.lines, ["fleet BUILD SPLIT — Edge: unreported on a11y-worker-2, a11y-worker-3"]);
+  assert.deepEqual(failureLines(allSilent), ["fleet BUILD SPLIT — Edge: unreported on a11y-worker-2, a11y-worker-3"]);
 });
 
 test("A11-183: an unreachable box is not a split, and nothing answering is exit 1, not 3", async () => {
@@ -1519,7 +1523,7 @@ test("A11-183: a guard that reports stale, drift, absent or unknown on one box f
     const probes = [reading(2, AGREED), reading(3, { ...AGREED, guard }), reading(4, AGREED)];
     const status = await statusOver(probes);
     assert.deepEqual(status.buildSplit.updater.notHeld, [{ box: boxName(3), state }], JSON.stringify(guard));
-    assert.deepEqual(status.buildSplit.lines, [`fleet Edge updater NOT HELD — a11y-worker-3 ${state}`]);
+    assert.deepEqual(failureLines(status.buildSplit), [`fleet Edge updater NOT HELD — a11y-worker-3 ${state}`]);
     assert.equal(exitCodeOf(status), 3, `${state} stops captures`);
     assert.match(buildSplitAdvice(status.buildSplit), /Edge updater: it is not held/);
   }
@@ -1542,12 +1546,12 @@ test("A11-183: a worker that sends no edgeUpdaterGuard at all is UNREAD, named, 
   const split = buildSplitOf([reading(2, { ...AGREED, edge: "155.0.4283.62" }), reading(3, { ...AGREED, guard: undefined })]);
   assert.equal(split.failed, true);
   assert.match(split.lines[0], /^fleet BUILD SPLIT — Edge: /);
-  assert.match(split.lines[1], /^fleet Edge updater UNREAD/);
+  assert.match(split.lines.at(-1) ?? "", /^fleet Edge updater UNREAD/);
 });
 
 test("A11-183: a build split and an updater that is not held print one line each, the split first", () => {
   const split = buildSplitOf(fleetOf({ 2: {}, 3: { edge: "155.0.4283.62", guard: { state: "drift" } } }));
-  assert.equal(split.lines.length, 2);
+  assert.equal(failureLines(split).length, 2);
   assert.match(split.lines[0], /^fleet BUILD SPLIT — Edge: /);
   assert.equal(split.lines[1], "fleet Edge updater NOT HELD — a11y-worker-3 drift");
 });
