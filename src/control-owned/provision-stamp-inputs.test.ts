@@ -113,7 +113,8 @@ const EXEMPT: Record<string, string> = {
   "ansible/roles/worker/tasks/account.yml":
     "Account identity and auto-logon. No relationship to what a capture observes.",
   "ansible/roles/worker/tasks/firewall.yml":
-    "Network reachability (port rules, sshd). No relationship to what a capture observes.",
+    "Network reachability (port rules, sshd) and the outbound block on the Edge updater's image (A11-183), which keeps the "
+    + "browser on its pin rather than changing what a capture observes of it.",
   "ansible/roles/worker/tasks/powershell-native-image.yml":
     "NGEN of System.Management.Automation (#2672): changes how fast powershell.exe STARTS, never what a "
     + "capture hears. It reads before it writes and names its assembly in the task file, not in "

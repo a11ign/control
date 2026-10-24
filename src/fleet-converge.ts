@@ -421,7 +421,9 @@ export function recapOf(result: ConvergeResult): string {
 /** The ONE call that wakes the orchestrator, and only for a result that needs a decision. Never retried: exit 2 is QUEUED, not a failure. */
 export function wakeMessage(result: ConvergeResult, row?: number): string | null {
   if (result.status === "ok") return null;
-  const why = result.status === "unknown" ? "an UNKNOWN failure" : "a known cause that exhausted its attempts";
+  const why = result.status === "unknown" ? "an UNKNOWN failure"
+    : result.steps.some((step) => step.step === "status" && step.outcome === "failed") ? "the fleet did not converge (fleet:status exited 3)"
+      : "a known cause that exhausted its attempts";
   const where = row === undefined ? "" : ` (row #${row})`;
   return `fleet-converge${where} ended ${result.status.toUpperCase()}: ${why}. ${result.reason ?? ""} The result is in ${RESULT_PATH}.`;
 }

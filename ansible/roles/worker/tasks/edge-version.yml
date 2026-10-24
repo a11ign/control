@@ -335,12 +335,14 @@
           # By prefix: the set of tasks grew once already (BrowserReplacementTask).
           foreach ($t in @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
             $changed = $false
+            # Stop BEFORE disable: Disable-ScheduledTask does not terminate an instance already running
+            # (a11y-worker-5, 2026-08-25). A task that cannot be stopped is still disabled: each has its own turn.
             try {
-              # Stop BEFORE disable: Disable-ScheduledTask does not terminate an instance already running
-              # (a11y-worker-5, 2026-08-25).
               if ($t.State -eq 'Running') { $changed = $true; Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop }
+            } catch { $changed = $true; $failed += "task:$($t.TaskName): stop: $($_.Exception.Message)" }
+            try {
               if ($t.State -ne 'Disabled') { $changed = $true; Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop | Out-Null }
-            } catch { $changed = $true; $failed += "task:$($t.TaskName): $($_.Exception.Message)" }
+            } catch { $changed = $true; $failed += "task:$($t.TaskName): disable: $($_.Exception.Message)" }
             if ($changed) { $reenabled += "task:$($t.TaskName)" }
           }
           foreach ($name in $services) {
@@ -366,7 +368,8 @@
           # tasks were Disabled and whose service was Stopped. Any such process is the updater working, so it is stopped and written down.
           foreach ($p in @(Get-Process -Name 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
             $reenabled += "process:$($p.ProcessName)"
-            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { $failed += "process:$($p.ProcessName): $($_.Exception.Message)" }
+            # One that exited between the listing and the stop is gone, which is what was wanted, and not a failure.
+            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { $failed += "process:$($p.ProcessName): $($_.Exception.Message)" } }
           }
           $record = '{{ edge_guard_dir }}\edge-updater-guard.json'
           # READ THE PREVIOUS RECORD BEFORE WRITING THIS ONE (a11ign#5048). `reenabled` is THIS run's, so a clean run
@@ -387,9 +390,12 @@
             $entry.lastReenabled = @($previous.lastReenabled)
           }
           # Written to a sibling and moved over, so a reader never sees half a record.
-          $json = $entry | ConvertTo-Json -Depth 3
-          Set-Content -LiteralPath "$record.tmp" -Value $json -Encoding UTF8
-          Move-Item -LiteralPath "$record.tmp" -Destination $record -Force
+          # A record that cannot be written is the failure this script was rewritten for: it must end the task non-zero, not age quietly.
+          try {
+            $json = $entry | ConvertTo-Json -Depth 3
+            Set-Content -LiteralPath "$record.tmp" -Value $json -Encoding UTF8 -ErrorAction Stop
+            Move-Item -LiteralPath "$record.tmp" -Destination $record -Force -ErrorAction Stop
+          } catch { exit 1 }
           # Non-zero when anything stayed on, so the task's `LastTaskResult` says so too and the closing assertion can read it.
           if ($failed.Count -gt 0) { exit 1 }
 
@@ -451,7 +457,8 @@
       $g = Get-ScheduledTask -TaskName $Guard -ErrorAction SilentlyContinue
       if (-not $g) { $wrong += "guard task $Guard is absent" }
       elseif ($g.State -eq 'Disabled') { $wrong += "guard task $Guard is Disabled, expected enabled" }
-      else {
+      elseif (-not $Ansible.CheckMode) {
+        # Under --check this stays a read: running the guard changes the box (the registry, the services, the processes).
         # A guard that is registered but cannot do its work is not a hold: on 2026-10-24 it was registered on every box and failed on
         # twelve, as SYSTEM, with a record days old (A11-183). So RUN it, as the task, and require a newer record, result 0 and nothing
         # it could not change. The wait is bounded; a guard that never finishes is a failure by name.

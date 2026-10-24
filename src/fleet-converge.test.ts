@@ -218,6 +218,7 @@ test("A11-183: fleet:status exiting 3 (a build split, or an updater not held) is
   assert.equal(result.steps.find((step) => step.step === "status")?.outcome, "failed");
   assert.equal(result.reason, `fleet:status exited 3: ${split} | ${notHeld}`);
   assert.match(result.fleetStatus ?? "", /BUILD SPLIT/, "the split is kept on the result for the row's post");
+  assert.match(wakeMessage(result) ?? "", /the fleet did not converge \(fleet:status exited 3\)/, "and the wake does not claim attempts were exhausted");
 });
 
 test("A11-183: fleet:status exiting 1 (nothing answered) stays `unknown`, and a clean 0 stays ok (the controls for the exit-3 case)", async () => {

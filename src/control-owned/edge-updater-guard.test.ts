@@ -116,11 +116,12 @@ function scriptChecks(text: string): Array<[string, boolean]> {
       !script.includes("Get-Process -Name 'MicrosoftEdgeUpdate*'") || !/Stop-Process -Id \$p\.Id -Force/.test(script)],
     ["the first failure aborts the run before the record is written", /\$ErrorActionPreference = 'Stop'/.test(script)],
     ["an item is not handled on its own: a task, service or process failure is not caught and recorded",
-      (script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length < 4],
+      (script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length < 5],
     ["the record does not say what could not be changed", !/failed = @\(\$failed\)/.test(script)],
     ["the record is written before the items are handled", script.indexOf("Set-Content") < script.lastIndexOf("$failed += ")],
     ["the script does not exit non-zero when something stayed on",
-      !/Move-Item[^\n]*\n\s*if \(\$failed\.Count -gt 0\) \{ exit 1 \}\s*$/.test(script)],
+      !/\} catch \{ exit 1 \}\s*(#[^\n]*\s*)*if \(\$failed\.Count -gt 0\) \{ exit 1 \}\s*$/.test(script.replace(/^\s*#.*$/gm, ""))],
+    ["a record that cannot be written ends the task zero", !/Move-Item[^\n]*-ErrorAction Stop\s*\} catch \{ exit 1 \}/.test(script)],
     ["the record is not written with checkedAt and reenabled",
       !script.includes(RECORD) || !script.includes("checkedAt") || !script.includes("reenabled")],
     ["the record is not written atomically", !script.includes("Move-Item")],
@@ -142,6 +143,8 @@ function closingAssertionChecks(text: string): Array<[string, boolean]> {
     ["the closing assertion does not require the guard task",
       !closing.includes(`Guard: ${GUARD_TASK_NAME}`) || !/Get-ScheduledTask -TaskName \$Guard/.test(closing)],
     ["the closing assertion does not start the guard", !/Start-ScheduledTask -TaskName \$Guard/.test(closing)],
+    // `win_powershell` runs under --check, and running the guard changes the box: the registry, the services and the processes.
+    ["the closing assertion runs the guard under --check", !/elseif \(-not \$Ansible\.CheckMode\) \{[\s\S]*Start-ScheduledTask -TaskName \$Guard/.test(closing)],
     ["the closing assertion does not require a record newer than the start",
       !/\(\[datetime\]\$r\.checkedAt\)\.ToUniversalTime\(\) -gt \$started\)/.test(closing)],
     ["the closing assertion does not wait for the guard with a bound", !/\$deadline = \(Get-Date\)\.AddSeconds\(120\)/.test(closing)],
@@ -237,7 +240,7 @@ test("control: a guard that leaves the updater process running FAILS", () => {
 test("the record is written on a failing path: nothing aborts the run, every item is caught, and the record says what could not be changed", () => {
   const script = guardScript(TASKS);
   assert.doesNotMatch(script, /\$ErrorActionPreference = 'Stop'/);
-  assert.equal((script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length, 4, "one catch each for the task, the service's stop, its start type and the process");
+  assert.equal((script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length, 5, "one catch each for the task's stop and its disable, the service's stop and its start type, and the process");
   assert.ok(script.indexOf("Set-Content") > script.lastIndexOf("$failed += "), "the record is written after every item had its turn");
   assert.match(script, /failed = @\(\$failed\)/);
 });
@@ -245,14 +248,23 @@ test("the record is written on a failing path: nothing aborts the run, every ite
 test("control: a guard under `$ErrorActionPreference = 'Stop'`, or one that does not catch an item, FAILS", () => {
   const aborting = guardViolations(mutatedGuard(["$ErrorActionPreference = 'Continue'", "$ErrorActionPreference = 'Stop'"]));
   assert.ok(aborting.includes("the first failure aborts the run before the record is written"), aborting.join("|"));
-  const uncaught = guardViolations(mutatedGuard(["catch { $changed = $true; $failed += \"task:", "catch { $changed = $true; $other += \"task:"]));
+  const uncaught = guardViolations(mutatedGuard(["catch { $changed = $true; $failed += \"task:$($t.TaskName): disable:", "catch { $changed = $true; $other += \"task:$($t.TaskName): disable:"]));
   assert.ok(uncaught.includes("an item is not handled on its own: a task, service or process failure is not caught and recorded"), uncaught.join("|"));
   const silent = guardViolations(mutatedGuard(["reenabled = @($reenabled); failed = @($failed) }", "reenabled = @($reenabled) }"]));
   assert.ok(silent.includes("the record does not say what could not be changed"), silent.join("|"));
 });
 
 test("the guard exits non-zero when something stayed on, after the record is written", () => {
-  assert.match(guardScript(TASKS), /Move-Item[^\n]*\n\s*if \(\$failed\.Count -gt 0\) \{ exit 1 \}\s*$/);
+  assert.match(guardScript(TASKS), /\} catch \{ exit 1 \}\s*if \(\$failed\.Count -gt 0\) \{ exit 1 \}\s*$/);
+});
+
+test("control: a record that cannot be written and ends the task 0 FAILS (the failure that made the old record go stale unseen)", () => {
+  const v = guardViolations(mutatedGuard(["} catch { exit 1 }", "} catch { }"]));
+  assert.ok(v.includes("a record that cannot be written ends the task zero"), v.join("|"));
+});
+
+test("a process that exited between the listing and the stop is not a failure", () => {
+  assert.match(guardScript(TASKS), /catch \{ if \(Get-Process -Id \$p\.Id -ErrorAction SilentlyContinue\) \{ \$failed \+= /);
 });
 
 test("control: a guard that exits 0 whatever stayed on FAILS", () => {
@@ -289,6 +301,7 @@ test("control: a closing assertion that never starts the guard, ignores its resu
     ["@($fresh.failed).Count -gt 0", "@($fresh.failed).Count -gt 99", "does not require an empty list of what the guard could not change"],
     ["$start -ne 4", "$start -ne $null", "does not require the registry start type"],
     ["$deadline = (Get-Date).AddSeconds(120)", "$deadline = [datetime]::MaxValue", "does not wait for the guard with a bound"],
+    ["elseif (-not $Ansible.CheckMode) {", "else {", "runs the guard under --check"],
   ];
   for (const [from, to, expected] of cases) {
     assert.match(guardViolations(mutatedClosing([from, to])).join("|"), new RegExp(expected), `"${from}" mutated was not noticed`);
