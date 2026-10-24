@@ -347,7 +347,9 @@
           # `LastTaskResult` 1 and a record days old, and nothing said so. Now a failure on one task, service or process is written down and
           # the rest still run, the record is always written, and the script exits non-zero when anything stayed on.
           $ErrorActionPreference = 'Continue'
-          $services = @('{{ worker_edge_updater_services | to_json }}' | ConvertFrom-Json)
+          # Cast to string[]: Windows PowerShell 5.1's ConvertFrom-Json emits a JSON array as ONE object, so the bare `@(... | ConvertFrom-Json)` made
+          # `$name` below the whole list ("edgeupdate edgeupdatem") and the registry path built from it did not exist (a11y-worker-11, 2026-10-24).
+          $services = [string[]]('{{ worker_edge_updater_services | to_json }}' | ConvertFrom-Json)
           $reenabled = @()
           $failed = @()
           # By prefix: the set of tasks grew once already (BrowserReplacementTask).

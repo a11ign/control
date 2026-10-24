@@ -121,6 +121,8 @@ function scriptChecks(text: string): Array<[string, boolean]> {
     ["the first failure aborts the run before the record is written", /\$ErrorActionPreference = 'Stop'/.test(script)],
     ["an item is not handled on its own: a task, service or process failure is not caught and recorded",
       (script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length < 5],
+    // Windows PowerShell 5.1 emits a JSON array as ONE object, so each service must be a string of its own (A11-183, a11y-worker-11).
+    ["the service list is not cast to string[], so 5.1 reads it as one name", !/\$services = \[string\[\]\]\('/.test(script)],
     ["the record does not say what could not be changed", !/failed = @\(\$failed\)/.test(script)],
     ["the record is written before the items are handled", script.indexOf("Set-Content") < script.lastIndexOf("$failed += ")],
     ["the script does not exit non-zero when something stayed on",
@@ -268,6 +270,11 @@ test("control: a guard under `$ErrorActionPreference = 'Stop'`, or one that does
   assert.ok(uncaught.includes("an item is not handled on its own: a task, service or process failure is not caught and recorded"), uncaught.join("|"));
   const silent = guardViolations(mutatedGuard(["reenabled = @($reenabled); failed = @($failed) }", "reenabled = @($reenabled) }"]));
   assert.ok(silent.includes("the record does not say what could not be changed"), silent.join("|"));
+});
+
+test("control: a service list read as one object (the 5.1 ConvertFrom-Json shape) FAILS", () => {
+  const v = guardViolations(mutatedGuard(["$services = [string[]](", "$services = @("]));
+  assert.ok(v.includes("the service list is not cast to string[], so 5.1 reads it as one name"), v.join("|"));
 });
 
 test("the guard exits non-zero when something stayed on, after the record is written", () => {
