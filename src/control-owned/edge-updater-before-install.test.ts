@@ -1,156 +1,167 @@
 /**
- * THE EDGE UPDATER IS STOPPED BEFORE ANYTHING THAT CAN STOP THE ROLE AT THE EDGE STEP (a11ign#4732).
+ * THE EDGE UPDATER IS FROZEN WHATEVER STOPS THE ROLE AT THE EDGE STEP (a11ign#4732, a11ign#4948, A11-205).
  *
- * `edge-version.yml` used to stop the updater AFTER "Install it". A box that stopped at the Edge step never
- * reached the two tasks that stop it, so it kept a live updater by construction. a11y-worker-7, -8 and -9 were
- * those boxes: Edge moved to 154 and then 155 on its own, Chromium's MSI declined the 152 pin and still
- * logged success, `--rename-chrome-exe` threw, and the role stopped. Worker 11, whose updater was off, held the
- * pin. The bootstrap already stopped the updater first (`edge-pin-parity.test.ts` pins that copy); this pins
- * the role.
+ * `edge-version.yml` used to stop the updater with two tasks placed BEFORE "Install it", and again with the same pair AFTER the rename, because a box that
+ * stopped at the Edge step never reached tasks placed after it (a11y-worker-7, -8 and -9: Edge moved to 154 and then 155 on its own, the MSI declined the
+ * 152 pin and still logged success, `--rename-chrome-exe` threw, and the role stopped with a live updater) and because the installer re-registers what it was
+ * told to stop (twelve boxes on 2026-10-11). Two copies of the same pair, kept in order by this test.
  *
- * ONE STOP BEFORE THE INSTALL IS NOT ENOUGH (a11ign#4948): the installer re-registers the updater as it runs, so
- * the same pair runs again after the rename, and the second run is pinned too.
+ * With the freeze that is ONE thing: the install is a block, and the role's `freeze.yml` is its `always:`, so a failed download, a refused downgrade, a failed
+ * install and a failed rename each leave the updater frozen. The installer is the one thing that lifts a lever (it renames the updater's binaries back, so the
+ * MSI's own `MicrosoftEdgeUpdate.exe /install` can run), and the `always:` puts it back.
  *
- * The line `edge-pin-parity.test.ts` and this file draw: that one holds two COPIES of a pin equal, this one
- * holds the ORDER of one file's tasks. The order is read off the file's own top-level `- name:` lines, so no
- * YAML parser is needed (this package has no dependencies, ADR 0012).
+ * The line `edge-pin-parity.test.ts` and this file draw: that one holds two COPIES of a pin equal, this one holds the ORDER of one file's tasks. The YAML is
+ * parsed by PyYAML in a subprocess because this package takes no npm dependency (ADR 0012).
  *
- * THE NEGATIVE CONTROL IS THE ASSERTION ITSELF, run on the same file with the two updater blocks put back
- * where they were, so the check is shown to fail on the defect rather than pass on a file that cannot
- * contain it.
+ * THE NEGATIVE CONTROL IS THE ASSERTION ITSELF, run on the same file with one property mutated, so the check is shown to fail on the defect.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const TASKS = readFileSync(
-  fileURLToPath(new URL("../../ansible/roles/worker/tasks/edge-version.yml", import.meta.url)), "utf8");
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Task = Record<string, any>;
+const PATH = fileURLToPath(new URL("../../ansible/roles/worker/tasks/edge-version.yml", import.meta.url));
+const TASKS: Task[] = JSON.parse(execFileSync("python3", ["-I", "-c",
+  "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", PATH], { encoding: "utf8" }));
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
-const UPDATER_TASKS = [
-  "Stop and disable EVERY Edge-updater scheduled task",
-  "Stop and disable the updater's services",
-  // A process already running outlives its tasks and services being disabled (a11y-worker-11, 2026-10-24, A11-183): it was installing 156
-  // itself while the role's MSI ran, and the MSI's own `MicrosoftEdgeUpdate.exe /install` failed with 1722.
-  "Stop any Edge-updater process that is already running",
-];
-/** Every task after which the role can stop at the Edge step, so every one the updater must precede. */
-const STEPS_THAT_CAN_STOP_THE_ROLE = [
+const INSTALL_BLOCK = "Install the pinned Edge when the box is not on it, and leave the updater frozen whatever happens";
+/** The block's tasks in the order they must run: each can stop the role, so each must have the freeze behind it. */
+const INSTALL_ORDER = [
+  "Freeze the box before anything is fetched, so the updater cannot start between here and the install",
   "Fetch the pinned installer",
+  "Refuse to upgrade a worker that is mid-capture",
+  "Stop Edge, or the installer cannot replace the launcher",
+  "Stop any Edge-updater process that is already running, so the pinned MSI's own installer does not meet it",
   "Refuse a DOWNGRADE unless it was explicitly authorised, and say which remedy applies",
+  "Let the installer run the updater it brings, by naming the updater's binaries as they were",
   "Install it",
   "Complete the launcher rename, which is what actually makes the new build the running one",
 ];
-const CLOSING_ASSERTION = "Refuse to call this provisioned unless Edge is the pinned build and the updater is off";
-const RENAME = "Complete the launcher rename, which is what actually makes the new build the running one";
-/**
- * The same pair, repeated after the install (a11ign#4948). The installer re-registers the updater as it runs, so the
- * early pair alone leaves a box that installed Edge this run with a live updater at the closing assertion.
- */
-const LATE_UPDATER_TASKS = [
-  "Stop and disable EVERY Edge-updater scheduled task again, after the install",
-  "Stop and disable the updater's services again, after the install",
-];
+const CLOSING_ASSERTION = "Refuse to call this provisioned unless Edge is the pinned build and the updater is frozen";
+const GUARD = "Register the guard that REPORTS when the Edge updater is not frozen";
 
-const taskHeads = (text: string) => [...text.matchAll(/^- name: (.+)$/gm)].map((m) => m[1].trim());
+const heads = (tasks: Task[]) => tasks.map((task) => String(task.name));
+const blockOf = (tasks: Task[]): Task | undefined => tasks.find((task) => task.name === INSTALL_BLOCK);
+const isFreeze = (task: Task | undefined): boolean => {
+  const include = task?.["ansible.builtin.include_tasks"];
+  return include?.file === "freeze.yml";
+};
 
-/** The text of one task: from its `- name:` line to the next top-level task, or to the end. */
-function taskBlock(text: string, name: string): string {
-  const start = text.indexOf(`- name: ${name}\n`);
-  assert.ok(start >= 0, `edge-version.yml has no task named "${name}": this test examines nothing`);
-  const next = text.indexOf("\n- name: ", start + 1);
-  return text.slice(start, next < 0 ? text.length : next + 1);
+/** The block's tasks run in the order each can stop the role, every one found, none before the one it must follow. */
+function orderViolations(inner: Task[]): string[] {
+  const at = (name: string) => heads(inner).indexOf(name);
+  const missing = INSTALL_ORDER.filter((name) => at(name) < 0).map((name) => `task not found in the block: ${name}`);
+  const misordered = INSTALL_ORDER.slice(1).filter((name, i) => at(INSTALL_ORDER[i]) >= 0 && at(name) >= 0 && at(name) < at(INSTALL_ORDER[i]))
+    .map((name) => `"${name}" comes before "${INSTALL_ORDER[INSTALL_ORDER.indexOf(name) - 1]}"`);
+  return [...missing, ...misordered];
 }
 
-/** Which of the tasks the updater must precede come at or before an updater task. Empty means the order holds. */
-function updaterOrderViolations(text: string): string[] {
-  const heads = taskHeads(text);
-  const at = (name: string) => heads.indexOf(name);
-  const missing = [...UPDATER_TASKS, ...STEPS_THAT_CAN_STOP_THE_ROLE, CLOSING_ASSERTION].filter((n) => at(n) < 0);
-  if (missing.length > 0) return [`task not found: ${missing.join("; ")}`];
-  return UPDATER_TASKS.flatMap((updater) =>
-    STEPS_THAT_CAN_STOP_THE_ROLE.filter((step) => at(updater) > at(step))
-      .map((step) => `"${updater}" comes AFTER "${step}"`));
+/** Where the freeze sits in the block: first (before the download), last in `always:`, and nowhere else. */
+function placementViolations(block: Task): string[] {
+  const inner: Task[] = block.block ?? [];
+  const always: Task[] = block.always ?? [];
+  return [
+    always.some(isFreeze) ? "" : "the freeze is not in the block's `always:`, so a run that stops at a step leaves the updater live",
+    always.length > 0 && !isFreeze(always[always.length - 1]) ? "something comes after the freeze in `always:` and could undo it" : "",
+    // The ONE freeze the block may hold is its first task, taken before the download so the updater cannot start between there and the install.
+    isFreeze(inner[0]) ? "" : "the block does not open with the freeze, so the updater is live through the download",
+    inner.slice(1).some(isFreeze) ? "the freeze is in the block itself, where a failure before it skips it" : "",
+  ].filter(Boolean);
 }
 
-/** The late pair sits after the rename and before the closing assertion. Empty means it holds. */
-function lateUpdaterViolations(text: string): string[] {
-  const heads = taskHeads(text);
-  const at = (name: string) => heads.indexOf(name);
-  const missing = [...LATE_UPDATER_TASKS, RENAME, CLOSING_ASSERTION].filter((n) => at(n) < 0);
-  if (missing.length > 0) return [`task not found: ${missing.join("; ")}`];
-  return LATE_UPDATER_TASKS.flatMap((late) => [
-    ...(at(late) <= at(RENAME) ? [`"${late}" comes BEFORE "${RENAME}"`] : []),
-    ...(at(late) >= at(CLOSING_ASSERTION) ? [`"${late}" comes AFTER the closing assertion`] : []),
-  ]);
+/** What is wrong with where the freeze sits, as a list. Empty means the updater is frozen whatever stops the install. */
+function freezeViolations(tasks: Task[]): string[] {
+  const block = blockOf(tasks);
+  if (!block) return ["the install block is not found"];
+  const heading = heads(tasks);
+  return [
+    ...orderViolations(block.block ?? []),
+    ...placementViolations(block),
+    tasks.slice(0, tasks.indexOf(block)).some(isFreeze) ? "the freeze runs BEFORE the install, which the installer then undoes (a11ign#4948)" : "",
+    heading.indexOf(CLOSING_ASSERTION) < heading.indexOf(INSTALL_BLOCK) ? "the closing assertion comes before the install" : "",
+    heading.indexOf(GUARD) < heading.indexOf(INSTALL_BLOCK) ? "the guard is registered before the install" : "",
+  ].filter(Boolean);
 }
 
-/** The file with the late pair deleted: the role as it stood before a11ign#4948. */
-function withoutLatePair(text: string): string {
-  return LATE_UPDATER_TASKS.reduce((rest, name) => rest.replace(taskBlock(text, name), ""), text);
-}
-
-/** The file with the late pair moved to sit just after the closing assertion. */
-function withLatePairAfterRefusal(text: string): string {
-  const blocks = LATE_UPDATER_TASKS.map((name) => taskBlock(text, name));
-  const without = blocks.reduce((rest, block) => rest.replace(block, ""), text);
-  const closing = taskBlock(without, CLOSING_ASSERTION);
-  return without.replace(closing, closing + blocks.join(""));
-}
-
-/** The file as it was before #4732: both updater blocks moved to sit just before the closing assertion. */
-function withUpdaterAfterInstall(text: string): string {
-  const blocks = UPDATER_TASKS.map((name) => taskBlock(text, name));
-  const without = blocks.reduce((rest, block) => rest.replace(block, ""), text);
-  const closing = `- name: ${CLOSING_ASSERTION}\n`;
-  assert.equal(without.split(closing).length, 2, "the closing assertion must appear exactly once");
-  return without.replace(closing, blocks.join("") + closing);
-}
-
-test("the updater's tasks and services come BEFORE every Edge step that can stop the role", () => {
-  assert.deepEqual(updaterOrderViolations(TASKS), [],
-    "a box that stops at one of these steps has a live updater, and a live updater moves Edge past the pin "
-    + "while the role is stopped (a11ign#4732)");
+test("the freeze is the install block's `always:`, and the block runs fetch, refusals, restore, install and rename in that order", () => {
+  assert.deepEqual(freezeViolations(TASKS), [],
+    "a box that stops at one of these steps has a live updater, and a live updater moves Edge past the pin while the role is stopped (a11ign#4732)");
 });
 
-test("the late pair sits after the rename and before the closing assertion (a11ign#4948)", () => {
-  assert.deepEqual(lateUpdaterViolations(TASKS), [],
-    "a box that installed Edge this run ends the install with a live updater, and the closing assertion refuses it");
+test("the early and the late pair that raced the updater are gone, and nothing in this file disables the updater's tasks by hand", () => {
+  for (const gone of ["Stop and disable EVERY Edge-updater scheduled task", "Stop and disable the updater's services", "Stop any Edge-updater process that is already running"]) {
+    assert.ok(!heads(TASKS).some((name) => name.startsWith(gone)), `${gone} is back: the freeze does it`);
+  }
+  assert.ok(!JSON.stringify(TASKS).includes("Disable-ScheduledTask"), "the guard reports; the freeze unregisters");
 });
 
-test("the closing assertion stays, and comes after the install and the updater", () => {
-  const heads = taskHeads(TASKS);
-  const closing = heads.indexOf(CLOSING_ASSERTION);
-  assert.ok(closing >= 0, "the task that refuses to call the box provisioned is gone");
-  for (const earlier of [...UPDATER_TASKS, ...LATE_UPDATER_TASKS, "Install it"]) {
-    assert.ok(heads.indexOf(earlier) < closing, `"${earlier}" must come before the closing assertion`);
+test("control: a block with no `always:`, a freeze outside it, or one before the install FAILS", () => {
+  const noAlways = clone(TASKS);
+  delete (blockOf(noAlways) as Task).always;
+  assert.match(freezeViolations(noAlways).join("|"), /not in the block's `always:`/);
+
+  const insideBlock = clone(TASKS);
+  const block = blockOf(insideBlock) as Task;
+  block.block.push(block.always[0]);
+  block.always = [];
+  assert.match(freezeViolations(insideBlock).join("|"), /not in the block's `always:`/);
+  assert.match(freezeViolations(insideBlock).join("|"), /in the block itself/, "a second freeze mid-block is not the always");
+
+  const notFirst = clone(TASKS);
+  const opening = blockOf(notFirst) as Task;
+  opening.block.push(opening.block.shift());
+  assert.match(freezeViolations(notFirst).join("|"), /does not open with the freeze/);
+
+  const before = clone(TASKS);
+  const beforeBlock = blockOf(before) as Task;
+  before.splice(before.indexOf(beforeBlock), 0, clone(beforeBlock.always[0]));
+  assert.match(freezeViolations(before).join("|"), /runs BEFORE the install/);
+
+  const undone = clone(TASKS);
+  (blockOf(undone) as Task).always.push({ name: "x", "ansible.builtin.debug": { msg: "after" } });
+  assert.match(freezeViolations(undone).join("|"), /something comes after the freeze/);
+
+  const wrongFile = clone(TASKS);
+  (blockOf(wrongFile) as Task).always[0]["ansible.builtin.include_tasks"].file = "policy.yml";
+  assert.match(freezeViolations(wrongFile).join("|"), /not in the block's `always:`/);
+});
+
+test("control: the installer's lift put after the install, or a step dropped, FAILS", () => {
+  const swapped = clone(TASKS);
+  const inner = (blockOf(swapped) as Task).block as Task[];
+  const lift = inner.findIndex((task) => task.name === INSTALL_ORDER[6]);
+  const install = inner.findIndex((task) => task.name === "Install it");
+  [inner[lift], inner[install]] = [inner[install], inner[lift]];
+  assert.match(freezeViolations(swapped).join("|"), /"Install it" comes before "Let the installer run the updater/);
+
+  for (const name of INSTALL_ORDER) {
+    const dropped = clone(TASKS);
+    const droppedBlock = blockOf(dropped) as Task;
+    droppedBlock.block = droppedBlock.block.filter((task: Task) => task.name !== name);
+    assert.match(freezeViolations(dropped).join("|"), /task not found in the block/, name);
   }
 });
 
-test("control: the late-pair assertion FAILS when the late pair is deleted", () => {
-  const before = withoutLatePair(TASKS);
-  assert.notEqual(before, TASKS, "the mutation changed nothing, so it controls nothing");
-  assert.match(lateUpdaterViolations(before).join(" "), /task not found/);
+test("control: a closing assertion or a guard ahead of the install FAILS, and a file with no install block is refused, not passed", () => {
+  const early = clone(TASKS);
+  const closing = early.splice(heads(early).indexOf(CLOSING_ASSERTION), 1)[0];
+  early.unshift(closing);
+  assert.match(freezeViolations(early).join("|"), /closing assertion comes before the install/);
+  const guardEarly = clone(TASKS);
+  const guard = guardEarly.splice(heads(guardEarly).indexOf(GUARD), 1)[0];
+  guardEarly.unshift(guard);
+  assert.match(freezeViolations(guardEarly).join("|"), /guard is registered before the install/);
+  assert.deepEqual(freezeViolations(TASKS.filter((task) => task.name !== INSTALL_BLOCK)), ["the install block is not found"]);
 });
 
-test("control: the late-pair assertion FAILS when the late pair moves after the refusal", () => {
-  const after = withLatePairAfterRefusal(TASKS);
-  assert.deepEqual([...taskHeads(after)].sort(), [...taskHeads(TASKS)].sort(), "the mutation lost or added a task");
-  assert.ok(lateUpdaterViolations(after).some((v) => v.includes("AFTER the closing assertion")),
-    "the late-pair assertion passed with the pair after the refusal, so it cannot see the defect");
-});
-
-test("control: the same assertion FAILS on the file with the updater blocks put back after the install", () => {
-  const before = withUpdaterAfterInstall(TASKS);
-  assert.notEqual(before, TASKS, "the mutation changed nothing, so it controls nothing");
-  assert.deepEqual([...taskHeads(before)].sort(), [...taskHeads(TASKS)].sort(), "the mutation lost or added a task");
-  const violations = updaterOrderViolations(before);
-  assert.ok(violations.length > 0, "the order assertion passed on the pre-#4732 order, so it cannot see the defect");
-  assert.ok(violations.some((v) => v.includes("AFTER \"Install it\"")),
-    `the violations did not name the install: ${violations.join(" | ")}`);
-});
-
-test("control: a file missing an updater task is refused, not passed", () => {
-  const without = TASKS.replace(taskBlock(TASKS, UPDATER_TASKS[0]), "");
-  assert.match(updaterOrderViolations(without).join(" "), /task not found/);
+test("the installer lifts exactly one lever and says so: the updater binaries it brings are named as they were, then frozen again in `always:`", () => {
+  const lift = ((blockOf(TASKS) as Task).block as Task[]).find((task) => task.name === INSTALL_ORDER[6]) as Task;
+  const script = String(lift["ansible.windows.win_powershell"].script);
+  assert.match(script, /Where-Object \{ \$_\.Name -like "MicrosoftEdgeUpdate\*\.exe\$Suffix" \}/);
+  assert.match(script, /Move-Item -LiteralPath \$f\.FullName -Destination \$original -Force/);
+  assert.match(String(lift.when), /!= worker_edge_version/, "only a box that is installing pays for it");
+  assert.doesNotMatch(script, /Start-Service|Enable-ScheduledTask|Register-ScheduledTask|Set-ItemProperty/, "no service, task or policy lever is lifted for an install");
 });

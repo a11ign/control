@@ -51,7 +51,7 @@
  *
  * THE VALUE IS A FACT ABOUT A MACHINE, not about this repository, so it does not follow a rename of the
  * product. It is `control` because the plane's checkout IS the control repository (a11ign#5306), cloned at
- * `/root/control`, and `ansible/patch-schedule.yml`'s `patch_checkout` names that same path. Changing it
+ * `/root/control`, and `ansible/files/a11y-fleet-freeze-daily.service`'s `WorkingDirectory` is under that same path. Changing it
  * here asserts that the directory on the control plane has actually been renamed — which is a thing
  * somebody does with `mv`, not with a sweep.
  */

@@ -13,7 +13,9 @@
 # honoured. Provisioning set them, this role read them back correctly, and a11y-worker-2 updated itself
 # anyway. A read-back that can only prove a value is STORED is not proof that anything obeys it.
 #
-# Hence: install the build we want, and stop the updater by the two levers that do work here.
+# Hence: install the build we want, and FREEZE the updater by the levers that do work here (`freeze.yml`): its services disabled, its scheduled tasks
+# unregistered, its processes stopped, its binaries renamed and its network blocked. A fleet moves only when a person edits `deploy-pins.json` and runs the
+# deliberate upgrade (A11-205, docs/adr/0001), so "the updater followed forward" is no longer something a box does by itself.
 
 - name: What Edge is actually installed
   # From the binary, never from the registry's "installed version" -- the same rule the worker itself now
@@ -43,266 +45,237 @@
       {{ '— already the pinned build' if (edge_installed.output | default([]) | first | default('', true)) == worker_edge_version
          else '— would install ' ~ worker_edge_version }}
 
-- name: Stop and disable EVERY Edge-updater scheduled task
-  # THESE TWO TASKS COME BEFORE ANY TASK THAT CAN STOP THE ROLE AT THE EDGE STEP, and the order is the fix
-  # (a11ign#4732). They used to sit after "Install it", so a box that stopped at the Edge step -- the download,
-  # the downgrade refusal, the install, the rename -- never reached them and kept a live updater. a11y-worker-7,
-  # -8 and -9 were exactly that: Edge moved to 154 and then 155 on its own, Chromium's MSI declined the 152 pin
-  # while logging success, `--rename-chrome-exe` threw, and the role stopped with the updater still running.
-  # Worker 11, whose updater was off, held the pin. `edge-updater-before-install.test.ts` pins the order.
-  #
-  # BY PREFIX, NOT BY NAME. The first version named the two tasks that were known -- Core and UA -- and a
-  # freshly installed guest turned out to carry a third, `MicrosoftEdgeUpdateBrowserReplacementTask`, sitting
-  # `Ready` while the other two were correctly disabled. A task called "browser replacement" is precisely the
-  # thing this concern exists to stop, and an enumerated list could not see it.
-  #
-  # Same shape as `edgePolicy` reporting two policy values, and as the probe flags that had to be forwarded
-  # by prefix rather than by name. When the set can grow underneath you, match the set.
-  become: true
-  ansible.windows.win_shell: |
-    $tasks = Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue
-    if (-not $tasks) { "none found"; exit 0 }
-    foreach ($t in $tasks) {
-      # STOP BEFORE DISABLE, and this is the step that was missing. `Disable-ScheduledTask` marks a task
-      # so it will not START again; it does not terminate an instance already RUNNING. Measured on
-      # a11y-worker-5, 2026-08-25: the final verify refused with "scheduled task
-      # MicrosoftEdgeUpdateTaskMachineCore is Running, expected Disabled" — on the one guest in the fleet
-      # that had updated itself past the pin.
+- name: Install the pinned Edge when the box is not on it, and leave the updater frozen whatever happens
+  # THE FREEZE IS IN `always:`, SO A RUN THAT STOPS AT ANY STEP BELOW STILL LEAVES THE UPDATER OFF (a11ign#4732, A11-205). The updater used to be stopped
+  # by two tasks placed before the install, and again after it (a11ign#4948), because the installer re-registers what it was told to stop. Those tasks
+  # disabled; the freeze UNREGISTERS the tasks, disables the services, stops the processes, renames the binaries and blocks their network (`freeze.yml`),
+  # and one `always:` covers a failed download, a refused downgrade, a failed install and a failed rename alike. `edge-updater-before-install.test.ts`
+  # holds it there.
+  block:
+    - name: Freeze the box before anything is fetched, so the updater cannot start between here and the install
+      # THE SERVICES AND THE TASKS STAY LIVE UNTIL THE `always:` BELOW OTHERWISE, and the download is ~150 MB on a box that may be mid-corpus: long enough for the hourly
+      # `MicrosoftEdgeUpdate.exe /ua` to start the very process the pinned MSI's own installer collides with (error 1722, A11-183, a11y-worker-11). The two tasks that
+      # stopped it before the install are the freeze now; the `always:` is for the run that stops half way. Only a box that is installing pays for it twice.
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      ansible.builtin.include_tasks:
+        file: freeze.yml
+        apply:
+          tags: [edge, freeze]
+
+    - name: Fetch the pinned installer
+      # Only when it would change something: this is a ~150 MB download onto a box that may be mid-corpus.
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      become: true
+      ansible.windows.win_get_url:
+        url: "{{ worker_edge_msi_url }}"
+        dest: "{{ worker_edge_msi_path }}"
+        checksum: "{{ worker_edge_msi_sha256 }}"
+        checksum_algorithm: sha256
+        # A version claim that rests on a hostname is not a version claim. The checksum is what makes
+        # "the fleet runs 151.0.4129.101" a fact rather than a hope.
+        force: false
+
+    - name: Refuse to upgrade a worker that is mid-capture
+      # Installing means stopping Edge, and stopping Edge under a running capture destroys 12-520 s of real
+      # screen-reader work and writes a fault the run reads as a flaky guest. `ready` is the field to ask --
+      # `ok` only ever meant "the HTTP server is answering".
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      delegate_to: localhost
+      become: false
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:8765/health"
+        return_content: true
+      register: edge_worker_health
+      failed_when: edge_worker_health.json.busy | default(true)
+
+    - name: Stop Edge, or the installer cannot replace the launcher
+      # THE REASON THIS TASK EXISTS, measured on a11y-worker-3: `win_package` reported success, the version
+      # directory 151.0.4129.101 was created, and `msedge.exe` stayed at .93 -- because 8 msedge processes were
+      # holding it. The worker keeps a browser alive between captures on purpose (`A11Y_REUSE_BROWSER`, which
+      # took `windowsActivate` from 8.9 s to 3.6 s), so an idle worker still has Edge running.
       #
-      # So this is not a tidy-up, it is the mechanism. A run that disables a live updater and walks away
-      # leaves it to finish the update it was already performing, which is precisely the drift the pin
-      # exists to prevent, arriving in the window between disabling and believing it.
-      if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
-      if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
-      "$($t.TaskName) -> $((Get-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath).State)"
-    }
-  changed_when: true
+      # An install that reports success and changes nothing is the worst outcome available here: it is the
+      # "green result vouching for an inert remedy" shape, applied to the browser the whole corpus is keyed on.
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      become: true
+      ansible.windows.win_shell: taskkill /im msedge.exe /f
+      failed_when: false   # "not found" is success here; the verify at the end is the judge
+      changed_when: true
 
-- name: Stop and disable the updater's services
-  become: true
-  ansible.windows.win_service:
-    name: "{{ item }}"
-    state: stopped
-    start_mode: disabled
-  loop: "{{ worker_edge_updater_services }}"
-  failed_when: false
+    - name: Stop any Edge-updater process that is already running, so the pinned MSI's own installer does not meet it
+      # A PROCESS ALREADY RUNNING OUTLIVES THE FREEZE THAT HAS NOT RUN YET, and on 2026-10-24 that was the failure (A11-183). On a11y-worker-11 two
+      # `MicrosoftEdgeUpdate.exe` processes (started minutes before, by nothing this role could see) were downloading and installing 156.0.4314.42 THEMSELVES,
+      # so the pinned MSI's own `MicrosoftEdgeUpdate.exe /install` failed with 0x80040707, "Another Microsoft application is being installed or updated", and Windows
+      # Installer returned 1722. An update the updater runs for itself is the drift this role exists to stop, and it also races the install. The freeze stops
+      # processes too, but in the `always:` below, which is after the install; this is the stop the install needs before it.
+      #
+      # BY PREFIX: the updater's own image and the installer it stages (`MicrosoftEdge_X64_<new>_<old>.exe`). Stopping an installer the updater began is safe here
+      # because the next tasks install the pinned build over whatever it left, from a checksummed MSI.
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      become: true
+      ansible.windows.win_shell: |
+        $found = @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)
+        foreach ($p in $found) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+        if ($found) { Start-Sleep -Seconds 3 }
+        $left = @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)
+        "stopped $($found.Count) updater process(es); $($left.Count) left"
+      changed_when: true
 
-- name: Stop any Edge-updater process that is already running
-  # THE TASKS AND THE SERVICES BEING DISABLED DOES NOT STOP A PROCESS ALREADY RUNNING, and on 2026-10-24 that was the failure (A11-183).
-  # On a11y-worker-11 both services read `Stopped` and `Disabled` and both tasks `Disabled`, yet two `MicrosoftEdgeUpdate.exe` processes (started
-  # minutes before, by nothing this role could see) were downloading and installing 156.0.4314.42 THEMSELVES, so the pinned MSI's own
-  # `MicrosoftEdgeUpdate.exe /install` failed with 0x80040707, "Another Microsoft application is being installed or updated", and Windows
-  # Installer returned 1722. An update the updater runs for itself is the drift this role exists to stop, and it also races the install.
-  #
-  # BY PREFIX, like the tasks: the updater's own image and the installer it stages (`MicrosoftEdge_X64_<new>_<old>.exe`). Stopping an installer
-  # the updater began is safe here because the next task installs the pinned build over whatever it left, from a checksummed MSI.
-  become: true
-  ansible.windows.win_shell: |
-    $found = @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)
-    foreach ($p in $found) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-    if ($found) { Start-Sleep -Seconds 3 }
-    $left = @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)
-    "stopped $($found.Count) updater process(es); $($left.Count) left"
-  changed_when: true
+    - name: Refuse a DOWNGRADE unless it was explicitly authorised, and say which remedy applies
+      # THIS COMMENT USED TO OPEN "EDGE CANNOT BE DOWNGRADED ON THIS FLEET", AND IT CONTRADICTED THE REMEDY
+      # LISTED TWELVE LINES BELOW IT. Read what was actually measured: the 2026-08-25 run installed the MSI
+      # with `/quiet /norestart` and NO `ALLOWDOWNGRADE`. That establishes a PLAIN install will not go
+      # backwards -- which is the precise case the flag exists to override -- and says nothing whatever about
+      # the flag. A measurement that did not exercise the remedy cannot rule the remedy out.
+      #
+      # `--force-uninstall` failing is a separate and genuine finding, and it is why REMOVING Edge is not a
+      # route. Rolling back over the top is a different operation.
+      #
+      # So the refusal stands by DEFAULT and is now liftable: `-e worker_edge_allow_downgrade=true` performs
+      # remedy (2) through this role instead of leaving it as a shell command for a human to type on the box.
+      #
+      # Measured on a11y-worker-5, 2026-08-25, in this order:
+      #
+      #   Edge had auto-updated to .107 against a pin of .101
+      #   win_package ran the .101 MSI and reported ok — no .101 directory appeared, because Chromium's
+      #     installer declines to install over a newer build
+      #   setup.exe --uninstall --system-level --force-uninstall reported an exit code and removed NOTHING;
+      #     .107 was still the only build on disk afterwards. Windows blocks uninstalling Edge outside the
+      #     EEA, so this is a platform decision rather than a flag we are missing.
+      #
+      # So the role cannot fix a forward drift, and the honest thing is to say so with the remedies rather
+      # than fail on a confusing symptom ("the MSI did not lay down 151.0.4129.101", which is true and does
+      # not explain itself). Both remedies are decisions a person has to make:
+      #
+      #   REIMAGE the guest, which is destructive and restores the pin; or
+      #   MOVE THE PIN forward to the newer build — which invalidates every cached corpus capture, because
+      #     `worker_edge_version` is part of the capture cache key.
+      #
+      # Meanwhile nothing silently contaminates a corpus: `capture-real-pages.mjs` refuses to run across a
+      # fleet whose browsers disagree, checked before the run AND after it.
+      when:
+        - (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+        - (edge_installed.output | default([]) | first | default('0', true)) is version(worker_edge_version, '>')
+        - not (worker_edge_allow_downgrade | bool)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is on Edge {{ edge_installed.output | default([]) | first | default('?', true) }},
+          NEWER than the pinned {{ worker_edge_version }}, and Chromium will not install over a newer build.
+          THREE remedies, cheapest first — and this message used to name the most expensive one first, which
+          sent an operator to reimage a machine that one flag fixes.
+          (1) FOLLOW IT — BUT CHECK THE BUILD EXISTS THERE FIRST. Move `edge` in `deploy-pins.json` (the version,
+          `msiUrl` and `msiSha256`) to the newer build from
+          https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
+          the WHOLE fleet. RE-QUERY THAT API NOW rather than trusting an earlier look, because a box can run
+          AHEAD of the enterprise channel for hours: measured 2026-09-04, a box self-updated to a build the
+          enterprise Stable x64 listing did not yet carry — it was published at 22:28 UTC that same day,
+          minutes after that check, while the rollback it appeared to justify was already running. An
+          availability check against a moving index expires, so redo it first rather than assuming it.
+          This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
+          that drifts forward has exactly two ways back ... following it is one download against a reimage."
+          Check the cache cost rather than assuming it: if corpus captures record `browserVersion: ABSENT`
+          their key already reads `.../unknown` and matches no live guest, so following costs nothing.
+          (2) ROLL IT BACK, WITH THIS ROLE: re-run it against this host with
+          `-e worker_edge_allow_downgrade=true`, which installs the pinned MSI with Microsoft's supported
+          `ALLOWDOWNGRADE=1` and the updater already stopped — both of which this role has done by the time
+          you read this. It is opt-in rather than automatic because it moves a working box to an OLDER
+          browser; see `worker_edge_allow_downgrade` in defaults/main.yml. It is documented as a temporary fix that "risks exposure to known security issues",
+          so prefer (1) unless the newer build is what broke you.
+          (3) Reimage the guest. Last, not first.
+          Until one of them, a capture run will refuse to use this fleet, which is the behaviour you want.
 
-- name: Fetch the pinned installer
-  # Only when it would change something: this is a ~150 MB download onto a box that may be mid-corpus.
-  when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
-  become: true
-  ansible.windows.win_get_url:
-    url: "{{ worker_edge_msi_url }}"
-    dest: "{{ worker_edge_msi_path }}"
-    checksum: "{{ worker_edge_msi_sha256 }}"
-    checksum_algorithm: sha256
-    # A version claim that rests on a hostname is not a version claim. The checksum is what makes
-    # "the fleet runs 151.0.4129.101" a fact rather than a hope.
-    force: false
+    - name: Let the installer run the updater it brings, by naming the updater's binaries as they were
+      # THE ONE LEVER THE INSTALL LIFTS, and `freeze.yml` puts it back in the `always:` below. The freeze renames every `MicrosoftEdgeUpdate*.exe` to
+      # `<name>.a11y-frozen`, so the updater cannot run under its own name; the pinned MSI runs `MicrosoftEdgeUpdate.exe /install` itself, and it must be
+      # able to. Only a box that is installing pays this, and only for the length of the install. The firewall rules stay, so the restored binaries are
+      # blocked from the network throughout.
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          Dir: "{{ worker_edge_updater_exe | win_dirname }}"
+          Suffix: '.a11y-frozen'
+        script: |
+          param($Dir, $Suffix)
+          $Ansible.Changed = $false
+          $restored = @()
+          if (Test-Path -LiteralPath $Dir) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "MicrosoftEdgeUpdate*.exe$Suffix" })) {
+              $original = $f.FullName.Substring(0, $f.FullName.Length - $Suffix.Length)
+              if (-not $Ansible.CheckMode) { Move-Item -LiteralPath $f.FullName -Destination $original -Force -ErrorAction Stop }
+              $restored += $original
+            }
+          }
+          $Ansible.Changed = $restored.Count -gt 0
+          "restored $($restored.Count) updater binar(ies) for the install"
 
-- name: Refuse to upgrade a worker that is mid-capture
-  # Installing means stopping Edge, and stopping Edge under a running capture destroys 12-520 s of real
-  # screen-reader work and writes a fault the run reads as a flaky guest. `ready` is the field to ask --
-  # `ok` only ever meant "the HTTP server is answering".
-  when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
-  delegate_to: localhost
-  become: false
-  ansible.builtin.uri:
-    url: "http://{{ ansible_host }}:8765/health"
-    return_content: true
-  register: edge_worker_health
-  failed_when: edge_worker_health.json.busy | default(true)
+    - name: Install it
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      become: true
+      ansible.windows.win_package:
+        path: "{{ worker_edge_msi_path }}"
+        state: present
+        # ALLOWDOWNGRADE ONLY WHEN GOING BACKWARDS, never unconditionally. Passing it always would work today
+        # and would erase the distinction between a fresh install and a rollback, so nothing downstream --
+        # this role's own output included -- could say which happened. Two faults must not print the same word.
+        arguments: >-
+          /quiet /norestart
+          {{ 'ALLOWDOWNGRADE=1'
+             if ((edge_installed.output | default([]) | first | default('0', true)) is version(worker_edge_version, '>'))
+             else '' }}
+      register: edge_installed_now
 
-- name: Stop Edge, or the installer cannot replace the launcher
-  # THE REASON THIS TASK EXISTS, measured on a11y-worker-3: `win_package` reported success, the version
-  # directory 151.0.4129.101 was created, and `msedge.exe` stayed at .93 -- because 8 msedge processes were
-  # holding it. The worker keeps a browser alive between captures on purpose (`A11Y_REUSE_BROWSER`, which
-  # took `windowsActivate` from 8.9 s to 3.6 s), so an idle worker still has Edge running.
-  #
-  # An install that reports success and changes nothing is the worst outcome available here: it is the
-  # "green result vouching for an inert remedy" shape, applied to the browser the whole corpus is keyed on.
-  when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
-  become: true
-  ansible.windows.win_shell: taskkill /im msedge.exe /f
-  failed_when: false   # "not found" is success here; the verify at the end is the judge
-  changed_when: true
+    - name: Complete the launcher rename, which is what actually makes the new build the running one
+      # THE STEP THIS ROLE WAS MISSING, and it is not a workaround -- it is how Chromium installs work.
+      #
+      # The MSI stages the new launcher beside the old one as `new_msedge.exe` and leaves `msedge.exe` alone,
+      # because the running browser holds it. The rename is a SEPARATE operation performed later by the Edge
+      # updater -- which this role has just disabled, permanently and on purpose. So on this fleet nothing was
+      # ever going to finish the install.
+      #
+      # Measured on a11y-worker-3, in this order, and the first two are why the comment is this long:
+      #
+      #   win_package                 reported success; msedge.exe stayed at .93, new_msedge.exe appeared
+      #   a full reboot               did NOT complete it -- so it is not a pending-file-rename
+      #   setup.exe --rename-chrome-exe --system-level    exit 0, msedge.exe became .101
+      #
+      # `pv` in Edge's own ClientState already read 151.0.4129.101 while the binary read .93, so the vendor's
+      # bookkeeping and the file on disk disagreed -- the same shape as the worker reporting a version it was
+      # not running. Trust the binary.
+      #
+      # Run unconditionally when the version is still wrong, NOT gated on `install is changed`: once the MSI has
+      # been installed by an earlier attempt, `win_package` is a no-op and reports unchanged, which is exactly
+      # how the second run left the box on the old build while claiming to have done its job.
+      when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
+      become: true
+      ansible.windows.win_shell: |
+        taskkill /im msedge.exe /f 2>$null | Out-Null
+        Start-Sleep -Seconds 3
+        $setup = "{{ worker_edge_dir }}\{{ worker_edge_version }}\Installer\setup.exe"
+        if (-not (Test-Path -LiteralPath $setup)) { throw "no installer at $setup — the MSI did not lay down {{ worker_edge_version }}" }
+        $p = Start-Process -FilePath $setup -ArgumentList "--rename-chrome-exe","--system-level" -Wait -PassThru -NoNewWindow
+        if ($p.ExitCode -ne 0) { throw "rename-chrome-exe exited $($p.ExitCode)" }
+      changed_when: true
+  always:
+    - name: Freeze this box, so the updater is off whether the install ran, was refused or died
+      ansible.builtin.include_tasks:
+        file: freeze.yml
+        apply:
+          tags: [edge, freeze]
 
-- name: Refuse a DOWNGRADE unless it was explicitly authorised, and say which remedy applies
-  # THIS COMMENT USED TO OPEN "EDGE CANNOT BE DOWNGRADED ON THIS FLEET", AND IT CONTRADICTED THE REMEDY
-  # LISTED TWELVE LINES BELOW IT. Read what was actually measured: the 2026-08-25 run installed the MSI
-  # with `/quiet /norestart` and NO `ALLOWDOWNGRADE`. That establishes a PLAIN install will not go
-  # backwards -- which is the precise case the flag exists to override -- and says nothing whatever about
-  # the flag. A measurement that did not exercise the remedy cannot rule the remedy out.
+- name: Register the guard that REPORTS when the Edge updater is not frozen
+  # THE GUARD IS A DETECTOR, NOT THE MECHANISM (A11-205). It used to race the updater: every fifteen minutes it disabled whatever had come back (a11ign#5015),
+  # and it lost often enough that Edge moved itself on four occasions. The freeze (`freeze.yml`) is what holds the updater off now, and the daily freeze run
+  # is what puts a lever back. This task only LOOKS, and writes down what it found that is not frozen: a task present, a service not at `Start` 4 or running,
+  # an updater binary under its own name, an updater process. It changes nothing, stops nothing and disables nothing.
   #
-  # `--force-uninstall` failing is a separate and genuine finding, and it is why REMOVING Edge is not a
-  # route. Rolling back over the top is a different operation.
+  # The record keeps its shape (`checkedAt`, `reenabled`, `failed`, `lastReenabledAt`, `lastReenabled`), so screenreader-worker's `edgeUpdaterGuardFrom`
+  # (a non-empty `reenabled` reads `drift`) and `fleet:status`'s "Edge updater NOT HELD" keep their meaning and no worker release is needed. `reenabled` now
+  # lists what was FOUND not frozen, which is what it always meant to the reader.
   #
-  # So the refusal stands by DEFAULT and is now liftable: `-e worker_edge_allow_downgrade=true` performs
-  # remedy (2) through this role instead of leaving it as a shell command for a human to type on the box.
-  #
-  # Measured on a11y-worker-5, 2026-08-25, in this order:
-  #
-  #   Edge had auto-updated to .107 against a pin of .101
-  #   win_package ran the .101 MSI and reported ok — no .101 directory appeared, because Chromium's
-  #     installer declines to install over a newer build
-  #   setup.exe --uninstall --system-level --force-uninstall reported an exit code and removed NOTHING;
-  #     .107 was still the only build on disk afterwards. Windows blocks uninstalling Edge outside the
-  #     EEA, so this is a platform decision rather than a flag we are missing.
-  #
-  # So the role cannot fix a forward drift, and the honest thing is to say so with the remedies rather
-  # than fail on a confusing symptom ("the MSI did not lay down 151.0.4129.101", which is true and does
-  # not explain itself). Both remedies are decisions a person has to make:
-  #
-  #   REIMAGE the guest, which is destructive and restores the pin; or
-  #   MOVE THE PIN forward to the newer build — which invalidates every cached corpus capture, because
-  #     `worker_edge_version` is part of the capture cache key.
-  #
-  # Meanwhile nothing silently contaminates a corpus: `capture-real-pages.mjs` refuses to run across a
-  # fleet whose browsers disagree, checked before the run AND after it.
-  when:
-    - (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
-    - (edge_installed.output | default([]) | first | default('0', true)) is version(worker_edge_version, '>')
-    - not (worker_edge_allow_downgrade | bool)
-  ansible.builtin.fail:
-    msg: >-
-      {{ inventory_hostname }} is on Edge {{ edge_installed.output | default([]) | first | default('?', true) }},
-      NEWER than the pinned {{ worker_edge_version }}, and Chromium will not install over a newer build.
-      THREE remedies, cheapest first — and this message used to name the most expensive one first, which
-      sent an operator to reimage a machine that one flag fixes.
-      (1) FOLLOW IT — BUT CHECK THE BUILD EXISTS THERE FIRST. Move `edge` in `deploy-pins.json` (the version,
-      `msiUrl` and `msiSha256`) to the newer build from
-      https://edgeupdates.microsoft.com/api/products?view=enterprise and re-run across
-      the WHOLE fleet. RE-QUERY THAT API NOW rather than trusting an earlier look, because a box can run
-      AHEAD of the enterprise channel for hours: measured 2026-09-04, a box self-updated to a build the
-      enterprise Stable x64 listing did not yet carry — it was published at 22:28 UTC that same day,
-      minutes after that check, while the rollback it appeared to justify was already running. An
-      availability check against a moving index expires, so redo it first rather than assuming it.
-      This is the documented behaviour of this pin — see `defaults/main.yml`: "a fleet
-      that drifts forward has exactly two ways back ... following it is one download against a reimage."
-      Check the cache cost rather than assuming it: if corpus captures record `browserVersion: ABSENT`
-      their key already reads `.../unknown` and matches no live guest, so following costs nothing.
-      (2) ROLL IT BACK, WITH THIS ROLE: re-run it against this host with
-      `-e worker_edge_allow_downgrade=true`, which installs the pinned MSI with Microsoft's supported
-      `ALLOWDOWNGRADE=1` and the updater already stopped — both of which this role has done by the time
-      you read this. It is opt-in rather than automatic because it moves a working box to an OLDER
-      browser; see `worker_edge_allow_downgrade` in defaults/main.yml. It is documented as a temporary fix that "risks exposure to known security issues",
-      so prefer (1) unless the newer build is what broke you.
-      (3) Reimage the guest. Last, not first.
-      Until one of them, a capture run will refuse to use this fleet, which is the behaviour you want.
-
-- name: Install it
-  when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
-  become: true
-  ansible.windows.win_package:
-    path: "{{ worker_edge_msi_path }}"
-    state: present
-    # ALLOWDOWNGRADE ONLY WHEN GOING BACKWARDS, never unconditionally. Passing it always would work today
-    # and would erase the distinction between a fresh install and a rollback, so nothing downstream --
-    # this role's own output included -- could say which happened. Two faults must not print the same word.
-    arguments: >-
-      /quiet /norestart
-      {{ 'ALLOWDOWNGRADE=1'
-         if ((edge_installed.output | default([]) | first | default('0', true)) is version(worker_edge_version, '>'))
-         else '' }}
-  register: edge_installed_now
-
-- name: Complete the launcher rename, which is what actually makes the new build the running one
-  # THE STEP THIS ROLE WAS MISSING, and it is not a workaround -- it is how Chromium installs work.
-  #
-  # The MSI stages the new launcher beside the old one as `new_msedge.exe` and leaves `msedge.exe` alone,
-  # because the running browser holds it. The rename is a SEPARATE operation performed later by the Edge
-  # updater -- which this role has just disabled, permanently and on purpose. So on this fleet nothing was
-  # ever going to finish the install.
-  #
-  # Measured on a11y-worker-3, in this order, and the first two are why the comment is this long:
-  #
-  #   win_package                 reported success; msedge.exe stayed at .93, new_msedge.exe appeared
-  #   a full reboot               did NOT complete it -- so it is not a pending-file-rename
-  #   setup.exe --rename-chrome-exe --system-level    exit 0, msedge.exe became .101
-  #
-  # `pv` in Edge's own ClientState already read 151.0.4129.101 while the binary read .93, so the vendor's
-  # bookkeeping and the file on disk disagreed -- the same shape as the worker reporting a version it was
-  # not running. Trust the binary.
-  #
-  # Run unconditionally when the version is still wrong, NOT gated on `install is changed`: once the MSI has
-  # been installed by an earlier attempt, `win_package` is a no-op and reports unchanged, which is exactly
-  # how the second run left the box on the old build while claiming to have done its job.
-  when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
-  become: true
-  ansible.windows.win_shell: |
-    taskkill /im msedge.exe /f 2>$null | Out-Null
-    Start-Sleep -Seconds 3
-    $setup = "{{ worker_edge_dir }}\{{ worker_edge_version }}\Installer\setup.exe"
-    if (-not (Test-Path -LiteralPath $setup)) { throw "no installer at $setup — the MSI did not lay down {{ worker_edge_version }}" }
-    $p = Start-Process -FilePath $setup -ArgumentList "--rename-chrome-exe","--system-level" -Wait -PassThru -NoNewWindow
-    if ($p.ExitCode -ne 0) { throw "rename-chrome-exe exited $($p.ExitCode)" }
-  changed_when: true
-
-- name: Stop and disable EVERY Edge-updater scheduled task again, after the install
-  # THE SAME PAIR, REPEATED AFTER THE INSTALL (a11ign#4948, #4405). The early pair above stops the updater before
-  # the install, which is what a box that stops at the Edge step needs (a11ign#4732). It is not enough on its own:
-  # the installer re-registers the updater as it runs, so a box that installed Edge in this run came out of the
-  # install with a live updater, and the closing assertion refused it. Twelve boxes failed that way on 2026-10-11
-  # with `MicrosoftEdgeUpdateTaskMachineCore` and `MicrosoftEdgeUpdateTaskMachineUA` Ready, expected Disabled.
-  #
-  # UNCONDITIONAL, not gated on an install having run: an installer an earlier attempt already ran has
-  # registered the updater too, and a box that skipped the install this time can still hold one. Same rules as
-  # the early pair: BY PREFIX, and STOP BEFORE DISABLE. `edge-updater-before-install.test.ts` pins this position.
-  become: true
-  ansible.windows.win_shell: |
-    $tasks = Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue
-    if (-not $tasks) { "none found"; exit 0 }
-    foreach ($t in $tasks) {
-      if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
-      if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath | Out-Null }
-      "$($t.TaskName) -> $((Get-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath).State)"
-    }
-  changed_when: true
-
-- name: Stop and disable the updater's services again, after the install
-  become: true
-  ansible.windows.win_service:
-    name: "{{ item }}"
-    state: stopped
-    start_mode: disabled
-  loop: "{{ worker_edge_updater_services }}"
-  failed_when: false
-
-- name: Register the guard that re-asserts the Edge updater, because disabling it once is not keeping it off
-  # THE UPDATER STAYS OFF BECAUSE SOMETHING RE-ASSERTS IT, not because it was off once (a11ign#5015).
-  # 2026-10-11, a11ign#4948 run 1: 12 boxes ended `failed=1` at the closing assertion below with
-  # `MicrosoftEdgeUpdateBrowserReplacementTask` `Ready`, expected `Disabled`. Everything above disables the
-  # tasks and services once per provision; nothing re-asserted them between provisions, and Edge puts a task
-  # back. So a SYSTEM task does the same two things at startup and every few minutes, and writes down what it
-  # had to undo, because the worker runs unelevated and CANNOT read these tasks -- the elevated task is the
-  # only reader that can answer "did the updater come back?".
-  #
-  # POLICY WAS NOT ADDED, and that is a decision, not an omission: see the header of this file. The EdgeUpdate
-  # policies are stored and never honoured on these standalone boxes. UNREGISTERING the tasks is not durable
-  # either, since the updater re-registers them. The pair this role already uses -- disable the tasks, disable
-  # the services -- is what works; what was missing is repetition.
-  #
-  # The script is a FILE the task runs with `-File`, not an inline `-Command`: a script with quotes in it
-  # survives neither YAML nor the Windows command line, and a guard that fails to parse is a guard that never
-  # runs. Same two rules as the tasks above: BY PREFIX not by name, and STOP BEFORE DISABLE.
+  # The worker runs unelevated and CANNOT read these tasks, so the elevated task is the only reader that can answer "did the updater come back?".
+  # The script is a FILE the task runs with `-File`, not an inline `-Command`: a script with quotes in it survives neither YAML nor the Windows command
+  # line, and a guard that fails to parse is a guard that never runs.
   become: true
   vars:
     edge_guard_interval_minutes: 15
@@ -342,73 +315,55 @@
       ansible.windows.win_copy:
         dest: "{{ edge_guard_dir }}\\edge-updater-guard.ps1"
         content: |
-          # EVERY ITEM IS HANDLED ON ITS OWN (A11-183). This script used to run under `$ErrorActionPreference = 'Stop'`, so the first
-          # failure ended the run BEFORE the record below was written. On 2026-10-24 that was twelve boxes: the guard task read
-          # `LastTaskResult` 1 and a record days old, and nothing said so. Now a failure on one task, service or process is written down and
-          # the rest still run, the record is always written, and the script exits non-zero when anything stayed on.
+          # EVERY ITEM IS READ ON ITS OWN (A11-183). A failure on one task, service or process is written down and the rest still run, the record is always
+          # written, and the script exits non-zero when anything was found not frozen or could not be read.
           $ErrorActionPreference = 'Continue'
           # Cast to string[]: Windows PowerShell 5.1's ConvertFrom-Json emits a JSON array as ONE object, so the bare `@(... | ConvertFrom-Json)` made
           # `$name` below the whole list ("edgeupdate edgeupdatem") and the registry path built from it did not exist (a11y-worker-11, 2026-10-24).
           $services = [string[]]('{{ worker_edge_updater_services | to_json }}' | ConvertFrom-Json)
-          $reenabled = @()
+          $updaterDir = '{{ worker_edge_updater_exe | win_dirname }}'
+          $found = @()
           $failed = @()
-          # By prefix: the set of tasks grew once already (BrowserReplacementTask).
-          foreach ($t in @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
-            $changed = $false
-            # Stop BEFORE disable: Disable-ScheduledTask does not terminate an instance already running
-            # (a11y-worker-5, 2026-08-25). A task that cannot be stopped is still disabled: each has its own turn.
-            try {
-              if ($t.State -eq 'Running') { $changed = $true; Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop }
-            } catch { $changed = $true; $failed += "task:$($t.TaskName): stop: $($_.Exception.Message)" }
-            try {
-              if ($t.State -ne 'Disabled') { $changed = $true; Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop | Out-Null }
-            } catch { $changed = $true; $failed += "task:$($t.TaskName): disable: $($_.Exception.Message)" }
-            if ($changed) { $reenabled += "task:$($t.TaskName)" }
-          }
+          # By prefix: the set of tasks grew once already (BrowserReplacementTask). The freeze UNREGISTERS them, so any task at all is a finding.
+          try {
+            foreach ($t in @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction Stop)) { $found += "task:$($t.TaskName)" }
+          } catch { $failed += "tasks: $($_.Exception.Message)" }
           foreach ($name in $services) {
-            $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-            if (-not $svc) { continue }
-            $changed = $false
-            # SYSTEM may stop the service (it holds WP) but may NOT change its start type through the service manager: the service's
-            # security descriptor gives SERVICE_CHANGE_CONFIG to Administrators alone, so `Set-Service -StartupType` throws here
-            # (measured on a11y-worker-2, -4, -6 and -15, 2026-10-24). The Services registry key does not withhold it, so the start
-            # type is written there: `Start` 4 is Disabled. The service manager reads it again at the next boot, which is what the
-            # guard's startup trigger and the stop above bridge; the provision run sets it through the manager as an administrator.
-            try {
-              if ($svc.Status -ne 'Stopped') { $changed = $true; Stop-Service -Name $name -Force -ErrorAction Stop }
-            } catch { $changed = $true; $failed += "service:${name}: stop: $($_.Exception.Message)" }
             try {
               $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+              if (-not (Test-Path -LiteralPath $key)) { continue }
               $start = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction Stop).Start
-              if ($start -ne 4) { $changed = $true; Set-ItemProperty -LiteralPath $key -Name Start -Value 4 -Type DWord -ErrorAction Stop }
-            } catch { $changed = $true; $failed += "service:${name}: start type: $($_.Exception.Message)" }
-            if ($changed) { $reenabled += "service:$name" }
+              if ($start -ne 4) { $found += "service:$name" }
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') { $found += "service:$name" }
+            } catch { $failed += "service:${name}: $($_.Exception.Message)" }
           }
-          # The updater also runs without its tasks or services: `MicrosoftEdgeUpdate.exe /ua /installsource core` ran hourly on boxes whose
-          # tasks were Disabled and whose service was Stopped. Any such process is the updater working, so it is stopped and written down.
-          #
-          # NOT WHILE THE ROLE'S OWN INSTALL IS RUNNING: the pinned MSI runs `MicrosoftEdgeUpdate.exe /install` itself, and stopping that one fails the install.
+          # NOT WHILE THE ROLE'S OWN INSTALL IS RUNNING: the pinned MSI runs `MicrosoftEdgeUpdate.exe /install` itself, and the install restores the binaries.
           $installing = @(Get-CimInstance Win32_Process -Filter "Name = 'msiexec.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'MicrosoftEdgeEnterprise' })
-          foreach ($p in $(if ($installing.Count -gt 0) { @() } else { @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue) })) {
-            $reenabled += "process:$($p.ProcessName)"
-            # One that exited between the listing and the stop is gone, which is what was wanted, and not a failure.
-            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { $failed += "process:$($p.ProcessName): $($_.Exception.Message)" } }
+          if ($installing.Count -eq 0) {
+            # The updater also runs without its tasks or services: `MicrosoftEdgeUpdate.exe /ua /installsource core` ran hourly on boxes whose tasks were
+            # Disabled and whose service was Stopped. Any such process is the updater working.
+            foreach ($p in @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)) { $found += "process:$($p.ProcessName)" }
+            try {
+              foreach ($f in @(Get-ChildItem -LiteralPath $updaterDir -Recurse -File -ErrorAction Stop | Where-Object { $_.Name -like 'MicrosoftEdgeUpdate*.exe' })) { $found += "binary:$($f.FullName)" }
+            } catch { if (Test-Path -LiteralPath $updaterDir) { $failed += "binaries: $($_.Exception.Message)" } }
           }
+          $found = @($found | Sort-Object -Unique)
           $record = '{{ edge_guard_dir }}\edge-updater-guard.json'
           # READ THE PREVIOUS RECORD BEFORE WRITING THIS ONE (a11ign#5048). `reenabled` is THIS run's, so a clean run
-          # writes `[]` and a drift outlives the run that found it by one interval: a fleet poll between two runs
+          # writes `[]` and a finding outlives the run that made it by one interval: a fleet poll between two runs
           # read `ok` for an updater that had come back. `lastReenabledAt` and `lastReenabled` are the carry.
-          # An unreadable record is no record: the guard's job is to disable, and it must still do that.
+          # An unreadable record is no record: the detector's job is to look, and it must still do that.
           $previous = $null
           if (Test-Path -LiteralPath $record) {
             try { $previous = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json } catch { $previous = $null }
           }
-          $entry = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($reenabled); failed = @($failed) }
-          if ($reenabled.Count -gt 0) {
+          $entry = [ordered]@{ checkedAt = (Get-Date).ToUniversalTime().ToString('o'); reenabled = @($found); failed = @($failed) }
+          if ($found.Count -gt 0) {
             $entry.lastReenabledAt = $entry.checkedAt
-            $entry.lastReenabled = @($reenabled)
+            $entry.lastReenabled = @($found)
           } elseif ($previous -and $previous.lastReenabledAt) {
-            # Absent on a box that has never re-enabled: nothing is invented for it.
+            # Absent on a box that has never been found unfrozen: nothing is invented for it.
             $entry.lastReenabledAt = $previous.lastReenabledAt
             $entry.lastReenabled = @($previous.lastReenabled)
           }
@@ -419,13 +374,13 @@
             Set-Content -LiteralPath "$record.tmp" -Value $json -Encoding UTF8 -ErrorAction Stop
             Move-Item -LiteralPath "$record.tmp" -Destination $record -Force -ErrorAction Stop
           } catch { exit 1 }
-          # Non-zero when anything stayed on, so the task's `LastTaskResult` says so too and the closing assertion can read it.
-          if ($failed.Count -gt 0) { exit 1 }
+          # Non-zero when anything was found unfrozen or could not be read, so the task's `LastTaskResult` says so too.
+          if ($found.Count -gt 0 -or $failed.Count -gt 0) { exit 1 }
 
     - name: Register the guard task, as SYSTEM, at startup and on a repeat
       community.windows.win_scheduled_task:
         name: "{{ edge_guard_task }}"
-        description: a11ign Edge updater guard (a11ign#5015), re-disables the updater and records what had come back
+        description: a11ign Edge updater guard (a11ign#5015, A11-205), reports what is not frozen and changes nothing
         username: SYSTEM
         logon_type: service_account
         run_level: highest
@@ -446,7 +401,7 @@
         state: present
         enabled: true
 
-- name: Refuse to call this provisioned unless Edge is the pinned build and the updater is off
+- name: Refuse to call this provisioned unless Edge is the pinned build and the updater is frozen
   # The "prove it" half, matching every other concern in this role. Read back from the binary and from the
   # live task/service state -- never from the variables we just wrote, which would assert our own intent.
   become: true
@@ -454,21 +409,20 @@
     parameters:
       Exe: "{{ worker_edge_exe }}"
       Want: "{{ worker_edge_version }}"
-      Tasks: "{{ worker_edge_updater_tasks }}"
       Services: "{{ worker_edge_updater_services }}"
+      UpdaterDir: "{{ worker_edge_updater_exe | win_dirname }}"
       Guard: a11y-edge-updater-guard
       Record: 'C:\ProgramData\a11ign\edge-updater-guard.json'
     script: |
-      param($Exe, $Want, $Tasks, $Services, $Guard, $Record)
+      param($Exe, $Want, $Services, $UpdaterDir, $Guard, $Record)
       $Ansible.Changed = $false
       $wrong = @()
       $have = if (Test-Path -LiteralPath $Exe) { (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion } else { "(absent)" }
       if ($have -ne $Want) { $wrong += "Edge is $have, expected $Want" }
       # Enumerated, not looked up by name -- and it must be, because the fault this catches is a task nobody
-      # listed. The old form asked after two known names and would have passed vacuously on a guest carrying a
-      # third: `$task -and ...` reads an ABSENT task as compliant.
+      # listed. The freeze UNREGISTERS the updater's tasks, so any task at all is a fault.
       foreach ($task in @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
-        if ($task.State -ne 'Disabled') { $wrong += "scheduled task $($task.TaskName) is $($task.State), expected Disabled" }
+        $wrong += "scheduled task $($task.TaskName) is registered ($($task.State)), expected none"
       }
       foreach ($s in $Services) {
         $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
@@ -476,19 +430,22 @@
           if ($svc.Status -ne 'Stopped') { $wrong += "service $s is $($svc.Status), expected Stopped" }
           if ($svc.StartType -ne 'Disabled') { $wrong += "service $s start type is $($svc.StartType), expected Disabled" }
         }
-        # The registry value the guard writes (SYSTEM cannot change the start type through the service manager) must agree.
+        # The registry value the freeze writes (SYSTEM cannot change the start type through the service manager) must agree.
         $start = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$s" -Name Start -ErrorAction SilentlyContinue).Start
         if ($svc -and $start -ne 4) { $wrong += "service $s registry Start is $start, expected 4 (Disabled)" }
       }
-      # The guard is what keeps the updater off after this run ends, so a box without it is not provisioned.
+      foreach ($f in @(Get-ChildItem -LiteralPath $UpdaterDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'MicrosoftEdgeUpdate*.exe' })) {
+        $wrong += "updater binary $($f.FullName) has its own name, expected it renamed"
+      }
+      # The detector is what reports the updater coming back after this run ends, so a box without it is not provisioned.
       $g = Get-ScheduledTask -TaskName $Guard -ErrorAction SilentlyContinue
       if (-not $g) { $wrong += "guard task $Guard is absent" }
       elseif ($g.State -eq 'Disabled') { $wrong += "guard task $Guard is Disabled, expected enabled" }
       elseif (-not $Ansible.CheckMode) {
-        # Under --check this stays a read: running the guard changes the box (the registry, the services, the processes).
-        # A guard that is registered but cannot do its work is not a hold: on 2026-10-24 it was registered on every box and failed on
+        # Under --check this stays a read: running the detector writes its record.
+        # A detector that is registered but cannot work is not a watch: on 2026-10-24 the old guard was registered on every box and failed on
         # twelve, as SYSTEM, with a record days old (A11-183). So RUN it, as the task, and require a newer record, result 0 and nothing
-        # it could not change. The wait is bounded; a guard that never finishes is a failure by name.
+        # it found or could not read. The wait is bounded; a detector that never finishes is a failure by name.
         $started = (Get-Date).ToUniversalTime()
         Start-ScheduledTask -TaskName $Guard
         $deadline = (Get-Date).AddSeconds(120)
@@ -507,11 +464,12 @@
         elseif (-not $fresh) { $wrong += "guard task $Guard wrote no record newer than its start" }
         else {
           if ($result -ne 0) { $wrong += "guard task $Guard ended with result $result, expected 0" }
-          if (@($fresh.failed).Count -gt 0) { $wrong += "guard could not change: $(@($fresh.failed) -join ' | ')" }
+          if (@($fresh.reenabled).Count -gt 0) { $wrong += "guard found the updater not frozen: $(@($fresh.reenabled) -join ' | ')" }
+          if (@($fresh.failed).Count -gt 0) { $wrong += "guard could not read: $(@($fresh.failed) -join ' | ')" }
         }
       }
       if ($wrong.Count) { throw ($wrong -join '; ') }
-      "Edge $have, updater disabled, guard ran clean"
+      "Edge $have, updater frozen, guard found nothing"
   register: edge_proof
 
 - name: Say what it is on

@@ -116,12 +116,6 @@ export const DEFAULT_CAPTURES_STATE_PATH = "runs/fleet-captures-state.json";
 /** First-seen ledger of the off-fleet lines already posted. Not `DEFAULT_STATE_PATH`: see the header. */
 export const DEFAULT_OFF_FLEET_STATE_PATH = "runs/fleet-off-fleet-state.json";
 
-/**
- * The file `fleet:patch`'s timer (#4446) writes on the CONTROL HOST when a patch run completes, `{"lastRunAt": <epoch ms>}`.
- * That row owns the writer; this is the contract it must meet, and this watch reads it the way it reads the auto-off record.
- */
-export const PATCH_RUN_PATH = "runs/fleet-patch-last-run.json";
-
 const CAPTURE_WINDOW_MS = HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
 
 /** Exit codes are the contract: 0 nothing needs attention, 1 something does, 2 could not ask. */
@@ -582,11 +576,8 @@ export function watchBody(entries: OverdueEntry[]): string {
 export type Oddity = {line: string, box: string | null};
 export type BoxValue = {box: string, value: string};
 
-const DAYS_PER_PATCH_WINDOW = 28;
-const PATCH_WINDOW_MS = DAYS_PER_PATCH_WINDOW * HOURS_PER_DAY * MINUTES_PER_HOUR * MS_PER_MINUTE;
 /** What a worker's `/health` says before its first sample lands: a placeholder, not a reading of the box. */
 const NOT_YET_SAMPLED = "unknown";
-const ISO_DATE_LENGTH = "2026-10-09".length;
 
 const OFF_FLEET_FIELDS = [
   { field: "windowsBuild", label: "build" },
@@ -681,25 +672,6 @@ export function readEdgePin(read: () => string = () => readFileSync(DEPLOY_PINS_
  */
 export function offFleetLines(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[], browserVersions?: Record<string, string | null> }, edgePin?: string): Oddity[] {
   return [...OFF_FLEET_FIELDS.flatMap((spec) => oddBoxes(spec, status)), ...edgeUpdaterLines(status), ...(edgePin === undefined ? [] : edgePinLines(status, edgePin))];
-}
-
-/**
- * `patch-window-missed` when the newest completed patch run is OLDER than the 28-day window. `null` for no run on record is
- * not a miss: a control host that has never patched has not missed a window it was never given, and the row that
- * installs the timer raises its own line when the window closes. The line names the run's DATE and not its age, because
- * the line is the dedup key and an age would make a new line every tick.
- */
-export function patchWindowMissed(lastRunAt: number | null, now: number): Oddity | null {
-  if (lastRunAt === null || now - lastRunAt <= PATCH_WINDOW_MS) return null;
-  return { box: null, line: `patch-window-missed: last patch run ${new Date(lastRunAt).toISOString().slice(0, ISO_DATE_LENGTH)}, window ${DAYS_PER_PATCH_WINDOW} days` };
-}
-
-/** @returns the epoch ms of the last patch run, or `null` when none is recorded; a file that is not a record THROWS */
-export function parsePatchRun(text: string): number | null {
-  const lastRunAt = JSON.parse(text)?.lastRunAt;
-  if (lastRunAt === undefined) return null;
-  if (!Number.isFinite(lastRunAt)) throw new TypeError(`${PATCH_RUN_PATH}: lastRunAt must be an epoch-ms number, got ${JSON.stringify(lastRunAt)}`);
-  return lastRunAt;
 }
 
 /**
@@ -828,8 +800,6 @@ export function recordCaptures(rows: FleetRow[], { path, at, read, write, lock =
 export type WatchDeps = {
     getStatus?: StatusReader; now?: () => number; statePath?: string; capturesPath?: string; offFleetPath?: string;
     thresholdMs?: number; read?: typeof readFileSync; write?: typeof writeFileSync;
-    /** The newest completed patch run, epoch ms (see `readPatchRun`). Absent: the patch window is not read this tick. */
-    lastPatchRunAt?: () => number | null;
     /** The control host's installed units against the shipped ones. Absent: not read this tick, and the ledger's drift lines stand. */
     unitDrift?: () => Reading;
     /** The Windows build spread and its one stop-the-line incident (#5026). Absent: not read this tick, and nothing is claimed. */
@@ -871,11 +841,10 @@ export type WatchFound = { overdue: OverdueEntry[], offFleet: string[], unitDrif
 /** The off-fleet and unit-drift lines this tick that were not posted before; the one ledger is read and rewritten here. */
 function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], reportedOnly?: Drift[], browserVersions?: Record<string, string | null> }, at: number, deps: WatchDeps) {
   const path = deps.offFleetPath ?? DEFAULT_OFF_FLEET_STATE_PATH;
-  const patch = patchReading(deps.lastPatchRunAt, at);
   const drift = unitDriftReading(deps.unitDrift);
   const lock = fleetLockTick(deps.fleetLock, at);
-  const { state, fresh } = advanceOffFleet([...offFleetLines(status, (deps.edgePin ?? readEdgePin)()), ...patch.found, ...drift.tick.found, ...lock.found], readState(path, deps.read),
-    { now: at, keep: carriesEntry(status.rows, { patch: patch.carry, unitDrift: drift.carry, fleetLock: lock.carry }) });
+  const { state, fresh } = advanceOffFleet([...offFleetLines(status, (deps.edgePin ?? readEdgePin)()), ...drift.tick.found, ...lock.found], readState(path, deps.read),
+    { now: at, keep: carriesEntry(status.rows, { unitDrift: drift.carry, fleetLock: lock.carry }) });
   writeState(path, state, deps.writeOffFleet ?? deps.write);
   const isDrift = (line: string) => line.startsWith(UNIT_DRIFT_LINE_PREFIX);
   return {
@@ -887,35 +856,6 @@ function recordOffFleet(status: { rows: FleetRow[], mismatches?: Drift[], report
 /** `watchFleet`'s stuck workers alone. */
 export async function watch(deps: WatchDeps = {}): Promise<OverdueEntry[]> {
   return (await watchFleet(deps)).overdue;
-}
-
-/**
- * The last patch run, read FROM the control host (the timer runs there, this watch on the agents host): ssh, or local when
- * this is the control plane. A host that cannot be read THROWS rather than answering `null`: "no run on record" and "I
- * did not look" are different states. A missing file is `{}`, which is no run on record.
- */
-export function readPatchRun(
-  read: () => string = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${PATCH_RUN_PATH} 2>/dev/null || echo '{}'`, { capture: true }),
-): number | null {
-  return parsePatchRun(read());
-}
-
-const PATCH_LINE_PREFIX = "patch-window-missed: ";
-
-/**
- * The patch line to raise, and whether an unread host means the last one stands. A run that could not be read SAYS so on
- * stderr and carries the previous line: an unreadable host is not a patch that happened, and not a miss that cleared.
- * With no reader at all (a caller that did not ask) the line is carried the same way.
- */
-function patchReading(readLastRun: (() => number | null) | undefined, now: number): { found: Oddity[], carry: boolean } {
-  if (!readLastRun) return { found: [], carry: true };
-  try {
-    const missed = patchWindowMissed(readLastRun(), now);
-    return { found: missed ? [missed] : [], carry: false };
-  } catch (cause) {
-    console.error(`CANNOT READ the last patch run from the control host: ${cause instanceof Error ? cause.message : String(cause)}`);
-    return { found: [], carry: true };
-  }
 }
 
 /**
@@ -953,7 +893,7 @@ export function fleetLockLines(reading: FleetLockReading): Oddity[] {
 
 /**
  * The fleet-lock lines of this tick, and whether an absent reader means the last one stands. With no reader at all (a caller
- * that did not ask) the line is carried the same way the patch line is: nothing is claimed about a lock that was not read.
+ * that did not ask) the line is carried the same way the unit-drift line is: nothing is claimed about a lock that was not read.
  */
 function fleetLockTick(read: ((now: number) => FleetLockReading) | undefined, now: number): { found: Oddity[], carry: boolean } {
   if (!read) return { found: [], carry: true };
@@ -966,11 +906,10 @@ function boxOfLine(line: string): string {
   return prefix ? line.slice(prefix.length).split(" ")[0] : line.split(": ")[0];
 }
 
-/** Entries about a box that did not answer, or about a patch run, the control host's units or the fleet lock that could not be read, are not cleared by silence. */
-function carriesEntry(rows: FleetRow[], carry: { patch: boolean, unitDrift: boolean, fleetLock: boolean }): (line: string) => boolean {
+/** Entries about a box that did not answer, or about the control host's units or the fleet lock that could not be read, are not cleared by silence. */
+function carriesEntry(rows: FleetRow[], carry: { unitDrift: boolean, fleetLock: boolean }): (line: string) => boolean {
   const asleep = new Set(rows.filter((row) => row.state === "unreachable").map((row) => workerKey(row.name)));
   return (line) => asleep.has(boxOfLine(line))
-    || (carry.patch && line.startsWith(PATCH_LINE_PREFIX))
     || (carry.unitDrift && line.startsWith(UNIT_DRIFT_LINE_PREFIX))
     || (carry.fleetLock && line.startsWith(FLEET_LOCK_LINE_PREFIX));
 }
@@ -1028,7 +967,7 @@ async function main() {
   const thresholdMs = thresholdArg ? Number(thresholdArg.slice("--threshold-ms=".length)) : undefined;
   let found;
   try {
-    found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), lastPatchRunAt: readPatchRun, unitDrift: readUnitDrift,
+    found = await watchFleet({ ...(thresholdMs === undefined ? {} : { thresholdMs }), unitDrift: readUnitDrift,
       fleetLock: (now) => readFleetLock(now, { log: (line) => console.error(line) }),
       buildIncident: (status) => fleetBuildIncidentTick(status, post ? ghIncidentDeps() : readOnlyIncidentDeps(ghIncidentDeps())),
       ...(post ? {} : { writeOffFleet: () => undefined }) });

@@ -1,107 +1,77 @@
-// Relocated from packages/worker-fleet/src/update-deferral-policy.test.ts by #3504: it reads control/lab/guards/the root, so it stays in the core and reads the fleet through the layer checkout at packages/worker-fleet.
+// Relocated from packages/worker-fleet/src/update-deferral-policy.test.ts by #3504, and rewritten by A11-205: the deferral it pinned is gone.
 /**
- * #921 / PR #1759 review: the write (`tasks/policy.yml`) and its read-back verification both derive the
- * expected values from the SAME `worker_update_deferral_policy` list in `defaults/main.yml` -- so a
- * mutation to that list (e.g. `DeferFeatureUpdatesPeriodInDays` 365 -> 1) regresses the actual policy
- * while every existing check, including the read-back, stays green: the read-back only proves Ansible
- * wrote whatever the list currently says, not that the list still says the right thing.
+ * A DEFERRAL IS A DELAY, NOT A FREEZE, and A11-205 ended it.
  *
- * This is the independent copy CLAUDE.md's assertion discipline asks for: the expected path, names and
- * values are LITERALS in this file, never read from `defaults/main.yml` itself, so a change to the role's
- * declared values is what this test exists to catch -- the same shape `worker-port.test.ts` and
- * `edge-pin-parity.test.ts` already use for a fact declared once and depended on elsewhere. Deliberately
- * not a YAML parse: `packages/control` takes no dependency (ADR 0012), and a plain regex on the block is
- * the house convention those two files already set.
+ * #921 deferred feature updates 365 days and #4438 deferred quality updates 30, so a box installed on its own once a deferral ran out: a11y-worker-4
+ * (2026-09-11) and a11y-worker-3 (2026-09-19) took a feature update although `NoAutoRebootWithLoggedOnUsers` was set. The 28-day patch window existed to
+ * lift the deferral before it expired. Now nothing on a box upgrades by itself (`docs/adr/0001`), the levers that stop Windows Update are in
+ * `tasks/freeze.yml`, and the deferral values are DELETED from every box, not left beside the freeze.
+ *
+ * This file used to pin the deferral's values with literals. It now pins their absence from the role's declared values, and their deletion from the box.
+ * The names are LITERALS here, not read from the role, so a change to what the role declares is what this test exists to catch (the shape
+ * `worker-port.test.ts` and `edge-pin-parity.test.ts` use). Deliberately not a YAML parse: control takes no dependency (ADR 0012).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const DEFAULTS = readFileSync(
-  fileURLToPath(new URL("../../ansible/roles/worker/defaults/main.yml", import.meta.url)), "utf8");
+const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+const DEFAULTS = read("../../ansible/roles/worker/defaults/main.yml");
+const POLICY = read("../../ansible/roles/worker/tasks/policy.yml");
+const FREEZE = read("../../ansible/roles/worker/tasks/freeze.yml");
 
-/** Every `- path: '...' / name: ... / value: ...` entry under `worker_update_deferral_policy:`. */
-function deferralEntries(): { path: string, name: string, value: number }[] {
-  const start = DEFAULTS.indexOf("worker_update_deferral_policy:");
-  assert.ok(start !== -1, "worker_update_deferral_policy is gone from the role defaults -- this test "
-    + "examines nothing");
-  // Ends at the next top-level (column-0) key, the same boundary convention `provision-stamp-inputs.test.ts`
-  // uses for `$ENVIRONMENT_FILES`.
-  const rest = DEFAULTS.slice(start);
-  const afterFirstLine = rest.indexOf("\n") + 1;
-  const end = rest.slice(afterFirstLine).search(/^\S/m);
-  const block = end === -1 ? rest : rest.slice(0, afterFirstLine + end);
-  const entries: { path: string, name: string, value: number }[] = [];
-  const re = /-\s*path:\s*'([^']+)'\s*\n\s*name:\s*(\S+)\s*\n\s*value:\s*(\d+)/g;
-  for (const m of block.matchAll(re)) entries.push({ path: m[1], name: m[2], value: Number(m[3]) });
-  return entries;
+const DEFERRAL_NAMES = ["DeferFeatureUpdates", "DeferFeatureUpdatesPeriodInDays", "DeferQualityUpdates", "DeferQualityUpdatesPeriodInDays"];
+const WINDOWS_UPDATE_PATH = "{{ freeze_wu_policy }}";
+
+/** The text with its comment lines removed: a comment may explain the deferral, and an executable line may not set it. */
+const code = (text: string) => text.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+
+/** What is wrong with where the deferral lives, as a list. Empty means no role value sets a deferral and the freeze deletes each one. */
+function deferralViolations(defaults: string, policy: string, freeze: string): string[] {
+  const problems: string[] = [];
+  if (/^worker_update_deferral_policy:/m.test(defaults)) problems.push("the role still declares worker_update_deferral_policy");
+  if (/worker_update_deferral_policy/.test(code(policy))) problems.push("policy.yml still applies or reads back worker_update_deferral_policy");
+  for (const name of DEFERRAL_NAMES) {
+    if (new RegExp(`\\b${name}\\b`).test(code(defaults))) problems.push(`${name} is still in defaults/main.yml`);
+    const entry = code(freeze).split("\n").find((line) => new RegExp(`name: ${name},`).test(line));
+    if (!entry) problems.push(`freeze.yml does not delete ${name}`);
+    else if (!/state: absent/.test(entry)) problems.push(`freeze.yml sets ${name} instead of deleting it: ${entry.trim()}`);
+    else if (!entry.includes(`path: '${WINDOWS_UPDATE_PATH}'`)) problems.push(`freeze.yml deletes ${name} from the wrong key: ${entry.trim()}`);
+  }
+  return problems;
 }
 
-const WINDOWS_UPDATE_PATH = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate';
-
-test("the deferral policy declares BOTH expected values, independent of whatever the list currently says", () => {
-  const entries = deferralEntries();
-  assert.ok(entries.length >= 2,
-    `found ${entries.length} entr(ies) under worker_update_deferral_policy -- expected at least 2 `
-    + "(DeferFeatureUpdates, DeferFeatureUpdatesPeriodInDays); the regex may have drifted from the file's "
-    + "own shape, or an entry was removed");
-
-  const byName = new Map(entries.map((e) => [e.name, e]));
-
-  const defer = byName.get("DeferFeatureUpdates");
-  assert.ok(defer, "DeferFeatureUpdates is missing from worker_update_deferral_policy");
-  assert.equal(defer.path, WINDOWS_UPDATE_PATH,
-    `DeferFeatureUpdates is under '${defer.path}', not the WindowsUpdate policy path a feature-update `
-    + "deferral has to live under to mean anything");
-  assert.equal(defer.value, 1, `DeferFeatureUpdates is ${defer.value}, not 1 -- the switch that turns the `
-    + "deferral on at all has regressed");
-
-  const period = byName.get("DeferFeatureUpdatesPeriodInDays");
-  assert.ok(period, "DeferFeatureUpdatesPeriodInDays is missing from worker_update_deferral_policy");
-  assert.equal(period.path, WINDOWS_UPDATE_PATH,
-    `DeferFeatureUpdatesPeriodInDays is under '${period.path}', not the WindowsUpdate policy path`);
-  assert.equal(period.value, 365,
-    `DeferFeatureUpdatesPeriodInDays is ${period.value}, not 365 (the maximum Windows accepts) -- #921 `
-    + "exists because a feature update reached a worker twice; a shorter deferral reopens exactly that "
-    + "window sooner, silently, with every other check here still green.");
+test("no deferral is declared by the role, and the freeze deletes every deferral value from the box", () => {
+  assert.deepEqual(deferralViolations(DEFAULTS, POLICY, FREEZE), [],
+    "a deferral left on a box is a delay that expires: the box then installs on its own (#921, #4438)");
 });
 
-/** The ceiling Windows Update for Business documents for `DeferQualityUpdatesPeriodInDays`; above it the value is ignored. */
-const QUALITY_DEFERRAL_CEILING_DAYS = 30;
-
-test("the deferral policy defers QUALITY updates by 30 days, the documented ceiling (#4438)", () => {
-  const byName = new Map(deferralEntries().map((e) => [e.name, e]));
-
-  const defer = byName.get("DeferQualityUpdates");
-  assert.ok(defer, "DeferQualityUpdates is missing from worker_update_deferral_policy -- without it the "
-    + "period below is not read, and each box installs the monthly cumulative update whenever it is awake");
-  assert.equal(defer.path, WINDOWS_UPDATE_PATH,
-    `DeferQualityUpdates is under '${defer.path}', not the WindowsUpdate policy path`);
-  assert.equal(defer.value, 1, `DeferQualityUpdates is ${defer.value}, not 1`);
-
-  const period = byName.get("DeferQualityUpdatesPeriodInDays");
-  assert.ok(period, "DeferQualityUpdatesPeriodInDays is missing from worker_update_deferral_policy");
-  assert.equal(period.path, WINDOWS_UPDATE_PATH,
-    `DeferQualityUpdatesPeriodInDays is under '${period.path}', not the WindowsUpdate policy path`);
-  assert.equal(period.value, QUALITY_DEFERRAL_CEILING_DAYS,
-    `DeferQualityUpdatesPeriodInDays is ${period.value}, not ${QUALITY_DEFERRAL_CEILING_DAYS}`);
+test("control: a deferral put back in the defaults, or applied by policy.yml, FAILS", () => {
+  const declared = DEFAULTS + "\nworker_update_deferral_policy:\n  - path: 'x'\n    name: DeferQualityUpdatesPeriodInDays\n    value: 30\n";
+  assert.match(deferralViolations(declared, POLICY, FREEZE).join("|"), /still declares worker_update_deferral_policy/);
+  assert.match(deferralViolations(declared, POLICY, FREEZE).join("|"), /DeferQualityUpdatesPeriodInDays is still in defaults/);
+  const applied = POLICY + "\n      Deferral: \"{{ worker_update_deferral_policy }}\"\n";
+  assert.match(deferralViolations(DEFAULTS, applied, FREEZE).join("|"), /policy.yml still applies/);
 });
 
-test("the quality deferral never exceeds the ceiling Windows honours (#4438)", () => {
-  const period = deferralEntries().find((e) => e.name === "DeferQualityUpdatesPeriodInDays");
-  assert.ok(period, "DeferQualityUpdatesPeriodInDays is missing -- there is no period to bound");
-  assert.ok(period.value <= QUALITY_DEFERRAL_CEILING_DAYS,
-    `DeferQualityUpdatesPeriodInDays is ${period.value}, above ${QUALITY_DEFERRAL_CEILING_DAYS}: Windows `
-    + "ignores a larger value, so it would read back as set and defer nothing");
+test("control: a freeze that sets a deferral value, leaves one out, or deletes it from another key FAILS", () => {
+  const set = FREEZE.replace("name: DeferQualityUpdates, state: absent }", "name: DeferQualityUpdates, value: 1, type: dword }");
+  assert.notEqual(set, FREEZE, "the mutation changed nothing, so it controls nothing");
+  assert.match(deferralViolations(DEFAULTS, POLICY, set).join("|"), /sets DeferQualityUpdates instead of deleting it/);
+  const missing = FREEZE.replace(/^.*name: DeferFeatureUpdates, state: absent.*\n/m, "");
+  assert.notEqual(missing, FREEZE);
+  assert.match(deferralViolations(DEFAULTS, POLICY, missing).join("|"), /does not delete DeferFeatureUpdates/);
+  const elsewhere = FREEZE.replace("{ path: '{{ freeze_wu_policy }}', name: DeferQualityUpdatesPeriodInDays, state: absent }", "{ path: 'HKLM:\\Other', name: DeferQualityUpdatesPeriodInDays, state: absent }");
+  assert.notEqual(elsewhere, FREEZE);
+  assert.match(deferralViolations(DEFAULTS, POLICY, elsewhere).join("|"), /wrong key/);
 });
 
-test("the comment above the policy no longer says quality updates are left unrestricted (#4438)", () => {
-  const start = DEFAULTS.indexOf("worker_update_deferral_policy:");
-  assert.ok(start !== -1, "worker_update_deferral_policy is gone -- this test examines nothing");
-  const comment = DEFAULTS.slice(DEFAULTS.lastIndexOf("\n\n", start), start);
-  assert.ok(comment.includes("DeferFeatureUpdates") || comment.includes("#921"),
-    "the comment block above worker_update_deferral_policy was not found -- the boundary search drifted");
-  assert.doesNotMatch(comment, /unrestricted/i,
-    "the comment still says quality updates are left unrestricted, the opposite of what the list now does");
+test("the comment in the defaults says the deferral was a delay and the freeze replaced it, and no longer says quality updates are deferred 30 days", () => {
+  const start = DEFAULTS.indexOf("WINDOWS UPDATE IS NOT DEFERRED HERE ANY MORE");
+  assert.ok(start !== -1, "the explanation of where the deferral went is gone from the defaults");
+  const comment = DEFAULTS.slice(start, DEFAULTS.indexOf("\n\n", start));
+  assert.match(comment, /a delay, not a freeze/);
+  assert.match(comment, /tasks\/freeze\.yml/);
+  assert.doesNotMatch(comment, /unrestricted/i);
 });

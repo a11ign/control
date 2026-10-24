@@ -1,0 +1,146 @@
+---
+# RE-APPLY THE FREEZE TO EVERY REACHABLE BOX, AND NAME THE ONES THAT WERE NOT REACHED -- A11-205, under docs/adr/0001.
+#
+#     ansible-playbook freeze.yml                        # the daily timer's play (`freeze-schedule.yml`)
+#     ansible-playbook freeze.yml --limit a11y-worker-4  # one box
+#
+# ## What it does, and what it cannot do
+#
+# It runs the role's `freeze.yml` and nothing else: policy values, services, scheduled tasks, the Edge updater's files and network. Every task is idempotent
+# and none installs anything, so it may run on a box that is capturing (it restarts nothing and never touches `msedge.exe`). `no-scheduled-install.test.ts`
+# holds that no install module is reachable from here. It is the mechanism that puts a lever back between provisions: `fleet:provision` is a person's
+# decision, and the freeze must not wait for one. The hourly `fleet:drift` read says whether anything moved; this is what stops it moving.
+#
+# ## A box that is off is named, and frozen the next day it is awake
+#
+# `ignore_unreachable` keeps one box that is powered off from ending the run for the rest. Each box is pinged first and the answer is kept, so the closing
+# play can name every box that was not reached and every box that was reached but did not hold. The run EXITS NON-ZERO when a lever had to be put back or a
+# box was not reached, so a failed unit shows where `systemctl --failed` looks. A box that was off gets the freeze at the next daily run it is awake for, and the
+# hourly drift check reads it before then.
+#
+# ## The record
+#
+# `runs/fleet-freeze-last-run.json` on the control plane: `checkedAt`, the boxes frozen, per box the levers put back, the boxes not reached, the boxes that
+# failed. `fleet:drift` carries these lines into its own hourly record (Step 3), so one record says everything about the freeze.
+- name: The workers must be in the inventory
+  # `ansible-playbook` prints "skipping: no hosts matched" and EXITS 0 on zero hosts, so a daily run could "pass" having frozen nothing.
+  hosts: localhost
+  gather_facts: false
+  tags: [freeze_guard]
+  tasks:
+    - name: The workers must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
+
+- name: Freeze every worker that answers
+  hosts: a11y_workers
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    # THE GUARD IS ON THE WORKERS PLAY, RUN ONCE AND DELEGATED TO THE CONTROL PLANE, NOT A PLAY ON `localhost`: on the plane `hosts: localhost` matches nothing ("skipping: no hosts
+    # matched", measured 2026-10-24 on the first live run), so a guard there would never run. The same is true of the zero-host play above, which is kept as the other plays
+    # keep it.
+    # NOT WHILE A BOX IS BEING UPGRADED. `patch.yml` lifts the Windows levers on one box at a time and freezes it again in `always:`; this play, run by hand or by the
+    # daily timer in the middle of that, would put the levers back under the install's feet. The upgrade runs as the unit `a11y-fleet-patch` (`fleet:patch`).
+    # `SubState`, not `ActiveState`: the wrapper starts the upgrade with `--remain-after-exit`, so a FINISHED run stays `active (exited)` for ever and would refuse this play for ever.
+    - name: Ask systemd whether the deliberate upgrade is running
+      tags: [freeze_guard]
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=SubState, --value, a11y-fleet-patch.service]
+      register: freeze_patch_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Refuse while it is
+      tags: [freeze_guard]
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.assert:
+        that: (freeze_patch_state.stdout | trim) not in ['running', 'start', 'start-pre', 'start-post', 'reload', 'stop-sigterm']
+        fail_msg: >-
+          `a11y-fleet-patch.service` is {{ freeze_patch_state.stdout | trim }} (SubState): the deliberate upgrade has lifted the Windows levers on a box, and this freeze would put
+          them back under the install. It freezes every box again itself when it ends. Nothing has been changed.
+
+    - name: Can this box be reached at all
+      ansible.windows.win_ping:
+      register: freeze_ping
+
+    - name: Freeze it
+      when: not (freeze_ping.unreachable | default(false))
+      # A box that fails the freeze is NAMED by the closing play (it never sets `worker_freeze_done`), and the record is still written when EVERY box fails: without
+      # this the play would end here and the previous record, possibly a clean one, would stay on disk looking current. The closing play fails the run.
+      ignore_errors: true
+      ansible.builtin.include_role:
+        name: worker
+        tasks_from: freeze.yml
+
+- name: Record the run, and fail on a put-back or a box that was not reached
+  # ON THE WORKERS, RUN ONCE, because `hosts: localhost` matches nothing on the control plane (the first live run printed "skipping: no hosts matched" for it, and the record
+  # was never written). Every host is still in the play: the freeze task ignores its own failure, so none was removed.
+  hosts: a11y_workers
+  gather_facts: false
+  run_once: true
+  tags: [freeze_verdict]
+  vars:
+    # The boxes of THIS run: `--limit` narrows `ansible_play_hosts_all`, and a one-box run must not name the other fourteen "not reached".
+    freeze_workers: "{{ ansible_play_hosts_all | sort }}"
+    # Reached is what the ping SAID: a box with no ping result at all was not asked, which is not the same as being frozen.
+    freeze_reached: >-
+      {%- set r = [] -%}
+      {%- for h in freeze_workers -%}
+        {%- if hostvars[h].freeze_ping is defined and not (hostvars[h].freeze_ping.unreachable | default(false)) -%}{%- set _ = r.append(h) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ r }}
+    freeze_unreachable: "{{ freeze_workers | reject('in', freeze_reached) | list }}"
+    # Frozen is set LAST by the role's freeze, after its read-back: a box that failed part way never reaches it.
+    freeze_frozen: >-
+      {%- set r = [] -%}
+      {%- for h in freeze_reached -%}
+        {%- if hostvars[h].worker_freeze_done | default(false) -%}{%- set _ = r.append(h) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ r }}
+    freeze_failed: "{{ freeze_reached | reject('in', freeze_frozen) | list }}"
+    freeze_put_back: >-
+      {%- set r = {} -%}
+      {%- for h in freeze_frozen -%}
+        {%- if hostvars[h].worker_freeze_put_back | default([]) | length > 0 -%}{%- set _ = r.update({h: hostvars[h].worker_freeze_put_back}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ r }}
+    freeze_record_path: "{{ playbook_dir }}/../runs/fleet-freeze-last-run.json"
+  tasks:
+    - name: The runs directory exists
+      when: not ansible_check_mode
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ freeze_record_path | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the record
+      when: not ansible_check_mode
+      delegate_to: localhost
+      ansible.builtin.copy:
+        dest: "{{ freeze_record_path }}"
+        mode: "0644"
+        content: "{{ {'checkedAt': (lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')), 'scope': (ansible_limit | default('the fleet')), 'frozen': freeze_frozen, 'putBack': freeze_put_back, 'unreachable': freeze_unreachable, 'failed': freeze_failed} | to_nice_json }}"
+
+    - name: Say who was frozen, who had to be put back, and who was not reached
+      ansible.builtin.debug:
+        msg: >-
+          {{ freeze_frozen | length }} of {{ freeze_workers | length }} box(es) frozen.
+          Put back: {{ freeze_put_back if freeze_put_back | length > 0 else 'nothing' }}.
+          Not reached: {{ freeze_unreachable if freeze_unreachable | length > 0 else 'none' }}.
+          Reached but did not hold: {{ freeze_failed if freeze_failed | length > 0 else 'none' }}.
+
+    - name: The freeze did not hold everywhere, or a box was not reached
+      when: (freeze_put_back | length > 0) or (freeze_unreachable | length > 0) or (freeze_failed | length > 0)
+      ansible.builtin.fail:
+        msg: >-
+          Put back (a lever had come back since the last run): {{ freeze_put_back | list }}.
+          Not reached, so NOT frozen today: {{ freeze_unreachable }}.
+          Reached but the freeze did not hold: {{ freeze_failed }}.

@@ -40,6 +40,9 @@ const EXEMPT: Record<string, string> = {
   "collect-logs.yml": "Reads files off the guest. Starts and stops nothing.",
   "ssh-key.yml": "Writes an authorized_keys file. Does not touch the worker process.",
   "wake.yml": "Wake-on-LAN to a machine that is OFF. A worker that answers /health is not its subject.",
+  "freeze.yml":
+    "The daily freeze (A11-205) restarts nothing, installs nothing and never touches `msedge.exe`: it writes registry values, disables services and tasks, "
+    + "and renames the Edge updater's files. It is MEANT to run on a box that is capturing, because a box that is always busy must still be frozen.",
 };
 
 function playbooksTargetingWorkers(): string[] {

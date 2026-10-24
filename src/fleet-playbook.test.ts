@@ -90,7 +90,9 @@ test("only the named playbooks are runnable, and they are names rather than path
   // -- is an endpoint ON the worker, so it cannot answer for a worker that has died, and `lab:log` and
   // `lab:fetch` are both localhost. This is the only route to a dead worker's `server.log`.
   assert.deepEqual(PLAYBOOKS, ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml",
-    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml", "collect-logs.yml", "patch.yml"]);
+    "inventory-install.yml", "control-host-install.yml", "os-rollback.yml", "collect-logs.yml", "patch.yml", "freeze.yml", "freeze-proof.yml"]);
+  // `freeze.yml` and `freeze-proof.yml` joined with A11-205: the first re-applies the levers that stop a box upgrading itself and installs nothing, so it
+  // takes no gate; the second shows on ONE box that each holds, so it requires `--limit=<one worker>` (below).
   // `patch.yml` joined on 2026-10-10 (#4446): it moves a box's Windows build, so it is fenced as `os-rollback.yml` is
   // (dry unless `--apply`, behind the link and hold gates) and busy boxes refuse it; `fleet-patch.test.ts` pins that.
   // `provision.yml` stays REFUSED and that is not an oversight: it is the UTM/PowerShell provisioning
@@ -256,17 +258,20 @@ test("THE CONTROL PLANE IS SENT A COMMIT, NEVER A NAME IT WOULD RESOLVE ITSELF (
     "merging `origin/<ref>` is the bug: it is a second, later resolution of the same question");
 });
 
-test("#5310: the checkout, its ansible/ directory and patch_checkout name ONE path, on the plane", () => {
-  // `patch-schedule.yml` runs the scheduled patch from `patch_checkout`. If the fleet's own `cd` and
-  // `--working-directory` name a different directory, the play fails on the plane, not here.
-  const patchCheckout = readFileSync(new URL("../ansible/patch-schedule.yml", import.meta.url), "utf8")
-    .match(/^\s*patch_checkout:\s*(\S+)\s*$/m)?.[1];
-  assert.ok(patchCheckout, "ansible/patch-schedule.yml must declare patch_checkout");
+test("#5310: the checkout, its ansible/ directory and the daily freeze unit's working directory name ONE path, on the plane", () => {
+  // `a11y-fleet-freeze-daily.service` runs `freeze.yml` from its `WorkingDirectory`. If the fleet's own `cd` and
+  // `--working-directory` name a different directory, the play fails on the plane, not here. (This pinned the patch window's
+  // `patch_checkout` until A11-205 removed that unit.)
+  const unitDirectory = readFileSync(new URL("../ansible/files/a11y-fleet-freeze-daily.service", import.meta.url), "utf8")
+    .match(/^WorkingDirectory=(\S+)$/m)?.[1];
+  assert.ok(unitDirectory, "ansible/files/a11y-fleet-freeze-daily.service must declare WorkingDirectory");
+  const patchCheckout = unitDirectory.replace(/\/ansible$/, "");
+  assert.notEqual(patchCheckout, unitDirectory, "the unit runs from the checkout's ansible/ directory, where the playbook is");
   assert.equal(CONTROL_PLANE_CHECKOUT_PATH, patchCheckout);
 
   // `ssh` lands in /root, so the relative `cd` the playbook emits is the same directory as the absolute path.
   const cdTarget = controlPlaneCheckout("main", "d2729386d6b8807cf610c6e620173930020798a5").match(/^cd (\S+) &&/)?.[1];
-  assert.equal(`/root/${cdTarget}`, patchCheckout, "controlPlaneCheckout must enter the patch_checkout directory");
+  assert.equal(`/root/${cdTarget}`, patchCheckout, "controlPlaneCheckout must enter the directory the freeze unit runs from");
 
   assert.equal(ANSIBLE_ON_THE_PLANE, `${cdTarget}/ansible`);
   assert.equal(`/root/${ANSIBLE_ON_THE_PLANE}`, `${patchCheckout}/ansible`);
@@ -321,9 +326,16 @@ test("an OS rollback names exactly ONE worker, and --apply belongs to it alone (
     assert.match(osRollbackRefusal({ chosen, limitFlag: "a11y-worker-4", apply: true }) ?? "",
       /refusing --apply/, chosen);
   }
-  for (const chosen of PLAYBOOKS.filter((name) => !["os-rollback.yml", "recover.yml"].includes(name))) {
+  for (const chosen of PLAYBOOKS.filter((name) => !["os-rollback.yml", "recover.yml", "freeze-proof.yml"].includes(name))) {
     assert.equal(osRollbackRefusal({ chosen, limitFlag: undefined, apply: false }), null, chosen);
   }
+  // A11-205: the freeze's proof starts services and runs an updater on the box, so it is one box or nothing, and `--apply` is refused on it like on any
+  // playbook that holds no change back. The negative control: the same call with one box is allowed.
+  for (const limitFlag of [undefined, "a11y_workers", "a11y-worker-3,a11y-worker-4", ""]) {
+    assert.match(osRollbackRefusal({ chosen: "freeze-proof.yml", limitFlag, apply: false }) ?? "", /without --limit=<one worker>/, JSON.stringify(limitFlag));
+  }
+  assert.equal(osRollbackRefusal({ chosen: "freeze-proof.yml", limitFlag: "a11y-worker-4", apply: false }), null);
+  assert.equal(osRollbackRefusal({ chosen: "freeze.yml", limitFlag: undefined, apply: false }), null, "the daily freeze takes the whole fleet");
   assert.ok(PLAYBOOK_TIMEOUT_MS["os-rollback.yml"] > DEFAULT_PLAYBOOK_TIMEOUT_MS,
     "a rollback runs inside a restart that can take most of an hour; the default ceiling would kill it");
 });

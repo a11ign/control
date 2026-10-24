@@ -1,0 +1,426 @@
+---
+# THE FREEZE: nothing on this box upgrades by itself (A11-205, docs/adr/0001).
+#
+# Every lever that stops a self-updater is here, VALUES INCLUDED, and nowhere else. The values are deliberately NOT in `defaults/main.yml`:
+# `stamp-provision-revision.ps1` hashes that file's text into `provisionRevision`, a capture cache key, and none of these changes what a capture
+# sees. They sit in this task file, which the stamp does not hash. `freeze-levers.test.ts` holds that.
+#
+# ## It runs three ways, and installs nothing in any of them
+#
+#   - as the role's `freeze` step, after Edge and the firewall, on every provision;
+#   - alone, as `ansible/freeze.yml`, which the daily timer runs on every reachable box (a box that was off is frozen when it is back);
+#   - in `always:` of `patch.yml` and of `edge-version.yml`'s install, so a run that dies half way still leaves the box frozen.
+# It restarts nothing and never touches `msedge.exe`, so it may run on a box that is capturing.
+#
+# ## The two lifts, and only these
+#
+# `worker_freeze_lift_windows: true` is the deliberate upgrade's (`patch.yml`): it drops the levers that stop Windows Update being ASKED to scan and
+# install (the server redirect, `NoAutoUpdate`, and the two services' start types), and leaves the rest standing, the scheduled tasks included. The same
+# file then reads back the LIFTED state, so a lift that did not land fails by name before anything installs. The Edge install lifts its own lever by
+# renaming the updater binaries back (`edge-version.yml`).
+#
+# ## Which levers hold here, and why not the others
+#
+# Every box is Windows 11 Pro, standalone. Pro honours the Windows Update policies below (the AU policy, the WSUS redirect, the Windows Update for
+# Business target release, the driver exclusion and device installation's search order). It does NOT honour EdgeUpdate's ADMX policies, which Microsoft
+# scopes to domain-joined machines (see `edge-version.yml`), so Edge is held by services, tasks, binaries and the firewall instead. Services and tasks
+# are not policy: the edition does not decide whether they hold, access does. `WaaSMedicSvc` and the `WaaSMedic` tasks are owned by TrustedInstaller, which
+# SYSTEM may be refused; those are changed through a one-shot task that runs as `NT SERVICE\TrustedInstaller` and is removed again.
+#
+# SYSTEM has no SERVICE_CHANGE_CONFIG on these services either (A11-183), so a service is frozen as the registry's `Start` = 4, which SYSTEM may write.
+#
+# ## What is reported and not fought
+#
+# Defender's security-intelligence policy is `soft`: Tamper Protection may revert a value, and then the read-back NAMES it and the run still ends
+# (`a11y_defender` does the same). Everything else fails the run by name.
+- name: Freeze this box
+  become: true
+  vars:
+    freeze_lift_windows: "{{ worker_freeze_lift_windows | default(false) | bool }}"
+    freeze_wu_policy: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    freeze_defender_policy: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Signature Updates'
+    # An address nothing listens on, so a scan that is started anyway finds no server instead of Microsoft's.
+    freeze_unreachable_server: 'http://127.0.0.1:1'
+    freeze_edge_updater_dir: "{{ worker_edge_updater_exe | win_dirname }}"
+    freeze_edge_firewall_prefix: 'a11ign block Edge updater'
+    freeze_frozen_suffix: '.a11y-frozen'
+    # `lift: absent` is dropped by the deliberate upgrade's lift. `state: absent` is deleted from the box always. `soft: true` is reported, not fought.
+    freeze_registry_values:
+      - { path: '{{ freeze_wu_policy }}\AU', name: NoAutoUpdate, value: 1, type: dword, lift: absent }
+      - { path: '{{ freeze_wu_policy }}\AU', name: UseWUServer, value: 1, type: dword, lift: absent }
+      - { path: '{{ freeze_wu_policy }}', name: WUServer, value: '{{ freeze_unreachable_server }}', type: string, lift: absent }
+      - { path: '{{ freeze_wu_policy }}', name: WUStatusServer, value: '{{ freeze_unreachable_server }}', type: string, lift: absent }
+      - { path: '{{ freeze_wu_policy }}', name: DoNotConnectToWindowsUpdateInternetLocations, value: 1, type: dword, lift: absent }
+      - { path: '{{ freeze_wu_policy }}', name: TargetReleaseVersion, value: 1, type: dword }
+      - { path: '{{ freeze_wu_policy }}', name: TargetReleaseVersionInfo, value: '{{ worker_fleet_pins.windows.release }}', type: string }
+      - { path: '{{ freeze_wu_policy }}', name: ProductVersion, value: 'Windows 11', type: string }
+      - { path: '{{ freeze_wu_policy }}', name: ExcludeWUDriversInQualityUpdate, value: 1, type: dword }
+      - { path: 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DriverSearching', name: SearchOrderConfig, value: 0, type: dword }
+      # The deferral was a delay, not a freeze: a box installed on its own once it ran out. It is deleted, not left beside the freeze.
+      - { path: '{{ freeze_wu_policy }}', name: DeferFeatureUpdates, state: absent }
+      - { path: '{{ freeze_wu_policy }}', name: DeferFeatureUpdatesPeriodInDays, state: absent }
+      - { path: '{{ freeze_wu_policy }}', name: DeferQualityUpdates, state: absent }
+      - { path: '{{ freeze_wu_policy }}', name: DeferQualityUpdatesPeriodInDays, state: absent }
+      - { path: 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore', name: AutoDownload, value: 2, type: dword }
+      - { path: '{{ freeze_defender_policy }}', name: FallbackOrder, value: FileShares, type: string, soft: true }
+      - { path: '{{ freeze_defender_policy }}', name: DefinitionUpdateFileSharesSources, value: '', type: string, soft: true }
+      - { path: '{{ freeze_defender_policy }}', name: SignatureUpdateInterval, value: 0, type: dword, soft: true }
+      - { path: '{{ freeze_defender_policy }}', name: UpdateOnStartUp, value: 0, type: dword, soft: true }
+      - { path: '{{ freeze_defender_policy }}', name: ForceUpdateFromMU, value: 0, type: dword, soft: true }
+    # Start = 4 is Disabled. `lift_start` is what the deliberate upgrade sets while Windows Update runs (3 is Manual). The Edge updater's two services come
+    # from the role's `worker_edge_updater_services` and are never lifted.
+    freeze_services:
+      - { name: wuauserv, lift_start: 3 }
+      - { name: UsoSvc, lift_start: 3 }
+      - { name: WaaSMedicSvc }
+      - { name: InstallService }
+    # Disabled, never deleted: Windows puts these back when it is repaired, and a disabled task is one the Medic can re-enable but cannot silently re-create.
+    freeze_tasks_disabled:
+      - { path: '\Microsoft\Windows\UpdateOrchestrator\*', name: '*' }
+      - { path: '\Microsoft\Windows\WindowsUpdate\*', name: '*' }
+      - { path: '\Microsoft\Windows\WaaSMedic\*', name: '*' }
+      # The Store's scans (ScanForUpdates, ScanForUpdatesAsUser, SmartRetry) and its wake-ups. The whole folder: RestoreDevice has no use on a capture box.
+      - { path: '\Microsoft\Windows\InstallService\*', name: '*' }
+      - { path: '\Microsoft\Windows\UNP\*', name: '*' }
+      # Read from the fleet (15 boxes, 2026-10-24): these download something that changes what the box is or does. Feature flighting turns Windows features on
+      # and off with no update; the speech-model, Maps and compatibility-database tasks fetch data; the rest are firmware and DirectX updaters.
+      - { path: '\Microsoft\Windows\Flighting\*', name: '*' }
+      - { path: '\Microsoft\Windows\Speech\', name: SpeechModelDownloadTask }
+      - { path: '\Microsoft\Windows\Maps\', name: MapsUpdateTask }
+      - { path: '\Microsoft\Windows\Application Experience\', name: PcaPatchDbTask }
+      - { path: '\Microsoft\Windows\Device Setup\', name: Metadata Refresh }
+      - { path: '\Microsoft\Windows\PI\', name: Secure-Boot-Update }
+      - { path: '\Microsoft\Windows\PCRPF\', name: PCR Prediction Framework Firmware Update Task }
+      - { path: '\Microsoft\Windows\DirectX\', name: DirectXDatabaseUpdater }
+      - { path: '\Microsoft\Windows\WindowsAI\ClickToDo\', name: ModelCachingUpdate }
+    # Unregistered: the Edge updater re-registers a task that is only disabled, and a leftover OneDrive task has no owner left.
+    freeze_tasks_unregistered:
+      - { path: '\', name: 'MicrosoftEdgeUpdate*' }
+      - { path: '\', name: 'OneDrive Startup Task-*' }
+  block:
+    - name: Windows Update, the Store and Defender's signatures may not fetch anything — policy values
+      ansible.windows.win_powershell:
+        parameters:
+          Values: "{{ freeze_registry_values }}"
+          Lift: "{{ freeze_lift_windows }}"
+        script: |
+          param($Values, $Lift)
+          $Ansible.Changed = $false
+          $changed = @()
+          $soft = @()
+          foreach ($v in $Values) {
+            $remove = ($v.state -eq 'absent') -or ($Lift -and $v.lift -eq 'absent')
+            try {
+              $cur = $null
+              try { $cur = (Get-ItemProperty -LiteralPath $v.path -Name $v.name -ErrorAction Stop).($v.name) } catch { $cur = $null }
+              if ($remove) {
+                if ($null -ne $cur) {
+                  if (-not $Ansible.CheckMode) { Remove-ItemProperty -LiteralPath $v.path -Name $v.name -Force -ErrorAction Stop }
+                  $changed += "$($v.name) removed"
+                }
+              } elseif ($null -eq $cur -or "$cur" -ne "$($v.value)") {
+                if (-not $Ansible.CheckMode) {
+                  if (-not (Test-Path -LiteralPath $v.path)) { New-Item -Path $v.path -Force -ErrorAction Stop | Out-Null }
+                  $kind = if ($v.type -eq 'string') { 'String' } else { 'DWord' }
+                  $value = if ($kind -eq 'DWord') { [int]$v.value } else { [string]$v.value }
+                  New-ItemProperty -LiteralPath $v.path -Name $v.name -Value $value -PropertyType $kind -Force -ErrorAction Stop | Out-Null
+                }
+                $changed += "$($v.name)=$($v.value)"
+              }
+            } catch {
+              if ($v.soft) { $soft += "$($v.name): $($_.Exception.Message)" } else { throw }
+            }
+          }
+          $Ansible.Changed = $changed.Count -gt 0
+          $Ansible.Result = @{ changed_levers = $changed; soft_refused = $soft }
+          $changed
+      register: freeze_registry
+
+    - name: Services are frozen — the start type in the service manager AND the registry, and stopped
+      ansible.windows.win_powershell:
+        parameters:
+          Services: "{{ freeze_services }}"
+          EdgeServices: "{{ worker_edge_updater_services }}"
+          Lift: "{{ freeze_lift_windows }}"
+        script: |
+          param($Services, $EdgeServices, $Lift)
+          $Ansible.Changed = $false
+          $changed = @()
+          $refused = @()
+          # The service manager's own word for each registry start type. It keeps its OWN copy of the start type and reads the registry's again only at the next
+          # boot, so a registry write alone leaves a service startable until then (the guard's own comment in edge-version.yml recorded this, A11-183).
+          $mode = @{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }
+          foreach ($s in (@($Services) + @($EdgeServices | ForEach-Object { @{ name = $_ } }))) {
+            $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$($s.name)"
+            if (-not (Test-Path -LiteralPath $key)) { continue }
+            $lifting = $Lift -and ($null -ne $s.lift_start)
+            $want = if ($lifting) { [int]$s.lift_start } else { 4 }
+            $svc = Get-Service -Name $s.name -ErrorAction SilentlyContinue
+            $cur = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start
+            $differs = $cur -ne $want -or ($svc -and "$($svc.StartType)" -ne $mode[$want])
+            if (-not $Ansible.CheckMode) {
+              # EVERY RUN, whether or not what `sc qc` and the registry say already matches. Measured live (a11y-worker-13, 2026-10-24): after a registry-only change the service
+              # manager reported DISABLED and the registry said 4, and `sc start wuauserv` STILL succeeded; one `sc config start= disabled` made it refuse (1058). Its own copy of the
+              # start type is what is enforced, and only a call through it is sure to set that. It costs one call and is idempotent.
+              # The service manager first. SYSTEM is withheld SERVICE_CHANGE_CONFIG on some of these (edgeupdate, A11-183), so a refusal falls back to the registry.
+              try { Set-Service -Name $s.name -StartupType $mode[$want] -ErrorAction Stop } catch { $null = $_ }
+              if ((Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start -ne $want) {
+                try { Set-ItemProperty -LiteralPath $key -Name Start -Value $want -Type DWord -ErrorAction Stop } catch {
+                  # Owned by TrustedInstaller (WaaSMedicSvc): handed to the one-shot task below, as the same commands.
+                  $refused += "Set-Service -Name '$($s.name)' -StartupType $($mode[$want]) -ErrorAction SilentlyContinue; Set-ItemProperty -LiteralPath '$key' -Name Start -Value $want -Type DWord"
+                }
+              }
+            }
+            if ($differs) { $changed += "$($s.name) Start=$want" }
+            if (-not $lifting -and $svc -and $svc.Status -ne 'Stopped') {
+              if (-not $Ansible.CheckMode) {
+                try { Stop-Service -Name $s.name -Force -ErrorAction Stop } catch { $refused += "Stop-Service -Name '$($s.name)' -Force -ErrorAction SilentlyContinue" }
+              }
+              $changed += "$($s.name) stopped"
+            }
+          }
+          $Ansible.Changed = $changed.Count -gt 0
+          $Ansible.Result = @{ refused = $refused }
+          $changed
+      register: freeze_service_levers
+
+    - name: Scheduled tasks are frozen — Update Orchestrator, Medic, the Store scans and the other self-updaters disabled, the Edge updater's unregistered
+      ansible.windows.win_powershell:
+        parameters:
+          Disabled: "{{ freeze_tasks_disabled }}"
+          Unregistered: "{{ freeze_tasks_unregistered }}"
+        script: |
+          param($Disabled, $Unregistered)
+          $Ansible.Changed = $false
+          $changed = @()
+          $refused = @()
+          function Find-Task($spec) {
+            $found = @()
+            foreach ($t in @(Get-ScheduledTask -TaskPath $spec.path -ErrorAction SilentlyContinue)) {
+              if ($t.TaskName -like $spec.name) { $found += $t }
+            }
+            return $found
+          }
+          foreach ($spec in $Disabled) {
+            foreach ($t in @(Find-Task $spec)) {
+              if ($t.State -eq 'Disabled') { continue }
+              try {
+                if (-not $Ansible.CheckMode) {
+                  # Stop before disable: Disable-ScheduledTask does not end an instance that is already running.
+                  if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction SilentlyContinue }
+                  Disable-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop | Out-Null
+                }
+                $changed += "$($t.TaskPath)$($t.TaskName) disabled"
+              } catch {
+                $refused += "Disable-ScheduledTask -TaskPath '$($t.TaskPath)' -TaskName '$($t.TaskName -replace "'", "''")' | Out-Null"
+              }
+            }
+          }
+          foreach ($spec in $Unregistered) {
+            foreach ($t in @(Find-Task $spec)) {
+              if (-not $Ansible.CheckMode) {
+                if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction SilentlyContinue }
+                Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false -ErrorAction Stop
+              }
+              $changed += "$($t.TaskPath)$($t.TaskName) unregistered"
+            }
+          }
+          $Ansible.Changed = $changed.Count -gt 0
+          $Ansible.Result = @{ refused = $refused }
+          $changed
+      register: freeze_task_levers
+
+    - name: What SYSTEM was refused is changed as TrustedInstaller, through a task that is removed again
+      when:
+        - not ansible_check_mode
+        - (freeze_service_levers.result.refused | default([]) + freeze_task_levers.result.refused | default([])) | length > 0
+      ansible.windows.win_powershell:
+        parameters:
+          Commands: "{{ freeze_service_levers.result.refused | default([]) + freeze_task_levers.result.refused | default([]) }}"
+        script: |
+          param($Commands)
+          $Ansible.Changed = $true
+          $name = 'a11y-freeze-trustedinstaller-once'
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($Commands -join "`n")))
+          $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+          $principal = New-ScheduledTaskPrincipal -UserId 'NT SERVICE\TrustedInstaller' -LogonType ServiceAccount -RunLevel Highest
+          try {
+            Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName $name
+            $deadline = (Get-Date).AddSeconds(60)
+            do { Start-Sleep -Seconds 1 } while ((Get-ScheduledTask -TaskName $name).State -eq 'Running' -and (Get-Date) -lt $deadline)
+            "TrustedInstaller ran $($Commands.Count) command(s), result $((Get-ScheduledTaskInfo -TaskName $name).LastTaskResult)"
+          } finally {
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+          }
+
+    - name: The Edge updater is frozen — no process, no binary under its own name
+      ansible.windows.win_powershell:
+        parameters:
+          Dir: "{{ freeze_edge_updater_dir }}"
+          Suffix: "{{ freeze_frozen_suffix }}"
+        script: |
+          param($Dir, $Suffix)
+          $Ansible.Changed = $false
+          $changed = @()
+          # NOT WHILE THE ROLE'S OWN EDGE INSTALL IS RUNNING: the pinned MSI runs `MicrosoftEdgeUpdate.exe /install` itself, and stopping that fails the install.
+          $installing = @(Get-CimInstance Win32_Process -Filter "Name = 'msiexec.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'MicrosoftEdgeEnterprise' })
+          if ($installing.Count -eq 0) {
+            foreach ($p in @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)) {
+              if (-not $Ansible.CheckMode) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+              $changed += "$($p.ProcessName) stopped"
+            }
+            if ($changed.Count -gt 0 -and -not $Ansible.CheckMode) { Start-Sleep -Seconds 2 }
+            # Recursive: the versioned folders (`1.3.299.15\`, `1.3.303.7\`) and `Download\` hold copies of the same image.
+            if (Test-Path -LiteralPath $Dir) {
+              foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'MicrosoftEdgeUpdate*.exe' })) {
+                if (-not $Ansible.CheckMode) { Move-Item -LiteralPath $f.FullName -Destination "$($f.FullName)$Suffix" -Force -ErrorAction Stop }
+                $changed += "$($f.FullName) renamed"
+              }
+            }
+          }
+          $Ansible.Changed = $changed.Count -gt 0
+          $changed
+      register: freeze_edge_levers
+
+    - name: The Edge updater's network is blocked, one outbound rule for each updater binary
+      # A PROGRAM rule on every path, not an FQDN rule: a program rule blocks every endpoint the updater would use, and FQDN dynamic keywords resolve
+      # through Defender's network protection, which these boxes cannot be relied on to run. The paths are re-discovered on every freeze because the
+      # versioned folder names differ per box (A11-183 found the root binary alone was not enough). A renamed binary is found by its suffix.
+      ansible.windows.win_powershell:
+        parameters:
+          Dir: "{{ freeze_edge_updater_dir }}"
+          Suffix: "{{ freeze_frozen_suffix }}"
+          Prefix: "{{ freeze_edge_firewall_prefix }}"
+          Root: "{{ worker_edge_updater_exe }}"
+        script: |
+          param($Dir, $Prefix, $Suffix, $Root)
+          $Ansible.Changed = $false
+          $changed = @()
+          $paths = @($Root)
+          if (Test-Path -LiteralPath $Dir) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue)) {
+              $original = if ($f.Name.EndsWith($Suffix)) { $f.FullName.Substring(0, $f.FullName.Length - $Suffix.Length) } else { $f.FullName }
+              if ((Split-Path -Leaf $original) -like 'MicrosoftEdgeUpdate*.exe') { $paths += $original }
+            }
+          }
+          foreach ($path in ($paths | Sort-Object -Unique)) {
+            $rule = "$Prefix $path"
+            $have = @(Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue)
+            $right = $have.Count -eq 1 -and $have[0].Enabled -eq 'True' -and $have[0].Direction -eq 'Outbound' -and $have[0].Action -eq 'Block' -and ($have[0] | Get-NetFirewallApplicationFilter).Program -eq $path
+            if ($right) { continue }
+            if (-not $Ansible.CheckMode) {
+              if ($have.Count -gt 0) { $have | Remove-NetFirewallRule }
+              New-NetFirewallRule -DisplayName $rule -Direction Outbound -Action Block -Program $path -Protocol Any -Profile Any -Enabled True | Out-Null
+            }
+            $changed += $rule
+          }
+          # The first version of this rule had one name for the root binary alone.
+          $old = @(Get-NetFirewallRule -DisplayName $Prefix -ErrorAction SilentlyContinue)
+          if ($old.Count -gt 0) {
+            if (-not $Ansible.CheckMode) { $old | Remove-NetFirewallRule }
+            $changed += "$Prefix (the root-only rule) removed"
+          }
+          $Ansible.Changed = $changed.Count -gt 0
+          $changed
+      register: freeze_firewall_levers
+
+    - name: Refuse to call this box frozen unless every lever reads back
+      # Read from the box, not from the values just written. Under --check nothing was written, so there is nothing to read back.
+      when: not ansible_check_mode
+      ansible.windows.win_powershell:
+        parameters:
+          Values: "{{ freeze_registry_values }}"
+          Services: "{{ freeze_services }}"
+          EdgeServices: "{{ worker_edge_updater_services }}"
+          Disabled: "{{ freeze_tasks_disabled }}"
+          Unregistered: "{{ freeze_tasks_unregistered }}"
+          Lift: "{{ freeze_lift_windows }}"
+          Dir: "{{ freeze_edge_updater_dir }}"
+          Prefix: "{{ freeze_edge_firewall_prefix }}"
+          Suffix: "{{ freeze_frozen_suffix }}"
+          Root: "{{ worker_edge_updater_exe }}"
+        script: |
+          param($Values, $Services, $EdgeServices, $Disabled, $Unregistered, $Lift, $Dir, $Prefix, $Suffix, $Root)
+          $Ansible.Changed = $false
+          $wrong = @()
+          $soft = @()
+          $mode = @{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }
+          foreach ($v in $Values) {
+            $cur = $null
+            try { $cur = (Get-ItemProperty -LiteralPath $v.path -Name $v.name -ErrorAction Stop).($v.name) } catch { $cur = $null }
+            $remove = ($v.state -eq 'absent') -or ($Lift -and $v.lift -eq 'absent')
+            $bad = if ($remove) { $null -ne $cur } else { $null -eq $cur -or "$cur" -ne "$($v.value)" }
+            if ($bad) {
+              $line = "$($v.path)\$($v.name) is '$cur', wanted " + $(if ($remove) { 'absent' } else { "'$($v.value)'" })
+              if ($v.soft) { $soft += $line } else { $wrong += $line }
+            }
+          }
+          foreach ($s in (@($Services) + @($EdgeServices | ForEach-Object { @{ name = $_ } }))) {
+            $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$($s.name)"
+            if (-not (Test-Path -LiteralPath $key)) { continue }
+            $lifting = $Lift -and ($null -ne $s.lift_start)
+            $want = if ($lifting) { [int]$s.lift_start } else { 4 }
+            $start = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start
+            if ($start -ne $want) { $wrong += "service $($s.name) Start is '$start', wanted $want" }
+            $svc = Get-Service -Name $s.name -ErrorAction SilentlyContinue
+            # The service manager's copy, which is what decides whether `Start-Service` works. A registry value it has not read yet is a lever that does not hold.
+            if ($svc -and "$($svc.StartType)" -ne $mode[$want]) { $wrong += "service $($s.name) is $($svc.StartType) in the service manager, wanted $($mode[$want]) (the registry's Start=$start is read again at the next boot)" }
+            if (-not $lifting -and $svc -and $svc.Status -ne 'Stopped') { $wrong += "service $($s.name) is $($svc.Status), wanted Stopped" }
+          }
+          foreach ($spec in $Disabled) {
+            foreach ($t in @(Get-ScheduledTask -TaskPath $spec.path -ErrorAction SilentlyContinue)) {
+              if ($t.TaskName -like $spec.name -and $t.State -ne 'Disabled') { $wrong += "task $($t.TaskPath)$($t.TaskName) is $($t.State), wanted Disabled" }
+            }
+          }
+          foreach ($spec in $Unregistered) {
+            foreach ($t in @(Get-ScheduledTask -TaskPath $spec.path -ErrorAction SilentlyContinue)) {
+              if ($t.TaskName -like $spec.name) { $wrong += "task $($t.TaskPath)$($t.TaskName) still exists, wanted it unregistered" }
+            }
+          }
+          $installing = @(Get-CimInstance Win32_Process -Filter "Name = 'msiexec.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'MicrosoftEdgeEnterprise' })
+          if ($installing.Count -eq 0) {
+            foreach ($p in @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)) { $wrong += "process $($p.ProcessName) is running" }
+          }
+          # A rule must exist, enabled, outbound, blocking and on EXACTLY that program, for the root image always and for every other updater binary found.
+          function Test-BlockRule($path) {
+            $rule = @(Get-NetFirewallRule -DisplayName "$Prefix $path" -ErrorAction SilentlyContinue)
+            $ok = $rule.Count -eq 1 -and $rule[0].Enabled -eq 'True' -and $rule[0].Direction -eq 'Outbound' -and $rule[0].Action -eq 'Block' -and ($rule[0] | Get-NetFirewallApplicationFilter).Program -eq $path
+            if (-not $ok) { return "no enabled outbound block rule for $path" }
+          }
+          $wrong += @(Test-BlockRule $Root)
+          if (Test-Path -LiteralPath $Dir) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue)) {
+              if ($f.Name -like 'MicrosoftEdgeUpdate*.exe') { $wrong += "updater binary $($f.FullName) has its own name" }
+              if ($f.Name -like "MicrosoftEdgeUpdate*.exe$Suffix") { $wrong += @(Test-BlockRule ($f.FullName.Substring(0, $f.FullName.Length - $Suffix.Length))) }
+            }
+          }
+          if ($soft.Count -gt 0) { "NOT HELD (reported, not fought): " + ($soft -join '; ') }
+          if ($wrong.Count -gt 0) { $Ansible.Failed = $true; "freeze did not hold: " + ($wrong -join '; ') }
+          else { "frozen: $($Values.Count) policy values, $(@($Services).Count + @($EdgeServices).Count) services, the self-updater tasks, the Edge updater and its network" }
+      register: freeze_proof
+
+    - name: Remember what this run had to put back, for the daily run's record
+      # A fact, not a log line: `ansible/freeze.yml` collects it from every box. It is set LAST, after the read-back, so a box that failed part way has neither
+      # fact and is named as failed instead of as frozen. The daily play runs with `ignore_unreachable`, which lets a task that lost its connection (measured live: "Data
+      # could not be sent to remote host ... #< CLIXML" during the read-back) fall through to here, so each result is asked: a box whose read-back never answered is not frozen.
+      when:
+        - freeze_registry is not unreachable
+        - freeze_service_levers is not unreachable
+        - freeze_task_levers is not unreachable
+        - freeze_edge_levers is not unreachable
+        - freeze_firewall_levers is not unreachable
+        - freeze_proof is not unreachable
+      ansible.builtin.set_fact:
+        worker_freeze_put_back: >-
+          {{ freeze_registry.result.changed_levers | default([]) + freeze_service_levers.output | default([]) + freeze_task_levers.output | default([])
+             + freeze_edge_levers.output | default([]) + freeze_firewall_levers.output | default([])
+             + (freeze_service_levers.result.refused | default([]) + freeze_task_levers.result.refused | default([])) | map('regex_replace', '^', 'as TrustedInstaller: ') | list }}
+        worker_freeze_done: true
+
+    - name: Say what the freeze put back
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ 'LIFTED for the upgrade — ' if freeze_lift_windows else '' }}
+          {{ worker_freeze_put_back | length }} lever(s) changed this run.
+          {{ (freeze_proof.output | default([])) | join(' ') }}

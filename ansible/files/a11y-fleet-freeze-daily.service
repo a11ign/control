@@ -1,0 +1,28 @@
+[Unit]
+# THE DAILY FREEZE -- A11-205. Re-applies ONLY the freeze (`roles/worker/tasks/freeze.yml`) to every reachable box and names the ones it could not reach.
+# Installed by `freeze-schedule.yml`. It installs nothing: `no-scheduled-install.test.ts` reads this file and refuses a command that is not on its allowlist.
+#
+# THE UNIT NAME IS NOT `a11y-fleet-freeze`: `fleet:freeze` dispatches `freeze.yml` as a transient unit of that name and stops and resets it before every run, so
+# a unit of the same name here would be stopped by the very command it fires (the patch window's unit had the same trap).
+Description=a11y: re-apply the freeze to every reachable box, and name the ones that were not reached
+
+[Service]
+Type=oneshot
+# `ansible-playbook` lives in /root/.local/bin on the control plane, which systemd's default PATH omits (#2725).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+Environment=ANSIBLE_CONFIG=ansible.cfg
+# Control's own checkout, the one `a11y-fleet-auto-off.service` runs from. The playbook writes `runs/fleet-freeze-last-run.json` relative to itself.
+WorkingDirectory=/root/control/ansible
+# NOT WHILE A PLAY THAT MOVES A BOX IS RUNNING. The deliberate upgrade lifts the Windows levers on one box at a time and re-freezes in `always:`; a freeze that
+# landed in the middle would put the levers back under its feet. `ExecCondition` skips the day (exit 1 is "condition false", not a failure) and the next firing
+# is the retry. `--remain-after-exit` keeps a finished transient unit loaded, so it is `list-units --state=running,...` that is asked, as the follow-main step
+# of `a11y-fleet-auto-off.service` asks it. An unreadable answer fails the condition (the play is assumed to be running).
+ExecCondition=/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
+    a11y-fleet-deploy.service a11y-fleet-provision-role.service a11y-fleet-patch.service a11y-fleet-freeze.service a11y-fleet-freeze-proof.service \
+    a11y-fleet-recover.service a11y-fleet-os-rollback.service) || exit 1; \
+  test -z "$$playing" || { echo "freeze: a play is running ($$playing), not today"; exit 1; }'
+# Follow `main` first, or a stale checkout freezes with yesterday's levers. The `-` is the point: a failed step leaves the tree as it was, and the freeze still
+# runs the levers it has. `--ff-only`, never a checkout (a checkout a deploy put on another ref is left standing).
+ExecStartPre=-/bin/sh -c 'git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main && git merge --ff-only --quiet origin/main'
+# `env` resolves `ansible-playbook` through the PATH above: systemd looks up an ExecStart command in its own search path, not the unit's.
+ExecStart=/usr/bin/env ansible-playbook freeze.yml

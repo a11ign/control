@@ -1,0 +1,326 @@
+---
+# PROVE THE FREEZE HOLDS ON ONE BOX, FROM THE BOX -- A11-205, the ticket's "before merge" line.
+#
+#     ansible-playbook freeze-proof.yml --limit a11y-worker-4        # or: pnpm run fleet:freeze-proof -- --limit=a11y-worker-4
+#
+# ## What it shows, and why a registry read-back is not enough
+#
+# A value that reads back correctly is a value that is STORED. The EdgeUpdate policies read back clean on every box and Edge updated itself anyway (see
+# `edge-version.yml`). So each lever is shown by making the thing it stops TRY, and reading what happened:
+#
+#   services      `Start-Service` on `wuauserv`, `UsoSvc`, `edgeupdate` and `InstallService` each FAIL;
+#   Windows Update  with `wuauserv` and `UsoSvc` made startable (the one thing a Medic repair could do), a `Microsoft.Update.Session` search and
+#                 `UsoClient StartScan` both RUN, the search FAILS (the server it is redirected to is not there), `NotificationLevel` reads 1 (Notify off),
+#                 and `CurrentBuild.UBR` and the hotfix list are unchanged;
+#   effective policy  the Windows Update client's own `UpdatePolicy\PolicyState`, which is what the client DECIDED from the policy we wrote. If Pro does not
+#                 expose a value there, this says so by name and does not pretend;
+#   Medic         `WaaSMedicSvc` STARTS although its start type is Disabled (measured), so it is run on purpose for 90 s and what it changed is read; the freeze puts it back,
+#                 and the System log's service-control events (7040) say what changed a start type and over what window;
+#   Edge          no `MicrosoftEdgeUpdate*` task, no binary under its own name; then one binary is restored and `MicrosoftEdgeUpdate.exe /ua /installsource
+#                 core` is RUN, and the network is refused and Edge's binary version does not move;
+#   Store         no Appx package version moved across the whole proof.
+#
+# Every step that lifts a lever sits in a `block:` whose `always:` runs the role's freeze again and reads it back, so a proof that dies half way still leaves
+# the box frozen. It installs nothing: no install module is reachable from here (`no-scheduled-install.test.ts`).
+#
+# ## It needs ONE box, and refuses without
+#
+# `--limit` is required. The proof starts services and runs an updater: that is a change to a box, not a look, so it is never fleet-wide.
+- name: The workers must be in the inventory
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The workers must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
+
+- name: Prove the freeze on one box
+  hosts: a11y_workers
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  # The role's declared paths (the Edge image and the updater's), read where the proof uses them: an `include_role` below keeps the role's defaults to itself.
+  vars_files:
+    - roles/worker/defaults/main.yml
+  vars:
+    # `WaaSMedicSvc` is NOT here: measured on a11y-worker-13 (2026-10-24), `Start-Service WaaSMedicSvc` SUCCEEDS with the service manager reading it `DISABLED` (`sc qc`: START_TYPE 4).
+    # It is a protected service, so the proof runs it on purpose below and shows that it changes nothing that matters, instead of claiming a lever that does not hold.
+    proof_services: [wuauserv, UsoSvc, edgeupdate, InstallService]
+    proof_edge_dir: "{{ worker_edge_updater_exe | win_dirname }}"
+  tasks:
+    - name: Exactly one box, or this proof is refused
+      run_once: true
+      ansible.builtin.assert:
+        that: ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          freeze-proof.yml needs `--limit=<one worker>`: it starts services and runs an updater on the box to show they achieve nothing, and that is a
+          change to a box. It matched {{ ansible_play_hosts_all | length }}: {{ ansible_play_hosts_all }}.
+
+    - name: Refuse to prove it on a worker that is mid-capture
+      delegate_to: localhost
+      become: false
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ a11y_port }}/health"
+        return_content: true
+      register: proof_health
+      failed_when: proof_health.json.busy | default(true)
+
+    - name: Start from the frozen box, so the proof is of the freeze and not of whatever the box was
+      ansible.builtin.include_role:
+        name: worker
+        tasks_from: freeze.yml
+
+    - name: Read the box before anything is tried
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          EdgeExe: "{{ worker_edge_exe }}"
+        script: &proof_state |
+          param($EdgeExe)
+          $Ansible.Changed = $false
+          $v = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $hotfixes = @(Get-HotFix -ErrorAction SilentlyContinue | Sort-Object HotFixID | ForEach-Object { $_.HotFixID }) -join ','
+          $appx = (@(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Sort-Object PackageFullName | ForEach-Object { $_.PackageFullName }) -join '|')
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $appxHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($appx))).Replace('-', '')
+          $edge = if (Test-Path -LiteralPath $EdgeExe) { (Get-Item -LiteralPath $EdgeExe).VersionInfo.ProductVersion } else { '(absent)' }
+          [ordered]@{ build = "$($v.CurrentBuild).$($v.UBR)"; hotfixes = $hotfixes; appxHash = $appxHash; edge = $edge } | ConvertTo-Json -Compress
+      changed_when: false
+      register: proof_before
+
+    - name: Each service that could install or update something refuses to start
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          Services: "{{ proof_services }}"
+        script: &proof_refusal |
+          param($Services)
+          $Ansible.Changed = $false
+          $started = @()
+          foreach ($name in $Services) {
+            if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) { "$name : absent"; continue }
+            try {
+              Start-Service -Name $name -ErrorAction Stop
+              $started += $name
+              Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+            } catch { "$name : refused to start: $($_.Exception.Message)" }
+          }
+          if ($started.Count -gt 0) { $Ansible.Failed = $true; "STARTED, so the freeze does not hold: " + ($started -join ', ') }
+      register: proof_services_refused
+      changed_when: false
+
+    - name: Windows Update is asked to scan with everything but the redirect and NoAutoUpdate lifted
+      block:
+        - name: Make the two services startable, which is all a repaired Medic could undo
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $true
+              # THROUGH THE SERVICE MANAGER, as the upgrade's lift does. A registry-only write left the service manager's own copy out of step (measured live), and the proof
+              # must lift the way the real lift does or it proves a different thing.
+              foreach ($name in 'wuauserv', 'UsoSvc') { Set-Service -Name $name -StartupType Manual }
+              Start-Service -Name wuauserv
+              "wuauserv: $((Get-Service wuauserv).Status), UsoSvc: $((Get-Service UsoSvc).StartType)"
+
+        - name: A Windows Update search runs and finds no server, and the notification level is off
+          # THE SEARCH RUNS IN A PROCESS OF ITS OWN WITH A DEADLINE. Measured live (a11y-worker-13, 2026-10-24): `Search()` against the unreachable server does not return
+          # for 18+ minutes, and a client left calling it re-activates `wuauserv` after the freeze stops it. So it is given 90 s, and then killed: that it did NOT find a server
+          # in 90 s, with nothing returned, is the finding. The failure HRESULT, when the agent gives up sooner, is printed.
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $false
+              $level = (New-Object -ComObject Microsoft.Update.AutoUpdate).Settings.NotificationLevel
+              "NOTIFICATION_LEVEL: $level (1 is disabled)"
+              if ($level -ne 1) { $Ansible.Failed = $true; "NoAutoUpdate does not read as Notify-disabled" }
+              $file = Join-Path $env:TEMP 'a11y-freeze-proof-search.ps1'
+              Set-Content -LiteralPath $file -Encoding ASCII -Value @'
+              try {
+                $found = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software'")
+                "SEARCH_RETURNED: $($found.Updates.Count) update(s)"
+                exit 3
+              } catch {
+                "SEARCH_FAILED: 0x{0:X8} {1}" -f $_.Exception.HResult, $_.Exception.Message
+                exit 4
+              }
+              '@
+              $out = Join-Path $env:TEMP 'a11y-freeze-proof-search.out'
+              $p = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $file `
+                -RedirectStandardOutput $out -PassThru -WindowStyle Hidden
+              if ($p.WaitForExit(90000)) {
+                Get-Content -LiteralPath $out | ForEach-Object { $_ }
+                if ($p.ExitCode -eq 3) { $Ansible.Failed = $true; "the search found a server and an answer, so the redirect does not hold" }
+              } else {
+                Stop-Process -Id $p.Id -Force
+                "SEARCH_TIMED_OUT: no server answered in 90 s, nothing was found or installed; the search was stopped"
+              }
+              Remove-Item -LiteralPath $file, $out -Force -ErrorAction SilentlyContinue
+          register: proof_search
+          changed_when: false
+
+        - name: The Update Orchestrator is asked to scan
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $false
+              Start-Service -Name UsoSvc -ErrorAction SilentlyContinue
+              # StartScan only. StartDownload and StartInstall would act on whatever is already staged, and this proof installs nothing.
+              $p = Start-Process -FilePath "$env:SystemRoot\System32\UsoClient.exe" -ArgumentList 'StartScan' -Wait -PassThru -NoNewWindow
+              "UsoClient StartScan : exit $($p.ExitCode)"
+              Start-Sleep -Seconds 20
+          register: proof_uso
+          changed_when: false
+
+        - name: Read what the Windows Update client decided from the policy, which is not the policy key we wrote
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $false
+              $key = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\PolicyState'
+              if (-not (Test-Path -LiteralPath $key)) { "PolicyState: key absent on this edition/build"; return }
+              $state = Get-ItemProperty -LiteralPath $key
+              $names = @($state.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { "$($_.Name)=$($_.Value)" })
+              foreach ($line in $names) { "PolicyState: $line" }
+              foreach ($wanted in 'TargetReleaseVersion', 'ExcludeWUDrivers', 'PolicySources', 'IsWUfBConfigured') {
+                if (-not ($names | Where-Object { $_ -like "*$wanted*" })) { "NOT EXPOSED by Pro in PolicyState: $wanted" }
+              }
+          register: proof_policy
+          changed_when: false
+      always:
+        - name: Freeze the box again, whatever the scan did
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: freeze.yml
+
+    - name: The re-freeze put the refusal back — every service that was made startable refuses to start again
+      # THE POINT OF THE `always:`. The block above made `wuauserv` and `UsoSvc` startable and a scan ran; this is the same refusal test as at the start, after the freeze that closed
+      # the block. A freeze that read back clean but left the service manager willing to start them would pass every other check here and fail this one.
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          Services: "{{ proof_services }}"
+        script: *proof_refusal
+      register: proof_services_refused_again
+      changed_when: false
+
+    - name: Medic is run on purpose — it starts although it is Disabled — and left a minute and a half to repair what it likes
+      # THE ANSWER TO "WaaSMedicSvc HANDLED SO IT DOES NOT RE-ENABLE THEM, OR PROVEN NOT TO": it cannot be held off by its start type (a protected service starts anyway), so it is
+      # RUN here and what it did is read. Whatever it changes is put back by the freeze in `always:` and named in "Say what the freeze put back"; what holds regardless is the
+      # policy layer (the redirect, `NoAutoUpdate`, no Microsoft locations), which Medic does not repair and which the search above shows to hold with every service startable.
+      block:
+        - name: Start Medic and wait
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $true
+              $before = (Get-Service WaaSMedicSvc).StartType
+              try { Start-Service -Name WaaSMedicSvc -ErrorAction Stop; "MEDIC_STARTED: yes, with the service manager reading it $before" } catch { "MEDIC_STARTED: no, refused: $($_.Exception.Message)" }
+              Start-Sleep -Seconds 90
+              foreach ($name in 'wuauserv', 'UsoSvc', 'WaaSMedicSvc') {
+                $start = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -ErrorAction SilentlyContinue).Start
+                $svc = (Get-Service -Name $name).StartType
+                "MEDIC_AFTER_90S: $name registry Start=$start, service manager $svc"
+              }
+              foreach ($task in @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\WaaSMedic\*', '\Microsoft\Windows\UpdateOrchestrator\*' -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })) {
+                "MEDIC_AFTER_90S: task $($task.TaskPath)$($task.TaskName) is $($task.State)"
+              }
+          register: proof_medic
+      always:
+        - name: Freeze the box again, so whatever Medic changed is put back and Medic is stopped
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: freeze.yml
+
+    - name: The System log, for what changed a start type and when
+      become: true
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          # 7040 is "the start type of the service was changed". The window the log covers is said, because "no event" over a short window proves little.
+          $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7040 } -MaxEvents 500 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'Windows Update|Update Orchestrator|Medic' })
+          $oldest = (Get-WinEvent -LogName System -Oldest -MaxEvents 1 -ErrorAction SilentlyContinue).TimeCreated
+          "SYSTEM_LOG_OLDEST: $oldest"
+          foreach ($e in $events) { "EVENT_7040 $($e.TimeCreated.ToUniversalTime().ToString('o')) $($e.Message -replace '\s+', ' ')" }
+          "EVENT_7040_COUNT: $($events.Count)"
+      register: proof_log
+      changed_when: false
+
+    - name: Edge's updater is run from a restored binary, with the network blocked, and Edge does not move
+      block:
+        - name: No updater task, no binary under its own name
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Dir: "{{ proof_edge_dir }}"
+            script: |
+              param($Dir)
+              $Ansible.Changed = $false
+              $tasks = @(Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)
+              $named = @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'MicrosoftEdgeUpdate*.exe' })
+              "EDGE_UPDATE_TASKS: $($tasks.Count)"
+              "UPDATER_BINARIES_UNDER_OWN_NAME: $($named.Count)"
+              if ($tasks.Count -gt 0 -or $named.Count -gt 0) { $Ansible.Failed = $true }
+
+        - name: Restore the root updater binary and run it as the hourly task did
+          become: true
+          ansible.windows.win_powershell:
+            parameters:
+              Exe: "{{ worker_edge_updater_exe }}"
+              Suffix: '.a11y-frozen'
+              Log: 'C:\ProgramData\Microsoft\EdgeUpdate\Log\MicrosoftEdgeUpdate.log'
+            script: |
+              param($Exe, $Suffix, $Log)
+              $Ansible.Changed = $true
+              if (-not (Test-Path -LiteralPath "$Exe$Suffix")) { $Ansible.Failed = $true; "no frozen updater at $Exe$Suffix to restore"; return }
+              Move-Item -LiteralPath "$Exe$Suffix" -Destination $Exe -Force
+              $started = Get-Date
+              $p = Start-Process -FilePath $Exe -ArgumentList '/ua', '/installsource', 'core' -PassThru -NoNewWindow
+              $null = $p.Handle   # without a cached handle the exit code of a process we did not wait on through Start-Process reads back empty
+              if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; "UPDATER_RUN: still running after 120 s, stopped" }
+              else { "UPDATER_RUN: exit $($p.ExitCode)" }
+              if (Test-Path -LiteralPath $Log) {
+                foreach ($line in @(Get-Content -LiteralPath $Log -Tail 60 | Where-Object { $_ -match 'error|fail|0x8|refused|WinHttp|network' } | Select-Object -Last 12)) { "UPDATER_LOG: $line" }
+              } else { "UPDATER_LOG: no log at $Log" }
+          register: proof_updater
+      always:
+        - name: Freeze the box again, so the restored binary is renamed and the processes are stopped
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: freeze.yml
+
+    - name: Read the box after everything was tried
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          EdgeExe: "{{ worker_edge_exe }}"
+        script: *proof_state
+      changed_when: false
+      register: proof_after
+
+    - name: Nothing moved — the build, the hotfixes, Edge and every Store package are as they were
+      vars:
+        before: "{{ proof_before.output | first | from_json }}"
+        after: "{{ proof_after.output | first | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - before.build == after.build
+          - before.hotfixes == after.hotfixes
+          - before.edge == after.edge
+          - before.appxHash == after.appxHash
+        fail_msg: "{{ inventory_hostname }} MOVED during the proof: before {{ before }}, after {{ after }}"
+        success_msg: "{{ inventory_hostname }}: unchanged — build {{ after.build }}, Edge {{ after.edge }}, {{ (after.hotfixes | split(',')) | length }} hotfix(es), Store packages {{ after.appxHash[:12] }}"
+
+    - name: Say what each lever showed
+      ansible.builtin.debug:
+        msg:
+          - "services: {{ proof_services_refused.output | default([]) }}"
+          - "services after the re-freeze: {{ proof_services_refused_again.output | default([]) }}"
+          - "search: {{ proof_search.output | default([]) }}"
+          - "orchestrator: {{ proof_uso.output | default([]) }}"
+          - "effective policy: {{ proof_policy.output | default([]) }}"
+          - "medic: {{ proof_medic.output | default([]) }}"
+          - "system log: {{ proof_log.output | default([]) }}"
+          - "edge updater: {{ proof_updater.output | default([]) }}"

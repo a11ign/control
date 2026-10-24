@@ -83,13 +83,20 @@ const EXEMPT: Record<string, string> = {
     + "in the fleet's src/provisioning/, not roles/worker/) and carries no environment value "
     + "of its own -- it only applies what worker_display_mode already hashes, same as this task did inline.",
   "ansible/roles/worker/tasks/edge-version.yml":
-    "Installs and pins worker_edge_version (from the already-hashed defaults/main.yml), but the effect — "
+    "Installs and pins worker_edge_version (derived in the already-hashed defaults/main.yml from deploy-pins.json), but the effect — "
     + "which Edge build actually runs — is independently re-measured every capture via browserVersion, a "
     + "cache-key field read from the live binary rather than assumed from provisioning intent. A bug here "
     + "shows up as a live mismatch, which is louder and more reliable than a stale stamp.",
   "ansible/roles/worker/tasks/nvda.yml":
     "Installs guidepup/NVDA (screenReaderVersion and guidepupVersion are live-measured cache-key fields, "
-    + "same reasoning as edge-version.yml) and invokes a11y_speech_viewer, which IS hashed (HASHED_HERE).",
+    + "same reasoning as edge-version.yml) and invokes a11y_speech_viewer, which IS hashed (HASHED_HERE), and "
+    + "a11y_nvda_updates, which is exempt below.",
+  "ansible/roles/worker/tasks/freeze.yml":
+    "THE FREEZE (A11-205): every lever that stops a self-updater, with its values, deliberately NOT in defaults/main.yml so that "
+    + "none of them moves provisionRevision. It changes what a box may INSTALL, never what a capture observes: the versions it holds "
+    + "the box at are each live-measured cache-key fields (windowsVersion, browserVersion, screenReaderVersion, nodeVersion) and are "
+    + "read against deploy-pins.json by fleet:status and fleet:drift, which is louder and more reliable than a stale stamp. A refactor "
+    + "or a new lever here cannot change the evidence without changing a measured field.",
   "ansible/roles/worker/tasks/tasks.yml":
     "Registers the scheduled task (LogonType, RunLevel). Getting these wrong makes NVDA fail to start at "
     + "all (\"NVDA is not supported\") or capture nothing (an elevated worker cannot read the browser) — a "
@@ -117,8 +124,7 @@ const EXEMPT: Record<string, string> = {
   "ansible/roles/worker/tasks/account.yml":
     "Account identity and auto-logon. No relationship to what a capture observes.",
   "ansible/roles/worker/tasks/firewall.yml":
-    "Network reachability (port rules, sshd) and the outbound block on the Edge updater's image (A11-183), which keeps the "
-    + "browser on its pin rather than changing what a capture observes of it.",
+    "Network reachability (port rules, sshd). The outbound block on the Edge updater moved to freeze.yml (A11-205), which is exempt on its own entry.",
   "ansible/roles/worker/tasks/powershell-native-image.yml":
     "NGEN of System.Management.Automation (#2672): changes how fast powershell.exe STARTS, never what a "
     + "capture hears. It reads before it writes and names its assembly in the task file, not in "
@@ -163,6 +169,12 @@ const EXEMPT: Record<string, string> = {
     + "cache-key fields — the same reasoning as edge-version.yml above.",
   "ansible/collections/ansible_collections/a11y/worker/plugins/modules/a11y_nvda.py":
     "Documentation for a11y_nvda.ps1 (see that entry). No independent runtime effect.",
+  "ansible/collections/ansible_collections/a11y/worker/plugins/modules/a11y_nvda_updates.ps1":
+    "Turns NVDA's own update check and the add-on store's updates off (A11-205). guidepup's bundled config already ships these values, so "
+    + "it changes nothing in a healthy install; it exists to prove them and to put them back if a reinstall or another guidepup changes "
+    + "them. Which NVDA runs is screenReaderVersion, live-measured and compared with the manifest.",
+  "ansible/collections/ansible_collections/a11y/worker/plugins/modules/a11y_nvda_updates.py":
+    "Documentation for a11y_nvda_updates.ps1 (see that entry). No independent runtime effect.",
   "ansible/collections/ansible_collections/a11y/worker/plugins/modules/a11y_speech_viewer.py":
     "Documentation for a11y_speech_viewer.ps1, which IS hashed. Ansible requires the .py/.ps1 pair and "
     + "only the .ps1 has runtime effect, so hashing the docstring would churn the capture cache for a "

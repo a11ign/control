@@ -4,8 +4,8 @@
  * ever been shown to accept the real playbook has not been shown to reject anything.
  *
  * Two kinds of test, and the split is deliberate:
- *   - STRUCTURE, read off the parsed playbook: serial, the busy refusal, `reboot: false`, the restore that
- *     reads the role's list. These always run.
+ *   - STRUCTURE, read off the parsed playbook: serial, the busy refusal, `reboot: false`, the lift that opens the block
+ *     and the re-freeze that closes it in `always:` (A11-205). These always run.
  *   - BEHAVIOUR of the final verdict, run through the real `ansible-playbook` over a SYNTHETIC inventory of
  *     local connections carrying invented readings. It reaches no worker. It needs Ansible installed, which
  *     the control plane always has; where it is absent the tests say so by name rather than pass.
@@ -41,8 +41,9 @@ function parseYamlFile(path: string): Yaml {
 
 const PLAYS: Play[] = parseYamlFile(PATCH);
 const GUARD_PLAY: Play = PLAYS[0];
-const PATCH_PLAY: Play = PLAYS[1];
-const VERDICT_PLAY: Play = PLAYS[2];
+const DAILY_FREEZE_PLAY: Play = PLAYS[1];
+const PATCH_PLAY: Play = PLAYS[2];
+const VERDICT_PLAY: Play = PLAYS[3];
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 /** Every task in the play, flattened through block/rescue/always, in order. */
@@ -80,16 +81,27 @@ function rebootsOnlyItself(play: Play): boolean {
   return neverModuleReboot && onlyAfterInstalling && !updates.includes(reboots[0]);
 }
 
-/** The restore runs in `always` and takes its values from the role's list through the variable's name. */
-function restoresFromRolesList(play: Play): boolean {
-  const block = play.tasks.find((task: Task) => Array.isArray(task.always));
-  const restore = block?.always.find((task: Task) => moduleOf(task, "ansible.windows.win_regedit"));
-  return restore !== undefined && /^\{\{\s*worker_update_deferral_policy\s*\}\}$/.test(String(restore.loop))
-    && play.vars_files?.includes("roles/worker/defaults/main.yml") === true;
+/** The role's own freeze, included with the Windows levers lifted or not. */
+const freezeInclude = (task: Task | undefined, lifted: boolean): boolean => {
+  const include = task?.["ansible.builtin.include_role"];
+  return include?.name === "worker" && include.tasks_from === "freeze.yml" && task?.vars?.worker_freeze_lift_windows === lifted;
+};
+
+/**
+ * A11-205: the block OPENS with the lift (the role's freeze, lifted) and `always:` ENDS with the freeze, not lifted. Last, so that nothing after it in
+ * `always:` can undo it, and in `always:` so that an install or a reboot that died still leaves the box frozen.
+ */
+function liftsThenRefreezes(play: Play): boolean {
+  const block = play.tasks.find((task: Task) => Array.isArray(task.block));
+  if (block === undefined || !Array.isArray(block.always) || block.always.length === 0) return false;
+  return freezeInclude(block.block[0], true) && freezeInclude(block.always[block.always.length - 1], false);
 }
 
+/** The play moves no Windows Update value itself: the lift and the freeze are the role's one list, so the two cannot disagree about what "frozen" is. */
+const writesNoRegistryValue = (play: Play): boolean => tasksUsing(play, "ansible.windows.win_regedit").length === 0;
+
 test("parses as YAML, targets the workers group, and runs one box at a time", () => {
-  assert.ok(Array.isArray(PLAYS) && PLAYS.length === 3, "patch.yml is the zero-host guard, the patch play and the verdict play");
+  assert.ok(Array.isArray(PLAYS) && PLAYS.length === 4, "patch.yml is the zero-host guard, the daily-freeze guard, the patch play and the verdict play");
   // A run matching no worker exits 0 having patched nothing; the guard play is what makes that a refusal.
   assert.equal(GUARD_PLAY.hosts, "localhost");
   assert.ok(allTasks(GUARD_PLAY.tasks).some((task) => task["ansible.builtin.include_tasks"] === "tasks/require-inventory-group.yml"));
@@ -129,23 +141,49 @@ test("win_updates runs with reboot: false and the reboot is a separate, conditio
   assert.ok(!rebootsOnlyItself(noSeparateReboot), "with no win_reboot task there is no visible reboot");
 });
 
-test("the restore reads worker_update_deferral_policy; the play declares no deferral values of its own", () => {
-  assert.ok(restoresFromRolesList(PATCH_PLAY));
+test("A11-205: the block lifts the Windows freeze first and the re-freeze is the last thing in `always:`; the play writes no value of its own", () => {
+  assert.ok(liftsThenRefreezes(PATCH_PLAY));
+  const noAlways = clone(PATCH_PLAY);
+  delete noAlways.tasks.find((task: Task) => task.always).always;
+  assert.ok(!liftsThenRefreezes(noAlways), "no `always:` must be caught");
+  const emptyAlways = clone(PATCH_PLAY);
+  emptyAlways.tasks.find((task: Task) => task.always).always = [];
+  assert.ok(!liftsThenRefreezes(emptyAlways), "an empty `always:` must be caught");
+  const stillLifted = clone(PATCH_PLAY);
+  const closing = stillLifted.tasks.find((task: Task) => task.always).always;
+  closing[closing.length - 1].vars.worker_freeze_lift_windows = true;
+  assert.ok(!liftsThenRefreezes(stillLifted), "a re-freeze that is itself lifted leaves the box open");
+  const notLast = clone(PATCH_PLAY);
+  notLast.tasks.find((task: Task) => task.always).always.push({ name: "x", "ansible.builtin.debug": { msg: "after" } });
+  assert.ok(!liftsThenRefreezes(notLast), "something after the re-freeze could undo it");
+  const noLift = clone(PATCH_PLAY);
+  noLift.tasks.find((task: Task) => task.block).block.shift();
+  assert.ok(!liftsThenRefreezes(noLift), "a block that does not open with the lift installs nothing");
+  const wrongRole = clone(PATCH_PLAY);
+  wrongRole.tasks.find((task: Task) => task.always).always.at(-1)["ansible.builtin.include_role"].tasks_from = "policy.yml";
+  assert.ok(!liftsThenRefreezes(wrongRole), "a re-freeze that runs another task file is no freeze");
+
+  assert.ok(writesNoRegistryValue(PATCH_PLAY));
   const own = clone(PATCH_PLAY);
-  const restore = own.tasks.find((task: Task) => task.always).always.find((task: Task) => task["ansible.windows.win_regedit"]);
-  restore.loop = [{ path: "HKLM:\\x", name: "DeferQualityUpdatesPeriodInDays", value: 30 }];
-  assert.ok(!restoresFromRolesList(own), "a literal list in the restore must be caught");
-  const unrestored = clone(PATCH_PLAY);
-  unrestored.tasks.find((task: Task) => task.always).always = [];
-  assert.ok(!restoresFromRolesList(unrestored), "no restore in `always` must be caught");
+  own.tasks.find((task: Task) => task.always).always.unshift({ name: "x", "ansible.windows.win_regedit": { path: "HKLM:\\x", name: "NoAutoUpdate", data: 0 } });
+  assert.ok(!writesNoRegistryValue(own), "a value written here could disagree with the freeze");
 
   const text = readFileSync(PATCH, "utf8").split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
-  // #4897: the window may also name `DeferFeatureUpdatesPeriodInDays` (with a target), as it names the quality entry.
-  assert.doesNotMatch(text, /DeferFeatureUpdates(?!PeriodInDays)|DeferQualityUpdates(?!PeriodInDays)|:\s*365\b|\bvalue:\s*30\b/,
-    "the play must not restate the role's values; only the lifted entries' NAMES and the window's 0 are its own");
-  // The variable it reads really lives in the file it loads: otherwise the read is of an undefined name.
-  const defaults = readFileSync(join(ANSIBLE, "roles/worker/defaults/main.yml"), "utf8");
-  assert.match(defaults, /^worker_update_deferral_policy:/m);
+  assert.doesNotMatch(text, /Defer(Feature|Quality)Updates|worker_update_deferral_policy|TargetReleaseVersion/,
+    "no deferral and no target release is restated here: the deferral is gone, and the target release is the freeze's");
+});
+
+test("A11-205: the daily freeze is refused while it runs, so it cannot undo a lift", () => {
+  const tasks = allTasks(DAILY_FREEZE_PLAY.tasks);
+  // On the workers, run once, delegated to the control plane: `hosts: localhost` matches nothing there ("skipping: no hosts matched"), so a guard on it never runs.
+  assert.equal(DAILY_FREEZE_PLAY.hosts, "a11y_workers");
+  assert.equal(DAILY_FREEZE_PLAY.run_once, true);
+  assert.ok(tasks.every((task) => task.delegate_to === "localhost"), "every task of the guard runs on the control plane");
+  const ask = tasks.find((task) => /a11y-fleet-freeze-daily\.service/.test(JSON.stringify(task["ansible.builtin.command"] ?? "")));
+  assert.ok(ask, "the play asks systemd about the daily freeze's unit");
+  const refusal = tasks.find((task) => "ansible.builtin.assert" in task);
+  assert.match(JSON.stringify(refusal), /active.*activating/, "active and activating both refuse");
+  assert.match(JSON.stringify(refusal), /not in/, "the refusal is on the unit being in those states");
 });
 
 // --- the verdict, through the real Ansible over invented readings -----------------------------------------
@@ -221,10 +259,8 @@ function runLocal(opts: { playbook: string, hosts: Record<string, Record<string,
   return { status: run.status, out: `${run.stdout}\n${run.stderr}`, dir };
 }
 
-interface WindowValue { path: string, name: string, value: string | number, type?: string }
 interface Evaluated {
-  categories: string[], lifted: WindowValue[], window: WindowValue[], targetValues: WindowValue[],
-  pending: boolean, restart: boolean, rebootTimeout: number,
+  categories: string[], pending: boolean, restart: boolean, rebootTimeout: number,
 }
 
 /**
@@ -236,26 +272,20 @@ function evaluatedVars(extra: Record<string, unknown>): Evaluated {
   const dir = mkdtempSync(join(tmpdir(), "patch-vars-"));
   const out = join(dir, "out.json");
   const playbook = join(dir, "vars.yml");
-  const result = "{'categories': patch_categories, 'lifted': patch_lifted_values, 'window': patch_window_values, "
-    + "'targetValues': patch_target_values, 'pending': patch_feature_pending | bool, 'restart': patch_restart_wanted | bool, "
+  const result = "{'categories': patch_categories, 'pending': patch_feature_pending | bool, 'restart': patch_restart_wanted | bool, "
     + "'rebootTimeout': patch_reboot_timeout | int}";
   writeFileSync(playbook, JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false,
-    vars_files: [join(ANSIBLE, "roles/worker/defaults/main.yml")], vars: PATCH_PLAY.vars,
+    vars: PATCH_PLAY.vars,
     tasks: [{ "ansible.builtin.copy": { dest: out, content: `{{ ${result} | to_json }}` } }] }]));
   const run = runLocal({ playbook, hosts: { localhost: {} }, extra: extra as Extra });
   assert.equal(run.status, 0, run.out);
   return JSON.parse(readFileSync(out, "utf8"));
 }
-const names = (values: WindowValue[]): string[] => values.map((v) => v.name);
-const valueOf = (values: WindowValue[], name: string): string | number | undefined => values.find((v) => v.name === name)?.value;
 const BASE_CATEGORIES = ["SecurityUpdates", "CriticalUpdates", "UpdateRollups", "Updates"];
 
-test("#4897 negative control: with no target the categories, the deferral and the reboot rule are what they were", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+test("#4897 negative control: with no target the categories and the reboot rule are what they were", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
   const none = evaluatedVars(NO_TARGET);
   assert.deepEqual(none.categories, BASE_CATEGORIES, "no Upgrades category without a target");
-  assert.deepEqual(none.window.map((v) => `${v.name}=${v.value}`), ["DeferQualityUpdatesPeriodInDays=0"],
-    "the window lifts the quality deferral and nothing else, and writes no target release");
-  assert.deepEqual(none.targetValues, []);
   assert.equal(none.rebootTimeout, 1800, "the reboot timeout is the cumulative one");
   assert.equal(none.pending, false, "no target, no feature route");
   assert.ok(rebootsOnlyItself(PATCH_PLAY));
@@ -263,41 +293,10 @@ test("#4897 negative control: with no target the categories, the deferral and th
   assert.doesNotMatch(JSON.stringify(tasksUsing(PATCH_PLAY, "ansible.windows.win_reboot")[0].when), /patch_target/);
 });
 
-test("#4897: with a target the feature deferral is lifted for the window, the target is set, and Upgrades is NOT a category", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+test("#4897: with a target Upgrades is NOT a category, and the play still writes no policy value (A11-205: the target release is the freeze's)", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
   const set = evaluatedVars(TARGET);
   assert.deepEqual(set.categories, BASE_CATEGORIES, "win_updates cannot switch a feature update (A11-31), so it is not asked to");
-  assert.equal(valueOf(set.window, "DeferFeatureUpdatesPeriodInDays"), 0, "feature deferral lifted");
-  assert.equal(valueOf(set.window, "DeferQualityUpdatesPeriodInDays"), 0, "quality deferral still lifted");
-  assert.equal(valueOf(set.window, "TargetReleaseVersion"), 1);
-  assert.equal(valueOf(set.window, "TargetReleaseVersionInfo"), "26H2");
-  assert.equal(valueOf(set.window, "ProductVersion"), "Windows 11");
-  assert.equal(set.window.find((v) => v.name === "TargetReleaseVersionInfo")?.type, "string", "a release name is not a dword");
-  assert.ok(!names(set.window).includes("DeferFeatureUpdates"), "the on/off flag is the role's and stays on");
-  assert.ok(set.window.every((v) => v.path.startsWith("HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate")));
-});
-
-/** The restore (in `always`) removes every target name the window can write, and reads the removal back. */
-function removesTargetThenReadsBack(play: Play): boolean {
-  const always: Task[] = play.tasks.find((task: Task) => Array.isArray(task.always))?.always ?? [];
-  const removeAt = always.findIndex((task) => moduleOf(task, "ansible.windows.win_regedit")?.state === "absent"
-    && /patch_target_names/.test(String(task.loop)));
-  const readsBack = always.slice(removeAt + 1).some((task) => /Names/.test(JSON.stringify(task["ansible.windows.win_powershell"] ?? "")));
-  return removeAt > 0 && readsBack && String(play.vars.patch_target_names).includes("TargetReleaseVersionInfo");
-}
-
-test("#4897: the target is REMOVED in the `always`, after the role's list is back, on every run, and read back", () => {
-  assert.ok(removesTargetThenReadsBack(PATCH_PLAY));
-  const noRemoval = clone(PATCH_PLAY);
-  const always = noRemoval.tasks.find((task: Task) => task.always);
-  always.always = always.always.filter((task: Task) => moduleOf(task, "ansible.windows.win_regedit")?.state !== "absent");
-  assert.ok(!removesTargetThenReadsBack(noRemoval), "no removal must be caught");
-  const noReadBack = clone(PATCH_PLAY);
-  const tail = noReadBack.tasks.find((task: Task) => task.always);
-  tail.always = tail.always.filter((task: Task) => !/Names/.test(JSON.stringify(task["ansible.windows.win_powershell"] ?? "")));
-  assert.ok(!removesTargetThenReadsBack(noReadBack), "a removal nobody read back must be caught");
-  // Never conditional on the target: a target a killed run left behind is healed by the next window of any kind.
-  const removal = PATCH_PLAY.tasks.find((task: Task) => task.always).always.find((task: Task) => moduleOf(task, "ansible.windows.win_regedit")?.state === "absent");
-  assert.equal(removal.when, undefined);
+  assert.ok(writesNoRegistryValue(PATCH_PLAY), "the lift and the target release are written by the role's freeze, from deploy-pins.json");
 });
 
 /** Run only the box-level target verdict over invented readings, with the caller's `-e`. */
@@ -336,6 +335,10 @@ test("#4897: a target is given whole and well-formed, or not at all", { skip: HA
   assert.notEqual(targetInputs({ patch_target_build: "26300.9711" }), 0, "a build with no release would change nothing");
   assert.notEqual(targetInputs({ patch_target_release: "Windows 11", patch_target_build: "26300.9711" }), 0, "a release is NNHn");
   assert.notEqual(targetInputs({ patch_target_release: "26H2", patch_target_build: "26300" }), 0, "a build is <build>.<UBR>");
+  // A11-205: the freeze holds Windows Update at the manifest's release for the whole run, so a target for another release could never be reached.
+  const manifestRelease = (JSON.parse(readFileSync(join(ANSIBLE, "../deploy-pins.json"), "utf8")) as { windows: { release: string } }).windows.release;
+  assert.equal(targetInputs({ patch_target_release: manifestRelease, patch_target_build: "26300.9711" }), 0, "the manifest's own release is accepted");
+  assert.notEqual(targetInputs({ patch_target_release: "25H2", patch_target_build: "26200.1" }), 0, "another release than the manifest's is refused");
 });
 
 // --- A11-31: a feature update goes through the Installation Assistant, then ONE restart once Setup has finished ----
@@ -376,9 +379,8 @@ test("A11-31: the Assistant route runs space, fetch, launch, wait and ONE restar
   assert.equal(tasksUsing(PATCH_PLAY, "ansible.windows.win_reboot").length, 1, "one restart, this play's own");
   // The restart is bounded: `reboot_timeout` is not read while a connection hangs, so the task carries its own `timeout`.
   assert.match(String(FEATURE_BLOCK(PATCH_PLAY).find(isReboot)?.timeout), /patch_reboot_timeout/);
-  // The restore still sits in the `always`, and the install is not asked to do the feature pass's job.
-  assert.ok(restoresFromRolesList(PATCH_PLAY));
-  assert.ok(removesTargetThenReadsBack(PATCH_PLAY));
+  // The re-freeze still sits in the `always`, and the install is not asked to do the feature pass's job.
+  assert.ok(liftsThenRefreezes(PATCH_PLAY));
   const install = FEATURE_BLOCK(PATCH_PLAY).find(nameStarts("Install the pending quality updates"));
   assert.match(JSON.stringify(install?.when), /not \(patch_feature_pending/, "a feature pass installs nothing beside the Assistant");
 });
@@ -444,7 +446,7 @@ test("A11-31: the steps that did not switch a box stay gone, read from the parse
 });
 
 test("A11-31: the removed-steps check sees each step when it is put back", () => {
-  const withTask = (task: Task): Play[] => { const plays = clone(PLAYS); plays[1].tasks.push(task); return plays; };
+  const withTask = (task: Task): Play[] => { const plays = clone(PLAYS); plays[2].tasks.push(task); return plays; };
   const usoClient = { name: "x", "ansible.windows.win_powershell": { script: "UsoClient.exe StartInstall" } };
   const bcd = { name: "x", "ansible.windows.win_powershell": { script: "bcdedit /enum all" } };
   const upgrades = { name: "x", "ansible.windows.win_updates": { category_names: ["Upgrades"], state: "installed" } };
@@ -455,10 +457,10 @@ test("A11-31: the removed-steps check sees each step when it is put back", () =>
     assert.equal(staleSteps(withTask(task)).length, 1, JSON.stringify(task));
   }
   const viaVar = clone(PLAYS);
-  viaVar[1].vars.patch_categories = [...viaVar[1].vars.patch_categories, "Upgrades"];
+  viaVar[2].vars.patch_categories = [...viaVar[2].vars.patch_categories, "Upgrades"];
   assert.equal(staleSteps(viaVar).length, 1, "Upgrades back in patch_categories");
   const renamed = clone(PLAYS);
-  renamed[1].vars.patch_switch_pending = "{{ true }}";
+  renamed[2].vars.patch_switch_pending = "{{ true }}";
   assert.equal(staleSteps(renamed).length, 1, "the BCD wait's var");
   const named = { name: "UsoClient and bcdedit and Upgrades, mentioned only in the task name", "ansible.builtin.debug": { msg: "gone" } };
   assert.deepEqual(staleSteps(withTask(named)), [], "a name is not a step");
