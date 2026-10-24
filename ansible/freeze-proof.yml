@@ -183,7 +183,7 @@
               $state = Get-ItemProperty -LiteralPath $key
               $names = @($state.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { "$($_.Name)=$($_.Value)" })
               foreach ($line in $names) { "PolicyState: $line" }
-              foreach ($wanted in 'TargetReleaseVersion', 'ExcludeWUDriversInQualityUpdate', 'PolicySources') {
+              foreach ($wanted in 'TargetReleaseVersion', 'ExcludeWUDrivers', 'PolicySources', 'IsWUfBConfigured') {
                 if (-not ($names | Where-Object { $_ -like "*$wanted*" })) { "NOT EXPOSED by Pro in PolicyState: $wanted" }
               }
           register: proof_policy
@@ -278,6 +278,7 @@
               Move-Item -LiteralPath "$Exe$Suffix" -Destination $Exe -Force
               $started = Get-Date
               $p = Start-Process -FilePath $Exe -ArgumentList '/ua', '/installsource', 'core' -PassThru -NoNewWindow
+              $null = $p.Handle   # without a cached handle the exit code of a process we did not wait on through Start-Process reads back empty
               if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; "UPDATER_RUN: still running after 120 s, stopped" }
               else { "UPDATER_RUN: exit $($p.ExitCode)" }
               if (Test-Path -LiteralPath $Log) {
