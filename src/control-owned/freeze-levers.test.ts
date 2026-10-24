@@ -91,46 +91,62 @@ const UNREGISTERED_TASKS: Array<[string, string]> = [["\\", "MicrosoftEdgeUpdate
 
 // ---- the predicate ---------------------------------------------------------------------------------------------------------------------------------
 
+const byName = <T extends { name: string }>(list: T[]): Map<string, T> => new Map(list.map((item) => [item.name, item]));
+
+/** What is wrong with the registry levers the ticket lists: each present, under its key, with its value and type, and dropped by the lift or not. */
+function registryViolations(registry: Map<string, Lever>): string[] {
+  return Object.entries(REGISTRY).flatMap(([name, [key, value, type, lifted]]) => {
+    const have = registry.get(name);
+    if (!have) return [`registry lever ${name} is missing`];
+    return [
+      have.path !== key ? `${name} is under '${have.path}', wanted '${key}'` : "",
+      have.value !== value ? `${name} is '${have.value}', wanted '${value}'` : "",
+      have.type !== type ? `${name} is a ${have.type}, wanted a ${type}` : "",
+      (have.lift === "absent") !== lifted ? `${name} ${lifted ? "is not dropped by" : "is dropped by"} the upgrade's lift` : "",
+      have.state === "absent" ? `${name} is deleted instead of set` : "",
+    ].filter(Boolean);
+  });
+}
+
+/** Defender's signature levers are soft (reported, not fought) and the deferral values are deleted from the box. */
+function defenderAndDeferralViolations(registry: Map<string, Lever>): string[] {
+  const defender = Object.entries(DEFENDER_LEVERS).flatMap(([name, value]) => {
+    const have = registry.get(name);
+    if (!have) return [`Defender lever ${name} is missing`];
+    return [
+      have.path !== DEFENDER || have.value !== value ? `${name} is '${have.value}' under '${have.path}', wanted '${value}' under the signature-updates key` : "",
+      have.soft !== true ? `${name} is not soft: Tamper Protection may revert it, and that is reported, not fought` : "",
+    ].filter(Boolean);
+  });
+  const deferrals = DEFERRALS.filter((name) => registry.get(name)?.state !== "absent").map((name) => `${name} is not deleted from the box`);
+  return [...defender, ...deferrals];
+}
+
+/** Each service present, with the start type the upgrade's lift gives it (or none). */
+function serviceViolations(services: Map<string, Service>): string[] {
+  return Object.entries(SERVICES).flatMap(([name, lift]) => {
+    const have = services.get(name);
+    if (!have) return [`service ${name} is missing`];
+    return (have.lift_start ?? null) !== lift ? [`service ${name} lift_start is ${have.lift_start ?? "none"}, wanted ${lift ?? "none"}`] : [];
+  });
+}
+
+/** Each task disabled or unregistered as wanted, and none both: the Edge updater re-registers a task that is only disabled. */
+function taskViolations(freeze: Freeze): string[] {
+  const keys = (list: TaskSpec[]) => list.map((spec) => `${spec.path}|${spec.name}`);
+  const disabled = keys(freeze.vars.disabled);
+  const unregistered = keys(freeze.vars.unregistered);
+  return [
+    ...DISABLED_TASKS.filter(([taskPath, name]) => !disabled.includes(`${taskPath}|${name}`)).map(([taskPath, name]) => `task ${taskPath}${name} is not disabled`),
+    ...UNREGISTERED_TASKS.filter(([taskPath, name]) => !unregistered.includes(`${taskPath}|${name}`)).map(([taskPath, name]) => `task ${taskPath}${name} is not unregistered`),
+    ...unregistered.filter((key) => disabled.includes(key)).map((key) => `${key.split("|")[1]} is both disabled and unregistered`),
+  ];
+}
+
 /** What is wrong with the freeze, as a list. Empty means every lever is there with its value and is read back from the same data. */
 function leverViolations(freeze: Freeze): string[] {
-  const problems: string[] = [];
-  const registry = new Map(freeze.vars.registry.map((lever) => [lever.name, lever]));
-  for (const [name, [key, value, type, lifted]] of Object.entries(REGISTRY)) {
-    const have = registry.get(name);
-    if (!have) { problems.push(`registry lever ${name} is missing`); continue; }
-    if (have.path !== key) problems.push(`${name} is under '${have.path}', wanted '${key}'`);
-    if (have.value !== value) problems.push(`${name} is '${have.value}', wanted '${value}'`);
-    if (have.type !== type) problems.push(`${name} is a ${have.type}, wanted a ${type}`);
-    if ((have.lift === "absent") !== lifted) problems.push(`${name} ${lifted ? "is not dropped by" : "is dropped by"} the upgrade's lift`);
-    if (have.state === "absent") problems.push(`${name} is deleted instead of set`);
-  }
-  for (const [name, value] of Object.entries(DEFENDER_LEVERS)) {
-    const have = registry.get(name);
-    if (!have) { problems.push(`Defender lever ${name} is missing`); continue; }
-    if (have.path !== DEFENDER || have.value !== value) problems.push(`${name} is '${have.value}' under '${have.path}', wanted '${value}' under the signature-updates key`);
-    if (have.soft !== true) problems.push(`${name} is not soft: Tamper Protection may revert it, and that is reported, not fought`);
-  }
-  for (const name of DEFERRALS) {
-    const have = registry.get(name);
-    if (!have || have.state !== "absent") problems.push(`${name} is not deleted from the box`);
-  }
-  const services = new Map(freeze.vars.services.map((service) => [service.name, service]));
-  for (const [name, lift] of Object.entries(SERVICES)) {
-    const have = services.get(name);
-    if (!have) { problems.push(`service ${name} is missing`); continue; }
-    if ((have.lift_start ?? null) !== lift) problems.push(`service ${name} lift_start is ${have.lift_start ?? "none"}, wanted ${lift ?? "none"}`);
-  }
-  const tasks = (list: TaskSpec[]) => list.map((spec) => `${spec.path}|${spec.name}`);
-  for (const [taskPath, name] of DISABLED_TASKS) {
-    if (!tasks(freeze.vars.disabled).includes(`${taskPath}|${name}`)) problems.push(`task ${taskPath}${name} is not disabled`);
-  }
-  for (const [taskPath, name] of UNREGISTERED_TASKS) {
-    if (!tasks(freeze.vars.unregistered).includes(`${taskPath}|${name}`)) problems.push(`task ${taskPath}${name} is not unregistered`);
-  }
-  for (const spec of freeze.vars.unregistered) {
-    if (freeze.vars.disabled.some((other) => other.path === spec.path && other.name === spec.name)) problems.push(`${spec.name} is both disabled and unregistered`);
-  }
-  return problems;
+  const registry = byName(freeze.vars.registry);
+  return [...registryViolations(registry), ...defenderAndDeferralViolations(registry), ...serviceViolations(byName(freeze.vars.services)), ...taskViolations(freeze)];
 }
 
 const freezeLifted = (): Lever[] => FREEZE.vars.registry.filter((lever) => lever.lift === "absent");
@@ -180,7 +196,7 @@ test("control: a service, a disabled task or an unregistered task removed FAILS"
 });
 
 test("the Edge updater's two services come from the role's list, and the role declares them", () => {
-  assert.match(DEFAULTS, /^worker_edge_updater_services:\n  - edgeupdate\n  - edgeupdatem$/m);
+  assert.match(DEFAULTS, /^worker_edge_updater_services:\n {2}- edgeupdate\n {2}- edgeupdatem$/m);
   for (const name of EDGE_SERVICES) assert.ok(DEFAULTS.includes(`  - ${name}\n`), name);
   const scripts = FREEZE.tasks.filter((task) => /EdgeServices/.test(JSON.stringify(task)));
   assert.equal(scripts.length, 2, "both the apply and the read-back handle them");

@@ -46,9 +46,12 @@ function run(options: { hosts: Record<string, Record<string, unknown>>; tags: st
   const result = spawnSync("ansible-playbook", ["-i", inventory, play, "--tags", options.tags], {
     cwd: join(dir, "ansible"), encoding: "utf8",
     env: { ...process.env, ANSIBLE_CONFIG: join(dir, "ansible", "ansible.cfg"), ANSIBLE_NOCOLOR: "1", PATH: `${join(dir, "bin")}:${process.env.PATH}` } });
-  let written: Yaml | null = null;
-  try { written = JSON.parse(readFileSync(record, "utf8")); } catch { written = null; }
-  return { status: result.status, out: `${result.stdout}\n${result.stderr}`, record: written };
+  return { status: result.status, out: `${result.stdout}\n${result.stderr}`, record: readRecord(record) };
+}
+
+/** The record the closing play wrote, or null when it wrote none. */
+function readRecord(path: string): Yaml | null {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
 }
 
 const FROZEN = { freeze_ping: { ping: "pong" }, worker_freeze_done: true, worker_freeze_put_back: [] };

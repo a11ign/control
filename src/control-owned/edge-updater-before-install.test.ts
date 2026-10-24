@@ -50,31 +50,40 @@ const isFreeze = (task: Task | undefined): boolean => {
   return include?.file === "freeze.yml";
 };
 
+/** The block's tasks run in the order each can stop the role, every one found, none before the one it must follow. */
+function orderViolations(inner: Task[]): string[] {
+  const at = (name: string) => heads(inner).indexOf(name);
+  const missing = INSTALL_ORDER.filter((name) => at(name) < 0).map((name) => `task not found in the block: ${name}`);
+  const misordered = INSTALL_ORDER.slice(1).filter((name, i) => at(INSTALL_ORDER[i]) >= 0 && at(name) >= 0 && at(name) < at(INSTALL_ORDER[i]))
+    .map((name) => `"${name}" comes before "${INSTALL_ORDER[INSTALL_ORDER.indexOf(name) - 1]}"`);
+  return [...missing, ...misordered];
+}
+
+/** Where the freeze sits in the block: first (before the download), last in `always:`, and nowhere else. */
+function placementViolations(block: Task): string[] {
+  const inner: Task[] = block.block ?? [];
+  const always: Task[] = block.always ?? [];
+  return [
+    always.some(isFreeze) ? "" : "the freeze is not in the block's `always:`, so a run that stops at a step leaves the updater live",
+    always.length > 0 && !isFreeze(always[always.length - 1]) ? "something comes after the freeze in `always:` and could undo it" : "",
+    // The ONE freeze the block may hold is its first task, taken before the download so the updater cannot start between there and the install.
+    isFreeze(inner[0]) ? "" : "the block does not open with the freeze, so the updater is live through the download",
+    inner.slice(1).some(isFreeze) ? "the freeze is in the block itself, where a failure before it skips it" : "",
+  ].filter(Boolean);
+}
+
 /** What is wrong with where the freeze sits, as a list. Empty means the updater is frozen whatever stops the install. */
 function freezeViolations(tasks: Task[]): string[] {
   const block = blockOf(tasks);
   if (!block) return ["the install block is not found"];
-  const inner: Task[] = block.block ?? [];
-  const always: Task[] = block.always ?? [];
-  const problems: string[] = [];
-  const at = (name: string) => heads(inner).indexOf(name);
-  for (const name of INSTALL_ORDER) if (at(name) < 0) problems.push(`task not found in the block: ${name}`);
-  for (let i = 1; i < INSTALL_ORDER.length; i += 1) {
-    if (at(INSTALL_ORDER[i - 1]) >= 0 && at(INSTALL_ORDER[i]) >= 0 && at(INSTALL_ORDER[i]) < at(INSTALL_ORDER[i - 1])) {
-      problems.push(`"${INSTALL_ORDER[i]}" comes before "${INSTALL_ORDER[i - 1]}"`);
-    }
-  }
-  if (!always.some(isFreeze)) problems.push("the freeze is not in the block's `always:`, so a run that stops at a step leaves the updater live");
-  if (always.length > 0 && !isFreeze(always[always.length - 1])) problems.push("something comes after the freeze in `always:` and could undo it");
-  // The ONE freeze the block may hold is its first task, taken before the download so the updater cannot start between there and the install.
-  if (!isFreeze(inner[0])) problems.push("the block does not open with the freeze, so the updater is live through the download");
-  if (inner.slice(1).some(isFreeze)) problems.push("the freeze is in the block itself, where a failure before it skips it");
-  const beforeBlock = tasks.slice(0, tasks.indexOf(block));
-  if (beforeBlock.some(isFreeze)) problems.push("the freeze runs BEFORE the install, which the installer then undoes (a11ign#4948)");
   const heading = heads(tasks);
-  if (heading.indexOf(CLOSING_ASSERTION) < heading.indexOf(INSTALL_BLOCK)) problems.push("the closing assertion comes before the install");
-  if (heading.indexOf(GUARD) < heading.indexOf(INSTALL_BLOCK)) problems.push("the guard is registered before the install");
-  return problems;
+  return [
+    ...orderViolations(block.block ?? []),
+    ...placementViolations(block),
+    tasks.slice(0, tasks.indexOf(block)).some(isFreeze) ? "the freeze runs BEFORE the install, which the installer then undoes (a11ign#4948)" : "",
+    heading.indexOf(CLOSING_ASSERTION) < heading.indexOf(INSTALL_BLOCK) ? "the closing assertion comes before the install" : "",
+    heading.indexOf(GUARD) < heading.indexOf(INSTALL_BLOCK) ? "the guard is registered before the install" : "",
+  ].filter(Boolean);
 }
 
 test("the freeze is the install block's `always:`, and the block runs fetch, refusals, restore, install and rename in that order", () => {
