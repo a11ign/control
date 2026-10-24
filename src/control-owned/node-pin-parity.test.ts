@@ -2,7 +2,7 @@
 /**
  * THE NODE PIN EXISTS IN TWO PLACES, AND THEY MUST NOT DRIFT — #2063.
  *
- * `roles/worker/defaults/main.yml` is the tested copy and the one `provisionRevision` hashes.
+ * `deploy-pins.json` (`node`) is the tested copy (A11-205: the role's `worker_node_*` are derived from it, and `defaults/main.yml` holds no literal).
  * `bootstrap-windows-worker.ps1` carries a port of it, because a box built from the bootstrap comes up
  * before the fleet can reach it — the same argument `edge-pin-parity.test.ts` makes for Edge, and this
  * file is deliberately that test with `worker_edge_version` swapped for Node.
@@ -29,11 +29,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse } from "yaml";
 
+import { readFleetPins } from "../fleet-pins.ts";
+
 const REPO = resolve(import.meta.dirname, "../../../..");
 const read = (path: string) => readFileSync(resolve(REPO, path), "utf8");
 
 const ROLE = "packages/control/ansible/roles/worker";
-const DEFAULTS = parse(read(`${ROLE}/defaults/main.yml`)) as Record<string, unknown>;
+const NODE = readFleetPins(resolve(REPO, "packages/control/deploy-pins.json")).node;
 /** One task as the playbook declares it. `unknown` values because a task's shape is per-module. */
 type Task = { name?: string, when?: string, register?: string, changed_when?: boolean,
   block?: Task[], [module: string]: unknown };
@@ -48,9 +50,7 @@ const options = (of: Task | undefined, module: string) =>
   (of?.[module] ?? {}) as Record<string, string>;
 
 test("the bootstrap pins the SAME Node build the role does", () => {
-  const version = DEFAULTS.worker_node_version;
-  assert.equal(typeof version, "string",
-    "worker_node_version is gone from the role defaults — this test examines nothing");
+  const version = NODE.version;
   assert.ok(BOOTSTRAP.includes(`'${version}'`),
     `the role pins Node ${version} and the bootstrap does not. A box built from the bootstrap would come `
     + "up on a different runtime from the fleet, which is exactly the split #2063 measured — and since "
@@ -63,12 +63,12 @@ test("the bootstrap verifies the SAME bytes, for EVERY architecture the role nam
   // The URL is a delivery endpoint: what it serves can change under a stable address, so the hash is the
   // real pin. Per architecture because the zip differs per architecture and this fleet has both — one
   // hash could only ever verify one of them, and a copy carrying a subset verifies the other by accident.
-  const hashes = DEFAULTS.worker_node_sha256 as Record<string, string> | undefined;
-  assert.deepEqual(Object.keys(hashes ?? {}).sort(), ["arm64", "x64"],
-    "the role no longer pins a Node checksum per architecture — `packages.yml` indexes this map by the "
+  const hashes = NODE.sha256 as Record<string, string>;
+  assert.deepEqual(Object.keys(hashes).sort(), ["arm64", "x64"],
+    "the manifest no longer pins a Node checksum per architecture — `packages.yml` indexes this map by the "
     + "box's own arch, so a missing key installs unverified bytes on exactly one kind of box");
-  for (const [arch, sha] of Object.entries(hashes ?? {})) {
-    assert.match(sha, /^[0-9a-f]{64}$/, `worker_node_sha256.${arch} is not a sha256`);
+  for (const [arch, sha] of Object.entries(hashes)) {
+    assert.match(sha, /^[0-9a-f]{64}$/, `node.sha256.${arch} is not a sha256`);
     assert.ok(BOOTSTRAP.includes(sha),
       `the role verifies the ${arch} archive against ${sha} and the bootstrap does not mention it — the `
       + "two copies would accept different bytes under the same version number");

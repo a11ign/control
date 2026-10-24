@@ -1,9 +1,9 @@
 // The control half of fleet-layer/edge-pin-parity.test.ts (a11ign/a11ign#5345): the role-vs-bootstrap parity and lag tests read control's own
-// `defaults/main.yml`. The three bootstrap-only tests moved to a11ign/screenreader-fleet (src/edge-pin-parity.test.ts, #5350).
+// manifest, `deploy-pins.json` (A11-205: the role derives its Edge pin from it). The three bootstrap-only tests moved to a11ign/screenreader-fleet (src/edge-pin-parity.test.ts, #5350).
 /**
  * THE EDGE PIN EXISTS IN TWO PLACES, AND THEY MUST NOT DRIFT.
  *
- * `roles/worker/tasks/edge-version.yml` is the tested copy and the one `provisionRevision` hashes.
+ * `deploy-pins.json` (`edge`) is the tested copy, and `roles/worker/tasks/edge-version.yml` installs from it (A11-205; it was the role's defaults before).
  * `bootstrap-windows-worker.ps1` now carries a port of it, because a pin that arrives after the box has
  * updated itself is not a pin — which is what happened to a11y-worker-7 on 2026-09-04. Nothing in first
  * boot mentioned Edge; the box came up with a network, Edge updated itself to 152 while `npm install` was
@@ -30,19 +30,18 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { readFleetPins } from "../fleet-pins.ts";
+
 // Located from THIS file, not from a guessed repository root: the same test runs in control's own checkout (the layer installed under
 // `node_modules`) and in the core's lay of it (`packages/control`, the layer laid beside it at `packages/worker-fleet`). A root four levels up
 // is only right in the second, so from control's checkout it read `/home/agent/packages/control` and the row's Acceptance could not pass (#5660).
 const CONTROL = resolve(import.meta.dirname, "../..");
 const BOOTSTRAP_AT = "src/provisioning/bootstrap-windows-worker.ps1";
 const BOOTSTRAP_HOMES = [resolve(CONTROL, "node_modules/@a11ign/screenreader-fleet", BOOTSTRAP_AT), resolve(CONTROL, "../worker-fleet", BOOTSTRAP_AT)];
-const DEFAULTS = readFileSync(resolve(CONTROL, "ansible/roles/worker/defaults/main.yml"), "utf8");
+const MANIFEST = readFleetPins(resolve(CONTROL, "deploy-pins.json"));
 const BOOTSTRAP_PATH = BOOTSTRAP_HOMES.find((path) => existsSync(path));
 if (BOOTSTRAP_PATH === undefined) throw new Error(`the fleet layer's bootstrap is in neither place this test looks: ${BOOTSTRAP_HOMES.join(", ")}`);
 const BOOTSTRAP = readFileSync(BOOTSTRAP_PATH, "utf8");
-
-const fromRole = (key: string) =>
-  new RegExp(`^${key}:\\s*["']?([^"'\\n]+)["']?\\s*$`, "m").exec(DEFAULTS)?.[1]?.trim();
 
 interface Pin { version: string; url: string; sha256: string }
 
@@ -65,9 +64,9 @@ const acceptedPins = (role: Pin, lag: Pin | undefined): Pin[] => (lag ? [role, l
 /** A declared lag the bootstrap no longer needs: the script carries the role's whole pin and the allowance is still there. */
 const lagIsStale = (script: string, role: Pin, lag: Pin | undefined) => lag !== undefined && carriesWhole(script, role);
 
+/** The fleet's Edge pin: the manifest's, which the role derives its own from. */
 function rolePin(): Pin {
-  const [version, url, sha256] = ["worker_edge_version", "worker_edge_msi_url", "worker_edge_msi_sha256"].map(fromRole);
-  assert.ok(version && url && sha256, "the role defaults no longer declare the whole Edge pin — this test examines nothing");
+  const { version, msiUrl: url, msiSha256: sha256 } = MANIFEST.edge;
   return { version, url, sha256 };
 }
 

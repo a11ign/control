@@ -187,7 +187,7 @@
           Either worker_update_deferral_policy has no entry (or more than one) for each of {{ patch_lifted_names }},
           so there is no deferral for the patch window to lift; or patch_target_release
           ('{{ patch_target_release }}') and patch_target_build ('{{ patch_target_build }}') are not given
-          together, as a release like 25H2 and a build like 26200.9457, or not at all.
+          together, as a release and a build number, or not at all.
 
     - name: Refuse to patch a worker that is mid-capture
       # Same shape and same reason as display.yml's and edge-version.yml's check: an install that ends in a

@@ -46,7 +46,7 @@ eval "$(pnpm run --silent fleet:env)"                                # A11Y_WORK
 pnpm run fleet:status                                                # what every box is doing, right now
 ```
 
-`pnpm run fleet:status` exits **1** when no box answers and **3** when the boxes that answered are split on Edge, NVDA, the Windows build or the worker code (`/health.code`, the hash `fleet:deploy` reads back), or the Edge updater is not held on one (`fleet BUILD SPLIT` / `fleet Edge updater NOT HELD`, naming the boxes and values): exit 3 means captures stop until the fleet converges forward to the newest, and `fleet:converge` reads it as failed.
+`pnpm run fleet:status` exits **1** when no box answers and **3** when the boxes that answered are split on Edge, NVDA, the Windows build or the worker code (`/health.code`, the hash `fleet:deploy` reads back), or the Edge updater is not held on one (`fleet BUILD SPLIT` / `fleet Edge updater NOT HELD`, naming the boxes and values), or **any box differs from `deploy-pins.json`** (`fleet OFF THE MANIFEST`, naming the box, the field, what it has and what the manifest wants; `--json` carries `drift`): exit 3 means captures stop until every box is on the manifest, and `fleet:converge` reads it as failed. `deploy-pins.json` is the one place the fleet's Windows build, Edge, NVDA and Node are written (A11-205); the worker role derives its Edge and Node installs from it, and no version is restated elsewhere.
 
 The write plays import the two layers control declares as dependencies (ADR 0045), which a checkout holds only after
 `pnpm install`. A checkout that was never installed fails the write plays with `ERR_MODULE_NOT_FOUND: @a11ign/screenreader-fleet`:
