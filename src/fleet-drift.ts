@@ -70,15 +70,8 @@ export type DriftRecord = {
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const stringList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
 
-/** The freeze run's record out of its file's text, or `null` when it is missing or not the shape `freeze.yml` writes. */
-export function parseFreezeRun(text: string | null): FreezeRun | null {
-  if (text === null) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
+/** The freeze run as `ansible/freeze.yml` writes it, out of an already-parsed value; `null` when it is not that shape. */
+function freezeRunFrom(parsed: unknown): FreezeRun | null {
   if (!isObject(parsed) || typeof parsed.checkedAt !== "string") return null;
   const putBack = isObject(parsed.putBack)
     ? Object.fromEntries(Object.entries(parsed.putBack).map(([box, levers]) => [box, stringList(levers)]))
@@ -87,15 +80,24 @@ export function parseFreezeRun(text: string | null): FreezeRun | null {
     putBack, unreachable: stringList(parsed.unreachable), failed: stringList(parsed.failed) };
 }
 
+/** JSON text that may be missing or not JSON, as a value: `undefined` is "no record", never a crash. */
+function parsedOrUndefined(text: string | null): unknown {
+  if (text === null) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The freeze run's record out of its file's text, or `null` when it is missing or not the shape `freeze.yml` writes. */
+export function parseFreezeRun(text: string | null): FreezeRun | null {
+  return freezeRunFrom(parsedOrUndefined(text));
+}
+
 /** A previous record, or `null` when the file is missing or is not one. Only what carrying needs is checked. */
 export function parseDriftRecord(text: string | null): DriftRecord | null {
-  if (text === null) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
+  const parsed = parsedOrUndefined(text);
   if (!isObject(parsed) || typeof parsed.checkedAt !== "string" || !Array.isArray(parsed.differences)) return null;
   const differences = parsed.differences.filter(isObject).flatMap((entry): RecordedDifference[] =>
     (typeof entry.box === "string" && DRIFT_FIELDS.some((field) => field === entry.field) && typeof entry.wants === "string"
@@ -107,7 +109,7 @@ export function parseDriftRecord(text: string | null): DriftRecord | null {
   return { checkedAt: parsed.checkedAt, firstSeenAt: typeof parsed.firstSeenAt === "string" ? parsed.firstSeenAt : null, expected,
     unreadable: typeof parsed.unreadable === "string" ? parsed.unreadable : null,
     reachable: Number(parsed.reachable) || 0, total: Number(parsed.total) || 0, unreachable: stringList(parsed.unreachable), differences,
-    freeze: isObject(parsed.freeze) ? parseFreezeRun(JSON.stringify(parsed.freeze)) : null };
+    freeze: freezeRunFrom(parsed.freeze) };
 }
 
 const sameExpectation = (a: ExpectedFleet | null, b: ExpectedFleet | null): boolean =>

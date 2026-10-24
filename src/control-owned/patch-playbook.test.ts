@@ -324,6 +324,7 @@ test("A11-205: a caller's -e cannot move the target off the manifest; the manife
   assert.equal(targetInputs({ patch_target_release: MANIFEST.windows.release, patch_target_build: MANIFEST.windows.build, patch_target_kb: MANIFEST.windows.kb }), 0,
     "the manifest's own values, given explicitly, are the same target");
   assert.notEqual(targetInputs({ patch_target_build: "26300.1" }), 0, "another build");
+  assert.notEqual(targetInputs({ patch_target_release: MANIFEST.windows.release, patch_target_build: "26300.1" }), 0, "another build beside the manifest's own release (the pair the play used to accept)");
   assert.notEqual(targetInputs({ patch_target_release: "25H2" }), 0, "another release");
   assert.notEqual(targetInputs({ patch_target_kb: "KB5000000" }), 0, "another update");
   assert.notEqual(targetInputs({ patch_target_kb: "kb" }), 0, "a KB that is not shaped as one");

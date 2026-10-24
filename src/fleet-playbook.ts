@@ -2127,7 +2127,7 @@ export function patchRefusal({ apply, limitFlag, boxes, allowOffline, target }: 
   }
   const above = boxes.filter((box) => limitTouches(box.name, limitFlag) && boxAgainstManifest(box, target) === "above");
   if (above.length) {
-    return `REFUSING patch.yml: ${above.map(({ name }) => `${name} (build ${above.find((box) => box.name === name)?.build})`).join(", ")} ${above.length === 1 ? "is" : "are"} ABOVE the manifest's Windows build `
+    return `REFUSING patch.yml: ${above.map(({ name, build }) => `${name} (build ${build})`).join(", ")} ${above.length === 1 ? "is" : "are"} ABOVE the manifest's Windows build `
       + `${target.build} (deploy-pins.json). A box is never rolled back to an older build: edit the manifest to a build no box is above, or decide what becomes of the box.`;
   }
   return null;
@@ -2157,6 +2157,11 @@ export function boxAgainstManifest(box: PatchBox, target: PatchTarget): "below" 
   return difference < 0 ? "below" : "above";
 }
 
+/** What the plan says beside a box, by where it stands against the manifest's Windows build. */
+const PLAN_NOTES: Record<ReturnType<typeof boxAgainstManifest>, string> = {
+  below: " (a feature update first)", above: " (ABOVE the manifest: refused, never rolled back)", same: "", unread: "",
+};
+
 /** The plan, one line per box in the order `serial: 1` takes them -- what a dry run prints and `--apply` is about to do. */
 export function patchPlan({ boxes, limitFlag, apply, target, differences }: {
   boxes: PatchBox[]; limitFlag: string | undefined; apply: boolean; target: PatchTarget;
@@ -2171,7 +2176,7 @@ export function patchPlan({ boxes, limitFlag, apply, target, differences }: {
     const against = boxAgainstManifest(box, target);
     const differs = (differences ?? []).filter((difference) => difference.box === box.name);
     if (differences !== undefined && differs.length === 0 && against === "same") return `  ${box.name}  on the manifest, nothing to upgrade${box.busy ? " (BUSY)" : ""}  [${build}]`;
-    const note = against === "below" ? " (a feature update first)" : against === "above" ? " (ABOVE the manifest: refused, never rolled back)" : "";
+    const note = PLAN_NOTES[against];
     const reasons = differs.length === 0 ? "" : ` -- ${differs.map(({ field, has, wants }) => `${field} ${has ?? "unreported"} -> ${wants}`).join("; ")}`;
     return `  ${box.name}  ${verb}${box.busy ? ": BUSY" : ""}  [${build}]${note}${reasons}`;
   });
