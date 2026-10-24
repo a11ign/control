@@ -30,6 +30,9 @@ const TASKS = readFileSync(
 const UPDATER_TASKS = [
   "Stop and disable EVERY Edge-updater scheduled task",
   "Stop and disable the updater's services",
+  // A process already running outlives its tasks and services being disabled (a11y-worker-11, 2026-10-24, A11-183): it was installing 156
+  // itself while the role's MSI ran, and the MSI's own `MicrosoftEdgeUpdate.exe /install` failed with 1722.
+  "Stop any Edge-updater process that is already running",
 ];
 /** Every task after which the role can stop at the Edge step, so every one the updater must precede. */
 const STEPS_THAT_CAN_STOP_THE_ROLE = [

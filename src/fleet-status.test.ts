@@ -7,7 +7,8 @@ import { spawnSync } from "node:child_process";
 
 import { stateOf, activityOf, summarise, degradedAdvice, warmingAdvice, consistencyVerdict, fleetStatus, LINK,
   linkVerdictOf, readLinkLayer, neighbourScript, renderHead, failedRead, fleetToProbe, inconsistentAdvice,
-  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive, probeWorker } from "./fleet-status.ts";
+  subnetOf, macResolveScript, parseNeighbourTable, resolveMovedByMac, resolveMovedByMacLive, probeWorker, buildSplitOf, buildSplitAdvice,
+  exitCodeOf, EXIT } from "./fleet-status.ts";
 import type { requestJson } from "./worker-fleet-carried.ts";
 import { fleetConsistency, MUST_MATCH, REPORTED_ONLY } from "./worker-fleet-carried.ts";
 import { readFileSync } from "node:fs";
@@ -1419,4 +1420,146 @@ test("#4944: a box that answers the first time is asked ONCE per path -- the ret
   const probe = await probeWorker({ name: "a11y-worker-6", url: PROBE_URL }, { request: flakyRequest({}, calls) });
   assert.equal(probe.reachable, true);
   assert.deepEqual(calls.slice().sort(), ["/health", "/progress"], "each endpoint asked exactly once");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A11-183: the build split. One Edge, one NVDA and one Windows build, and the Edge updater held, or fleet:status exits 3.
+// ---------------------------------------------------------------------------------------------------------------------
+
+type BoxReading = { edge?: string; nvda?: string; windows?: string; guard?: unknown; };
+const AGREED = { edge: "156.0.4314.42", nvda: "2026.1", windows: "26300.9711", guard: { state: "ok" } };
+const boxName = (n: number) => `a11y-worker-${n}`;
+
+/** A reachable probe whose `/health.environment` carries exactly the readings given; a key left out is a field the box did not report. */
+function reading(n: number, box: BoxReading): Parameters<typeof buildSplitOf>[0][number] {
+  const environment: Record<string, unknown> = {};
+  if (box.edge !== undefined) environment.browserVersion = box.edge;
+  if (box.nvda !== undefined) environment.screenReaderVersion = box.nvda;
+  if (box.windows !== undefined) environment.windowsBuild = box.windows;
+  if (box.guard !== undefined) environment.edgeUpdaterGuard = box.guard;
+  return { name: `${boxName(n)}  http://REDACTED-INTERNAL-ADDRESS`, url: `http://REDACTED-INTERNAL-ADDRESS:8765`, reachable: true,
+    health: { ok: true, ready: true, busy: false, code: "abc1234", environment } };
+}
+/** The lines that name a failure, without the line that says which fields agree. */
+const failureLines = (split: Parameters<typeof buildSplitAdvice>[0]) => split.lines.filter((line) => /^fleet (BUILD SPLIT|Edge updater NOT HELD)/.test(line));
+const fleetOf = (boxes: Record<number, BoxReading>) => Object.entries(boxes).map(([n, box]) => reading(Number(n), { ...AGREED, ...box }));
+/** The REAL fleetStatus over those probes, so `buildSplit` and the exit code are what the command computes. */
+const statusOver = (probes: ReturnType<typeof fleetOf>) => fleetStatus({
+  workers: () => probes.map(({ name, url }) => ({ name, url })),
+  probe: async (worker) => probes.find((p) => p.name === worker.name) as never,
+  linkRead: () => new Map(), macRead: () => new Map(), switchRead: async () => ({ lines: [], tripped: false }) as never,
+});
+
+test("A11-183: one value on every field and the updater held is clean, and exits 0 (the negative control)", async () => {
+  const status = await statusOver(fleetOf({ 2: {}, 3: {}, 4: {} }));
+  assert.equal(status.buildSplit.failed, false);
+  assert.deepEqual(status.buildSplit.fields.map(({ split }) => split), [false, false, false]);
+  assert.equal(exitCodeOf(status), EXIT.OK);
+  assert.match(status.buildSplit.lines.join("\n"), /^fleet builds AGREE — Edge: 156\.0\.4314\.42 on a11y-worker-2, a11y-worker-3, a11y-worker-4; NVDA: .*; Windows: .*; Edge updater held on 3 of 3$/);
+  assert.equal(buildSplitAdvice(status.buildSplit), "");
+});
+
+test("A11-183: today's three-way Edge split names each box under its version, and exits 3", async () => {
+  const status = await statusOver(fleetOf({
+    2: { edge: "155.0.4283.62" }, 3: { edge: "155.0.4283.62" }, 4: { edge: "156.0.4314.42" }, 5: { edge: "155.0.4283.45" }, 15: { edge: "156.0.4314.42" } }));
+  assert.equal(exitCodeOf(status), 3);
+  assert.deepEqual(status.buildSplit.fields[0].values, {
+    "155.0.4283.62": [boxName(2), boxName(3)], "156.0.4314.42": [boxName(4), boxName(15)], "155.0.4283.45": [boxName(5)] });
+  assert.deepEqual(failureLines(status.buildSplit),
+    ["fleet BUILD SPLIT — Edge: 155.0.4283.62 on a11y-worker-2, a11y-worker-3; 156.0.4314.42 on a11y-worker-4, a11y-worker-15; 155.0.4283.45 on a11y-worker-5"]);
+  assert.match(status.buildSplit.lines.at(-1) ?? "", /^fleet builds agree on — NVDA: 2026\.1 on .*; Windows: 26300\.9711 on /, "the fields that agree are said beside the one that does not");
+  const advice = buildSplitAdvice(status.buildSplit);
+  assert.match(advice, /Captures stop until every box converges forward to the newest value/);
+  assert.match(advice, /move the pin .* then run `npm run fleet:provision` across the WHOLE fleet/);
+  assert.doesNotMatch(advice, /fleet:patch/, "the Windows remedy is named only when Windows differs");
+});
+
+test("A11-183: boxes are named by inventory name in numeric order, never by address", () => {
+  const split = buildSplitOf(fleetOf({ 15: { edge: "156.0.4314.42" }, 2: { edge: "156.0.4314.42" }, 3: { edge: "155.0.4283.62" } }));
+  assert.equal(split.lines[0], "fleet BUILD SPLIT — Edge: 156.0.4314.42 on a11y-worker-2, a11y-worker-15; 155.0.4283.62 on a11y-worker-3");
+  assert.doesNotMatch(split.lines.join(" "), /10\.|http/);
+});
+
+test("A11-183: a Windows-only split fails with NVDA and Edge agreeing, and names the fleet:patch remedy", async () => {
+  const status = await statusOver(fleetOf({ 2: {}, 3: {}, 5: { windows: "22631.6199" } }));
+  assert.deepEqual(status.buildSplit.fields.map(({ field, split }) => [field, split]), [["Edge", false], ["NVDA", false], ["Windows", true]]);
+  assert.deepEqual(failureLines(status.buildSplit), ["fleet BUILD SPLIT — Windows: 26300.9711 on a11y-worker-2, a11y-worker-3; 22631.6199 on a11y-worker-5"]);
+  assert.match(status.buildSplit.lines.at(-1) ?? "", /^fleet builds agree on — Edge: 156\.0\.4314\.42 on a11y-worker-2, a11y-worker-3, a11y-worker-5; NVDA: 2026\.1 on a11y-worker-2, a11y-worker-3, a11y-worker-5$/);
+  assert.equal(exitCodeOf(status), 3);
+  assert.match(buildSplitAdvice(status.buildSplit), /fleet:patch/);
+});
+
+test("A11-183: an NVDA-only split fails", async () => {
+  const status = await statusOver(fleetOf({ 2: {}, 3: { nvda: "2025.3" } }));
+  assert.deepEqual(failureLines(status.buildSplit), ["fleet BUILD SPLIT — NVDA: 2026.1 on a11y-worker-2; 2025.3 on a11y-worker-3"]);
+  assert.equal(exitCodeOf(status), 3);
+});
+
+test("A11-183: a reachable box that reports no value for a field is `unreported` and fails, because a field nobody reported is not agreement", async () => {
+  const probes = [reading(2, AGREED), reading(3, { ...AGREED, edge: undefined }), reading(4, AGREED)];
+  const status = await statusOver(probes);
+  assert.deepEqual(status.buildSplit.fields[0].unreported, [boxName(3)]);
+  assert.deepEqual(failureLines(status.buildSplit), ["fleet BUILD SPLIT — Edge: 156.0.4314.42 on a11y-worker-2, a11y-worker-4; unreported on a11y-worker-3"]);
+  assert.equal(exitCodeOf(status), 3);
+  // Every box silent on the field draws no values to disagree about and still fails: the shape #1997 and #2019 are about.
+  const allSilent = buildSplitOf([reading(2, { ...AGREED, edge: undefined }), reading(3, { ...AGREED, edge: undefined })]);
+  assert.equal(allSilent.failed, true);
+  assert.deepEqual(failureLines(allSilent), ["fleet BUILD SPLIT — Edge: unreported on a11y-worker-2, a11y-worker-3"]);
+});
+
+test("A11-183: an unreachable box is not a split, and nothing answering is exit 1, not 3", async () => {
+  const down = { name: `${boxName(9)}  http://REDACTED-INTERNAL-ADDRESS`, url: "http://REDACTED-INTERNAL-ADDRESS:8765", reachable: false, error: "ECONNREFUSED" };
+  const withDown = buildSplitOf([...fleetOf({ 2: {}, 3: {} }), down]);
+  assert.equal(withDown.failed, false, "an unreachable box is no reading: `reachable` already says it did not answer");
+  assert.equal(withDown.fields[0].unreported.length, 0);
+  const nobody = await statusOver([down] as never);
+  assert.equal(nobody.reachable, 0);
+  assert.equal(exitCodeOf(nobody), 1);
+  assert.deepEqual(nobody.buildSplit.lines, []);
+});
+
+test("A11-183: a guard that reports stale, drift, absent or unknown on one box fails, naming the box and its state", async () => {
+  for (const [guard, state] of [[{ state: "stale" }, "stale"], [{ state: "drift" }, "drift"], [{ state: "absent" }, "absent"], ["absent", "absent"], [{ state: "unknown" }, "unknown"]] as const) {
+    const probes = [reading(2, AGREED), reading(3, { ...AGREED, guard }), reading(4, AGREED)];
+    const status = await statusOver(probes);
+    assert.deepEqual(status.buildSplit.updater.notHeld, [{ box: boxName(3), state }], JSON.stringify(guard));
+    assert.deepEqual(failureLines(status.buildSplit), [`fleet Edge updater NOT HELD — a11y-worker-3 ${state}`]);
+    assert.equal(exitCodeOf(status), 3, `${state} stops captures`);
+    assert.match(buildSplitAdvice(status.buildSplit), /Edge updater: it is not held/);
+  }
+});
+
+test("A11-183: a worker that sends no edgeUpdaterGuard at all is UNREAD, named, and is not this check's failure", async () => {
+  for (const missing of [undefined, null]) {
+    const probes = [reading(2, AGREED), reading(3, { ...AGREED, guard: undefined }), reading(4, AGREED)];
+    if (missing === null) (probes[1].health!.environment as Record<string, unknown>).edgeUpdaterGuard = null;
+    const status = await statusOver(probes);
+    assert.deepEqual(status.buildSplit.updater.unread, [boxName(3)]);
+    assert.equal(status.buildSplit.failed, false);
+    assert.equal(exitCodeOf(status), 0);
+    assert.deepEqual(status.buildSplit.lines.slice(-2), [
+      status.buildSplit.lines[0],
+      "fleet Edge updater UNREAD (not a failure) — a11y-worker-3 send no edgeUpdaterGuard: their worker code predates it"]);
+    assert.match(status.buildSplit.lines[0], /Edge updater held on 2 of 3$/);
+  }
+  // And the same box does not hide a REAL split elsewhere: the unread line rides beside the failure.
+  const split = buildSplitOf([reading(2, { ...AGREED, edge: "155.0.4283.62" }), reading(3, { ...AGREED, guard: undefined })]);
+  assert.equal(split.failed, true);
+  assert.match(split.lines[0], /^fleet BUILD SPLIT — Edge: /);
+  assert.match(split.lines.at(-1) ?? "", /^fleet Edge updater UNREAD/);
+});
+
+test("A11-183: a build split and an updater that is not held print one line each, the split first", () => {
+  const split = buildSplitOf(fleetOf({ 2: {}, 3: { edge: "155.0.4283.62", guard: { state: "drift" } } }));
+  assert.equal(failureLines(split).length, 2);
+  assert.match(split.lines[0], /^fleet BUILD SPLIT — Edge: /);
+  assert.equal(split.lines[1], "fleet Edge updater NOT HELD — a11y-worker-3 drift");
+});
+
+test("A11-183: --json carries the same reading as `buildSplit`", async () => {
+  const status = await statusOver(fleetOf({ 2: {}, 3: { edge: "155.0.4283.62" } }));
+  const json = JSON.parse(JSON.stringify(status));
+  assert.equal(json.buildSplit.failed, true);
+  assert.deepEqual(json.buildSplit.fields[0].values, { "156.0.4314.42": [boxName(2)], "155.0.4283.62": [boxName(3)] });
+  assert.deepEqual(json.buildSplit.lines, status.buildSplit.lines);
 });

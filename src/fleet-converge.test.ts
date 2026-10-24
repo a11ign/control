@@ -209,6 +209,26 @@ test("a clean run wakes nobody, posts once on the row, and reads fleet:status la
   assert.equal(wakeMessage(result), null);
 });
 
+test("A11-183: fleet:status exiting 3 (a build split, or an updater not held) is `failed` with the split line as the reason, not `unknown`", async () => {
+  const split = "fleet BUILD SPLIT — Edge: 156.0.4314.42 on a11y-worker-4, a11y-worker-15; 155.0.4283.62 on a11y-worker-2";
+  const notHeld = "fleet Edge updater NOT HELD — a11y-worker-2 stale";
+  const h = harness({ plays: { status: [{ status: 3, output: ["fleet: 3 of 3 serving", `  ${split}`, `  ${notHeld}`, "  Captures stop until every box converges forward."].join("\n") }] } });
+  const result = await runConverge({ workers: WORKERS, layerRefs: REFS, row: 5023, effects: h.effects });
+  assert.equal(result.status, "failed");
+  assert.equal(result.steps.find((step) => step.step === "status")?.outcome, "failed");
+  assert.equal(result.reason, `fleet:status exited 3: ${split} | ${notHeld}`);
+  assert.match(result.fleetStatus ?? "", /BUILD SPLIT/, "the split is kept on the result for the row's post");
+  assert.match(wakeMessage(result) ?? "", /the fleet did not converge \(fleet:status exited 3\)/, "and the wake does not claim attempts were exhausted");
+});
+
+test("A11-183: fleet:status exiting 1 (nothing answered) stays `unknown`, and a clean 0 stays ok (the controls for the exit-3 case)", async () => {
+  const down = harness({ plays: { status: [{ status: 1, output: "fleet: 0 of 3 serving" }] } });
+  const unknown = await runConverge({ workers: WORKERS, layerRefs: REFS, effects: down.effects });
+  assert.equal(unknown.status, "unknown");
+  assert.match(unknown.reason ?? "", /fleet:status exited 1: fleet: 0 of 3 serving/);
+  assert.equal((await runConverge({ workers: WORKERS, layerRefs: REFS, effects: harness().effects })).status, "ok");
+});
+
 test("provision runs --serial=0, and no play is handed a flag it would refuse", async () => {
   const h = harness();
   await converge({ workers: WORKERS, layerRefs: REFS, effects: h.effects });

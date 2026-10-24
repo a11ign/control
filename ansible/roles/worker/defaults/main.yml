@@ -161,11 +161,27 @@ worker_edge_policy:
 # also published 152.0.4191.122 a few hours later, which is an older-branch patch, not a newer build, and the
 # three boxes on 155 cannot be brought to it without ALLOWDOWNGRADE.
 #
+# FOLLOWED FORWARD to 156.0.4314.42 on 2026-10-24 (A11-183), the pin's documented behaviour again. The fleet had split three ways: only
+# three boxes (a11y-worker-5, -6, -11) were still on 155.0.4283.45, ten had moved to .62 and two (-4, -15) to 156 on their own.
+#
+# WHY THE HOLD DID NOT HOLD, measured 2026-10-24 through Ansible on -2, -4, -6 and -15: the guard task (`edge-version.yml`) failed on
+# every run with `LastTaskResult` 1 and a record days stale. It runs as SYSTEM, and the `edgeupdate` service's security descriptor
+# (`D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)...`) gives SYSTEM no SERVICE_CHANGE_CONFIG, only Administrators. So
+# once an Edge install re-registered the service as `Automatic`, `Set-Service -StartupType Disabled` threw under
+# `$ErrorActionPreference = 'Stop'`, the script died before it wrote its record, and from then on nothing re-disabled the service and
+# nothing reported it (the worker on those boxes did not send the field). `MicrosoftEdgeUpdate.exe /ua` then ran hourly. The provision
+# run sets the service as an administrator, which is why it worked there and the guard never could. -5, whose service was still
+# `Disabled`, needed no change from the guard, succeeded, and stayed on the pin. The guard now writes the start type through the
+# registry, which SYSTEM may do, and `firewall.yml` blocks the updater's network as a second lever.
+#
+# 156.0.4314.42 is the newest Stable x64 MSI `edgeupdates.microsoft.com` publishes (2026-10-22T19:20Z), re-queried on 2026-10-24. No box
+# is above it, so the converge only goes forward and `worker_edge_allow_downgrade` stays false.
+#
 # THE BOOTSTRAP CARRIES THE SAME PIN and is not in this repository (`bootstrap-windows-worker.ps1`, in
 # screenreader-fleet). `edge-pin-parity.test.ts` holds the two equal, so this value and that script move together.
-worker_edge_version: "155.0.4283.45"
-worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/2e772119-b856-4562-ad9a-8422e4224d42/MicrosoftEdgeEnterpriseX64.msi"
-worker_edge_msi_sha256: "46db09d14b85a0df8bca87fbe9c3224ccf54f97d776bedc2eebf4b0c2ccbf5b4"
+worker_edge_version: "156.0.4314.42"
+worker_edge_msi_url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/62209208-6eb6-4f5e-bff5-feb45cfe41d3/MicrosoftEdgeEnterpriseX64.msi"
+worker_edge_msi_sha256: "324d226c5ade08c2776645cfc2a7b12af9c08214abf18c6499410cd8ed92d1b3"
 # The binary is the source of truth for "which Edge is installed", not the registry's recorded version.
 # Same rule the worker itself now follows: it reported a version it was not running for five days because
 # the value was read once and cached, and the file on disk had moved underneath it.
@@ -212,6 +228,9 @@ worker_edge_updater_tasks:
 worker_edge_updater_services:
   - edgeupdate
   - edgeupdatem
+# The updater's image, the one `MicrosoftEdgeUpdate.exe /ua /installsource core` runs from hourly (the EdgeUpdate log, 2026-10-24).
+# `firewall.yml` blocks it outbound: the second lever, because tasks and services get re-registered by an Edge install.
+worker_edge_updater_exe: 'C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe'
 
 # On a workstation Edge auto-update is right; on a capture appliance it means an installer runs
 # unannounced while we are driving the browser.

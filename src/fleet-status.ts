@@ -1111,6 +1111,114 @@ export function browserVersionsOf(guests: { worker: string, environment?: { brow
 const reportedString = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
 
 /**
+ * THE BUILD SPLIT: one Edge, one NVDA and one Windows build across the fleet, and the Edge updater held on every box (A11-183).
+ *
+ * `fleetConsistency` already compares `browserVersion` and `screenReaderVersion` (MUST_MATCH) and the lab's capture gate refuses on them, but the
+ * command that describes the fleet printed a split as one more mismatch line and exited 0, and `windowsBuild` and the updater's guard were
+ * REPORTED_ONLY: a fleet could sit split three ways on Edge (155.0.4283.45, .62 and 156) while this command said nothing a script could stop on.
+ * So this reads each reachable box's OWN value for the three fields, keyed by inventory name, and groups the boxes by value.
+ *
+ * - More than one value on a field is a split, and a reachable box that reports none is `unreported` and also fails: a field nobody reported is
+ *   not agreement (#1997, #2019). An unreachable box is no reading and is not a split; `reachable` already says it did not answer.
+ * - The guard (`edgeUpdaterGuard.state`) fails on anything but `ok`, one box and one state at a time: `absent` (the worker reports no guard record),
+ *   `stale`, `drift` and `unknown` are an updater that is not held. A worker that sends NO `edgeUpdaterGuard` at all predates the field (code deployed
+ *   before it): its updater is unread, which is named but is not this check's failure, because the Edge version split above catches the updater's
+ *   effect on every box and a deploy gap would otherwise hold the fleet for a cause that is not the updater (`REPORTED_ONLY` says the same, #5021).
+ * - The boxes are named by inventory name, not by URL, so the line can be read and acted on.
+ */
+export type FieldReading = { field: string; values: Record<string, string[]>; unreported: string[]; split: boolean; };
+export type BuildSplit = {
+  failed: boolean;
+  fields: FieldReading[];
+  updater: { held: boolean; notHeld: { box: string; state: string; }[]; unread: string[]; };
+  lines: string[];
+};
+
+/** The three builds that must agree, and the `/health.environment` key each box reports its own under. */
+const BUILD_FIELDS = [
+  { field: "Edge", key: "browserVersion" },
+  { field: "NVDA", key: "screenReaderVersion" },
+  { field: "Windows", key: "windowsBuild" },
+];
+
+const GUARD_HELD = "ok";
+
+/** The guard's state as the box reported it: the record's `state`, or the bare string an old worker sends; `null` for a worker that sent no word at all. */
+function guardStateOf(environment: Record<string, unknown> | undefined): string | null {
+  const guard = environment?.edgeUpdaterGuard;
+  if (typeof guard === "string" && guard !== "") return guard;
+  const state = (guard as { state?: unknown } | null | undefined)?.state;
+  return typeof state === "string" && state !== "" ? state : null;
+}
+
+const describeGroups = (values: Record<string, string[]>, unreported: string[]) =>
+  [...Object.entries(values).map(([value, boxes]) => `${value} on ${boxes.join(", ")}`),
+    ...(unreported.length > 0 ? [`unreported on ${unreported.join(", ")}`] : [])].join("; ");
+
+export function buildSplitOf(probes: WorkerProbe[]): BuildSplit {
+  const reachable = probes.filter((probe) => probe.reachable)
+    .map((probe) => ({ box: inventoryName(probe.name), environment: probe.health?.environment }))
+    .sort((a, b) => a.box.localeCompare(b.box, "en", { numeric: true }));
+  const fields = BUILD_FIELDS.map(({ field, key }) => {
+    const values: Record<string, string[]> = {};
+    const unreported: string[] = [];
+    for (const { box, environment } of reachable) {
+      const value = reportedString(environment?.[key]);
+      if (value === null) unreported.push(box);
+      else (values[value] ??= []).push(box);
+    }
+    return { field, values, unreported, split: Object.keys(values).length > 1 || unreported.length > 0 };
+  });
+  const guards = reachable.map(({ box, environment }) => ({ box, state: guardStateOf(environment) }));
+  const unread = guards.filter(({ state }) => state === null).map(({ box }) => box);
+  const notHeld = guards.flatMap(({ box, state }) => (state !== null && state !== GUARD_HELD ? [{ box, state }] : []));
+  const failed = fields.some(({ split }) => split) || notHeld.length > 0;
+  return { failed, fields, updater: { held: notHeld.length === 0, notHeld, unread },
+    lines: buildSplitLines({ fields, notHeld, unread, boxes: reachable.length }) };
+}
+
+function buildSplitLines({ fields, notHeld, unread, boxes }: {
+  fields: FieldReading[]; notHeld: { box: string; state: string; }[]; unread: string[]; boxes: number;
+}): string[] {
+  if (boxes === 0) return [];
+  const split = fields.filter((field) => field.split);
+  const lines = split.map(({ field, values, unreported }) => `fleet BUILD SPLIT — ${field}: ${describeGroups(values, unreported)}`);
+  if (notHeld.length > 0) lines.push(`fleet Edge updater NOT HELD — ${notHeld.map(({ box, state }) => `${box} ${state}`).join(", ")}`);
+  if (split.length === 0 && notHeld.length === 0) {
+    lines.push(`fleet builds AGREE — ${fields.map(({ field, values }) => `${field}: ${describeGroups(values, [])}`).join("; ")}; Edge updater held on ${boxes - unread.length} of ${boxes}`);
+  } else if (split.length < fields.length) {
+    // The fields that DO agree are still said, beside the ones that do not: a reader of a failing line should see that the Edge reading was made and
+    // came back as one value, not infer it from its absence.
+    lines.push(`fleet builds agree on — ${fields.filter((field) => !field.split).map(({ field, values }) => `${field}: ${describeGroups(values, [])}`).join("; ")}`);
+  }
+  if (unread.length > 0) lines.push(`fleet Edge updater UNREAD (not a failure) — ${unread.join(", ")} send no edgeUpdaterGuard: their worker code predates it`);
+  return lines;
+}
+
+/**
+ * What to DO about a build split, or "" when there is none. The line says captures stop, and names the remedy: the rule is that any build mismatch
+ * stops the line until every box converges FORWARD to the newest (ADR 0047, precondition 2: an oracle on two versions measures noise).
+ */
+export function buildSplitAdvice(split: BuildSplit): string {
+  if (!split.failed) return "";
+  const differs = (name: string) => split.fields.some(({ field, split: isSplit }) => field === name && isSplit);
+  const advice = ["  Captures stop until every box converges forward to the newest value: an oracle on two builds measures noise."];
+  if (differs("Edge")) {
+    advice.push("  Edge: move the pin (`worker_edge_version`, URL and hash) to the newest Stable build, then run `npm run fleet:provision` across the WHOLE fleet.");
+  }
+  if (differs("Windows")) {
+    advice.push("  Windows: `npm run fleet:patch` brings a box to the fleet's target build; a box whose CPU the target does not support stays where it is.");
+  }
+  if (differs("NVDA")) {
+    advice.push("  NVDA: `npm run fleet:provision` installs the pinned build; run it across the WHOLE fleet.");
+  }
+  if (!split.updater.held) {
+    advice.push("  Edge updater: it is not held, so a box can move on its own. `npm run fleet:provision` lays the guard again and proves it runs.");
+  }
+  return `${advice.join("\n")}\n`;
+}
+
+/**
  *   injectable ONLY so a
  *   test can drive THIS FUNCTION rather than the pure one below it. #1029's defect was never inside
  *   `consistencyVerdict` -- both halves were computed here and never crossed -- so a test that drives only
@@ -1171,7 +1279,7 @@ export async function fleetStatus(deps?: {
   const verdict = consistencyVerdict({ consistent, compared, total: workers.length, mismatches, rows,
     fields, reportedOnly });
   return { rows, linkLayer, switch: switchReading, comparedAgree: consistent, verdict, mismatches, codes, compared, fields,
-    reportedOnly, windowsBuilds: windowsBuildsOf(guests), browserVersions: browserVersionsOf(guests), reachable: guests.length, total: workers.length,
+    reportedOnly, windowsBuilds: windowsBuildsOf(guests), browserVersions: browserVersionsOf(guests), buildSplit: buildSplitOf(probes), reachable: guests.length, total: workers.length,
     // DEPRECATED, kept one release for scripts reading `fleet:status --json` from outside this repo.
     //
     // Removing it outright fails SILENTLY: `undefined` is falsy, so `if (status.consistent)` would read
@@ -1213,6 +1321,19 @@ export function inconsistentAdvice(mismatches: { field: string; }[]): string {
     + "  box alone: a lone re-provision splits the fleet rather than converging it.\n";
 }
 
+/** Exit code of `fleet:status`: how it ended, for a script that stops on it (`fleet:converge`, a runbook's `set -e`). */
+export const EXIT = Object.freeze({ OK: 0, NOTHING_ANSWERED: 1, BUILD_SPLIT: 3 });
+
+/**
+ * 1 when nothing answered. Every worker being down is a fault; ONE being down is not, because a run evicts a dead worker and carries on, the same
+ * rule doctor applies. 3 when the boxes that answered are split on Edge, NVDA or the Windows build, or the Edge updater is not held on one: the
+ * code `capture-fleet-guard` already uses to refuse an inconsistent fleet, so captures stop on both (A11-183).
+ */
+export function exitCodeOf(status: { reachable: number; buildSplit: BuildSplit; }): number {
+  if (status.reachable === 0) return EXIT.NOTHING_ANSWERED;
+  return status.buildSplit.failed ? EXIT.BUILD_SPLIT : EXIT.OK;
+}
+
 async function main() {
   const status = await fleetStatus();
   if (process.argv.includes("--json")) {
@@ -1236,6 +1357,8 @@ async function main() {
     if (status.verdict.state === "INCONSISTENT") {
       process.stdout.write(inconsistentAdvice(status.mismatches));
     }
+    for (const line of status.buildSplit.lines) process.stdout.write(`  ${line}\n`);
+    process.stdout.write(buildSplitAdvice(status.buildSplit));
     // SPLIT CODE IS A SEPARATE VERDICT FROM INCONSISTENT, and collapsing them would be wrong in both
     // directions. INCONSISTENT means the guests are not interchangeable for capture — a cache-key field
     // differs. This means a DEPLOY did not finish, which is a fixable operational state rather than an
@@ -1253,9 +1376,7 @@ async function main() {
         + "  REFUSE until it is fixed. Re-run `npm run fleet:deploy` — it is idempotent.\n");
     }
   }
-  // Exit 1 when nothing answered. Every worker being down is a fault; ONE being down is not, because a
-  // run evicts a dead worker and carries on — the same rule doctor applies.
-  process.exit(status.reachable === 0 ? 1 : 0);
+  process.exit(exitCodeOf(status));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

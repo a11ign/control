@@ -79,3 +79,49 @@
     profiles: [domain, private, public]
     enabled: true
     state: present
+
+- name: Block the Edge updater's network
+  # THE SECOND LEVER ON THE EDGE UPDATER, independent of the first (A11-183). `edge-version.yml` disables the updater's tasks and
+  # services, and that has been undone four times (a11ign#4732, #4948, #5015, and now this): an Edge install re-registers the tasks and
+  # the service, and the guard that re-disables them could not (SYSTEM cannot change the service's start type). The EdgeUpdate policies
+  # are documented as honoured only on a domain-joined machine and measured as not honoured here. A firewall rule is honoured, and an
+  # installer that re-registers the updater does not remove it.
+  #
+  # The image is the one the EdgeUpdate log shows running `/ua` hourly: `MicrosoftEdgeUpdate.exe`. Outbound, every profile (the NIC's
+  # category flips, see the rules above). It does not stand in this role's way: Edge is installed from a checksummed MSI that Ansible
+  # downloads (`win_get_url`), never through the updater, and a version change is a play run on purpose across the whole fleet.
+  become: true
+  community.windows.win_firewall_rule:
+    name: "a11ign block Edge updater"
+    program: '{{ worker_edge_updater_exe }}'
+    direction: out
+    action: block
+    protocol: any
+    profiles: [domain, private, public]
+    enabled: true
+    state: present
+
+- name: Refuse to call this provisioned unless the Edge updater's network is blocked
+  # Read back from the firewall, not from the variables just written. This sits here and not in the closing assertion of
+  # `edge-version.yml` because that file runs BEFORE this one in `main.yml`, and a rule that is not laid yet cannot be required there.
+  become: true
+  ansible.windows.win_powershell:
+    parameters:
+      Rule: "a11ign block Edge updater"
+      Program: '{{ worker_edge_updater_exe }}'
+    script: |
+      param($Rule, $Program)
+      $Ansible.Changed = $false
+      $found = @(Get-NetFirewallRule -DisplayName $Rule -ErrorAction SilentlyContinue)
+      if (-not $found) { throw "firewall rule '$Rule' is absent" }
+      $wrong = @()
+      foreach ($r in $found) {
+        if ($r.Enabled -ne 'True') { $wrong += "rule '$Rule' is not enabled" }
+        if ($r.Direction -ne 'Outbound') { $wrong += "rule '$Rule' is $($r.Direction), expected Outbound" }
+        if ($r.Action -ne 'Block') { $wrong += "rule '$Rule' is $($r.Action), expected Block" }
+        $app = ($r | Get-NetFirewallApplicationFilter).Program
+        if ($app -ne $Program) { $wrong += "rule '$Rule' covers $app, expected $Program" }
+      }
+      if ($wrong.Count) { throw ($wrong -join '; ') }
+      "Edge updater blocked outbound: $Program"
+  register: edge_updater_blocked

@@ -48,11 +48,17 @@ interface Pin { version: string; url: string; sha256: string }
 
 /**
  * The pin the bootstrap may still carry until the fleet layer's own repository moves it, or `undefined` once it
- * has. It is `undefined` since the fleet layer is pinned at 0.10.2 (a11ign#5312), whose bootstrap carries the role's whole pin
- * (it was 152.0.4191.66, the role's pin until a11ign#4939). Declare one here only for a lag that is real: `lagIsStale` fails
- * the test that leaves one in once the bootstrap catches up.
+ * has. It is DECLARED since A11-183 moved the role to 156.0.4314.42: screenreader-fleet 0.13.2 carries that pin in the bootstrap, but
+ * control stays on 0.11.0, whose bootstrap still carries the role's PREVIOUS whole pin, 155.0.4283.45. The layer cannot move in this pull
+ * request: `layer-pins-core-lock.test.ts` holds `deploy-pins.json` to what the core's lockfile resolves at `core.commit`, and that lock
+ * resolves 0.11.0. The core's pin bump to 0.13.2 and the `core.commit` move are their own changes; the one that moves control's layer
+ * pin deletes this lag, or `lagIsStale` fails by name. Declare one here only for a lag that is real.
  */
-const BOOTSTRAP_LAG: Pin | undefined = undefined;
+const BOOTSTRAP_LAG: Pin | undefined = {
+  version: "155.0.4283.45",
+  url: "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/2e772119-b856-4562-ad9a-8422e4224d42/MicrosoftEdgeEnterpriseX64.msi",
+  sha256: "46db09d14b85a0df8bca87fbe9c3224ccf54f97d776bedc2eebf4b0c2ccbf5b4",
+};
 
 const carriesWhole = (script: string, pin: Pin) => [pin.version, pin.url, pin.sha256].every((v) => script.includes(v));
 const acceptedPins = (role: Pin, lag: Pin | undefined): Pin[] => (lag ? [role, lag] : [role]);
