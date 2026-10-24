@@ -87,7 +87,8 @@
   run_once: true
   tags: [freeze_verdict]
   vars:
-    freeze_workers: "{{ groups['a11y_workers'] | sort }}"
+    # The boxes of THIS run: `--limit` narrows `ansible_play_hosts_all`, and a one-box run must not name the other fourteen "not reached".
+    freeze_workers: "{{ ansible_play_hosts_all | sort }}"
     # Reached is what the ping SAID: a box with no ping result at all was not asked, which is not the same as being frozen.
     freeze_reached: >-
       {%- set r = [] -%}
@@ -126,7 +127,7 @@
       ansible.builtin.copy:
         dest: "{{ freeze_record_path }}"
         mode: "0644"
-        content: "{{ {'checkedAt': (lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')), 'frozen': freeze_frozen, 'putBack': freeze_put_back, 'unreachable': freeze_unreachable, 'failed': freeze_failed} | to_nice_json }}"
+        content: "{{ {'checkedAt': (lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')), 'scope': (ansible_limit | default('the fleet')), 'frozen': freeze_frozen, 'putBack': freeze_put_back, 'unreachable': freeze_unreachable, 'failed': freeze_failed} | to_nice_json }}"
 
     - name: Say who was frozen, who had to be put back, and who was not reached
       ansible.builtin.debug:

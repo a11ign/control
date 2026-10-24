@@ -254,6 +254,13 @@ test("Medic is handled: its service and tasks are frozen, and what SYSTEM is ref
   assert.match(tasks, /\$refused \+= "Disable-ScheduledTask /, "a refused task is handed on, not lost");
 });
 
+test("a box whose connection dropped mid-freeze is not marked frozen: the fact that says so is set only when no step was unreachable", () => {
+  const remember = taskNamed("Remember what this run had to put back");
+  assert.deepEqual([...remember.when].sort(), ["freeze_edge_levers", "freeze_firewall_levers", "freeze_proof", "freeze_registry", "freeze_service_levers", "freeze_task_levers"]
+    .map((name) => `${name} is not unreachable`).sort(),
+  "the daily play runs with ignore_unreachable, which lets an unreachable task fall through: each registered result is asked");
+});
+
 test("what only TrustedInstaller could change is recorded as put back, so Medic re-arming a lever is named by the daily run", () => {
   const remember = taskNamed("Remember what this run had to put back");
   const facts = JSON.stringify(remember["ansible.builtin.set_fact"]);

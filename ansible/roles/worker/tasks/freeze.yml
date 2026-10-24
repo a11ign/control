@@ -400,7 +400,15 @@
 
     - name: Remember what this run had to put back, for the daily run's record
       # A fact, not a log line: `ansible/freeze.yml` collects it from every box. It is set LAST, after the read-back, so a box that failed part way has neither
-      # fact and is named as failed instead of as frozen.
+      # fact and is named as failed instead of as frozen. The daily play runs with `ignore_unreachable`, which lets a task that lost its connection (measured live: "Data
+      # could not be sent to remote host ... #< CLIXML" during the read-back) fall through to here, so each result is asked: a box whose read-back never answered is not frozen.
+      when:
+        - freeze_registry is not unreachable
+        - freeze_service_levers is not unreachable
+        - freeze_task_levers is not unreachable
+        - freeze_edge_levers is not unreachable
+        - freeze_firewall_levers is not unreachable
+        - freeze_proof is not unreachable
       ansible.builtin.set_fact:
         worker_freeze_put_back: >-
           {{ freeze_registry.result.changed_levers | default([]) + freeze_service_levers.output | default([]) + freeze_task_levers.output | default([])

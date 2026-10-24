@@ -125,22 +125,38 @@
               "wuauserv: $((Get-Service wuauserv).Status), UsoSvc: $((Get-Service UsoSvc).StartType)"
 
         - name: A Windows Update search runs and finds no server, and the notification level is off
+          # THE SEARCH RUNS IN A PROCESS OF ITS OWN WITH A DEADLINE. Measured live (a11y-worker-13, 2026-10-24): `Search()` against the unreachable server does not return
+          # for 18+ minutes, and a client left calling it re-activates `wuauserv` after the freeze stops it. So it is given 90 s, and then killed: that it did NOT find a server
+          # in 90 s, with nothing returned, is the finding. The failure HRESULT, when the agent gives up sooner, is printed.
           become: true
           ansible.windows.win_powershell:
             script: |
               $Ansible.Changed = $false
-              $session = New-Object -ComObject Microsoft.Update.Session
               $level = (New-Object -ComObject Microsoft.Update.AutoUpdate).Settings.NotificationLevel
               "NOTIFICATION_LEVEL: $level (1 is disabled)"
+              if ($level -ne 1) { $Ansible.Failed = $true; "NoAutoUpdate does not read as Notify-disabled" }
+              $file = Join-Path $env:TEMP 'a11y-freeze-proof-search.ps1'
+              Set-Content -LiteralPath $file -Encoding ASCII -Value @'
               try {
-                $found = $session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software'")
+                $found = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software'")
                 "SEARCH_RETURNED: $($found.Updates.Count) update(s)"
-                $Ansible.Failed = $true
-                "the search found a server and an answer, so the redirect does not hold"
+                exit 3
               } catch {
                 "SEARCH_FAILED: 0x{0:X8} {1}" -f $_.Exception.HResult, $_.Exception.Message
+                exit 4
               }
-              if ($level -ne 1) { $Ansible.Failed = $true; "NoAutoUpdate does not read as Notify-disabled" }
+              '@
+              $out = Join-Path $env:TEMP 'a11y-freeze-proof-search.out'
+              $p = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $file `
+                -RedirectStandardOutput $out -PassThru -WindowStyle Hidden
+              if ($p.WaitForExit(90000)) {
+                Get-Content -LiteralPath $out | ForEach-Object { $_ }
+                if ($p.ExitCode -eq 3) { $Ansible.Failed = $true; "the search found a server and an answer, so the redirect does not hold" }
+              } else {
+                Stop-Process -Id $p.Id -Force
+                "SEARCH_TIMED_OUT: no server answered in 90 s, nothing was found or installed; the search was stopped"
+              }
+              Remove-Item -LiteralPath $file, $out -Force -ErrorAction SilentlyContinue
           register: proof_search
           changed_when: false
 
