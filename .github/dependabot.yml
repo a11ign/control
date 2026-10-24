@@ -14,7 +14,10 @@ updates:
       # The handle the org's gate recognises a dependency pull request by: every title starts `deps:`.
       prefix: deps
   - package-ecosystem: github-actions
-    directory: /
+    # The composite action holds `actions/cache`, and Dependabot reads a local action's own directory only when it is named.
+    directories:
+      - /
+      - /.github/actions/ansible-collections
     schedule:
       interval: daily
     commit-message:

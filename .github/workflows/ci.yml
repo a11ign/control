@@ -125,8 +125,9 @@ jobs:
         with: { python-version: "3.12" }
       # `ansible-core`, not the full `ansible` metapackage: the metapackage bundles hundreds of collections this fleet does not use.
       - run: pip install ansible-core pyyaml
-      - name: Install the collections these playbooks import
-        run: ansible-galaxy collection install -r ansible/requirements.yml
+      # The collections come from git at pinned tags, never from Galaxy (its downloads were down on 2026-10-24, A11-210), and are cached on requirements.yml's hash. One composite action holds the key
+      # and the install, and `ansible-collections-cache.yml` runs the same one on `main` so this job's first run on a new pull request restores `main`'s cache.
+      - uses: ./.github/actions/ansible-collections
       - name: Every playbook still parses
         env:
           ANSIBLE_CONFIG: ansible/ansible.cfg
