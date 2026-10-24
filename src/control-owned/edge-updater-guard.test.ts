@@ -89,6 +89,11 @@ function registrationChecks(text: string): Array<[string, boolean]> {
     ["no startup trigger", !has(/^\s+- type: boot$/m)],
     ["no repeating trigger", !has(/^\s+repetition:$/m)
       || !has(/^\s+interval: "PT\{\{ edge_guard_interval_minutes \}\}M"$/m)],
+    // A daily trigger with a one-day repetition does not begin repeating when the task is registered after 00:00 until the next midnight
+    // (measured on the fleet, A11-183): the repetition must hang off a time trigger, and have no duration so it never ends.
+    ["the repetition hangs off a daily trigger, which does not repeat after a registration until the next midnight", has(/^\s+- type: daily$/m)],
+    ["the repetition is not on a time trigger", !has(/^\s+- type: time\n\s+start_boundary: '2026-01-01T00:00:00'\n\s+repetition:/m)],
+    ["the repetition ends after a duration", has(/^\s+duration:/m)],
     // A LIST here reads as an array to win_scheduled_task, which tests `-is [Hashtable]` and hands the array to
     // COM as Repetition: "failed to set trigger property 'Repetition' ... Index was outside the bounds" (a11ign#5472).
     ["repetition is a list, which the module cannot set", has(/^\s+repetition:\n\s+- /m)],
@@ -186,10 +191,19 @@ test("the guard holds: SYSTEM, startup and repeating triggers, prefix match, sto
     "without these, Edge puts a task back between provisions and the updater moves the pin (a11ign#5015)");
 });
 
+test("control: the daily trigger with a one-day repetition (the shape that went quiet after a registration) FAILS", () => {
+  const v = guardViolations(mutatedGuard([
+    `- type: time\n            start_boundary: '2026-01-01T00:00:00'\n            repetition:\n              interval: "PT{{ edge_guard_interval_minutes }}M"\n`,
+    `- type: daily\n            start_boundary: '2026-01-01T00:00:00'\n            repetition:\n              interval: "PT{{ edge_guard_interval_minutes }}M"\n              duration: P1D\n`]));
+  assert.ok(v.includes("the repetition hangs off a daily trigger, which does not repeat after a registration until the next midnight"), v.join("|"));
+  assert.ok(v.includes("the repetition ends after a duration"), v.join("|"));
+  assert.ok(v.includes("the repetition is not on a time trigger"), v.join("|"));
+});
+
 test("control: repetition written as a list FAILS, because win_scheduled_task cannot set it (a11ign#5472)", () => {
   const v = guardViolations(mutatedGuard([
-    `repetition:\n              interval: "PT{{ edge_guard_interval_minutes }}M"\n              duration: P1D`,
-    `repetition:\n              - interval: "PT{{ edge_guard_interval_minutes }}M"\n                duration: P1D`]));
+    `repetition:\n              interval: "PT{{ edge_guard_interval_minutes }}M"\n`,
+    `repetition:\n              - interval: "PT{{ edge_guard_interval_minutes }}M"\n`]));
   assert.ok(v.includes("repetition is a list, which the module cannot set"), v.join("|"));
 });
 

@@ -432,13 +432,17 @@
         actions:
           - path: powershell.exe
             arguments: -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{{ edge_guard_dir }}\edge-updater-guard.ps1"
+        # A TIME TRIGGER THAT REPEATS FOR EVER, NOT A DAILY ONE WITH A ONE-DAY REPETITION (A11-183). Measured 2026-10-24 on the fleet: a task registered with
+        # the daily shape after 00:00 did not begin repeating until the next midnight (the scheduler logged no launch, `NumberOfMissedRuns` climbed, and
+        # `NextRunTime` still read the coming quarter hour), so every box whose guard was (re)registered that day went quiet for hours, and the eleven that
+        # kept firing were only the ones whose registration predated the day. A throwaway probe on a box that fired showed the same: the daily shape never ran,
+        # a `time` trigger with a start in the past and no duration ran every interval from the first one. No `duration` is what makes it indefinite.
         triggers:
           - type: boot
-          - type: daily
+          - type: time
             start_boundary: '2026-01-01T00:00:00'
             repetition:
               interval: "PT{{ edge_guard_interval_minutes }}M"
-              duration: P1D
         state: present
         enabled: true
 
