@@ -37,7 +37,7 @@ const COMMANDS = [
 const targetOf = (command: string): string | undefined => /(?:node |ansible-playbook )(\S+\.(?:ts|yml))/.exec(command)?.[1];
 
 /** A11-205: the freeze's commands. The daily run and the one-box proof go through the wrapper; the timer is installed by its own playbook. */
-const FREEZE_COMMANDS = ["fleet:freeze", "fleet:freeze-proof", "fleet:freeze-schedule"];
+const FREEZE_COMMANDS = ["fleet:freeze", "fleet:freeze-proof", "fleet:freeze-schedule", "fleet:drift"];
 
 test("the 30 commands are control's, none reaches into `packages/control`, and each names a file this repository holds", () => {
   assert.equal(COMMANDS.length, 30, "positive control: the list is the 31 the row names, less the patch window's timer");
@@ -75,6 +75,7 @@ test("A11-205: the patch window's timer command is gone, no schedule command ins
   for (const [name, command] of Object.entries(manifest.scripts)) {
     if (/schedule/.test(name)) assert.doesNotMatch(command, /patch/, `${name} must not install a patch timer`);
   }
-  assert.ok(manifest.scripts["fleet:patch"], "negative control: fleet:patch remains");
+  assert.equal(manifest.scripts["fleet:patch"], "node src/fleet-upgrade.ts", "negative control: fleet:patch remains, and it is the chain (deploy.yml, patch.yml, the closing read), not one play");
+  assert.equal(manifest.scripts["fleet:drift"], "node src/fleet-drift.ts", "the hourly read is a command a person can run too");
   assert.match(manifest.scripts["fleet:freeze-schedule"], /freeze-schedule\.yml$/);
 });
