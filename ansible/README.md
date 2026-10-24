@@ -4,7 +4,7 @@ Provision, update, restart and diagnose N bare-metal capture workers from the co
 
 ```bash
 pipx install ansible-core                       # 2.18+ — Debian's apt version is too old for Windows SSH
-ansible-galaxy collection install -r requirements.yml   # BOTH collections; see requirements.yml
+ansible-galaxy collection install -r requirements.yml -p ~/.ansible/collections   # every collection, from git at a pinned tag; see requirements.yml
 
 cd packages/control/ansible
 ansible-playbook deploy.yml                     # git pull + pnpm install --frozen-lockfile + restart + PROVE it took

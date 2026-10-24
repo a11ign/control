@@ -1,0 +1,29 @@
+# THE ONE COPY OF THE COLLECTIONS' CACHE KEY, PATH AND INSTALL (A11-210). `ci.yml`'s `ansible` job and `ansible-collections-cache.yml` (which saves the cache on `main`, so a new pull
+# request's first run restores it) both `uses:` this action. Two copies would drift, and a drifted key would make `main`'s cache unreachable from pull requests with nothing going red.
+# The caller has already installed `ansible-core` (and set up Python).
+name: Install the Ansible collections, cached
+description: Restore ~/.ansible/collections keyed on ansible/requirements.yml, and install from git only when that missed.
+runs:
+  using: composite
+  steps:
+    # An exact key, and NO `restore-keys`: a partial match would restore a different pinned set, and the install below would be skipped over it.
+    - uses: actions/cache@v6
+      id: collections-cache
+      with:
+        path: ~/.ansible/collections
+        key: ansible-collections-${{ runner.os }}-${{ hashFiles('ansible/requirements.yml') }}
+    - name: ansible collections cache HIT or MISS, printed so the run log can be quoted
+      shell: bash
+      run: |
+        echo "ansible collections cache: ${{ steps.collections-cache.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }}"
+    # GALAXY IS UNREACHABLE FROM THIS STEP BY DESIGN. Every entry in requirements.yml is `type: git`, but a collection's own `dependencies:` are asked of Galaxy unless they are listed from a
+    # concrete source too, and a static test cannot see that. Pointing the default server at a closed loopback port makes the step pass only if nothing needs Galaxy, whether Galaxy is up or down.
+    - name: Install the collections these playbooks import
+      if: steps.collections-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ANSIBLE_GALAXY_SERVER: http://127.0.0.1:9/
+      run: ansible-galaxy collection install -r ansible/requirements.yml -p ~/.ansible/collections
+    - name: Collections installed
+      shell: bash
+      run: ansible-galaxy collection list -p ~/.ansible/collections

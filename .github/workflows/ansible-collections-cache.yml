@@ -1,0 +1,30 @@
+# SAVES THE COLLECTIONS' CACHE ON `main` (A11-210). `ci.yml` runs only on `pull_request` and `merge_group`, and GitHub lets a run restore a cache saved by its own ref, its base branch or the
+# default branch: a cache a pull request's merge ref saved is visible to that pull request alone, and a merge-group ref is new for every queue entry. Without a cache saved here, every new
+# pull request would miss on its first run and install over the network. The same composite action means the same key, so this is the cache pull requests restore.
+# The daily run is a restore, which keeps the cache from GitHub's 7-day eviction; if it ever missed, it rebuilds from the pinned git sources, never from Galaxy.
+# A `schedule` is acceptable here although `auto-arm.yml` avoids one: GitHub disables scheduled workflows in a repository quiet for 60 days, and the cost is only a MISS (printed in the log) that installs from git.
+name: ansible-collections-cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ansible/requirements.yml
+      - .github/actions/ansible-collections/**
+      - .github/workflows/ansible-collections-cache.yml
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12" }
+      - run: pip install ansible-core pyyaml
+      - uses: ./.github/actions/ansible-collections

@@ -3,6 +3,12 @@
 #
 #     ansible-galaxy collection install -r requirements.yml -p ~/.ansible/collections
 #
+# THE SOURCE IS GIT, NOT GALAXY, AND EVERY PIN IS AN EXACT TAG. Galaxy's artifact downloads returned HTTP 500 for every version on 2026-10-24 (its site, API and
+# version index still answered 200), and every pull request's `ansible` job failed with it (A11-210). Each collection is therefore built by `ansible-galaxy` from its own
+# repository at a release tag, and CI refuses Galaxy outright (`.github/actions/ansible-collections`), so an entry that would reach for it fails on the pull request that adds it.
+# The pins are what the old `>=` ranges resolved to on 2026-10-24, so nothing moved by the change of source. A pin moves only by a deliberate edit of this file, in its own
+# pull request (A11-205's rule for the fleet, applied to the control plane's own tools); `src/requirements-from-git.test.ts` holds the shape.
+#
 # The `-p` matters: ansible.cfg puts the repo's own `collections/` path FIRST, so a bare install vendors
 # third-party collections into git. Only a11y.worker belongs there.
 #
@@ -18,20 +24,37 @@
 collections:
   # win_powershell, win_regedit, win_user, win_group_membership, win_service, win_package,
   # win_get_url, win_path, win_acl, win_wait_for, win_reboot, win_uri.
+  #
+  # The tag is `3.9.0` and it installs as 3.9.1: GitHub has no `3.9.1` tag, and the `3.9.0` tag's galaxy.yml declares `version: 3.9.1` (Galaxy published its 3.9.1 four minutes after
+  # that GitHub release, on 2026-10-20). `ansible-galaxy collection list` reads 3.9.1, which is what the old range `>=3.7.0` resolved to.
   - name: ansible.windows
-    version: ">=3.7.0"
+    source: https://github.com/ansible-collections/ansible.windows.git
+    type: git
+    version: "3.9.0"
 
   # win_scheduled_task, win_firewall_rule and win_unzip live HERE, not in ansible.windows.
   # All three are load-bearing: the worker is a scheduled task, the worker port needs a firewall rule,
   # and node/MinGit arrive as zips.
   - name: community.windows
-    version: ">=3.0.0"
+    source: https://github.com/ansible-collections/community.windows.git
+    type: git
+    version: "3.3.0"
 
   # `wakeonlan`, for waking a powered-down worker from the control plane. Note it must be THIS one and
   # not community.windows.win_wakeonlan: that module sends the magic packet FROM a Windows host, and our
   # control plane is Linux. The two are easy to confuse and only one of them can work here.
   - name: community.general
-    version: ">=8.0.0"
+    source: https://github.com/ansible-collections/community.general.git
+    type: git
+    version: "13.5.0"
+
+  # No playbook imports this. It is listed because community.general 13.5.0's galaxy.yml depends on it (`>=1.0.0`), and a dependency that is not listed from a concrete source is asked
+  # of Galaxy: with Galaxy down the install fails ("Unknown error when attempting to call Galaxy"). Listed here it is fetched from git like the rest. Its repository has no `_v1`
+  # in its name. When community.general's pin moves, read its galaxy.yml `dependencies:` and move this one with it.
+  - name: community.library_inventory_filtering_v1
+    source: https://github.com/ansible-collections/community.library_inventory_filtering.git
+    type: git
+    version: "1.1.5"
 
   # `profile_tasks`, for the per-task timings that turn "provisioning feels slow" into a number. A run
   # against an already-provisioned box reports ok=43 changed=7 — so Ansible is re-CHECKING rather than
@@ -42,4 +65,6 @@ collections:
   # It is a CALLBACK, and `ansible.cfg` must not name it until this is installed: an absent callback
   # aborts every playbook before its first task, which is what `stdout_callback = yaml` did here.
   - name: ansible.posix
-    version: ">=1.5.0"
+    source: https://github.com/ansible-collections/ansible.posix.git
+    type: git
+    version: "2.2.2"

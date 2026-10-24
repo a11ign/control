@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { workflowCode } from "./workflow-code.ts";
+import { codeOf, workflowCode } from "./workflow-code.ts";
 
 const ci = workflowCode("ci.yml");
 
@@ -106,10 +106,42 @@ test("the playbooks are checked in this repository's own CI, on every pull reque
   const job = /^ {2}ansible:\n([\s\S]*?)\n\n/m.exec(ci)?.[1];
   assert.ok(job, "positive control: the ansible job is found");
   assert.doesNotMatch(job, /^ {4}if:/m, "no condition: `gate` accepts success only, so a job a path filter skipped would read red");
-  assert.match(job, /ansible-galaxy collection install -r ansible\/requirements\.yml/);
+  const useAction = job.indexOf("uses: ./.github/actions/ansible-collections");
+  assert.ok(useAction > 0, "the job installs its collections through the composite action, which holds the cache and refuses Galaxy");
+  assert.ok(useAction < job.indexOf("ansible-playbook"), "installed before the first playbook is parsed");
+  assert.doesNotMatch(job, /ansible-galaxy collection install/, "no second copy of the install in the job: the action holds the only one");
   assert.match(job, /ansible-playbook -i ansible\/inventory\.example\.yml --syntax-check/);
   assert.match(job, /working-directory: ansible\n\s+run: python3 check-modules\.py/, "check-modules.py globs from its own directory");
   assert.doesNotMatch(job, /lay-layer|packages\/control/, "it reads this repository's root and needs no core");
   assert.match(job, /case "\$playbook" in ansible\/inventory\.example\.yml\|ansible\/requirements\.yml\) continue ;; esac/, "the files that are not playbooks are named");
   assert.doesNotMatch(job, /grep -q "[^"]*hosts:/, "a content filter on `hosts:` skips a playbook whose `hosts:` is mistyped");
+});
+
+const collectionsAction = codeOf(readFileSync(new URL("../.github/actions/ansible-collections/action.yml", import.meta.url), "utf8"));
+
+test("the collections are cached on requirements.yml's hash alone, installed only on a miss, and Galaxy is unreachable from the install (A11-210)", () => {
+  assert.match(collectionsAction, /^ {2}using: composite$/m, "positive control: the composite action is found");
+  assert.match(collectionsAction, /uses: actions\/cache@v6\n\s+id: collections-cache\n\s+with:\n\s+path: ~\/\.ansible\/collections$/m, "the cache holds the install path");
+  assert.match(collectionsAction, /key: ansible-collections-\$\{\{ runner\.os \}\}-\$\{\{ hashFiles\('ansible\/requirements\.yml'\) \}\}$/m, "keyed on requirements.yml");
+  assert.doesNotMatch(collectionsAction, /restore-keys/, "a partial match would restore a different pinned set and the install would be skipped over it");
+  assert.match(collectionsAction, /ansible collections cache: \$\{\{ steps\.collections-cache\.outputs\.cache-hit == 'true' && 'HIT' \|\| 'MISS' \}\}/, "HIT or MISS is printed, so the run log can be quoted");
+  const install = /- name: Install the collections these playbooks import\n([\s\S]*?)(?=\n {4}- name: |$)/.exec(collectionsAction)?.[1];
+  assert.ok(install, "positive control: the install step is found");
+  assert.match(install, /if: steps\.collections-cache\.outputs\.cache-hit != 'true'/, "skipped on a hit: a run with an unchanged file installs nothing");
+  assert.match(install, /run: ansible-galaxy collection install -r ansible\/requirements\.yml -p ~\/\.ansible\/collections$/m);
+  assert.match(install, /ANSIBLE_GALAXY_SERVER: http:\/\/127\.0\.0\.1:\d+\/$/m, "Galaxy is unreachable from the install by design: a dependency that would come from it fails the pull request that adds it");
+  assert.match(collectionsAction, /ansible-galaxy collection list -p ~\/\.ansible\/collections/, "what is installed is listed, on a hit and on a miss");
+});
+
+test("`main` saves the cache pull requests restore, with the same action, on a push to main, daily and on demand (A11-210)", () => {
+  const cache = workflowCode("ansible-collections-cache.yml");
+  assert.match(cache, /^ {2}push:\n {4}branches: \[main\]$/m, "positive control: it runs on a push to main");
+  assert.match(cache, /^ {6}- ansible\/requirements\.yml$/m);
+  assert.match(cache, /^ {6}- \.github\/actions\/ansible-collections\/\*\*$/m);
+  assert.match(cache, /^ {2}schedule:\n {4}- cron: /m, "a restore each day keeps the cache from the 7-day eviction");
+  assert.match(cache, /^ {2}workflow_dispatch:$/m);
+  assert.match(cache, /^ {2}contents: read$/m);
+  assert.match(cache, /- uses: \.\/\.github\/actions\/ansible-collections$/m, "the same action as ci.yml, so the same key");
+  assert.doesNotMatch(cache, /ansible-galaxy collection install/, "the action holds the only install");
+  assert.ok(cache.indexOf("pip install ansible-core") < cache.indexOf("uses: ./.github/actions/ansible-collections"), "ansible-core is installed before the action runs");
 });
