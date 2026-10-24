@@ -157,19 +157,21 @@
             $want = if ($lifting) { [int]$s.lift_start } else { 4 }
             $svc = Get-Service -Name $s.name -ErrorAction SilentlyContinue
             $cur = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start
-            if ($cur -ne $want -or ($svc -and "$($svc.StartType)" -ne $mode[$want])) {
-              if (-not $Ansible.CheckMode) {
-                # The service manager first. SYSTEM is withheld SERVICE_CHANGE_CONFIG on some of these (edgeupdate, A11-183), so a refusal falls back to the registry.
-                try { Set-Service -Name $s.name -StartupType $mode[$want] -ErrorAction Stop } catch { $null = $_ }
-                if ((Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start -ne $want) {
-                  try { Set-ItemProperty -LiteralPath $key -Name Start -Value $want -Type DWord -ErrorAction Stop } catch {
-                    # Owned by TrustedInstaller (WaaSMedicSvc): handed to the one-shot task below, as the same commands.
-                    $refused += "Set-Service -Name '$($s.name)' -StartupType $($mode[$want]) -ErrorAction SilentlyContinue; Set-ItemProperty -LiteralPath '$key' -Name Start -Value $want -Type DWord"
-                  }
+            $differs = $cur -ne $want -or ($svc -and "$($svc.StartType)" -ne $mode[$want])
+            if (-not $Ansible.CheckMode) {
+              # EVERY RUN, whether or not what `sc qc` and the registry say already matches. Measured live (a11y-worker-13, 2026-10-24): after a registry-only change the service
+              # manager reported DISABLED and the registry said 4, and `sc start wuauserv` STILL succeeded; one `sc config start= disabled` made it refuse (1058). Its own copy of the
+              # start type is what is enforced, and only a call through it is sure to set that. It costs one call and is idempotent.
+              # The service manager first. SYSTEM is withheld SERVICE_CHANGE_CONFIG on some of these (edgeupdate, A11-183), so a refusal falls back to the registry.
+              try { Set-Service -Name $s.name -StartupType $mode[$want] -ErrorAction Stop } catch { $null = $_ }
+              if ((Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start -ne $want) {
+                try { Set-ItemProperty -LiteralPath $key -Name Start -Value $want -Type DWord -ErrorAction Stop } catch {
+                  # Owned by TrustedInstaller (WaaSMedicSvc): handed to the one-shot task below, as the same commands.
+                  $refused += "Set-Service -Name '$($s.name)' -StartupType $($mode[$want]) -ErrorAction SilentlyContinue; Set-ItemProperty -LiteralPath '$key' -Name Start -Value $want -Type DWord"
                 }
               }
-              $changed += "$($s.name) Start=$want"
             }
+            if ($differs) { $changed += "$($s.name) Start=$want" }
             if (-not $lifting -and $svc -and $svc.Status -ne 'Stopped') {
               if (-not $Ansible.CheckMode) {
                 try { Stop-Service -Name $s.name -Force -ErrorAction Stop } catch { $refused += "Stop-Service -Name '$($s.name)' -Force -ErrorAction SilentlyContinue" }

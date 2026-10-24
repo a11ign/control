@@ -239,6 +239,15 @@ test("the lift is read back as the LIFTED state, and a lever the lift drops is e
   assert.equal(FREEZE.vars.raw.freeze_lift_windows, "{{ worker_freeze_lift_windows | default(false) | bool }}", "off unless a caller lifts");
 });
 
+test("the service manager is told EVERY run, not only when what it reports already differs: its own copy of the start type is what is enforced (measured live)", () => {
+  const apply = scriptOf(taskNamed("Services are frozen"));
+  const gate = apply.indexOf("if ($differs)");
+  const call = apply.indexOf("try { Set-Service -Name $s.name -StartupType $mode[$want] -ErrorAction Stop }");
+  assert.ok(call >= 0 && gate >= 0, "both the unconditional call and the record of a change are there");
+  assert.ok(call < gate, "the call comes before, and is not inside, the `if ($differs)` that only decides whether it is recorded");
+  assert.doesNotMatch(apply.slice(0, call).split("\n").slice(-6).join("\n"), /if \(\$cur -ne \$want/, "the call is not guarded by the mismatch it would otherwise skip on");
+});
+
 test("Medic is handled: its service and tasks are frozen, and what SYSTEM is refused is done as TrustedInstaller through a task that is removed again", () => {
   const medic = taskNamed("What SYSTEM was refused");
   const script = scriptOf(medic);

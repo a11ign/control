@@ -95,7 +95,7 @@
       ansible.windows.win_powershell:
         parameters:
           Services: "{{ proof_services }}"
-        script: |
+        script: &proof_refusal |
           param($Services)
           $Ansible.Changed = $false
           $started = @()
@@ -118,9 +118,9 @@
           ansible.windows.win_powershell:
             script: |
               $Ansible.Changed = $true
-              foreach ($name in 'wuauserv', 'UsoSvc') {
-                Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -Value 3 -Type DWord
-              }
+              # THROUGH THE SERVICE MANAGER, as the upgrade's lift does. A registry-only write left the service manager's own copy out of step (measured live), and the proof
+              # must lift the way the real lift does or it proves a different thing.
+              foreach ($name in 'wuauserv', 'UsoSvc') { Set-Service -Name $name -StartupType Manual }
               Start-Service -Name wuauserv
               "wuauserv: $((Get-Service wuauserv).Status), UsoSvc: $((Get-Service UsoSvc).StartType)"
 
@@ -193,6 +193,17 @@
           ansible.builtin.include_role:
             name: worker
             tasks_from: freeze.yml
+
+    - name: The re-freeze put the refusal back — every service that was made startable refuses to start again
+      # THE POINT OF THE `always:`. The block above made `wuauserv` and `UsoSvc` startable and a scan ran; this is the same refusal test as at the start, after the freeze that closed
+      # the block. A freeze that read back clean but left the service manager willing to start them would pass every other check here and fail this one.
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          Services: "{{ proof_services }}"
+        script: *proof_refusal
+      register: proof_services_refused_again
+      changed_when: false
 
     - name: Medic is run on purpose — it starts although it is Disabled — and left a minute and a half to repair what it likes
       # THE ANSWER TO "WaaSMedicSvc HANDLED SO IT DOES NOT RE-ENABLE THEM, OR PROVEN NOT TO": it cannot be held off by its start type (a protected service starts anyway), so it is
@@ -305,6 +316,7 @@
       ansible.builtin.debug:
         msg:
           - "services: {{ proof_services_refused.output | default([]) }}"
+          - "services after the re-freeze: {{ proof_services_refused_again.output | default([]) }}"
           - "search: {{ proof_search.output | default([]) }}"
           - "orchestrator: {{ proof_uso.output | default([]) }}"
           - "effective policy: {{ proof_policy.output | default([]) }}"
