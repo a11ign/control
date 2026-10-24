@@ -75,6 +75,7 @@ import { parseEdgePin } from "./fleet-pins.ts";
 import { DEPLOY_PINS_PATH } from "./layer-pins.ts";
 import { sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
+import { FLEET_DRIFT_PATH } from "./fleet-drift.ts";
 import { readFleetLock, type FleetLockReading } from "./fleet-lock.ts";
 import {
   fleetBuildIncidentTick, ghIncidentDeps, readOnlyIncidentDeps, incidentFiledBody, NO_INCIDENT_TICK, type BuildIncidentTick, type BuildStatus,
@@ -110,6 +111,13 @@ export const AUTO_OFF_STATE_PATH = "runs/fleet-auto-off-state.json";
  * leaves it where the tick can read it (#3860, incident #3846).
  */
 export const AUTO_OFF_MIRROR_PATH = "runs/fleet-auto-off-mirror.json";
+
+/**
+ * Where this watch mirrors the hourly drift record (`runs/fleet-drift.json` on the control plane, written by `fleet-drift.ts --record`), for the chairman's
+ * announcement channel: agent-org's `incident:fleet-drift` reads this string from the agents host, where the record is not. The same arrangement as
+ * `AUTO_OFF_MIRROR_PATH`, and for the same reason (the tick may not ssh, #3566). A11-205, docs/adr/0001.
+ */
+export const FLEET_DRIFT_MIRROR_PATH = "runs/fleet-drift-mirror.json";
 
 export const DEFAULT_CAPTURES_STATE_PATH = "runs/fleet-captures-state.json";
 
@@ -735,6 +743,46 @@ function mirrorOrSay(text: string, mirror: AutoOffMirror) {
 }
 
 /**
+ * Write the drift record this watch just read, whole, beside the epoch ms it was read at: `{ readAt, record }`, as `mirrorAutoOffRecord` does. `readAt` is the
+ * reader's only clock, so a run that could not read writes nothing and the mirror AGES -- an old `readAt` says "nobody looked", which is not the same claim as a
+ * record that lists no difference. The record is kept verbatim: it holds inventory names, fields and versions, never an address (`fleet-drift.ts`).
+ *
+ * @param {string} text the control host's drift record, or `{}` when the hourly check has not written one
+ */
+export function mirrorFleetDriftRecord(text: string, { readAt, path = FLEET_DRIFT_MIRROR_PATH, write = replaceFile }: AutoOffMirror) {
+  write(path, `${JSON.stringify({ readAt, record: JSON.parse(text) }, null, 2)}\n`);
+}
+
+/**
+ * The hourly drift record, read FROM the control host and mirrored for the agents host. A host that cannot be read THROWS, and so does a record that is not JSON:
+ * the mirror then keeps its old `readAt`. A missing file is `{}`, a check that never ran.
+ */
+export function readFleetDriftRecord(
+  readState: () => string = () => sshToControlPlane(`cat ${CONTROL_PLANE_CHECKOUT}/${FLEET_DRIFT_PATH} 2>/dev/null || echo '{}'`, { capture: true }),
+  mirror?: AutoOffMirror,
+): string {
+  const text = readState();
+  if (mirror) mirrorFleetDriftRecord(text, mirror);
+  return text;
+}
+
+/**
+ * Mirror the drift record, or SAY it could not be: `true` when the mirror is fresh, `false` when the read or the write failed (stderr names why). An unread
+ * record is not a clean one, so `exitCodeFor` does not let a tick that could not mirror it read as quiet.
+ */
+export function mirrorDriftOrSay({ readState, path, write, now = Date.now }: {
+  readState?: () => string; path?: string; write?: AutoOffMirror["write"]; now?: () => number;
+} = {}): boolean {
+  try {
+    readFleetDriftRecord(readState, { readAt: now(), path, write });
+    return true;
+  } catch (cause) {
+    console.error(`CANNOT MIRROR the fleet drift record from the control host: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return false;
+  }
+}
+
+/**
  * The auto-off timer's refusal, read FROM the control host (this watch runs on the agents host, where the state file
  * is not): ssh, or local when this is the control plane. A host that cannot be read THROWS rather than answering
  * `null`: "no refusal" and "I did not look" are different states. A missing file is `{}`, a timer that never ticked.
@@ -939,11 +987,11 @@ export function readRefusalOrSay({ readState, path, now = Date.now }: { readStat
  * or its auto-off refusal could not be read (#4734), which is `CANNOT_ASK` and never QUIET (#4714): an unread host is not a clean one. ATTENTION outranks it, because a
  * finding that was made stays made whatever the host will not say about the rest.
  */
-export function exitCodeFor(found: WatchFound, refusal: AutoOffReading): number {
+export function exitCodeFor(found: WatchFound, refusal: AutoOffReading, driftMirrored = true): number {
   const refused = refusal !== null && refusal !== UNREAD;
   const attention = found.overdue.length > 0 || found.offFleet.length > 0 || found.unitDrift.fresh.length > 0 || found.buildIncident.fresh.length > 0 || refused;
   if (attention) return EXIT.ATTENTION;
-  const unread = found.unitDrift.cannotTell !== null || found.buildIncident.cannotAsk !== null || refusal === UNREAD;
+  const unread = found.unitDrift.cannotTell !== null || found.buildIncident.cannotAsk !== null || refusal === UNREAD || !driftMirrored;
   return unread ? EXIT.CANNOT_ASK : EXIT.QUIET;
 }
 
@@ -978,11 +1026,13 @@ async function main() {
   }
   postDailyUse(post);
   const refusal = readRefusalOrSay();
+  // Every run mirrors, as `readRefusalOrSay` does for the auto-off record: the mirror's `readAt` is when anyone last looked, and a dry run looked.
+  const driftMirrored = mirrorDriftOrSay();
   if (found.unitDrift.notShipped.length) {
     console.log(`unit-drift, reported and not raised: ${found.unitDrift.notShipped.join(", ")} installed on the control host and shipped by no playbook`);
   }
   const { fresh } = found.unitDrift;
-  const exitCode = exitCodeFor(found, refusal);
+  const exitCode = exitCodeFor(found, refusal, driftMirrored);
   if (exitCode !== EXIT.ATTENTION) {
     process.exitCode = exitCode;
     return;

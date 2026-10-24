@@ -1,0 +1,14 @@
+[Unit]
+# A11-205: EVERY BOX IS READ AGAINST THE MANIFEST ONCE AN HOUR. Installed by `freeze-schedule.yml`, which explicitly ensures this timer is `state: started, enabled: true`
+# every time it runs. The after-merge Done-when is 14 days of this reading with no difference on any box.
+Description=a11y: read the fleet against the pins manifest every hour
+
+[Timer]
+# At minute 17: clear of :23, :37 and :47 (other control-plane timers) and of the daily freeze (04:11). `Persistent=true` runs a firing the host slept through.
+OnCalendar=*-*-* *:17:00
+Persistent=true
+AccuracySec=1min
+Unit=a11y-fleet-drift.service
+
+[Install]
+WantedBy=timers.target
