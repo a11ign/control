@@ -1530,6 +1530,19 @@
         fail_msg: >-
           Refusing to run: left_out_workers must list inventory worker names ({{ groups['a11y_workers'] | join(', ') }}).
 
+    # A worker that differs from `deploy-pins.json` is out of capture (A11-205, docs/adr/0001). `lab-job.ts` read the workers it needs just before dispatching,
+    # found these differ in Windows build, Edge, NVDA or worker code, and left them out of the pool for a job that took the whole fleet (a job that NAMED a
+    # drifting worker was refused there instead, so nothing named is ever left out here). Like `left_out_workers` it names inventory workers and nothing else.
+    - name: A drift-excluded worker is an inventory worker
+      when: drift_excluded is defined
+      ansible.builtin.assert:
+        that:
+          - drift_excluded is sequence and drift_excluded is not string
+          - drift_excluded | difference(groups['a11y_workers']) | length == 0
+        fail_msg: >-
+          Refusing to run: drift_excluded must list inventory worker names ({{ groups['a11y_workers'] | join(', ') }}).
+          It is set by lab:job from what it read of the fleet against deploy-pins.json, never by hand.
+
     - name: Which enrolled workers take captured cases
       ansible.builtin.set_fact:
         lab_capture_hosts: >-
@@ -1538,6 +1551,7 @@
                             | selectattr('a11y_capture', 'defined') | selectattr('a11y_capture', 'sameas', false)
                             | map(attribute='inventory_hostname') | list)
              | reject('in', left_out_workers | default([]))
+             | reject('in', drift_excluded | default([]))
              | list }}
 
     - name: At least one enrolled worker must take captured cases

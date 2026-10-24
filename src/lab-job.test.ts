@@ -21,7 +21,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { ansiblePlaybookArgs, captureBearingJobs, extraVars, fleetBuildRefusal, fleetDispatchingJobs, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
+import { ansiblePlaybookArgs, captureBearingJobs, driftDecision, extraVars, fleetBuildRefusal, fleetDispatchingJobs, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
+import type { DriftReading } from "./lab-job.ts";
 import type { OpenIncident } from "./fleet-build-incident.ts";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
 import { postQualificationStatus } from "./post-qualification-status.ts";
@@ -769,10 +770,10 @@ const fixtureResolver = (workers: typeof FLEET_2803, macReads: Array<Map<string,
 };
 const sameMove = () => [new Map([["a11y-worker-b", MOVED_TO]]), new Map([["a11y-worker-b", MOVED_TO]])];
 
-type Drive2803 = { events: string[]; woken: { name: string; url: string }[]; checkedPool: string[];
+type Drive2803 = { events: string[]; woken: { name: string; url: string }[]; checkedPool: string[]; driftAsked?: string[];
   dispatched: string[] | null; exited: number | undefined; stderr: string };
 
-async function drive2803(argv: string[], { workers = FLEET_2803, macReads = sameMove(), openIncident = NO_OPEN_INCIDENT }: { workers?: typeof FLEET_2803; macReads?: Array<Map<string, string>>; openIncident?: () => OpenIncident | null } = {}): Promise<Drive2803> {
+async function drive2803(argv: string[], { workers = FLEET_2803, macReads = sameMove(), openIncident = NO_OPEN_INCIDENT, readDrift }: { workers?: typeof FLEET_2803; macReads?: Array<Map<string, string>>; openIncident?: () => OpenIncident | null; readDrift?: (pool: { name: string; url: string; }[]) => Promise<DriftReading> } = {}): Promise<Drive2803> {
   const seen: Drive2803 = { events: [], woken: [], checkedPool: [], dispatched: null, exited: undefined, stderr: "" };
   // `openIncident` is what #4405 reads: passed here, so an incident-open test drives the same path a real launch does.
   const realExit = process.exit;
@@ -792,6 +793,7 @@ async function drive2803(argv: string[], { workers = FLEET_2803, macReads = same
         seen.woken = needed.map(({ name, url }) => ({ name, url }));
         return needed.map((w) => ({ name: w.name, host: w.name, state: UP_AT.has(w.url) ? "already-up" : "no-answer" }));
       },
+      ...(readDrift ? { readDrift: async (pool: { name: string; url: string; }[]) => { seen.events.push("drift"); seen.driftAsked = pool.map((w) => w.name); return readDrift(pool); } } : {}),
       checkFleet: async (_expected, pool) => { seen.events.push("check"); seen.checkedPool = pool as string[]; },
       dispatch: (forwarded) => { seen.events.push("dispatch"); seen.dispatched = forwarded; },
     });
@@ -953,9 +955,104 @@ test("#2803: useTimeArgs renders nothing for an undisturbed fleet, and JSON for 
   assert.deepEqual(JSON.parse(useTimeArgs({ moved: {}, leftOut: ["w"] })[1]), { left_out_workers: ["w"] });
 });
 
+// ---------------------------------------------------------------------------------------------------------
+// A11-205: a box that differs from `deploy-pins.json` is OUT OF CAPTURE, on a read made just before the dispatch
+// (the pool is built on the control plane, so a ledger up to an hour old would be the wrong thing to trust).
+// ---------------------------------------------------------------------------------------------------------
+
+const DRIFTING_A: DriftReading = { drifting: ["a11y-worker-a"] };
+const NOTHING_DRIFTS: DriftReading = { drifting: [] };
+
+test("A11-205: a whole-fleet job leaves a drifting box out of the pool it checks and dispatches, and says so", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => DRIFTING_A });
+  assert.equal(seen.exited, undefined);
+  assert.deepEqual(seen.checkedPool, [`http://${MOVED_TO}:8765`], "the box that differs is not in the staleness check's pool, which would refuse its worker code instead of leaving it out");
+  assert.deepEqual(passed(seen.dispatched), {
+    resolved_addresses: { "a11y-worker-b": MOVED_TO }, left_out_workers: ["a11y-worker-c"], drift_excluded: ["a11y-worker-a"] });
+  assert.match(seen.stderr, new RegExp(`DRIFT a11y-worker-a \\(${PIN(10)}\\): differs from deploy-pins\\.json -- out of capture, left out of this run`));
+  assert.deepEqual(seen.driftAsked, ["a11y-worker-a", "a11y-worker-b"], "it asks about the boxes that are up, at the addresses they answer on now");
+});
+
+test("A11-205: the drift read comes AFTER the wake (a sleeping box can only be read once it is up) and BEFORE the staleness check", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => NOTHING_DRIFTS });
+  assert.deepEqual(seen.events, ["wake", "drift", "check", "dispatch"]);
+});
+
+test("A11-205 NEGATIVE CONTROL: a fleet on the manifest dispatches byte-for-byte as before, and a caller that passes no reader is unchanged", async () => {
+  const healthy = FLEET_2803.slice(0, 1);
+  const clean = await drive2803(["-e", "job=capture", "-e", "only=x"], { workers: healthy, macReads: [], readDrift: async () => NOTHING_DRIFTS });
+  assert.deepEqual(clean.dispatched, ["-e", "job=capture", "-e", "only=x"]);
+  assert.equal(clean.stderr, "");
+  const unread = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  assert.doesNotMatch(String(unread.dispatched?.join(" ")), /drift_excluded/);
+  assert.deepEqual(unread.events, ["wake", "check", "dispatch"]);
+});
+
+test("A11-205: a NAMED pool keeps its all-or-nothing rule: naming a drifting box is a refusal naming it, never a smaller pool", async () => {
+  const seen = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"], { readDrift: async () => DRIFTING_A });
+  assert.equal(seen.exited, 3);
+  assert.deepEqual(seen.events, ["wake", "drift"], "neither the check nor the dispatch may run after the refusal");
+  assert.equal(seen.dispatched, null);
+  assert.match(seen.stderr, /REFUSING capture-only: a11y-worker-a differs from deploy-pins\.json .* it named its workers, so a smaller pool is not the run that was asked for/);
+  // negative control: naming only boxes that do not differ runs
+  const fine = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"], { readDrift: async () => ({ drifting: ["a11y-worker-c"] }) });
+  assert.equal(fine.exited, undefined);
+  assert.doesNotMatch(String(fine.dispatched?.join(" ")), /drift_excluded/, "a box that differs but is not in the pool is not this run's");
+});
+
+test("A11-205: a pool in which EVERY box differs is refused, in the job's words, before the dispatch", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => ({ drifting: ["a11y-worker-a", "a11y-worker-b", "a11y-worker-c"] }) });
+  assert.equal(seen.exited, 3);
+  assert.equal(seen.dispatched, null);
+  assert.match(seen.stderr, /REFUSING capture: every worker it needs differs from deploy-pins\.json \(a11y-worker-a, a11y-worker-b\)/);
+});
+
+test("A11-205: a drift read that cannot be made REFUSES -- could not ask is not may proceed -- before the check and the dispatch", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => ({ cannotAsk: "pnpm install --frozen-lockfile" }) });
+  assert.equal(seen.exited, 3);
+  assert.deepEqual(seen.events, ["wake", "drift"]);
+  assert.match(seen.stderr, /REFUSING capture: could not ask whether the workers match deploy-pins\.json \(pnpm install --frozen-lockfile\)\. Could not ask is not may proceed\./);
+});
+
+test("A11-205: a job with no fleet demand, and a describe-only run, do not read the fleet for drift", async () => {
+  for (const argv of [["-e", "job=train", "-e", "out=varied"], ["-e", "job=capture", "-e", "describe=1"]]) {
+    const seen = await drive2803(argv, { readDrift: async () => { throw new Error("must not be asked"); } });
+    assert.equal(seen.exited, undefined, argv.join(" "));
+    assert.ok(!seen.events.includes("drift"), argv.join(" "));
+  }
+});
+
+test("A11-205: driftDecision is the same decision, pure: exclude, refuse a named pool, refuse an empty one, refuse an unreadable manifest", () => {
+  const pool = [{ name: "a", url: "http://192.0.2.1:8765" }, { name: "b", url: "http://192.0.2.2:8765" }];
+  assert.deepEqual(driftDecision({ job: "capture", pool, selected: false, reading: { drifting: ["b"] } }), { excluded: ["b"] });
+  assert.deepEqual(driftDecision({ job: "capture", pool, selected: false, reading: { drifting: [] } }), { excluded: [] });
+  assert.deepEqual(driftDecision({ job: "capture", pool, selected: false, reading: { drifting: ["not-in-this-pool"] } }), { excluded: [] });
+  assert.match((driftDecision({ job: "capture", pool, selected: true, reading: { drifting: ["b"] } }) as { refusal: string }).refusal, /^REFUSING capture: b differs from/);
+  assert.match((driftDecision({ job: "capture", pool, selected: false, reading: { drifting: ["a", "b"] } }) as { refusal: string }).refusal, /every worker it needs differs/);
+  assert.match((driftDecision({ job: "capture", pool, selected: false, reading: { cannotAsk: "x" } }) as { refusal: string }).refusal, /could not ask/);
+});
+
+test("A11-205: a caller may not supply drift_excluded -- it is what lab:job read, and nothing else", async () => {
+  const seen = await drive2803(["-e", "job=capture", "-e", "drift_excluded=[]"]);
+  assert.equal(seen.exited, 3);
+  assert.equal(seen.dispatched, null);
+});
+
+test("A11-205: useTimeArgs carries drift_excluded beside the other two, and renders nothing when nothing was held out", () => {
+  assert.deepEqual(JSON.parse(useTimeArgs({ moved: {}, leftOut: [], driftExcluded: ["w"] })[1]), { drift_excluded: ["w"] });
+  assert.deepEqual(useTimeArgs({ moved: {}, leftOut: [], driftExcluded: [] }), []);
+  assert.deepEqual(useTimeArgs({ moved: {}, leftOut: [] }), [], "the argument is optional: every caller before this row is unchanged");
+});
+
+test("A11-205: the real entry hands run() the real drift reader, and run() has no default for it (a test cannot reach a box)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
+  assert.match(source, /resolvePool: resolvePoolAtUseTime, readDrift: driftingBoxes, qualify, openIncident: openFleetBuildIncident \}\)/);
+  assert.doesNotMatch(source, /readDrift = /, "a default would let a test that leaves it out reach the real fleet");
+});
+
 test("#2803: the real entry hands run() the real resolver, and run() has no default for it (a test cannot reach a socket)", () => {
   const source = readFileSync(fileURLToPath(new URL("./lab-job.ts", import.meta.url)), "utf8");
-  assert.match(source, /resolvePool: resolvePoolAtUseTime, qualify, openIncident: openFleetBuildIncident \}\)/);
+  assert.match(source, /resolvePool: resolvePoolAtUseTime, readDrift: driftingBoxes, qualify, openIncident: openFleetBuildIncident \}\)/);
   assert.doesNotMatch(source, /resolvePool = /, "a default would let a test that leaves it out reach the real neighbour table");
 });
 
@@ -984,6 +1081,40 @@ test("#2803 (rendered): a left-out worker is absent from the pool, and the other
     assert.equal(run.status, 0, run.output);
     assert.equal(run.fleet, "http://192.0.2.10:8765,http://192.0.2.11:8765");
     assert.deepEqual(run.selected, ["a11y-worker-a", "a11y-worker-b"]);
+  });
+
+test("A11-205 (rendered): a drift-excluded worker is absent from the pool, and the others are not",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runUseTime(["-e", JSON.stringify({ drift_excluded: ["a11y-worker-b"] })]);
+    assert.equal(run.status, 0, run.output);
+    assert.equal(run.fleet, "http://192.0.2.10:8765,http://192.0.2.12:8765");
+    assert.deepEqual(run.selected, ["a11y-worker-a", "a11y-worker-c"]);
+    const none = runUseTime([]);
+    assert.deepEqual(none.selected, ["a11y-worker-a", "a11y-worker-b", "a11y-worker-c"], "positive control: with nothing excluded the pool is the whole inventory");
+  });
+
+test("A11-205 (rendered): drift-excluded and left-out workers each leave, and together they leave only the box that is neither",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runUseTime(["-e", JSON.stringify({ drift_excluded: ["a11y-worker-a"], left_out_workers: ["a11y-worker-c"] })]);
+    assert.equal(run.status, 0, run.output);
+    assert.deepEqual(run.selected, ["a11y-worker-b"]);
+  });
+
+test("A11-205 (rendered): drift_excluded is refused when it is not a list of inventory workers, by its own assert",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    for (const vars of [{ drift_excluded: ["not-a-worker"] }, { drift_excluded: "a11y-worker-b" }, { drift_excluded: ["a11y-worker-b", "192.0.2.5"] }]) {
+      const run = runUseTime(["-e", JSON.stringify(vars)]);
+      assert.notEqual(run.status, 0, `${JSON.stringify(vars)} must be refused: ${run.output}`);
+      assert.equal(run.fleet, null);
+      assert.match(run.output, /drift_excluded must list inventory worker names/);
+    }
+  });
+
+test("A11-205 (rendered): every worker drift-excluded is the playbook's own empty-pool refusal, not an empty A11Y_WORKERS",
+  { skip: HAS_ANSIBLE ? undefined : NO_ANSIBLE }, () => {
+    const run = runUseTime(["-e", JSON.stringify({ drift_excluded: ["a11y-worker-a", "a11y-worker-b", "a11y-worker-c"] })]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.output, /there is no\s+capture pool|capture pool/);
   });
 
 test("#2803 (rendered): an address that is not a bare IPv4, and a name that is not a worker, are each REFUSED",
