@@ -520,17 +520,19 @@ test("watchFleet(): the off-fleet ledger is NOT the worker ledger -- agent-org r
 
 test("watchFleet(): the patch window is no longer read, and a line it posted before is cleared by the next tick (A11-205)", async () => {
   const store = memoryStore();
+  // `memoryStore` types its two functions `never` so they fit any dependency slot; the test seeds the ledger through the write it hands out.
+  const seed = (ledger: Record<string, number>) => (store.write as unknown as (path: string, data: string) => void)(DEFAULT_OFF_FLEET_STATE_PATH, JSON.stringify(ledger));
   const quiet = reading([boxRow(2)], {});
   const old = "patch-window-missed: last patch run 2026-09-01, window 28 days";
   // The ledger a deployed watch left behind. Nothing raises that line any more, so the first tick drops it rather than carrying it for ever.
-  store.write(DEFAULT_OFF_FLEET_STATE_PATH, JSON.stringify({ [old]: 1_000 }));
+  seed({ [old]: 1_000 });
   const run = offFleetRun(store);
   assert.deepEqual((await run(quiet, 1_790_000_000_000 + 40 * 24 * 60 * 60 * 1000)).offFleet, [], "a run 40 days old posts nothing: there is no window to miss");
   assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "and the old line is gone from the ledger");
   // Negative control: the ledger is not simply emptied. A line that something still raises survives the same tick.
   const rows = [2, 3, 4, 5].map((n) => boxRow(n));
   const odd = reading(rows, { reportedOnly: [driftOf("windowsBuild", { 2: BUILD, 3: BUILD, 4: BUILD, 5: "26100.4651" })] });
-  store.write(DEFAULT_OFF_FLEET_STATE_PATH, JSON.stringify({ [old]: 1_000, [`a11y-worker-5: build 26100.4651 (fleet ${BUILD})`]: 1_000 }));
+  seed({ [old]: 1_000, [`a11y-worker-5: build 26100.4651 (fleet ${BUILD})`]: 1_000 });
   await run(odd, 2_000);
   assert.deepEqual(Object.keys(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read)), [`a11y-worker-5: build 26100.4651 (fleet ${BUILD})`]);
 });
