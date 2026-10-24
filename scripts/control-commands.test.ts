@@ -69,3 +69,12 @@ test("`doctor` and `worker:code` run the fleet's bins by name, from the pinned r
   assert.equal(manifest.scripts["worker:code"], "node src/with-control-plane-fleet.ts worker-code");
   assert.deepEqual(manifest.dependencies ?? {}, PINNED_LAYERS, "the only declared dependencies are the two published layers at their pins (ADR 0045); anything else is installed beside the fleet key (ADR 0012)");
 });
+
+test("A11-205: the patch window's timer command is gone, no schedule command installs a patch timer, and the deliberate upgrade is still a command", () => {
+  assert.equal(manifest.scripts["fleet:patch-schedule"], undefined, "the command that installed the window's timer is deleted");
+  for (const [name, command] of Object.entries(manifest.scripts)) {
+    if (/schedule/.test(name)) assert.doesNotMatch(command, /patch/, `${name} must not install a patch timer`);
+  }
+  assert.ok(manifest.scripts["fleet:patch"], "negative control: fleet:patch remains");
+  assert.match(manifest.scripts["fleet:freeze-schedule"], /freeze-schedule\.yml$/);
+});

@@ -138,9 +138,7 @@ test("A11-205: the patch window's playbook, its record and its health line are g
   }
   const watch = readFileSync(fileURLToPath(new URL("./fleet-watch.ts", import.meta.url)), "utf8");
   assert.doesNotMatch(watch, /patch-window-missed|PATCH_RUN_PATH|fleet-patch-last-run/, "fleet-watch no longer reads a patch window");
-  const scripts = (JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { scripts: Record<string, string> }).scripts;
-  assert.equal(scripts["fleet:patch-schedule"], undefined, "the command that installed the window's timer is gone");
-  assert.ok(scripts["fleet:patch"], "negative control: the deliberate upgrade is still a command");
+  // That `fleet:patch-schedule` is gone from the package scripts is pinned in `scripts/control-commands.test.ts`: the package.json laid inside the core carries no `scripts`.
 });
 
 // ---------------------------------------------------------------------------------------------------------------------

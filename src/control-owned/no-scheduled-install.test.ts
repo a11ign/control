@@ -117,11 +117,7 @@ test("the patch window is gone: no unit, playbook or package script installs or 
   assert.match(freezeSchedule, /removed_patch_window_units:\n\s+- a11y-fleet-patch-window\.timer\n\s+- a11y-fleet-patch-window\.service/, "the schedule removes the old pair from the control plane");
   assert.match(freezeSchedule, /state: absent/, "and deletes their files");
   assert.match(freezeSchedule, /patch_window_files\.stdout \| trim \| length == 0/, "and reads the removal back");
-  const scripts = (JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts;
-  assert.equal(scripts["fleet:patch-schedule"], undefined);
-  for (const [name, command] of Object.entries(scripts)) {
-    if (/schedule/.test(name)) assert.doesNotMatch(command, /patch/, `${name} must not install a patch timer`);
-  }
+  // The package scripts are pinned in `scripts/control-commands.test.ts`: the package.json this test sees laid inside the core carries no `scripts`.
 });
 
 // ---- reading 2: the freeze reaches no install module ---------------------------------------------------------------------------------------------
