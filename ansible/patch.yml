@@ -102,11 +102,13 @@
 - name: The daily freeze must not be running underneath this upgrade
   # The freeze puts the Windows levers back on every reachable box. Fired between a box's lift and its install it would undo the lift mid-run, and the install
   # would find a redirect it was told to drop. Its own unit refuses to start while this play runs (`files/a11y-fleet-freeze-daily.service`); this is the other half.
-  # On the control plane, where this runs.
-  hosts: localhost
+  # On the control plane, where this runs: the workers play, run once and delegated to it, because `hosts: localhost` matches nothing there ("skipping: no hosts matched").
+  hosts: a11y_workers
   gather_facts: false
+  run_once: true
   tasks:
     - name: Ask systemd whether the daily freeze is running
+      delegate_to: localhost
       ansible.builtin.command:
         argv: [systemctl, show, --property=ActiveState, --value, a11y-fleet-freeze-daily.service]
       register: patch_daily_freeze
@@ -115,6 +117,7 @@
       check_mode: false
 
     - name: Refuse while it is
+      delegate_to: localhost
       ansible.builtin.assert:
         that: (patch_daily_freeze.stdout | trim) not in ['active', 'activating', 'deactivating', 'reloading']
         fail_msg: >-

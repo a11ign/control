@@ -93,9 +93,28 @@ test("the freeze task ignores its own failure, so the closing play still runs an
   assert.equal(freeze.ignore_errors, true);
   assert.equal(PLAYS[1].ignore_unreachable, true, "a box that is off does not end the run for the rest");
   assert.equal(freeze["ansible.builtin.include_role"].tasks_from, "freeze.yml");
-  // The closing play is a separate play on localhost: a play that ended with every host failed would never reach it, which is why the task above ignores errors.
-  assert.equal(PLAYS[2].hosts, "localhost");
+  // The closing play is a separate play: a play that ended with every host failed would never reach it, which is why the task above ignores errors.
   assert.deepEqual(PLAYS[2].tags, ["freeze_verdict"]);
+});
+
+test("nothing that must run is on `hosts: localhost`: on the control plane that matches NOTHING (measured on the first live run, 2026-10-24: \"skipping: no hosts matched\")", () => {
+  // The zero-host guard play stays on localhost as every playbook keeps it, and is inert there. The patch-running guard and the closing record would be too, so they are
+  // on the workers, run once, and delegated to the control plane for what must happen there.
+  const onLocalhost = PLAYS.filter((play: Yaml) => play.hosts === "localhost");
+  assert.equal(onLocalhost.length, 1, "only the zero-host guard play is on localhost");
+  assert.equal(onLocalhost[0].name, "The workers must be in the inventory");
+  const closing = PLAYS[2];
+  assert.equal(closing.hosts, "a11y_workers");
+  assert.equal(closing.run_once, true);
+  for (const task of closing.tasks.filter((candidate: Yaml) => "ansible.builtin.file" in candidate || "ansible.builtin.copy" in candidate)) {
+    assert.equal(task.delegate_to, "localhost", `${task.name} writes on the control plane`);
+  }
+  const guards = PLAYS[1].tasks.filter((task: Yaml) => (task.tags ?? []).includes("freeze_guard"));
+  assert.equal(guards.length, 2);
+  for (const task of guards) {
+    assert.equal(task.run_once, true);
+    assert.equal(task.delegate_to, "localhost");
+  }
 });
 
 test("the play refuses to run while the deliberate upgrade is running, and not after it finished (the unit stays `active (exited)` for ever)", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {

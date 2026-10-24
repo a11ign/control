@@ -34,10 +34,21 @@
         inventory_group: a11y_workers
         inventory_group_noun: worker
 
+- name: Freeze every worker that answers
+  hosts: a11y_workers
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    # THE GUARD IS ON THE WORKERS PLAY, RUN ONCE AND DELEGATED TO THE CONTROL PLANE, NOT A PLAY ON `localhost`: on the plane `hosts: localhost` matches nothing ("skipping: no hosts
+    # matched", measured 2026-10-24 on the first live run), so a guard there would never run. The same is true of the zero-host play above, which is kept as the other plays
+    # keep it.
     # NOT WHILE A BOX IS BEING UPGRADED. `patch.yml` lifts the Windows levers on one box at a time and freezes it again in `always:`; this play, run by hand or by the
     # daily timer in the middle of that, would put the levers back under the install's feet. The upgrade runs as the unit `a11y-fleet-patch` (`fleet:patch`).
     # `SubState`, not `ActiveState`: the wrapper starts the upgrade with `--remain-after-exit`, so a FINISHED run stays `active (exited)` for ever and would refuse this play for ever.
     - name: Ask systemd whether the deliberate upgrade is running
+      tags: [freeze_guard]
+      run_once: true
+      delegate_to: localhost
       ansible.builtin.command:
         argv: [systemctl, show, --property=SubState, --value, a11y-fleet-patch.service]
       register: freeze_patch_state
@@ -46,17 +57,15 @@
       check_mode: false
 
     - name: Refuse while it is
+      tags: [freeze_guard]
+      run_once: true
+      delegate_to: localhost
       ansible.builtin.assert:
         that: (freeze_patch_state.stdout | trim) not in ['running', 'start', 'start-pre', 'start-post', 'reload', 'stop-sigterm']
         fail_msg: >-
           `a11y-fleet-patch.service` is {{ freeze_patch_state.stdout | trim }} (SubState): the deliberate upgrade has lifted the Windows levers on a box, and this freeze would put
           them back under the install. It freezes every box again itself when it ends. Nothing has been changed.
 
-- name: Freeze every worker that answers
-  hosts: a11y_workers
-  gather_facts: false
-  ignore_unreachable: true
-  tasks:
     - name: Can this box be reached at all
       ansible.windows.win_ping:
       register: freeze_ping
@@ -71,8 +80,11 @@
         tasks_from: freeze.yml
 
 - name: Record the run, and fail on a put-back or a box that was not reached
-  hosts: localhost
+  # ON THE WORKERS, RUN ONCE, because `hosts: localhost` matches nothing on the control plane (the first live run printed "skipping: no hosts matched" for it, and the record
+  # was never written). Every host is still in the play: the freeze task ignores its own failure, so none was removed.
+  hosts: a11y_workers
   gather_facts: false
+  run_once: true
   tags: [freeze_verdict]
   vars:
     freeze_workers: "{{ groups['a11y_workers'] | sort }}"
@@ -102,6 +114,7 @@
   tasks:
     - name: The runs directory exists
       when: not ansible_check_mode
+      delegate_to: localhost
       ansible.builtin.file:
         path: "{{ freeze_record_path | dirname }}"
         state: directory
@@ -109,6 +122,7 @@
 
     - name: Write the record
       when: not ansible_check_mode
+      delegate_to: localhost
       ansible.builtin.copy:
         dest: "{{ freeze_record_path }}"
         mode: "0644"

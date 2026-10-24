@@ -175,7 +175,10 @@ test("A11-205: the block lifts the Windows freeze first and the re-freeze is the
 
 test("A11-205: the daily freeze is refused while it runs, so it cannot undo a lift", () => {
   const tasks = allTasks(DAILY_FREEZE_PLAY.tasks);
-  assert.equal(DAILY_FREEZE_PLAY.hosts, "localhost");
+  // On the workers, run once, delegated to the control plane: `hosts: localhost` matches nothing there ("skipping: no hosts matched"), so a guard on it never runs.
+  assert.equal(DAILY_FREEZE_PLAY.hosts, "a11y_workers");
+  assert.equal(DAILY_FREEZE_PLAY.run_once, true);
+  assert.ok(tasks.every((task) => task.delegate_to === "localhost"), "every task of the guard runs on the control plane");
   const ask = tasks.find((task) => /a11y-fleet-freeze-daily\.service/.test(JSON.stringify(task["ansible.builtin.command"] ?? "")));
   assert.ok(ask, "the play asks systemd about the daily freeze's unit");
   const refusal = tasks.find((task) => "ansible.builtin.assert" in task);
