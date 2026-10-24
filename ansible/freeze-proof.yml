@@ -40,6 +40,9 @@
   gather_facts: false
   serial: 1
   any_errors_fatal: true
+  # The role's declared paths (the Edge image and the updater's), read where the proof uses them: an `include_role` below keeps the role's defaults to itself.
+  vars_files:
+    - roles/worker/defaults/main.yml
   vars:
     proof_services: [wuauserv, UsoSvc, edgeupdate, InstallService, WaaSMedicSvc]
     proof_edge_dir: "{{ worker_edge_updater_exe | win_dirname }}"
