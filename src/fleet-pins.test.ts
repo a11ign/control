@@ -4,10 +4,11 @@
 // parity tests. This holds the other half of that: the manifest is the only source, and a second copy fails by name.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
-import { parseFleetPins, readFleetPins, expectedFleetOf, DRIFT_FIELDS } from "./fleet-pins.ts";
+import { parseFleetPins, parseEdgePin, readFleetPins, expectedFleetOf, installedReleaseRefusal, DRIFT_FIELDS } from "./fleet-pins.ts";
 import type { FleetPins } from "./fleet-pins.ts";
 
 const CONTROL = resolve(import.meta.dirname, "..");
@@ -80,6 +81,47 @@ test("a worker code that cannot be derived THROWS: a drift check with no expecte
   await assert.rejects(expectedFleetOf(PINS, async () => { throw new Error("layer \"nvda-worker\" is declared at packages/nvda-worker, and it does not exist"); }), /does not exist/);
 });
 
+test("the Edge pin alone is judged on its own: a fault in another section leaves it readable, and a fault in Edge refuses it", () => {
+  const edge = parseEdgePin(withValue("nvda", "malformed"));
+  assert.ok("edge" in edge);
+  assert.deepEqual(edge.edge, PINS.edge);
+  assert.match((parseEdgePin(withValue("edge.version", "latest")) as { refusal: string }).refusal, /^deploy-pins\.json edge\.version is "latest"/);
+  assert.match((parseEdgePin(withValue("edge", undefined)) as { refusal: string }).refusal, /declares no `edge`/);
+  assert.match((parseEdgePin("{") as { refusal: string }).refusal, /not JSON/);
+});
+
+// ---- the worker code is derived from the PINNED release, not whatever is installed ------------------------------------------------------------------------
+
+/** A host root with `@a11ign/screenreader-worker` installed at `version` (or not installed, for `undefined`). */
+function hostWith(version: string | undefined): string {
+  const root = mkdtempSync(join(tmpdir(), "fleet-pins-"));
+  if (version !== undefined) {
+    mkdirSync(join(root, "node_modules/@a11ign/screenreader-worker"), { recursive: true });
+    writeFileSync(join(root, "node_modules/@a11ign/screenreader-worker/package.json"), JSON.stringify({ name: "@a11ign/screenreader-worker", version }));
+  }
+  return root;
+}
+const PINNED_WORKER = MANIFEST.layers["nvda-worker"].version;
+const refusalOn = (root: string, checkout = false) => installedReleaseRefusal("nvda-worker", { root, checkoutAt: () => checkout });
+
+test("an installed worker release that is not the pinned one refuses the expectation, naming both and the install that fixes it", () => {
+  const root = hostWith("0.13.12");
+  try {
+    assert.match(refusalOn(root) ?? "", /^@a11ign\/screenreader-worker@0\.13\.12 is installed here and deploy-pins\.json pins 0\.13\.13, so the worker code a box should serve cannot be derived: run `pnpm install --frozen-lockfile`$/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the pinned release installed, no install at all, or a checkout of the layer are all left to the hasher (the controls for the case above)", () => {
+  const root = hostWith(PINNED_WORKER);
+  const bare = hostWith(undefined);
+  const stale = hostWith("0.0.1");
+  try {
+    assert.equal(refusalOn(root), null, "the pinned release is installed");
+    assert.equal(refusalOn(bare), null, "nothing installed: layerCodeVersion names what is missing");
+    assert.equal(refusalOn(stale, true), null, "a checkout is hashed as it stands, whatever is installed");
+  } finally { for (const dir of [root, bare, stale]) rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---- the manifest is the only source -------------------------------------------------------------------------------------------------------------------
 
 /** Every file whose CODE could carry a version: the playbooks and role, and the control plane's TypeScript (not its tests). `scripts/renovate-pins.test.ts` reads the Renovate config, which the core's lay does not carry. */
@@ -111,7 +153,7 @@ function codeLines(path: string, text: string): string[] {
 }
 
 /** The manifest's own values, each of which may be written in exactly one file. */
-function pinnedValues(): { label: string; pattern: RegExp; }[] {
+const PINNED_VALUES: { label: string; pattern: RegExp; }[] = (() => {
   const exact = (value: string) => new RegExp(`(?<![\\w.])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.])`);
   const { windows, edge, nvda, node } = PINS;
   return [
@@ -121,7 +163,7 @@ function pinnedValues(): { label: string; pattern: RegExp; }[] {
     ...Object.entries(MANIFEST.layers).flatMap(([name, layer]) => [[`layers.${name}.version`, layer.version], [`layers.${name}.integrity`, layer.integrity]]),
     ["core.commit", MANIFEST.core.commit],
   ].map(([label, value]) => ({ label, pattern: exact(value) }));
-}
+})();
 
 /** A literal that LOOKS like a box version, whether or not the manifest holds it today: the next stray copy is not one of the values above. */
 const VERSION_SHAPES: { label: string; pattern: RegExp; }[] = [
@@ -135,7 +177,7 @@ const VERSION_SHAPES: { label: string; pattern: RegExp; }[] = [
 function copiesIn(path: string, text: string): string[] {
   const found: string[] = [];
   for (const line of codeLines(path, text)) {
-    for (const { label, pattern } of [...pinnedValues(), ...VERSION_SHAPES]) if (pattern.test(line)) found.push(`${label}: ${line.trim().slice(0, 120)}`);
+    for (const { label, pattern } of [...PINNED_VALUES, ...VERSION_SHAPES]) if (pattern.test(line)) found.push(`${label}: ${line.trim().slice(0, 120)}`);
   }
   return found;
 }

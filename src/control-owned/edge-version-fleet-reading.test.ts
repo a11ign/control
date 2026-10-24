@@ -101,6 +101,13 @@ test("readEdgePin reads the manifest's Edge pin, and a manifest that declares no
   assert.throws(() => readEdgePin(() => withEdge("latest")), /deploy-pins\.json edge\.version is "latest"/);
 });
 
+test("readEdgePin judges only the Edge pin: a fault in another section does not stop the fleet watch's tick", () => {
+  const broken = (path: "nvda" | "node" | "windows") => JSON.stringify({ ...JSON.parse(readFileSync(new URL("../../deploy-pins.json", import.meta.url), "utf8")), [path]: "malformed" });
+  for (const section of ["nvda", "node", "windows"] as const) {
+    assert.equal(readEdgePin(() => broken(section)), readEdgePin(), `a malformed ${section} leaves the Edge pin readable`);
+  }
+});
+
 const memoryStore = () => {
   const files = new Map<string, string>();
   const read = ((path: string) => {

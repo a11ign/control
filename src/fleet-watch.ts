@@ -71,7 +71,7 @@ import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { fleetStatus } from "./fleet-status.ts";
-import { parseFleetPins } from "./fleet-pins.ts";
+import { parseEdgePin } from "./fleet-pins.ts";
 import { DEPLOY_PINS_PATH } from "./layer-pins.ts";
 import { sshToControlPlane } from "./control-plane-fleet.ts";
 import { CONTROL_PLANE_CHECKOUT } from "./control-plane-checkout.ts";
@@ -669,9 +669,9 @@ export function edgePinLines(status: { rows: FleetRow[], browserVersions?: Recor
 const EDGE_PIN_PREFIX = "edge-pin: ";
 /** The Edge build the fleet is pinned to: `edge.version` in `deploy-pins.json`, the one manifest (A11-205). A manifest that declares none THROWS, because no pin would read as no finding. */
 export function readEdgePin(read: () => string = () => readFileSync(DEPLOY_PINS_PATH, "utf8")): string {
-  const pins = parseFleetPins(read());
-  if ("refusal" in pins) throw new Error(`no box can be compared to the Edge pin: ${pins.refusal}`);
-  return pins.pins.edge.version;
+  const pin = parseEdgePin(read());
+  if ("refusal" in pin) throw new Error(`no box can be compared to the Edge pin: ${pin.refusal}`);
+  return pin.edge.version;
 }
 
 /**

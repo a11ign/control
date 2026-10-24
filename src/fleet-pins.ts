@@ -13,9 +13,12 @@
  * Nothing here reads a box or moves one. Imports `node:` modules and control's own layer resolver only, so `control-has-no-dependencies.test.ts`
  * holds. Like `parseDeployPins`, a pin that cannot be read is a refusal naming the first thing wrong with it, never a default.
  */
-import { readFileSync } from "node:fs";
-import { layerCodeVersion } from "./layer-checkouts.ts";
-import { DEPLOY_PINS_PATH } from "./layer-pins.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { layerCodeVersion, layerDeclaration, layersRootOf } from "./layer-checkouts.ts";
+import { DEPLOY_PINS_PATH, readDeployPins } from "./layer-pins.ts";
+import type { DeployPins } from "./layer-pins.ts";
 
 export type FleetPins = {
   windows: { release: string; build: string; kb: string; };
@@ -50,26 +53,48 @@ function sectionRefusal(section: unknown, where: string, keys: Record<string, [R
   return null;
 }
 
-/** The manifest as text, or the refusal naming the first thing wrong with it. */
-export function parseFleetPins(text: string): { pins: FleetPins; } | { refusal: string; } {
+/** The manifest's top-level object, or the refusal that it is not one. */
+function manifestObject(text: string): { manifest: Record<string, unknown>; } | { refusal: string; } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
     return { refusal: `deploy-pins.json is not JSON (${cause instanceof Error ? cause.message : String(cause)})` };
   }
-  if (!isObject(parsed)) return { refusal: "deploy-pins.json is not an object" };
+  return isObject(parsed) ? { manifest: parsed } : { refusal: "deploy-pins.json is not an object" };
+}
+
+const EDGE_KEYS: Record<string, [RegExp, string]> = {
+  version: [EDGE_VERSION, "an exact four-part Edge version"],
+  msiUrl: [HTTPS_URL, "an https URL"],
+  msiSha256: [SHA256, "a sha256 in lowercase hex: the pin is a fact about the bytes, not about a hostname"],
+};
+
+/**
+ * The Edge pin alone, judged on its own: a reader that wants one section is not stopped by a fault in another (the fleet watch wants only Edge, and
+ * a malformed NVDA entry is not a reason to stop its tick).
+ */
+export function parseEdgePin(text: string): { edge: FleetPins["edge"]; } | { refusal: string; } {
+  const read = manifestObject(text);
+  if ("refusal" in read) return read;
+  const refusal = sectionRefusal(read.manifest.edge, "edge", EDGE_KEYS);
+  if (refusal !== null) return { refusal };
+  const { version, msiUrl, msiSha256 } = read.manifest.edge as FleetPins["edge"];
+  return { edge: { version, msiUrl, msiSha256 } };
+}
+
+/** The whole manifest as text, or the refusal naming the first thing wrong with it. */
+export function parseFleetPins(text: string): { pins: FleetPins; } | { refusal: string; } {
+  const read = manifestObject(text);
+  if ("refusal" in read) return read;
+  const parsed = read.manifest;
   const { windows, edge, nvda, node } = parsed;
   const refusal = sectionRefusal(windows, "windows", {
       release: [RELEASE, "a Windows release such as <yy>H<n>"],
       build: [WINDOWS_BUILD, "a <CurrentBuild>.<UBR> build number"],
       kb: [KB, "a cumulative update KB (KB followed by digits): without it an upgrade lands on the newest update of the day"],
     })
-    ?? sectionRefusal(edge, "edge", {
-      version: [EDGE_VERSION, "an exact four-part Edge version"],
-      msiUrl: [HTTPS_URL, "an https URL"],
-      msiSha256: [SHA256, "a sha256 in lowercase hex: the pin is a fact about the bytes, not about a hostname"],
-    })
+    ?? sectionRefusal(edge, "edge", EDGE_KEYS)
     ?? sectionRefusal(nvda, "nvda", { version: [NVDA_VERSION, "a <year>.<n> or <year>.<n>.<n> NVDA version"] })
     ?? sectionRefusal(node, "node", { version: [NODE_VERSION, "a v<semver> Node version"] })
     ?? sectionRefusal((node as Record<string, unknown>).sha256, "node.sha256", {
@@ -101,9 +126,38 @@ export async function expectedFleetOf(pins: FleetPins, codeOf: (layer: string) =
   return { Windows: pins.windows.build, Edge: pins.edge.version, NVDA: pins.nvda.version, "Worker code": await codeOf("nvda-worker") };
 }
 
+const ROOT = layersRootOf(fileURLToPath(new URL("../", import.meta.url)));
+
+/**
+ * Why a layer's worker code cannot be derived from what this host holds, or `null` when it can.
+ *
+ * Without a checkout of the layer, `layerCodeVersion` answers from the release INSTALLED under `node_modules`, and nothing there says it is the pinned one.
+ * A host that has not run `pnpm install --frozen-lockfile` since a pin moved would hash the old release, and the boxes still serving it would read as on
+ * the manifest. So the installed version must be the pinned version, or the expectation is refused with the install that fixes it. A host that holds a
+ * checkout, or no install at all, is `layerCodeVersion`'s to judge: it hashes the tree, or names what is missing.
+ */
+export function installedReleaseRefusal(layer: string, { root = ROOT, pins = readDeployPins(), checkoutAt = (dir: string) => existsSync(dir) }:
+  { root?: string; pins?: DeployPins; checkoutAt?: (dir: string) => boolean; } = {}): string | null {
+  const pinned = Object.hasOwn(pins.layers, layer) ? pins.layers[layer] : undefined;
+  if (pinned === undefined || checkoutAt(layerDeclaration(layer).dir)) return null;
+  const manifestPath = join(root, "node_modules", pinned.package, "package.json");
+  if (!existsSync(manifestPath)) return null;
+  const installed = (JSON.parse(readFileSync(manifestPath, "utf8")) as { version?: unknown; }).version;
+  if (installed === pinned.version) return null;
+  return `${pinned.package}@${String(installed)} is installed here and deploy-pins.json pins ${pinned.version}, so the worker code a box should serve cannot be derived: `
+    + "run `pnpm install --frozen-lockfile`";
+}
+
+/** The worker code of a layer as this host can derive it, or a THROW naming why it cannot. */
+async function derivedWorkerCode(layer: string): Promise<string> {
+  const refusal = installedReleaseRefusal(layer);
+  if (refusal !== null) throw new Error(refusal);
+  return layerCodeVersion(layer);
+}
+
 let real: Promise<ExpectedFleet> | undefined;
 
 /** The real manifest's expectation, read once per process: every `fleetStatus` in a test run would otherwise hash the worker's sources again. */
 export function readExpectedFleet(): Promise<ExpectedFleet> {
-  return (real ??= expectedFleetOf(readFleetPins()));
+  return (real ??= expectedFleetOf(readFleetPins(), derivedWorkerCode));
 }

@@ -1117,7 +1117,7 @@ export function browserVersionsOf(guests: { worker: string, environment?: { brow
 const reportedString = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
 
 /** The `fleet BUILD SPLIT` field that reads `/health.code`, named once for the reading and for the advice that branches on it. */
-const WORKER_CODE = "Worker code";
+const WORKER_CODE: DriftField = "Worker code";
 
 /**
  * THE BUILD SPLIT: one Edge, one NVDA and one Windows build and one worker code across the fleet, and the Edge updater held on every box (A11-183, A11-204).
@@ -1151,7 +1151,7 @@ export type BuildSplit = {
 type BoxHealth = { box: string; environment: Record<string, unknown> | undefined; code: unknown; };
 
 /** The builds that must agree, and where in a box's `/health` each one is reported. */
-const BUILD_FIELDS: { field: string; read: (health: BoxHealth) => unknown; }[] = [
+const BUILD_FIELDS: { field: DriftField; read: (health: BoxHealth) => unknown; }[] = [
   { field: "Edge", read: ({ environment }) => environment?.browserVersion },
   { field: "NVDA", read: ({ environment }) => environment?.screenReaderVersion },
   { field: "Windows", read: ({ environment }) => environment?.windowsBuild },
@@ -1278,8 +1278,14 @@ export function driftOf(probes: WorkerProbe[], expectation: Expectation): FleetD
       lines: [`fleet OFF THE MANIFEST — cannot compare ${reachable.length} reachable box(es): ${expectation.unreadable}`] };
   }
   const { expected } = expectation;
-  const differences = reachable.flatMap((health) => DRIFT_FIELDS.flatMap((field): Difference[] => {
-    const has = reportedString(BUILD_FIELDS.find((build) => build.field === field)?.read(health));
+  const readers = DRIFT_FIELDS.map((field) => {
+    const build = BUILD_FIELDS.find((candidate) => candidate.field === field);
+    // A field the manifest wants and no reader reads would report every box as `unreported`; that is a defect in this file, not a finding about a box.
+    if (build === undefined) throw new Error(`fleet-status reads no "${field}" from a box, so it cannot be compared with the manifest`);
+    return build;
+  });
+  const differences = reachable.flatMap((health) => readers.flatMap(({ field, read }): Difference[] => {
+    const has = reportedString(read(health));
     return has === expected[field] ? [] : [{ box: health.box, field, has, wants: expected[field] }];
   }));
   const lines = differences.map(({ box, field, has, wants }) =>
