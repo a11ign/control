@@ -114,6 +114,10 @@ function scriptChecks(text: string): Array<[string, boolean]> {
     ["the start type is changed through the service manager, which SYSTEM may not do", /Set-Service|sc(\.exe)?\s+config|-StartupType/.test(script)],
     ["running MicrosoftEdgeUpdate processes are not stopped",
       !script.includes("Get-Process -Name 'MicrosoftEdgeUpdate*'") || !/Stop-Process -Id \$p\.Id -Force/.test(script)],
+    // The pinned MSI runs `MicrosoftEdgeUpdate.exe /install` itself: killing that one fails the role's install (A11-183).
+    ["the process stop does not wait for the role's own Edge install",
+      !/Get-CimInstance Win32_Process -Filter "Name = 'msiexec\.exe'"[^\n]*MicrosoftEdgeEnterprise/.test(script)
+      || !/\$installing\.Count -gt 0\) \{ @\(\) \}/.test(script)],
     ["the first failure aborts the run before the record is written", /\$ErrorActionPreference = 'Stop'/.test(script)],
     ["an item is not handled on its own: a task, service or process failure is not caught and recorded",
       (script.match(/\} catch \{[^\n]*\$failed \+= /g) ?? []).length < 5],
@@ -230,6 +234,18 @@ test("control: Set-Service -StartupType Disabled in place of the registry write 
 
 test("the guard stops any running MicrosoftEdgeUpdate* process", () => {
   assert.match(guardScript(TASKS), /Get-Process -Name 'MicrosoftEdgeUpdate\*'[\s\S]*Stop-Process -Id \$p\.Id -Force/);
+});
+
+test("control: a guard that stops the updater while the role's own MSI is installing FAILS", () => {
+  const v = guardViolations(mutatedGuard(["if ($installing.Count -gt 0) { @() }", "if ($false) { @() }"]));
+  assert.ok(v.includes("the process stop does not wait for the role's own Edge install"), v.join("|"));
+});
+
+test("the role stops an updater process that is already running BEFORE it installs, and says why", () => {
+  const block = taskBlock(TASKS, "Stop any Edge-updater process that is already running");
+  assert.match(block, /Get-Process -Name 'MicrosoftEdgeUpdate\*', 'MicrosoftEdge_X64_\*'/);
+  assert.match(block, /Stop-Process -Id \$p\.Id -Force/);
+  assert.ok(TASKS.indexOf(block) < TASKS.indexOf("- name: Install it\n"), "the stop must come before the install");
 });
 
 test("control: a guard that leaves the updater process running FAILS", () => {

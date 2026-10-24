@@ -87,6 +87,24 @@
   loop: "{{ worker_edge_updater_services }}"
   failed_when: false
 
+- name: Stop any Edge-updater process that is already running
+  # THE TASKS AND THE SERVICES BEING DISABLED DOES NOT STOP A PROCESS ALREADY RUNNING, and on 2026-10-24 that was the failure (A11-183).
+  # On a11y-worker-11 both services read `Stopped` and `Disabled` and both tasks `Disabled`, yet two `MicrosoftEdgeUpdate.exe` processes (started
+  # minutes before, by nothing this role could see) were downloading and installing 156.0.4314.42 THEMSELVES, so the pinned MSI's own
+  # `MicrosoftEdgeUpdate.exe /install` failed with 0x80040707, "Another Microsoft application is being installed or updated", and Windows
+  # Installer returned 1722. An update the updater runs for itself is the drift this role exists to stop, and it also races the install.
+  #
+  # BY PREFIX, like the tasks: the updater's own image and the installer it stages (`MicrosoftEdge_X64_<new>_<old>.exe`). Stopping an installer
+  # the updater began is safe here because the next task installs the pinned build over whatever it left, from a checksummed MSI.
+  become: true
+  ansible.windows.win_shell: |
+    $found = @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)
+    foreach ($p in $found) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    if ($found) { Start-Sleep -Seconds 3 }
+    $left = @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue)
+    "stopped $($found.Count) updater process(es); $($left.Count) left"
+  changed_when: true
+
 - name: Fetch the pinned installer
   # Only when it would change something: this is a ~150 MB download onto a box that may be mid-corpus.
   when: (edge_installed.output | default([]) | first | default('', true)) != worker_edge_version
@@ -366,7 +384,10 @@
           }
           # The updater also runs without its tasks or services: `MicrosoftEdgeUpdate.exe /ua /installsource core` ran hourly on boxes whose
           # tasks were Disabled and whose service was Stopped. Any such process is the updater working, so it is stopped and written down.
-          foreach ($p in @(Get-Process -Name 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue)) {
+          #
+          # NOT WHILE THE ROLE'S OWN INSTALL IS RUNNING: the pinned MSI runs `MicrosoftEdgeUpdate.exe /install` itself, and stopping that one fails the install.
+          $installing = @(Get-CimInstance Win32_Process -Filter "Name = 'msiexec.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'MicrosoftEdgeEnterprise' })
+          foreach ($p in $(if ($installing.Count -gt 0) { @() } else { @(Get-Process -Name 'MicrosoftEdgeUpdate*', 'MicrosoftEdge_X64_*' -ErrorAction SilentlyContinue) })) {
             $reenabled += "process:$($p.ProcessName)"
             # One that exited between the listing and the stop is gone, which is what was wanted, and not a failure.
             try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { $failed += "process:$($p.ProcessName): $($_.Exception.Message)" } }
