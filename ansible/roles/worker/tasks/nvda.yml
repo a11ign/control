@@ -109,9 +109,43 @@
     path: "{{ nvda.path }}"
   register: speech_viewer
 
+- name: NVDA may not update itself — its update check and the add-on store's updates off, and read back
+  # A11-205. NVDA checks for a new release at startup and its add-on store updates add-ons by itself; either moves the screen reader the capture cache keys
+  # on (`screenReaderVersion`), on one box and not the others. The keys are `[update] autoCheck` (the ticket words it `autoCheckForUpdates`; the file says
+  # `autoCheck`), `[update] startupNotification` and `[addonStore] automaticUpdates`. guidepup's bundled config already ships them, so this mostly PROVES the
+  # setting; a different guidepup or a reinstall could change it, which is why it comes after every install like the Speech Viewer.
+  # The module re-reads every nvda.ini after patching and fails if any can still update.
+  a11y.worker.a11y_nvda_updates:
+    path: "{{ nvda.path }}"
+  register: nvda_updates
+
+- name: What NVDA is actually installed
+  # From the binary, as `edge-version.yml` reads Edge and the worker reads `screenReaderVersion`. A read, so it runs under `--check` too.
+  ansible.windows.win_powershell:
+    parameters:
+      Exe: "{{ nvda.path }}\\nvda.exe"
+    script: |
+      param($Exe)
+      $Ansible.Changed = $false
+      if (Test-Path -LiteralPath $Exe) { (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion } else { "" }
+  changed_when: false
+  check_mode: false
+  register: nvda_installed
+
+- name: Refuse an NVDA that is not the manifest's
+  # NVDA arrives with guidepup, from the core's lockfile at `core.commit`, so `nvda.version` and `core.commit` in `deploy-pins.json` move together in one pull
+  # request. A box on another NVDA is off the manifest (`fleet:status` says so too), and nothing here may paper over that by installing a different one.
+  ansible.builtin.assert:
+    that: (nvda_installed.output | default([]) | first | default('', true)) == worker_fleet_pins.nvda.version
+    fail_msg: >-
+      {{ inventory_hostname }} has NVDA {{ nvda_installed.output | default([]) | first | default('(none)', true) }}, and `deploy-pins.json` pins
+      {{ worker_fleet_pins.nvda.version }}. NVDA comes from guidepup in the core's lockfile at `core.commit`: the two move together, in one pull request.
+    success_msg: "NVDA {{ worker_fleet_pins.nvda.version }}, as the manifest pins"
+
 - name: Say what happened
   ansible.builtin.debug:
     msg: >-
       NVDA at {{ nvda.path }} ({{ nvda.files | default('?') }} files) —
       Speech Viewer patched in {{ speech_viewer.patched | default([]) | length }}
-      of {{ speech_viewer.examined | default('?') }} nvda.ini file(s)
+      of {{ speech_viewer.examined | default('?') }} nvda.ini file(s),
+      update checks off in {{ nvda_updates.examined | default('?') }} file(s)

@@ -1,0 +1,15 @@
+[Unit]
+# A11-205: THE FREEZE IS RE-ASSERTED ONCE A DAY, not only when a person provisions. Installed by `freeze-schedule.yml`, which explicitly ensures this timer is
+# `state: started, enabled: true` every time it runs.
+Description=a11y: re-apply the freeze once a day
+
+[Timer]
+# Daily, local time, at a minute that is clear of the hourly drift check (:23, :37 and :47 are other timers' minutes). `Persistent=true` runs a firing the host
+# slept through, so a control plane that was off at 04:11 freezes when it is back. A BOX that was off is named by the run and frozen at the next one it is awake for.
+OnCalendar=*-*-* 04:11:00
+Persistent=true
+AccuracySec=1min
+Unit=a11y-fleet-freeze-daily.service
+
+[Install]
+WantedBy=timers.target

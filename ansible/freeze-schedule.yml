@@ -1,0 +1,113 @@
+---
+# Install the daily FREEZE timer on the control plane, and remove the patch window's -- LIVE. A11-205, docs/adr/0001.
+#
+#     ansible-playbook freeze-schedule.yml
+#
+# ## What this ships
+#
+# `a11y-fleet-freeze-daily.timer` fires `freeze.yml` once a day: the role's freeze on every reachable box, idempotent, no installs, and the boxes it could not
+# reach named. Modelled on `auto-off-schedule.yml` (the same require-inventory precondition on localhost, the same "install, reload only if changed, enable and
+# start, read back" shape), with its unit files in `files/` so `control-unit-drift` compares them.
+#
+# ## What it removes, and reads back
+#
+# The patch window (`patch-schedule.yml`, #4446) moved the build forward on a clock, with the newest box as its target. Nothing on a box upgrades by itself any
+# more, so its unit pair is stopped, disabled and DELETED here, and the removal is read back: the units are gone from `list-unit-files`, and the timer is not in
+# `list-timers`. A box could be left on a timer that fires a play that no longer exists, and nothing would say so.
+- name: The control plane must be in the inventory before anything claims to have run
+  # `ansible-playbook` prints `skipping: no hosts matched` and exits 0 on zero hosts (#1980), so this precondition runs on localhost first.
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control plane
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Install the daily freeze timer, and remove the patch window, on the control plane
+  hosts: a11y_control
+  gather_facts: false
+  vars:
+    freeze_timer_units:
+      - a11y-fleet-freeze-daily.timer
+      - a11y-fleet-freeze-daily.service
+    # The patch window's pair, which this ticket ends.
+    removed_patch_window_units:
+      - a11y-fleet-patch-window.timer
+      - a11y-fleet-patch-window.service
+  tasks:
+    - name: Install the unit files
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ freeze_timer_units }}"
+      register: freeze_units_installed
+
+    - name: Stop and disable the patch window, timer first so it cannot fire between the two
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ removed_patch_window_units }}"
+      # A unit that is already gone is the state wanted.
+      failed_when: false
+
+    - name: Delete the patch window's unit files
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}"
+        state: absent
+      loop: "{{ removed_patch_window_units }}"
+      register: patch_window_deleted
+
+    - name: Pick up any unit that changed or went
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: (freeze_units_installed.results | selectattr('changed') | list | length > 0) or (patch_window_deleted.results | selectattr('changed') | list | length > 0)
+
+    # The `.timer` is enabled and started and its `.service` is neither: one run by hand is `systemctl start` on the SAME service the timer uses.
+    - name: Enable and start the timer
+      ansible.builtin.systemd:
+        name: a11y-fleet-freeze-daily.timer
+        state: started
+        enabled: true
+
+    - name: Read the unit's own state back
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, a11y-fleet-freeze-daily.timer]
+      register: freeze_timer_enabled
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Read the timers back
+      ansible.builtin.command:
+        argv: [systemctl, list-timers, --all, --no-legend, --no-pager]
+      register: freeze_timers
+      changed_when: false
+      check_mode: false
+
+    - name: Read the patch window's unit files back
+      ansible.builtin.command:
+        argv: [systemctl, list-unit-files, --no-legend, --no-pager, "a11y-fleet-patch-window*"]
+      register: patch_window_files
+      changed_when: false
+      check_mode: false
+
+    - name: The freeze timer is installed and ENABLED, and no patch window is left
+      ansible.builtin.assert:
+        that:
+          - "'enabled' in freeze_timer_enabled.stdout"
+          - "'a11y-fleet-freeze-daily.timer' in freeze_timers.stdout"
+          - "'a11y-fleet-patch-window' not in freeze_timers.stdout"
+          - patch_window_files.stdout | trim | length == 0
+        fail_msg: >-
+          On {{ inventory_hostname }}: `systemctl is-enabled a11y-fleet-freeze-daily.timer` said `{{ freeze_timer_enabled.stdout }}`; the patch window's unit
+          files read back `{{ patch_window_files.stdout | trim }}`; `list-timers` must list the freeze timer and no patch-window timer.
+        success_msg: "a11y-fleet-freeze-daily.timer is installed and enabled, and the patch window is gone"

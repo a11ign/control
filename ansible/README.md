@@ -58,9 +58,11 @@ The UTM VMs keep their own lifecycle through `worker-ctl.sh` and are **not** man
 | `packages.yml` | Node (LTS resolved ONCE on the control plane, so a fleet cannot straddle a release), MinGit, the repo |
 | `account.yml` | the worker account, and credential-free auto-logon — including the `LimitBlankPasswordUse` assertion |
 | `powershell-native-image.yml` | the NGEN native image of PowerShell's engine, built only where `ngen display` says there is none (#2672) |
-| `policy.yml` | Edge, Windows Update, notifications, OneDrive, screensaver |
+| `policy.yml` | Edge, notifications, OneDrive, screensaver (Windows Update is `freeze.yml`'s, A11-205) |
 | `firewall.yml` | the worker port, and the allow-app alert that would block the whole desktop |
-| `nvda.yml` | pnpm install, guidepup, NVDA, and the Speech Viewer |
+| `edge-version.yml` | the pinned Edge (from `deploy-pins.json`), installed in a block whose `always:` freezes, and the detector that reports when the updater is not frozen |
+| `freeze.yml` | **every lever that stops a self-updater**, values included: Windows Update, Medic, the Store, Defender's signatures, the Edge updater. Run on every provision, daily by `ansible/freeze.yml`, and in `always:` of `patch.yml`. Installs nothing (A11-205) |
+| `nvda.yml` | pnpm install, guidepup, NVDA (refused unless it is the manifest's), the Speech Viewer, and NVDA's update checks off |
 | `tasks.yml` | `a11ycheck`, the display-mode logon task, and removing `a11ybootstrap`; imports `worker-task.yml` first |
 | `worker-task.yml` | `a11ysrv` on the published launcher. `deploy.yml` runs this same file before it restarts the task, then reads the action back (A11-204) |
 | `bespoke.yml` | sleep/NIC power, Defender and browser profiles — via the `a11y.worker` modules |

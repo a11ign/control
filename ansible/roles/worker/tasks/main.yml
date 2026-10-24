@@ -11,8 +11,11 @@
 #   display   the pinned display mode (#1567); independent of policy and edge, grouped with them as
 #             another machine-environment setting the capture cache key depends on
 #   edge      the browser BUILD, after policy because policy is not the mechanism that holds it: the
-#             EdgeUpdate policies are documented as domain-join only, and these boxes are standalone
+#             EdgeUpdate policies are documented as domain-join only, and these boxes are standalone.
+#             The install is a block whose `always:` freezes, so a run that stops half way leaves the updater off
 #   firewall  the port must be open before anything can verify /health across the network
+#   freeze    nothing on the box upgrades by itself (A11-205); after edge, whose install lifts and re-lays its own lever, and after the firewall, whose
+#             rules it adds to. Idempotent and installs nothing, so `ansible/freeze.yml` runs this one file alone every day
 #   nvda      needs the repo and npm; caches per-USER, so it must not be becomed
 #   tasks     names the account and the node it will launch, so it comes after both exist
 #   bespoke   power and NIC state; no module, no dependency either way
@@ -59,6 +62,10 @@
 - name: Firewall
   ansible.builtin.import_tasks: firewall.yml
   tags: [firewall]
+
+- name: Freeze the box, so nothing on it upgrades by itself
+  ansible.builtin.import_tasks: freeze.yml
+  tags: [freeze]
 
 - name: Dependencies, guidepup and NVDA
   ansible.builtin.import_tasks: nvda.yml

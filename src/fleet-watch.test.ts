@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
-  offFleetLines, offFleetBody, patchWindowMissed, parsePatchRun, readPatchRun, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH, fleetLockLines,
+  offFleetLines, offFleetBody, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH, fleetLockLines,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
   withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, pidAlive, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
@@ -442,25 +442,6 @@ test("off-fleet edge updater: an ASLEEP box raises nothing -- and the same box a
   assert.deepEqual(offFleetLines(reading(asleep, drift)), [], "box 3 unreachable: it is the resting state and is not counted");
 });
 
-test("patch-window-missed: fires at 29 days, not at 27 (and not at exactly 28)", () => {
-  const DAY = 24 * 60 * 60 * 1000;
-  const lastRun = Date.UTC(2026, 8, 1, 3, 0, 0);
-  assert.equal(patchWindowMissed(lastRun, lastRun + 27 * DAY), null, "27 days: inside the window");
-  assert.equal(patchWindowMissed(lastRun, lastRun + 28 * DAY), null, "exactly 28 days: the window has not yet closed");
-  const missed = patchWindowMissed(lastRun, lastRun + 29 * DAY);
-  assert.equal(missed?.line, "patch-window-missed: last patch run 2026-09-01, window 28 days");
-  assert.equal(patchWindowMissed(lastRun, lastRun + 29 * DAY + DAY)?.line, missed?.line, "a day later it is the SAME line, so the ledger dedups it");
-});
-
-test("patch-window-missed: no run on record is not a miss, and a file that is not a record is an error, not 'none'", () => {
-  assert.equal(patchWindowMissed(null, 1_800_000_000_000), null);
-  assert.equal(parsePatchRun("{}"), null, "the control host answers `{}` when the file is absent");
-  assert.equal(parsePatchRun('{"lastRunAt": 1790000000000}'), 1790000000000);
-  assert.throws(() => parsePatchRun('{"lastRunAt": "yesterday"}'), /epoch-ms/);
-  assert.throws(() => parsePatchRun("not json"));
-  assert.equal(readPatchRun(() => '{"lastRunAt": 5}'), 5, "the reader hands the control host's text to the parser");
-});
-
 test("offFleetBody names the count, every line, and the live-reading command", () => {
   const body = offFleetBody(["a11y-worker-5: build 26100.4651 (fleet 26100.4652)", "fleet-split: display 1024x768, 640x480"]);
   assert.match(body, /\*\*2 new on the fleet watch, ahead of capture/);
@@ -537,30 +518,21 @@ test("watchFleet(): the off-fleet ledger is NOT the worker ledger -- agent-org r
   assert.notEqual(DEFAULT_OFF_FLEET_STATE_PATH, "runs/fleet-watch-state.json");
 });
 
-test("watchFleet(): the patch window is read from the control host, posted once, and an unreadable host is said and carried", async () => {
-  const DAY = 24 * 60 * 60 * 1000;
-  const lastRun = 1_790_000_000_000;
+test("watchFleet(): the patch window is no longer read, and a line it posted before is cleared by the next tick (A11-205)", async () => {
   const store = memoryStore();
   const quiet = reading([boxRow(2)], {});
-  let answer: () => number | null = () => lastRun;
-  const run = offFleetRun(store, { lastPatchRunAt: () => answer() });
-  assert.deepEqual((await run(quiet, lastRun + 27 * DAY)).offFleet, [], "27 days: nothing");
-  const first = (await run(quiet, lastRun + 29 * DAY)).offFleet;
-  assert.equal(first.length, 1);
-  assert.match(first[0], /^patch-window-missed: last patch run /);
-  assert.deepEqual((await run(quiet, lastRun + 30 * DAY)).offFleet, [], "the next tick: the same line is not posted again");
-  const said: string[] = [];
-  const spy = console.error; console.error = (message: string) => { said.push(message); };
-  try {
-    answer = () => { throw new Error("ssh: no route to host"); };
-    assert.deepEqual((await run(quiet, lastRun + 31 * DAY)).offFleet, [], "an unreadable host raises nothing new");
-  } finally { console.error = spy; }
-  assert.match(said.join("\n"), /CANNOT READ the last patch run.*no route to host/, "and SAYS it could not look");
-  answer = () => lastRun;
-  assert.deepEqual((await run(quiet, lastRun + 32 * DAY)).offFleet, [], "the line was carried through the unreadable tick, so it is not re-posted when the host answers again");
-  answer = () => lastRun + 31 * DAY;
-  await run(quiet, lastRun + 33 * DAY);
-  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "a completed patch run clears the line");
+  const old = "patch-window-missed: last patch run 2026-09-01, window 28 days";
+  // The ledger a deployed watch left behind. Nothing raises that line any more, so the first tick drops it rather than carrying it for ever.
+  store.write(DEFAULT_OFF_FLEET_STATE_PATH, JSON.stringify({ [old]: 1_000 }));
+  const run = offFleetRun(store);
+  assert.deepEqual((await run(quiet, 1_790_000_000_000 + 40 * 24 * 60 * 60 * 1000)).offFleet, [], "a run 40 days old posts nothing: there is no window to miss");
+  assert.deepEqual(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read), {}, "and the old line is gone from the ledger");
+  // Negative control: the ledger is not simply emptied. A line that something still raises survives the same tick.
+  const rows = [2, 3, 4, 5].map((n) => boxRow(n));
+  const odd = reading(rows, { reportedOnly: [driftOf("windowsBuild", { 2: BUILD, 3: BUILD, 4: BUILD, 5: "26100.4651" })] });
+  store.write(DEFAULT_OFF_FLEET_STATE_PATH, JSON.stringify({ [old]: 1_000, [`a11y-worker-5: build 26100.4651 (fleet ${BUILD})`]: 1_000 }));
+  await run(odd, 2_000);
+  assert.deepEqual(Object.keys(readState(DEFAULT_OFF_FLEET_STATE_PATH, store.read)), [`a11y-worker-5: build 26100.4651 (fleet ${BUILD})`]);
 });
 
 // ---------------------------------------------------------------------------------------------------------------

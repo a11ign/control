@@ -121,7 +121,6 @@ export { inventorySources, inventoryReadScript, parseInventoryReads };
 refuseUnknownFlags(
   ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply",
     "--allow-offline=", "--allow-hold=",
-    "--scheduled", "--window-days=", "--retry-days=", "--weekday=", "--window-start-hour=", "--window-end-hour=",
     "--display-mode=", "--layer-ref="],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
 
@@ -144,7 +143,7 @@ const CHECKOUT = CONTROL_PLANE_CHECKOUT;
 // The playbooks' own directory on the plane. The checkout IS the control repository now (a11ign#5306), so
 // its `ansible/` sits at the top, not under `packages/control/`: the old `packages/control/ansible` path
 // names a directory that is not there, and a play that `cd`s or `--working-directory`s into it fails.
-// Exported so the test can pin it against `patch_checkout` in `ansible/patch-schedule.yml` (a11ign#5310).
+// Exported so the test can pin it against the `WorkingDirectory` of `ansible/files/a11y-fleet-freeze-daily.service` (a11ign#5310; it was the patch window's `patch_checkout` until A11-205).
 export const ANSIBLE_ON_THE_PLANE = `${CHECKOUT}/ansible`;
 
 /**
@@ -173,8 +172,11 @@ export function planeUnitStart(unit: string): string {
 // and NVDA's two logs, and writes only to the control plane. It is here rather than as a bare
 // `ansible-playbook` script because it targets `a11y_workers`: the `lab:*` scripts skip this wrapper
 // because their plays are `hosts: localhost`, and that is the line, not how simple the playbook is.
+// `freeze.yml` and `freeze-proof.yml` (A11-205) are the freeze's two plays: the first re-applies the levers that stop a box upgrading itself, the second shows on
+// ONE box that each holds. Neither installs anything, and neither is gated like a deploy: the freeze may run on a box that is capturing, and the proof
+// refuses a busy one itself.
 const PLAYBOOKS = ["deploy.yml", "sleep.yml", "provision-role.yml", "recover.yml", "inventory-install.yml",
-  "control-host-install.yml", "os-rollback.yml", "collect-logs.yml", "patch.yml"];
+  "control-host-install.yml", "os-rollback.yml", "collect-logs.yml", "patch.yml", "freeze.yml", "freeze-proof.yml"];
 
 /** Exactly one worker, by name -- what `os-rollback.yml` needs where every other playbook takes a list. */
 const ONE_WORKER = /^a11y-worker-[0-9]{1,3}$/;
@@ -195,7 +197,7 @@ const ONE_WORKER = /^a11y-worker-[0-9]{1,3}$/;
  * refuse it before it runs. Its own play asserts the same one-host rule directly, which is the only place
  * left that sees every invocation of it.
  */
-const ONE_WORKER_REQUIRED = ["os-rollback.yml", "recover.yml"];
+const ONE_WORKER_REQUIRED = ["os-rollback.yml", "recover.yml", "freeze-proof.yml"];
 
 /**
  * Why EACH entry in `ONE_WORKER_REQUIRED` needs it -- one playbook, one reason, never restated as one.
@@ -205,6 +207,8 @@ const ONE_WORKER_REASON: Record<string, string> = {
   "recover.yml": "it kills the worker process and reboots, exempt from the capturing-worker guard on "
     + "purpose -- an omitted or fleet-wide --limit could reboot a box a DIFFERENT session is mid-capture "
     + "on right now",
+  "freeze-proof.yml": "it starts services and runs an updater on the box to show they achieve nothing, "
+    + "which is a change to ONE box and never a look at the fleet",
 };
 
 /** The playbooks whose change waits behind `--apply` (#921, and `patch.yml` from #4446, whose dry run is the plan this wrapper prints). */
@@ -582,7 +586,7 @@ const argOf = (name: string) => flagValue(process.argv, name);
 function parseArgs(): {
     chosen: string; limitFlag: string | undefined; serialFlag: string | undefined; ref: string;
     allowEdgeDowngrade: boolean; apply: boolean; displayMode: string | undefined;
-    layerCommits: Record<string, string>; publishedWorkerDir: string | null; schedule: PatchSchedule | null;
+    layerCommits: Record<string, string>; publishedWorkerDir: string | null;
 } {
   const refuse = (message: string) => {
     process.stderr.write(`${message}\n`);
@@ -629,9 +633,7 @@ function parseArgs(): {
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
   const { layerCommits, publishedWorkerDir } = layerCommitsOrRefuse({ chosen, refuse });
 
-  const schedule = scheduleOrRefuse({ chosen, apply, argv: process.argv, refuse });
-
-  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir, schedule };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir };
 }
 
 /**
@@ -2070,23 +2072,12 @@ if (/^[0-9a-f]{7,40}$/i.test(ref)) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// #4446: `fleet:patch` -- THE PATCH WINDOW AS A COMMAND, WITH THE FLEET'S SAFETIES, AND A SCHEDULE.
+// #4446, A11-205: `fleet:patch` -- THE DELIBERATE UPGRADE AS A COMMAND, WITH THE FLEET'S SAFETIES. THERE IS NO SCHEDULE.
 //
-// `patch.yml` (#4445) lifts the quality-update deferral, installs, reboots and restores it, one box at a time. Run by
-// hand that is a thing done once and forgotten, and the build is then a capture-cache key nobody moves. This is the
-// command around it: what it refuses, what it prints, and the pure decision a daily timer asks.
+// `patch.yml` lifts the Windows levers of the freeze on one box, installs, reboots and freezes it again, one box at a time. Nothing runs it on a clock any more
+// (the 28-day patch window, its timer, its `--scheduled` flags and its run record are gone): a person runs it, and this is the command around it, what it
+// refuses and what it prints.
 // ---------------------------------------------------------------------------------------------------------------------
-
-/**
- * The file `fleet-watch`'s `patch-window-missed` reads (`PATCH_RUN_PATH` in `fleet-watch.ts`; `fleet-patch.test.ts` holds
- * the two equal), written on the control plane when a `--apply` run COMPLETES. Written here, by the command, and not by
- * the playbook: a play that ran is not a run that completed, and only the wrapper sees the exit.
- */
-export const PATCH_RUN_RECORD = "runs/fleet-patch-last-run.json";
-
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const DAYS_PER_WEEK = 7;
-const ISO_DATE_LENGTH = 10;
 
 /** One box as the patch gate reads it: whether it answered, and whether it is capturing. */
 export type PatchBox = { name: string; reachable: boolean; busy: boolean; build: string | null };
@@ -2279,144 +2270,6 @@ export function patchFollowBudgetMs({ boxes, limitFlag, target }: { boxes: Patch
   return Math.max(cumulative, below.length * PATCH_UPGRADE_BOX_MS);
 }
 
-/** The command that records a completed run on the control plane, for `fleet-watch`'s `patch-window-missed` to read. */
-export function patchRunRecordCommand(nowMs: number): string {
-  return `cd ${CHECKOUT} && mkdir -p runs && printf '{"lastRunAt":%d}\\n' ${Math.trunc(nowMs)} > ${PATCH_RUN_RECORD}`;
-}
-
-/**
- * THE WINDOW, as DATA. `patch-schedule.yml` holds every number as an Ansible variable and the unit passes them here, so
- * `ceo` moves the window by editing a variable and re-running that playbook -- no code change, no constant in a unit.
- *
- * `windowDays` is the cadence (28: under the 30-day deferral, and `fleet-watch` calls a run older than it missed).
- * The window OPENS `retryDays` before it closes, so a refused Saturday is retried daily until the day it closes.
- * `weekday` is `Date#getDay` (0 = Sunday, 6 = Saturday), and the hours bound when an attempt may START, in the control
- * host's local time.
- */
-export type PatchSchedule = { windowDays: number; retryDays: number; weekday: number; startHour: number; endHour: number };
-
-/**
- * Whether the timer's firing today is an attempt, and whether a refusal today is the window's last chance.
- *
- * **`lastRunAtMs: null` is a fleet that has never been patched on this schedule**: it attempts (on the weekday, then
- * daily), and a refusal raises no line, because `patchWindowMissed` gives such a host no window it could have missed.
- */
-export function patchScheduleDecision({ now, lastRunAtMs, schedule }: {
-  now: Date; lastRunAtMs: number | null; schedule: PatchSchedule;
-}): { attempt: boolean; lastChance: boolean; reason: string } {
-  const hour = now.getHours();
-  if (hour < schedule.startHour || hour >= schedule.endHour) {
-    return { attempt: false, lastChance: false, reason: `outside the window hours ${schedule.startHour}:00-${schedule.endHour}:00 (it is ${hour}:00)` };
-  }
-  const ageDays = lastRunAtMs === null ? Infinity : Math.floor((now.getTime() - lastRunAtMs) / MS_PER_DAY);
-  const opensAt = schedule.windowDays - schedule.retryDays;
-  if (ageDays < opensAt) {
-    return { attempt: false, lastChance: false, reason: `the window opens in ${opensAt - ageDays} day(s) (last run ${ageDays} day(s) ago)` };
-  }
-  // The weekday opens the attempts; once it has passed inside an open window, every day after it retries.
-  const sinceOpen = Number.isFinite(ageDays) ? ageDays - opensAt : DAYS_PER_WEEK;
-  let weekdayReached = false;
-  for (let back = 0; back <= Math.min(sinceOpen, DAYS_PER_WEEK - 1); back += 1) {
-    if ((now.getDay() - back + DAYS_PER_WEEK) % DAYS_PER_WEEK === schedule.weekday) weekdayReached = true;
-  }
-  if (!weekdayReached) return { attempt: false, lastChance: false, reason: `the window is open; waiting for weekday ${schedule.weekday}` };
-  return { attempt: true, lastChance: lastRunAtMs !== null && ageDays >= schedule.windowDays,
-    reason: lastRunAtMs === null ? "no patch run on record" : `last run ${ageDays} day(s) ago` };
-}
-
-/** The health line the window's last refused day raises -- `patch-window-missed`'s own wording, so one grep finds both. */
-export function patchHealthLine({ lastRunAtMs, schedule, refusal }: { lastRunAtMs: number | null; schedule: PatchSchedule; refusal: string }): string {
-  const last = lastRunAtMs === null ? "none" : new Date(lastRunAtMs).toISOString().slice(0, ISO_DATE_LENGTH);
-  return `fleet-health: patch-window-missed: last patch run ${last}, window ${schedule.windowDays} days, `
-    + `still refused on the last day: ${refusal.split("\n")[0]}`;
-}
-
-/** Exit code when the window closed with the fleet unpatched: not 2, so a unit's failure is not mistaken for one refusal. */
-export const PATCH_WINDOW_MISSED_EXIT_CODE = 4;
-
-/**
- * THE TIMER'S WHOLE DAY, with the clock, the record and the child injected: wait, or attempt and read what came back.
- *
- * A refusal (the child's exit 2) is LOGGED and retried tomorrow by the next firing -- the timer fires daily and this
- * decides, so there is no state here beyond the record. On the window's last day it raises the health line and exits
- * `PATCH_WINDOW_MISSED_EXIT_CODE`, which fails the unit where `systemctl --failed` and the journal show it.
- */
-export function scheduledPatchRun({ now, lastRunAtMs, schedule, runApply }: {
-  now: Date; lastRunAtMs: number | null; schedule: PatchSchedule; runApply: () => { status: number; refusal: string };
-}): { exit: number; lines: string[] } {
-  const decision = patchScheduleDecision({ now, lastRunAtMs, schedule });
-  if (!decision.attempt) return { exit: 0, lines: [`fleet:patch --scheduled: not attempting -- ${decision.reason}.`] };
-  const result = runApply();
-  if (result.status === 0) return { exit: 0, lines: [`fleet:patch --scheduled: patched (${decision.reason}).`] };
-  const why = result.refusal || `ansible exit ${result.status}`;
-  if (decision.lastChance) {
-    return { exit: PATCH_WINDOW_MISSED_EXIT_CODE, lines: [patchHealthLine({ lastRunAtMs, schedule, refusal: why })] };
-  }
-  return { exit: 0, lines: [`fleet:patch --scheduled: refused (${why}); retrying tomorrow.`] };
-}
-
-const SCHEDULE_FLAGS = { windowDays: "window-days", retryDays: "retry-days", weekday: "weekday",
-  startHour: "window-start-hour", endHour: "window-end-hour" } as const;
-const SMALL_INTEGER = /^[0-9]{1,3}$/;
-const LAST_HOUR = 24;
-const LAST_WEEKDAY = 6;
-
-/**
- * `--scheduled` and its window flags, refused or read. **`--scheduled` is `--apply` on a clock and says so**: without
- * `--apply` a unit would be a report on a timer, the shape `a11y-fleet-auto-off.service` spent 25 hours as (#2784).
- */
-export function scheduleOrRefuse({ chosen, apply, argv, refuse }: {
-  chosen: string; apply: boolean; argv: string[]; refuse: (message: string) => void;
-}): PatchSchedule | null {
-  const given = Object.values(SCHEDULE_FLAGS).filter((name) => flagValue(argv, name) !== undefined);
-  if (!argv.includes("--scheduled")) {
-    if (given.length) refuse(`refusing --${given[0]}: it is read only with --scheduled.`);
-    return null;
-  }
-  if (chosen !== "patch.yml") refuse(`refusing --scheduled with --playbook=${chosen}: only patch.yml has a window.`);
-  if (!apply) refuse("refusing --scheduled without --apply: a timer that passes no --apply is a report on a clock.");
-  const read = (key: keyof typeof SCHEDULE_FLAGS): number => {
-    const text = flagValue(argv, SCHEDULE_FLAGS[key]) ?? "";
-    if (!SMALL_INTEGER.test(text)) refuse(`refusing --scheduled: --${SCHEDULE_FLAGS[key]}=<integer> is required (the window is a variable, never a default here).`);
-    return Number(text);
-  };
-  const schedule = { windowDays: read("windowDays"), retryDays: read("retryDays"), weekday: read("weekday"),
-    startHour: read("startHour"), endHour: read("endHour") };
-  const bad = schedule.weekday > LAST_WEEKDAY || schedule.endHour > LAST_HOUR || schedule.startHour >= schedule.endHour
-    || schedule.retryDays > schedule.windowDays || schedule.retryDays < 1;
-  if (bad) refuse("refusing --scheduled: weekday 0-6, start hour < end hour <= 24, and 1 <= retry days <= window days.");
-  return schedule;
-}
-
-/** The record's `lastRunAt` off the control plane, or `null` for none. Unreadable THROWS: "no run" and "did not look" differ. */
-function readPatchRunRecord(): number | null {
-  const text = ssh(`cat ${CHECKOUT}/${PATCH_RUN_RECORD} 2>/dev/null || echo '{}'`, { capture: true, timeoutMs: INVENTORY_READ_TIMEOUT_MS });
-  const at = (JSON.parse(text) as { lastRunAt?: unknown }).lastRunAt;
-  if (at === undefined) return null;
-  if (typeof at !== "number" || !Number.isFinite(at)) throw new TypeError(`${PATCH_RUN_RECORD}: lastRunAt must be an epoch-ms number`);
-  return at;
-}
-
-/** This same command again as `--apply`, without the window flags -- one process per attempt, so every `process.exit` stays a refusal. */
-function runApplyChild(): { status: number; refusal: string } {
-  const own = process.argv.slice(2).filter((arg) => arg !== "--scheduled"
-    && !Object.values(SCHEDULE_FLAGS).some((name) => arg.startsWith(`--${name}=`)));
-  const child = spawnSync(process.execPath, [...process.execArgv, process.argv[1] ?? "", ...own],
-    { encoding: "utf8", stdio: ["ignore", "inherit", "pipe"] });
-  if (child.stderr) process.stderr.write(child.stderr);
-  const refusal = String(child.stderr ?? "").split("\n").find((line) => line.startsWith("REFUSING") || line.startsWith("refusing")) ?? "";
-  return { status: child.status ?? 1, refusal };
-}
-
-/** `--scheduled`, end to end on the control plane: read the record, decide, attempt, report, exit. */
-function runScheduled(schedule: PatchSchedule): never {
-  CONTROL_PLANE = requireControlPlaneHost();
-  requireControlPlaneKey();
-  const { exit, lines } = scheduledPatchRun({ now: new Date(), lastRunAtMs: readPatchRunRecord(), schedule, runApply: runApplyChild });
-  for (const line of lines) (exit === 0 ? process.stdout : process.stderr).write(`${line}\n`);
-  return process.exit(exit);
-}
-
 /** What the patch gate leaves for `main`: whether the command is done (a dry run), the target to pass, and how long to watch. */
 type PatchGate = { dryRun: boolean; target: PatchTarget | null; followBudgetMs: number };
 
@@ -2446,8 +2299,7 @@ async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
-  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir, schedule } = parseArgs();
-  if (schedule) runScheduled(schedule);
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir } = parseArgs();
   await guardProtocolChange(chosen, { readLocal: () => readLocalProtocol({ publishedDir: publishedWorkerDir }) });
   const { moved } = await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen, { limitFlag });
@@ -2523,8 +2375,6 @@ async function main() {
       + "  Verify with `npm run worker:code` before trusting any capture.\n");
     process.exit(5);
   }
-  // #4446: a COMPLETED window is recorded, so `fleet-watch` reads `patch-window-missed` off a fact and the timer's next day waits.
-  if (chosen === "patch.yml") ssh(patchRunRecordCommand(Date.now()));
   process.stdout.write(`\n  ${chosen} completed; the PLAY RECAP above is the per-host result.\n`);
 }
 

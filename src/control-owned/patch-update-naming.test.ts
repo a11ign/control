@@ -62,7 +62,8 @@ function namingMessages(task: Task): string[] {
   return [...`${run.stdout}`.matchAll(/"msg": "(localhost: [^"]*)"/g)].map((m) => m[1]);
 }
 
-const PATCH_PLAY = parseYamlFile(PATCH)[1];
+// The play that carries the naming task, not the play at an index: the daily-freeze guard (A11-205) sits before it.
+const PATCH_PLAY = parseYamlFile(PATCH).find((play: Task) => findNamingTask(play.tasks ?? [])) as Task;
 
 test("the naming task names each installed update by title and KB, and not the one offered but not installed", () => {
   const task = findNamingTask(PATCH_PLAY.tasks);
