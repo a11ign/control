@@ -8,6 +8,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
+// The worker registration lives in `worker-task.yml` since A11-204, so `deploy.yml` runs the same definition; the capture-check task stays in `tasks.yml`.
+const WORKER_TASKS = readFileSync(
+  fileURLToPath(new URL("../../ansible/roles/worker/tasks/worker-task.yml", import.meta.url)), "utf8");
 const TASKS = readFileSync(
   fileURLToPath(new URL("../../ansible/roles/worker/tasks/tasks.yml", import.meta.url)), "utf8");
 
@@ -30,11 +33,11 @@ const LAID_SRC_PATH = String.raw`{{ worker_repo_path }}\packages\nvda-worker\src
 const NODE_THEN_REPO_ROOT = `"{{ node_exe.output | first }}" "{{ worker_repo_path }}"`;
 
 test("a11ysrv launches the published run-server.cmd, the file the provision stamp hashes (#5551)", () => {
-  assert.equal(firstActionOf(TASKS, WORKER_TASK)?.path, PUBLISHED_PATH);
+  assert.equal(firstActionOf(WORKER_TASKS, WORKER_TASK)?.path, PUBLISHED_PATH);
 });
 
 test("a11ysrv passes node.exe as argument 1 and the repo root as argument 2 (the release launcher refuses without it) (#5551)", () => {
-  assert.equal(firstActionOf(TASKS, WORKER_TASK)?.arguments, NODE_THEN_REPO_ROOT);
+  assert.equal(firstActionOf(WORKER_TASKS, WORKER_TASK)?.arguments, NODE_THEN_REPO_ROOT);
 });
 
 test("a11ycheck stays on the laid run-capture-check.cmd, because release 0.13.1 ships no capture-check launcher (#5551)", () => {
