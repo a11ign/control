@@ -1120,15 +1120,17 @@ const reportedString = (value: unknown) => (typeof value === "string" && value !
  *
  * - More than one value on a field is a split, and a reachable box that reports none is `unreported` and also fails: a field nobody reported is
  *   not agreement (#1997, #2019). An unreachable box is no reading and is not a split; `reachable` already says it did not answer.
- * - The guard (`edgeUpdaterGuard.state`) fails on anything but `ok`, one box and one state at a time. A worker that does not send it is `absent`:
- *   an updater nobody can see is not held.
+ * - The guard (`edgeUpdaterGuard.state`) fails on anything but `ok`, one box and one state at a time: `absent` (the worker reports no guard record),
+ *   `stale`, `drift` and `unknown` are an updater that is not held. A worker that sends NO `edgeUpdaterGuard` at all predates the field (code deployed
+ *   before it): its updater is unread, which is named but is not this check's failure, because the Edge version split above catches the updater's
+ *   effect on every box and a deploy gap would otherwise hold the fleet for a cause that is not the updater (`REPORTED_ONLY` says the same, #5021).
  * - The boxes are named by inventory name, not by URL, so the line can be read and acted on.
  */
 export type FieldReading = { field: string; values: Record<string, string[]>; unreported: string[]; split: boolean; };
 export type BuildSplit = {
   failed: boolean;
   fields: FieldReading[];
-  updater: { held: boolean; notHeld: { box: string; state: string; }[]; };
+  updater: { held: boolean; notHeld: { box: string; state: string; }[]; unread: string[]; };
   lines: string[];
 };
 
@@ -1140,14 +1142,13 @@ const BUILD_FIELDS = [
 ];
 
 const GUARD_HELD = "ok";
-const GUARD_ABSENT = "absent";
 
-/** The guard's state as the box reported it: the record's `state`, the bare string an old worker sends, or `absent` for no word at all. */
-function guardStateOf(environment: Record<string, unknown> | undefined): string {
+/** The guard's state as the box reported it: the record's `state`, or the bare string an old worker sends; `null` for a worker that sent no word at all. */
+function guardStateOf(environment: Record<string, unknown> | undefined): string | null {
   const guard = environment?.edgeUpdaterGuard;
   if (typeof guard === "string" && guard !== "") return guard;
   const state = (guard as { state?: unknown } | null | undefined)?.state;
-  return typeof state === "string" && state !== "" ? state : GUARD_ABSENT;
+  return typeof state === "string" && state !== "" ? state : null;
 }
 
 const describeGroups = (values: Record<string, string[]>, unreported: string[]) =>
@@ -1168,22 +1169,25 @@ export function buildSplitOf(probes: WorkerProbe[]): BuildSplit {
     }
     return { field, values, unreported, split: Object.keys(values).length > 1 || unreported.length > 0 };
   });
-  const notHeld = reachable.map(({ box, environment }) => ({ box, state: guardStateOf(environment) }))
-    .filter(({ state }) => state !== GUARD_HELD);
+  const guards = reachable.map(({ box, environment }) => ({ box, state: guardStateOf(environment) }));
+  const unread = guards.filter(({ state }) => state === null).map(({ box }) => box);
+  const notHeld = guards.flatMap(({ box, state }) => (state !== null && state !== GUARD_HELD ? [{ box, state }] : []));
   const failed = fields.some(({ split }) => split) || notHeld.length > 0;
-  return { failed, fields, updater: { held: notHeld.length === 0, notHeld }, lines: buildSplitLines({ fields, notHeld, boxes: reachable.length }) };
+  return { failed, fields, updater: { held: notHeld.length === 0, notHeld, unread },
+    lines: buildSplitLines({ fields, notHeld, unread, boxes: reachable.length }) };
 }
 
-function buildSplitLines({ fields, notHeld, boxes }: { fields: FieldReading[]; notHeld: { box: string; state: string; }[]; boxes: number; }): string[] {
+function buildSplitLines({ fields, notHeld, unread, boxes }: {
+  fields: FieldReading[]; notHeld: { box: string; state: string; }[]; unread: string[]; boxes: number;
+}): string[] {
+  if (boxes === 0) return [];
   const split = fields.filter((field) => field.split);
-  if (split.length === 0 && notHeld.length === 0) {
-    if (boxes === 0) return [];
-    return [`fleet builds AGREE — ${fields.map(({ field, values }) => `${field}: ${describeGroups(values, [])}`).join("; ")}; Edge updater held on ${boxes}`];
-  }
   const lines = split.map(({ field, values, unreported }) => `fleet BUILD SPLIT — ${field}: ${describeGroups(values, unreported)}`);
-  if (notHeld.length > 0) {
-    lines.push(`fleet Edge updater NOT HELD — ${notHeld.map(({ box, state }) => `${box} ${state}`).join(", ")}`);
+  if (notHeld.length > 0) lines.push(`fleet Edge updater NOT HELD — ${notHeld.map(({ box, state }) => `${box} ${state}`).join(", ")}`);
+  if (split.length === 0 && notHeld.length === 0) {
+    lines.push(`fleet builds AGREE — ${fields.map(({ field, values }) => `${field}: ${describeGroups(values, [])}`).join("; ")}; Edge updater held on ${boxes - unread.length} of ${boxes}`);
   }
+  if (unread.length > 0) lines.push(`fleet Edge updater UNREAD (not a failure) — ${unread.join(", ")} send no edgeUpdaterGuard: their worker code predates it`);
   return lines;
 }
 

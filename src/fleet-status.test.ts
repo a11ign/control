@@ -1453,7 +1453,7 @@ test("A11-183: one value on every field and the updater held is clean, and exits
   assert.equal(status.buildSplit.failed, false);
   assert.deepEqual(status.buildSplit.fields.map(({ split }) => split), [false, false, false]);
   assert.equal(exitCodeOf(status), EXIT.OK);
-  assert.match(status.buildSplit.lines.join("\n"), /^fleet builds AGREE — Edge: 156\.0\.4314\.42 on a11y-worker-2, a11y-worker-3, a11y-worker-4; NVDA: .*; Windows: .*; Edge updater held on 3$/);
+  assert.match(status.buildSplit.lines.join("\n"), /^fleet builds AGREE — Edge: 156\.0\.4314\.42 on a11y-worker-2, a11y-worker-3, a11y-worker-4; NVDA: .*; Windows: .*; Edge updater held on 3 of 3$/);
   assert.equal(buildSplitAdvice(status.buildSplit), "");
 });
 
@@ -1514,17 +1514,35 @@ test("A11-183: an unreachable box is not a split, and nothing answering is exit 
   assert.deepEqual(nobody.buildSplit.lines, []);
 });
 
-test("A11-183: a guard that is stale, drifted or absent on one box fails, naming the box and its state", async () => {
-  for (const [guard, state] of [[{ state: "stale" }, "stale"], [{ state: "drift" }, "drift"], [undefined, "absent"], ["absent", "absent"], [null, "absent"], [{ state: "unknown" }, "unknown"]] as const) {
-    const probes = [reading(2, AGREED), reading(3, { ...AGREED, guard: undefined }), reading(4, AGREED)];
-    // `reading` leaves a key it was not given out of the environment, so `undefined` here is a worker that never sent the field.
-    if (guard !== undefined) (probes[1].health!.environment as Record<string, unknown>).edgeUpdaterGuard = guard;
+test("A11-183: a guard that reports stale, drift, absent or unknown on one box fails, naming the box and its state", async () => {
+  for (const [guard, state] of [[{ state: "stale" }, "stale"], [{ state: "drift" }, "drift"], [{ state: "absent" }, "absent"], ["absent", "absent"], [{ state: "unknown" }, "unknown"]] as const) {
+    const probes = [reading(2, AGREED), reading(3, { ...AGREED, guard }), reading(4, AGREED)];
     const status = await statusOver(probes);
-    assert.deepEqual(status.buildSplit.updater.notHeld, [{ box: boxName(3), state }], String(state));
+    assert.deepEqual(status.buildSplit.updater.notHeld, [{ box: boxName(3), state }], JSON.stringify(guard));
     assert.deepEqual(status.buildSplit.lines, [`fleet Edge updater NOT HELD — a11y-worker-3 ${state}`]);
     assert.equal(exitCodeOf(status), 3, `${state} stops captures`);
     assert.match(buildSplitAdvice(status.buildSplit), /Edge updater: it is not held/);
   }
+});
+
+test("A11-183: a worker that sends no edgeUpdaterGuard at all is UNREAD, named, and is not this check's failure", async () => {
+  for (const missing of [undefined, null]) {
+    const probes = [reading(2, AGREED), reading(3, { ...AGREED, guard: undefined }), reading(4, AGREED)];
+    if (missing === null) (probes[1].health!.environment as Record<string, unknown>).edgeUpdaterGuard = null;
+    const status = await statusOver(probes);
+    assert.deepEqual(status.buildSplit.updater.unread, [boxName(3)]);
+    assert.equal(status.buildSplit.failed, false);
+    assert.equal(exitCodeOf(status), 0);
+    assert.deepEqual(status.buildSplit.lines.slice(-2), [
+      status.buildSplit.lines[0],
+      "fleet Edge updater UNREAD (not a failure) — a11y-worker-3 send no edgeUpdaterGuard: their worker code predates it"]);
+    assert.match(status.buildSplit.lines[0], /Edge updater held on 2 of 3$/);
+  }
+  // And the same box does not hide a REAL split elsewhere: the unread line rides beside the failure.
+  const split = buildSplitOf([reading(2, { ...AGREED, edge: "155.0.4283.62" }), reading(3, { ...AGREED, guard: undefined })]);
+  assert.equal(split.failed, true);
+  assert.match(split.lines[0], /^fleet BUILD SPLIT — Edge: /);
+  assert.match(split.lines[1], /^fleet Edge updater UNREAD/);
 });
 
 test("A11-183: a build split and an updater that is not held print one line each, the split first", () => {
