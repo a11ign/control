@@ -16,7 +16,7 @@ import { PLAYBOOKS, patchRefusal, patchOutcome, patchPlan, patchBoxOf, patchTarg
   PLAYBOOK_TIMEOUT_MS, sequenceHoldGate, activeFleetHolds, linkGateFor, osRollbackRefusal } from "./fleet-playbook.ts";
 import type { PatchBox, PatchTarget } from "./fleet-playbook.ts";
 import { readFleetPins } from "./fleet-pins.ts";
-import { upgradeStepsOf, failedBoxesOf, stoppedLine, closingRefusal, runUpgrade } from "./fleet-upgrade.ts";
+import { upgradeStepsOf, limitedBoxesOf, failedBoxesOf, stoppedLine, closingRefusal, runUpgrade, CLOSING_READ_RETRIES } from "./fleet-upgrade.ts";
 import type { StepResult, UpgradeStep } from "./fleet-upgrade.ts";
 import { driftRecordOf } from "./fleet-drift.ts";
 import type { WorkerProbe } from "./fleet-status.ts";
@@ -140,6 +140,22 @@ test("A11-205: the wrapper refuses every flag of the patch window, so a unit tha
   assert.doesNotMatch(clean.stderr, /unknown flag|unrecognised/i);
 });
 
+test("A11-205: --preflight is the upgrade's gates and nothing else: only patch.yml with --apply may carry it", () => {
+  // A documentation address and no key file: the command reaches its flag checks and goes no further (the ref is named so the branch name of a worktree cannot refuse first).
+  const env = { ...process.env, A11Y_CONTROL_HOST: "192.0.2.1", A11Y_PVE_KEY: "/nonexistent" };
+  for (const args of [["--playbook=deploy.yml", "--preflight"], ["--playbook=patch.yml", "--preflight"]]) {
+    const run = spawnSync(process.execPath, [WRAPPER, ...args], { encoding: "utf8", env });
+    assert.equal(run.status, 2, args.join(" "));
+    assert.match(run.stderr, /refusing --preflight: it asks patch\.yml's gates for an --apply run, and nothing else/, args.join(" "));
+  }
+  // negative control: with --apply on patch.yml the flag is accepted, and the next thing to refuse is something else (the ref)
+  const accepted = spawnSync(process.execPath, [WRAPPER, "--playbook=patch.yml", "--apply", "--preflight", "--ref=not a ref"], { encoding: "utf8", env });
+  assert.doesNotMatch(accepted.stderr, /refusing --preflight|unknown flag/);
+  assert.match(accepted.stderr, /refusing --ref=not a ref/);
+  const source = readFileSync(WRAPPER, "utf8");
+  assert.match(source, /dryRun: outcome === "plan" \|\| preflight/, "a preflight that passed ends the command, as a dry run does, before the control plane is moved");
+});
+
 test("A11-205: the patch window's playbook, its record and its health line are gone from the code", () => {
   assert.equal(existsSync(fileURLToPath(new URL("../ansible/patch-schedule.yml", import.meta.url))), false, "patch-schedule.yml is deleted");
   for (const name of ["PATCH_RUN_RECORD", "patchRunRecordCommand", "scheduledPatchRun", "patchScheduleDecision", "scheduleOrRefuse", "patchHealthLine", "PATCH_WINDOW_MISSED_EXIT_CODE"]) {
@@ -181,22 +197,22 @@ test("A11-205: the plan names the manifest's target and marks the boxes that nee
   assert.doesNotMatch(plan, /newest|highest|-e patch_target/);
 });
 
-test("A11-205: with the boxes read against the manifest, the plan says which have nothing to upgrade and what each other box is missing", () => {
+test("A11-205: with the boxes read against the manifest, the plan says which read as the manifest and what each other box is missing", () => {
   const boxes = [idle("a11y-worker-2"), idle("a11y-worker-3"), onBuild("a11y-worker-5", 22631)];
   const differences = [{ box: "a11y-worker-3", field: "Edge", has: "155.0.4283.62", wants: "156.0.4314.42" },
     { box: "a11y-worker-5", field: "Windows", has: "22631.6199", wants: TARGET.build }];
   const plan = patchPlan({ boxes, limitFlag: undefined, apply: false, target: TARGET, differences }).join("\n");
-  assert.match(plan, /a11y-worker-2\s+on the manifest, nothing to upgrade\s+\[10\.0\.\d+\]\n/);
+  assert.match(plan, /a11y-worker-2\s+reads as the manifest \(Windows, Edge, NVDA, worker code\)\s+\[10\.0\.\d+\]\n/);
   assert.match(plan, /a11y-worker-3\s+would upgrade\s+\[10\.0\.\d+\] -- Edge 155\.0\.4283\.62 -> 156\.0\.4314\.42\n/);
   assert.match(plan, /a11y-worker-5\s+would upgrade\s+\[10\.0\.22631\] \(a feature update first\) -- Windows 22631\.6199 -> /);
   // negative controls: a plan made without the reading claims nothing, and a box that was not asked about is never "on the manifest"
   const unread = patchPlan({ boxes, limitFlag: undefined, apply: false, target: TARGET }).join("\n");
-  assert.doesNotMatch(unread, /nothing to upgrade/);
+  assert.doesNotMatch(unread, /reads as the manifest/);
   const unreported = patchPlan({ boxes: [idle("a11y-worker-2")], limitFlag: undefined, apply: false, target: TARGET,
     differences: [{ box: "a11y-worker-2", field: "NVDA", has: null, wants: "2026.1.1" }] }).join("\n");
   assert.match(unreported, /a11y-worker-2\s+would upgrade.* -- NVDA unreported -> 2026\.1\.1/);
   assert.match(patchPlan({ boxes: [{ ...idle("a11y-worker-2"), busy: true }], limitFlag: undefined, apply: true, target: TARGET, differences: [] }).join("\n"),
-    /a11y-worker-2\s+on the manifest, nothing to upgrade \(BUSY\)/);
+    /a11y-worker-2\s+reads as the manifest \(Windows, Edge, NVDA, worker code\) \(BUSY\)/);
 });
 
 test("A11-205: a box ABOVE the manifest refuses the run before anything is touched, naming it; it is never rolled back", () => {
@@ -250,17 +266,28 @@ const recordOver = async (probes: WorkerProbe[]) => {
     probe: async (worker) => probes.find((p) => p.name === worker.name) as WorkerProbe, expected: () => EXPECTED }), previous: null, freeze: null, now: new Date("2026-10-25T10:00:00Z") });
 };
 
-/** `runUpgrade` over scripted plays: the steps it ran, what it said, and its exit code. */
-async function chain(args: string[], results: Record<string, StepResult>, probes: WorkerProbe[] = [reading(2), reading(3)]) {
+/** `runUpgrade` over scripted plays: the steps it ran, what it said, and its exit code. `results` is keyed by `playbook` or, for a flagged call, `playbook args`. */
+async function chain(args: string[], results: Record<string, StepResult>, probes: WorkerProbe[] | (() => WorkerProbe[]) = [reading(2), reading(3)],
+  { read: readOverride }: { read?: (boxes: string[] | null) => Promise<never>; } = {}) {
   const ran: string[] = [];
   const said: string[] = [];
-  let read = 0;
+  const asked: (string[] | null)[] = [];
+  let pauses = 0;
   const code = await runUpgrade(args, {
-    run: async (step: UpgradeStep) => { ran.push(`${step.playbook} ${step.args.join(" ")}`.trim()); return results[step.playbook] ?? OK; },
-    read: async () => { read += 1; return recordOver(probes); },
+    run: async (step: UpgradeStep) => {
+      const label = `${step.playbook} ${step.args.join(" ")}`.trim();
+      ran.push(label);
+      return results[label] ?? results[step.playbook] ?? OK;
+    },
+    read: readOverride ?? (async (boxes) => {
+      asked.push(boxes);
+      const all = typeof probes === "function" ? probes() : probes;
+      return recordOver(boxes === null ? all : all.filter((probe) => boxes.includes(probe.name)));
+    }),
     say: (line) => said.push(line),
+    sleep: async () => { pauses += 1; },
   });
-  return { code, ran, said: said.join(""), read };
+  return { code, ran, said: said.join(""), read: asked.length, asked, pauses };
 }
 
 test("A11-205: without --apply only patch.yml runs, to print its plan, and no box is read", async () => {
@@ -272,13 +299,14 @@ test("A11-205: without --apply only patch.yml runs, to print its plan, and no bo
   assert.match(run.said, /This was the plan/);
 });
 
-test("A11-205: --apply runs deploy.yml (which refuses --apply), then patch.yml, then reads every box; the other arguments go to both plays", async () => {
+test("A11-205: --apply asks the upgrade's gates, runs deploy.yml (which refuses --apply), then patch.yml, then reads every box; the other arguments go to every play", async () => {
   const steps = upgradeStepsOf(["--apply", "--limit=a11y-worker-2,a11y-worker-3", "--allow-offline=a11y-worker-5"]);
-  assert.deepEqual(steps.map(({ playbook }) => playbook), ["deploy.yml", "patch.yml"]);
-  assert.deepEqual(steps[0].args, ["--limit=a11y-worker-2,a11y-worker-3", "--allow-offline=a11y-worker-5"], "deploy.yml is not asked for --apply");
-  assert.deepEqual(steps[1].args, ["--apply", "--limit=a11y-worker-2,a11y-worker-3", "--allow-offline=a11y-worker-5"]);
+  assert.deepEqual(steps.map(({ playbook }) => playbook), ["patch.yml", "deploy.yml", "patch.yml"]);
+  assert.deepEqual(steps[0].args, ["--apply", "--limit=a11y-worker-2,a11y-worker-3", "--allow-offline=a11y-worker-5", "--preflight"], "the gates of an --apply run, asked first");
+  assert.deepEqual(steps[1].args, ["--limit=a11y-worker-2,a11y-worker-3", "--allow-offline=a11y-worker-5"], "deploy.yml is not asked for --apply");
+  assert.deepEqual(steps[2].args, ["--apply", "--limit=a11y-worker-2,a11y-worker-3", "--allow-offline=a11y-worker-5"]);
   const run = await chain(["--apply"], {});
-  assert.deepEqual(run.ran, ["deploy.yml", "patch.yml --apply"]);
+  assert.deepEqual(run.ran, ["patch.yml --apply --preflight", "deploy.yml", "patch.yml --apply"]);
   assert.equal(run.read, 1);
   assert.equal(run.code, 0);
   assert.match(run.said, /fleet on the manifest — /);
@@ -287,19 +315,33 @@ test("A11-205: --apply runs deploy.yml (which refuses --apply), then patch.yml, 
 
 test("A11-205: a failing deploy.yml stops the run: patch.yml never starts, no box is read, and the box is named", async () => {
   const run = await chain(["--apply"], { "deploy.yml": { status: 2, output: RECAP({ "a11y-worker-2": {}, "a11y-worker-4": { failed: 1 } }) } });
-  assert.deepEqual(run.ran, ["deploy.yml"], "negative control for the next case: patch.yml is the play that did not run");
+  assert.deepEqual(run.ran, ["patch.yml --apply --preflight", "deploy.yml"], "negative control for the next case: the upgrade is the play that did not run");
   assert.equal(run.read, 0);
   assert.equal(run.code, 2, "the play's own exit code");
   assert.match(run.said, /fleet:patch STOPPED at deploy\.yml \(exit 2\): a11y-worker-4 is the box it stopped on\. Nothing was rolled back and nothing after this step ran/);
 });
 
 test("A11-205: a failing patch.yml stops the run at that box, names it, and does not read the fleet as if it had finished", async () => {
-  const run = await chain(["--apply"], { "patch.yml": { status: 2,
+  const run = await chain(["--apply"], { "patch.yml --apply": { status: 2,
     output: `fatal: [a11y-worker-7]: FAILED! => {"msg": "a11y-worker-7 is on 26300.10000, ABOVE the manifest's build"}\n${RECAP({ "a11y-worker-2": {}, "a11y-worker-7": { failed: 1 } })}` } });
-  assert.deepEqual(run.ran, ["deploy.yml", "patch.yml --apply"]);
+  assert.deepEqual(run.ran, ["patch.yml --apply --preflight", "deploy.yml", "patch.yml --apply"]);
   assert.equal(run.read, 0);
   assert.equal(run.code, 2);
   assert.match(run.said, /STOPPED at patch\.yml \(exit 2\): a11y-worker-7 is the box it stopped on/);
+});
+
+test("A11-205: the upgrade's own gates are asked BEFORE any code is delivered: a refusal leaves every box as it was", async () => {
+  const refused = await chain(["--apply"], { "patch.yml --apply --preflight": { status: 2, output: "REFUSING patch.yml: a11y-worker-4 is busy. A reboot destroys a capture in flight." } });
+  assert.deepEqual(refused.ran, ["patch.yml --apply --preflight"], "deploy.yml never started");
+  assert.equal(refused.code, 2);
+  assert.match(refused.said, /STOPPED at patch\.yml \(preflight\) \(exit 2\)/);
+  assert.match(refused.said, /Nothing was changed and nothing after this step ran/);
+  assert.match(refused.said, /fleet:patch -- --apply` again/);
+  // negative control: the same refusal from the upgrade itself is the one that has changed things
+  const late = await chain(["--apply"], { "patch.yml --apply": { status: 2, output: RECAP({ "a11y-worker-4": { failed: 1 } }) } });
+  assert.match(late.said, /Nothing was rolled back/);
+  // and a dry run that refuses names the plan, not an apply
+  assert.match(stoppedLine({ playbook: "patch.yml", args: [] }, { status: 2, output: "REFUSING" }), /Nothing was changed .* run `fleet:patch` again/);
 });
 
 test("A11-205: an unreachable box in the recap is named too, and a refusal before any play names none", () => {
@@ -322,6 +364,42 @@ test("A11-205: the run ends by reading EVERY box: a box that differs, or does no
   assert.equal(unread.code, 3, "a box nobody could read has not been shown to be on the manifest");
   assert.match(unread.said, /not read at the end of the upgrade \(so not shown to be on the manifest\): a11y-worker-3/);
   assert.equal(closingRefusal(await recordOver([reading(2), reading(3)])), null, "negative control: every box answered and agrees");
+});
+
+test("A11-205: under --limit the closing read is of the boxes the run touched, says so, and a limited run is not failed by a box outside it", async () => {
+  assert.equal(limitedBoxesOf(["--apply"]), null);
+  assert.equal(limitedBoxesOf(["--apply", "--limit=a11y_workers"]), null, "the group itself is the whole fleet");
+  assert.deepEqual(limitedBoxesOf(["--apply", "--limit=a11y-worker-2,a11y-worker-3"]), ["a11y-worker-2", "a11y-worker-3"]);
+  const probes = [reading(2), reading(3), reading(4, "157.0.1.1")];
+  const limited = await chain(["--apply", "--limit=a11y-worker-2,a11y-worker-3"], {}, probes);
+  assert.equal(limited.code, 0, limited.said);
+  assert.deepEqual(limited.asked, [["a11y-worker-2", "a11y-worker-3"]]);
+  assert.match(limited.said, /reading a11y-worker-2, a11y-worker-3 \(--limit; `fleet:drift` reads the whole fleet\)/);
+  assert.match(limited.said, /a11y-worker-2, a11y-worker-3 were read back and are on the manifest/);
+  const whole = await chain(["--apply"], {}, probes);
+  assert.equal(whole.code, 3, "negative control: without --limit the box that differs fails the run");
+  assert.deepEqual(whole.asked, [null]);
+});
+
+test("A11-205: a box that does not answer when the last play ends is asked again; one that never does fails the run, and a difference is not waited on", async () => {
+  const silent: WorkerProbe = { name: "a11y-worker-3", url: "http://192.0.2.3:8765", reachable: false, error: "ETIMEDOUT" };
+  let reads = 0;
+  const back = await chain(["--apply"], {}, () => { reads += 1; return [reading(2), reads < 3 ? silent : reading(3)]; });
+  assert.equal(back.code, 0, back.said);
+  assert.equal(back.pauses, 2, "asked twice more, pausing before each");
+  assert.match(back.said, /a11y-worker-3 did not answer; asking again \(1 of 5\)/);
+  const gone = await chain(["--apply"], {}, [reading(2), silent]);
+  assert.equal(gone.code, 3);
+  assert.equal(gone.pauses, CLOSING_READ_RETRIES);
+  const differs = await chain(["--apply"], {}, [reading(2), reading(3, "157.0.1.1")]);
+  assert.equal(differs.pauses, 0, "only silence is waited out");
+});
+
+test("A11-205: a closing read that cannot be made fails the run in words, not with a stack, and points at fleet:drift", async () => {
+  const run = await chain(["--apply"], {}, [], { read: async () => { throw new Error("No fleet to report on: A11Y_WORKERS is unset"); } });
+  assert.equal(run.code, 3);
+  assert.match(run.said, /The closing read could not be made \(No fleet to report on: A11Y_WORKERS is unset\): the upgrade is not shown to have reached the manifest\. `pnpm run fleet:drift` reads it again/);
+  assert.doesNotMatch(run.said, /completed/);
 });
 
 test("A11-205: the package script runs the chain, and `fleet:drift` runs the reading", () => {

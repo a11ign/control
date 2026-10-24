@@ -117,18 +117,23 @@ worker code (`layers.nvda-worker` and `core.commit`; the expected `/health.code`
 To upgrade the fleet:
 
 1. **Edit `deploy-pins.json` in a pull request and merge it.** Merging moves no box. `nvda.version` and `core.commit` move together (NVDA arrives with guidepup, from the core's lockfile). `windows.kb` is
-   the cumulative update that produces `windows.build`, so the run lands on that build and not on whatever Microsoft published after the edit.
+   the cumulative update that produces `windows.build`, so the run lands on that build and not on whatever Microsoft published after the edit. **When the release changes,** the Installation Assistant lands
+   a box on the release's *current* build whatever the manifest says, so `windows.build` must be the build the Assistant produces: a box that lands above the manifest fails the run, by name, and is not rolled back.
 2. **Read the plan:** `pnpm run fleet:patch` prints, per box, what it would do (`a feature update first`, or `ABOVE the manifest`) and changes nothing.
 3. **Run it:** `pnpm run fleet:patch -- --apply`. It runs, in order, and stops at the first one that fails, naming the box:
+   - the upgrade's own gates (`patch.yml --preflight`): a box that is busy, did not answer, or is above the manifest's Windows build refuses the run **before any code is delivered**;
    - `deploy.yml`, the worker code the manifest pins, with its own read-back;
    - `patch.yml`, **one box at a time** (`serial: 1`, `any_errors_fatal`): refuse the box if it is capturing or ABOVE the manifest; lift the Windows freeze; bring Windows to the manifest's release (the
      Installation Assistant, when the box is on an older release) and to exactly its KB; restart if Windows asks; install the manifest's Node, NVDA and Edge and the display driver pin through the role's own task
      files; freeze again in an `always:`; read the box back;
-   - a closing read of **every** box against the whole manifest (the reading `pnpm run fleet:drift` makes), which fails the run on any difference and on any box that does not answer.
+   - a closing read of **every** box against the whole manifest (the reading `pnpm run fleet:drift` makes), which fails the run on any difference and on any box that does not answer (a box that was just
+     restarted is asked again for up to five minutes). Under `--limit` it reads the boxes the run touched, and says so.
 4. **If it stops,** the output names the box and nothing is rolled back. Fix it and run `fleet:patch -- --apply` again, or `--limit=<box>` for that box: a box already on the manifest is checked and left as it is.
 
 What stops a run: a box that is busy, a box that did not answer (wake it first: the closing read fails on a box it could not read), a box **above** the manifest (never rolled back; edit
-the manifest to catch up with it, or decide what becomes of the box), a freeze that did not read back, or a box whose build, Edge, NVDA or Node is not the manifest's at the end.
+the manifest to catch up with it, or decide what becomes of the box), a freeze that did not read back, or a box whose build, Edge, NVDA or Node is not the manifest's at the end. A box above the
+manifest by revision only (`/health` reports no revision) is refused by `patch.yml` when its turn comes, not by the gates. Defender's signatures are refreshed on every box, every run; they are not
+a manifest field and not part of the closing read.
 
 **Between upgrades the boxes are watched, and re-frozen.** `fleet:freeze-schedule` installs two control-plane timers (read them with `systemctl list-timers 'a11y-fleet-*'` on the control host):
 

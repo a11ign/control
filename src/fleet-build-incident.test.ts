@@ -5,9 +5,11 @@
 // The fleet's drift comes out of the REAL `fleetConsistency`, so a fixture cannot invent a shape `fleetStatus` never returns.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
-  buildSpread, reconcileIncident, fleetBuildIncidentTick, ghIncidentDeps, readOnlyIncidentDeps, openFleetBuildIncident, parseIncident,
+  buildSpread, reconcileIncident, fleetBuildIncidentTick, ghIncidentDeps, ghPatchStartDeps, refuseUnattendedUpgrade, readOnlyIncidentDeps, openFleetBuildIncident, parseIncident,
   incidentBody, incidentTitle, busyReasonAt, FLEET_BUILD_INCIDENT_LINE, FLEET_BUILD_INCIDENT_LABELS, FLEET_BUILD_INCIDENT_REPO,
   type BuildStatus, type IncidentDeps, type OpenIncident, type PatchStart, type PatchStartDeps,
 } from "./fleet-build-incident.ts";
@@ -282,11 +284,11 @@ test("a failed start (a non-zero exit with no REFUSING line) is recorded with it
   assert.equal(effects.filter((effect) => effect === "patch").length, 1);
 });
 
-test("a dry run says it WOULD start, and starts nothing and records nothing", () => {
+test("a dry run says it would NOT start an upgrade, and starts nothing and records nothing", () => {
   const said: string[] = [];
   const { deps, effects, patch } = seam([incident(5100)]);
   reconcileIncident(buildSpread(rulingMap), readOnlyIncidentDeps(deps, (line) => said.push(line)));
-  assert.ok(said.some((line) => line.startsWith("WOULD START")), "the start is said");
+  assert.ok(said.some((line) => line.startsWith("WOULD NOT START an upgrade")), "the refusal is said");
   assert.deepEqual(effects, [], "and the seam saw no record, no patch and no comment");
   assert.equal(patch.record, null);
 });
@@ -467,4 +469,25 @@ test("a dry run reads and says, and files and closes nothing", () => {
 
 test("the title counts the laggards, not the fleet", () => {
   assert.equal(incidentTitle(buildSpread(fleet({ 2: OLD, 3: NEW, 4: NEW }))), `Mixed Windows build across the fleet: 1 boxes behind ${NEW}`);
+});
+
+// A11-205 (docs/adr/0001): nothing on a box upgrades by itself, so the watch that files the incident does not start an upgrade either.
+test("A11-205: the real start spawns nothing and refuses, naming the person's command", () => {
+  const start = ghPatchStartDeps("runs/never-written.json", () => "", () => 0);
+  const answer = start.runPatch();
+  assert.equal(answer.status, 2);
+  assert.match(answer.refusal, /^REFUSING: the fleet upgrade is a person's run, not the watch's .*fleet:patch -- --apply/);
+  assert.deepEqual(refuseUnattendedUpgrade(), answer);
+  const source = readFileSync(fileURLToPath(new URL("./fleet-build-incident.ts", import.meta.url)), "utf8");
+  assert.doesNotMatch(source, /spawnSync|child_process.*spawn|--playbook=patch\.yml|"--apply"/, "no code path of this file starts a play");
+  assert.match(source, /execFileSync/, "negative control: the file still runs `gh`, so the pattern above is about plays and not about every process");
+});
+
+test("A11-205: a mixed fleet still stops the line, and the one recorded start is the refusal, not an upgrade", () => {
+  const { status, refusal } = refuseUnattendedUpgrade();
+  const { deps, effects, patch } = seam([incident(5100)], { status, refusal });
+  const outcome = reconcileIncident(buildSpread(rulingMap), deps);
+  assert.match(outcome.patch?.outcome ?? "", /^refused: REFUSING: the fleet upgrade is a person's run/);
+  assert.equal(patch.record?.issue, 5100);
+  assert.equal(effects.filter((effect) => effect === "patch").length, 1, "asked once, as before");
 });

@@ -122,7 +122,7 @@ export { inventorySources, inventoryReadScript, parseInventoryReads };
  * An unrecognised flag is otherwise IGNORED, so it runs the default and reports success.
  */
 refuseUnknownFlags(
-  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply",
+  ["--playbook=", "--ref=", "--limit=", "--serial=", "--allow-protocol-change", "--allow-edge-downgrade", "--apply", "--preflight",
     "--allow-offline=", "--allow-hold=",
     "--display-mode=", "--layer-ref="],
   { entry: import.meta.url, command: "npm run fleet:deploy" });
@@ -588,7 +588,7 @@ const argOf = (name: string) => flagValue(process.argv, name);
  */
 function parseArgs(): {
     chosen: string; limitFlag: string | undefined; serialFlag: string | undefined; ref: string;
-    allowEdgeDowngrade: boolean; apply: boolean; displayMode: string | undefined;
+    allowEdgeDowngrade: boolean; apply: boolean; preflight: boolean; displayMode: string | undefined;
     layerCommits: Record<string, string>; publishedWorkerDir: string | null;
 } {
   const refuse = (message: string) => {
@@ -625,6 +625,9 @@ function parseArgs(): {
   }
 
   const apply = process.argv.includes("--apply");
+  // `fleet:patch -- --apply` asks the upgrade's gates BEFORE `deploy.yml` puts new code on every box (`fleet-upgrade.ts`): this is that question, and nothing else.
+  const preflight = process.argv.includes("--preflight");
+  if (preflight && !(chosen === "patch.yml" && apply)) refuse("refusing --preflight: it asks patch.yml's gates for an --apply run, and nothing else.");
   const osRefusal = osRollbackRefusal({ chosen, limitFlag, apply });
   if (osRefusal) refuse(osRefusal);
   // Every refusal this flag needs lives in one place, so the shape check, the playbook check and the
@@ -636,7 +639,7 @@ function parseArgs(): {
   if (!validRef(ref)) refuse(`refusing --ref=${ref}: a commit or simple branch name only.`);
   const { layerCommits, publishedWorkerDir } = layerCommitsOrRefuse({ chosen, refuse });
 
-  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir };
+  return { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, preflight, displayMode, layerCommits, publishedWorkerDir };
 }
 
 /**
@@ -2175,7 +2178,7 @@ export function patchPlan({ boxes, limitFlag, apply, target, differences }: {
     if (!box.reachable) return `  ${box.name}  ${verb}: DID NOT ANSWER`;
     const against = boxAgainstManifest(box, target);
     const differs = (differences ?? []).filter((difference) => difference.box === box.name);
-    if (differences !== undefined && differs.length === 0 && against === "same") return `  ${box.name}  on the manifest, nothing to upgrade${box.busy ? " (BUSY)" : ""}  [${build}]`;
+    if (differences !== undefined && differs.length === 0 && against === "same") return `  ${box.name}  reads as the manifest (Windows, Edge, NVDA, worker code)${box.busy ? " (BUSY)" : ""}  [${build}]`;
     const note = PLAN_NOTES[against];
     const reasons = differs.length === 0 ? "" : ` -- ${differs.map(({ field, has, wants }) => `${field} ${has ?? "unreported"} -> ${wants}`).join("; ")}`;
     return `  ${box.name}  ${verb}${box.busy ? ": BUSY" : ""}  [${build}]${note}${reasons}`;
@@ -2214,7 +2217,7 @@ type PatchGate = { dryRun: boolean; followBudgetMs: number };
  * `dryRun` is `true` when this was a dry run and the command is done. The manifest is read here, in a dry run too: it is a read, and the plan is what says
  * the target the run would take every box to.
  */
-async function enforcePatchGate({ chosen, limitFlag, apply }: { chosen: string; limitFlag: string | undefined; apply: boolean }): Promise<PatchGate> {
+async function enforcePatchGate({ chosen, limitFlag, apply, preflight }: { chosen: string; limitFlag: string | undefined; apply: boolean; preflight: boolean }): Promise<PatchGate> {
   const ordinary = { dryRun: false, followBudgetMs: PLAYBOOK_TIMEOUT_MS[chosen] ?? DEFAULT_PLAYBOOK_TIMEOUT_MS };
   if (chosen !== "patch.yml") return ordinary;
   const sources = inventorySources(readFileSync(resolve(ANSIBLE_DIR, "ansible.cfg"), "utf8"));
@@ -2231,19 +2234,20 @@ async function enforcePatchGate({ chosen, limitFlag, apply }: { chosen: string; 
   const refusal = patchRefusal({ apply, limitFlag, boxes, allowOffline: allowOfflineNames(process.argv.slice(2)), target });
   const outcome = patchOutcome({ apply, refusal });
   if (refusal) { process.stderr.write(`${refusal}\n`); process.exit(2); }
-  return { dryRun: outcome === "plan", followBudgetMs: patchFollowBudgetMs({ boxes, limitFlag, target }) };
+  if (preflight) process.stdout.write("  preflight: every gate of the upgrade passed; nothing was changed.\n\n");
+  return { dryRun: outcome === "plan" || preflight, followBudgetMs: patchFollowBudgetMs({ boxes, limitFlag, target }) };
 }
 
 async function main() {
   // Throws before anything else if neither A11Y_CONTROL_HOST nor its installed file exist -- see #83, #285.
   CONTROL_PLANE = requireControlPlaneHost();
   requireControlPlaneKey(); // same, for A11Y_PVE_KEY -- see #85
-  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, displayMode, layerCommits, publishedWorkerDir } = parseArgs();
+  const { chosen, limitFlag, serialFlag, ref, allowEdgeDowngrade, apply, preflight, displayMode, layerCommits, publishedWorkerDir } = parseArgs();
   await guardProtocolChange(chosen, { readLocal: () => readLocalProtocol({ publishedDir: publishedWorkerDir }) });
   const { moved } = await enforceLinkGate(chosen);
   await enforceSequenceHold(chosen, { limitFlag });
   // #4446: AFTER the gates that ask least of the control plane, BEFORE anything is written to it. A dry run ends HERE.
-  const patchGate = await enforcePatchGate({ chosen, limitFlag, apply });
+  const patchGate = await enforcePatchGate({ chosen, limitFlag, apply, preflight });
   if (patchGate.dryRun) return;
   // #2832: AFTER every gate that can refuse cheaply, BEFORE the control plane moves: a moved worker is aimed
   // at its new address only once its host key, recorded under its NAME, has been verified strictly.

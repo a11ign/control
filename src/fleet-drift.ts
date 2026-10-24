@@ -152,8 +152,9 @@ export function driftRecordOf({ drift, probes, previous, freeze, now }: {
 export const DRIFT_EXIT = Object.freeze({ ON_MANIFEST: 0, DIFFERS: 3, NOTHING_ANSWERED: 4 });
 
 export function driftExitCode(record: DriftRecord): number {
-  if (record.reachable === 0) return DRIFT_EXIT.NOTHING_ANSWERED;
-  return record.differences.length > 0 || record.unreadable !== null ? DRIFT_EXIT.DIFFERS : DRIFT_EXIT.ON_MANIFEST;
+  // A manifest that cannot be read is a failure however many boxes answered: with every box asleep it must not read as a quiet night.
+  if (record.unreadable !== null || record.differences.length > 0) return DRIFT_EXIT.DIFFERS;
+  return record.reachable === 0 ? DRIFT_EXIT.NOTHING_ANSWERED : DRIFT_EXIT.ON_MANIFEST;
 }
 
 /** The lines a person reads, one per fact. A carried difference says so: the box did not answer this hour. */

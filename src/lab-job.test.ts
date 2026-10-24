@@ -1022,6 +1022,18 @@ test("A11-205: a job with no fleet demand, and a describe-only run, do not read 
   }
 });
 
+test("A11-205: only a CAPTURE-BEARING job asks: a diagnostic on a drifting box (capture-check, evidence-check) is not refused for it", async () => {
+  const diagnostics = fleetDispatchingJobs(CATALOGUE).filter((job) => !captureBearingJobs(CATALOGUE).includes(job));
+  assert.ok(diagnostics.length > 0, "premise: the catalogue has fleet jobs that are not capture-bearing");
+  for (const job of diagnostics) {
+    const seen = await drive2803(["-e", `job=${job}`, "-e", "worker=a11y-worker-a"], { readDrift: async () => { throw new Error(`${job} must not be asked`); } });
+    assert.ok(!seen.events.includes("drift"), job);
+    assert.doesNotMatch(seen.stderr, /drift|differs from deploy-pins/, job);
+  }
+  const capturing = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => NOTHING_DRIFTS });
+  assert.ok(capturing.events.includes("drift"), "negative control: a capture-bearing job does ask");
+});
+
 test("A11-205: driftDecision is the same decision, pure: exclude, refuse a named pool, refuse an empty one, refuse an unreadable manifest", () => {
   const pool = [{ name: "a", url: "http://192.0.2.1:8765" }, { name: "b", url: "http://192.0.2.2:8765" }];
   assert.deepEqual(driftDecision({ job: "capture", pool, selected: false, reading: { drifting: ["b"] } }), { excluded: ["b"] });

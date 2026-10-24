@@ -330,6 +330,38 @@ test("A11-205: a caller's -e cannot move the target off the manifest; the manife
   assert.notEqual(targetInputs({ patch_target_kb: "kb" }), 0, "a KB that is not shaped as one");
 });
 
+/**
+ * The parameters of the readback task, templated by the real Ansible in a play that has (or lacks) the upgrade play's own `vars_files`. An `include_role` keeps the role's
+ * defaults to itself, so a play that uses `worker_edge_exe` outside the role must load them itself or its first box fails on an undefined variable.
+ */
+function readbackParameters(withVarsFiles: boolean): { status: number | null; out: string; parameters: Record<string, string> | null } {
+  const root = mkdtempSync(join(tmpdir(), "patch-readback-"));
+  mkdirSync(join(root, "ansible", "roles", "worker", "defaults"), { recursive: true });
+  for (const file of ["deploy-pins.json", "layers.json"]) copyFileSync(join(ANSIBLE, "..", file), join(root, file));
+  copyFileSync(join(ANSIBLE, "roles/worker/defaults/main.yml"), join(root, "ansible/roles/worker/defaults/main.yml"));
+  const task = allTasks(PATCH_PLAY.tasks).find((candidate) => candidate.name === "Ask the box what Edge and Node it has now");
+  const out = join(root, "out.json");
+  const playbook = join(root, "ansible", "readback.yml");
+  writeFileSync(playbook, JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false,
+    ...(withVarsFiles ? { vars_files: PATCH_PLAY.vars_files } : {}),
+    tasks: [{ "ansible.builtin.set_fact": { readback: task?.["ansible.windows.win_powershell"].parameters } },
+      { "ansible.builtin.copy": { dest: out, content: "{{ readback | to_json }}" } }] }]));
+  const run = runLocal({ playbook, hosts: { localhost: {} } });
+  let parameters: Record<string, string> | null = null;
+  try { parameters = JSON.parse(readFileSync(out, "utf8")); } catch { parameters = null; }
+  return { status: run.status, out: run.out, parameters };
+}
+
+test("A11-205: the readback's Edge and Node paths template in the upgrade play's own scope, which an include_role does not provide", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const loaded = readbackParameters(true);
+  assert.equal(loaded.status, 0, loaded.out);
+  assert.match(loaded.parameters?.EdgeExe ?? "", /\\msedge\.exe$/);
+  assert.match(loaded.parameters?.NodeExe ?? "", /\\node\.exe$/);
+  const without = readbackParameters(false);
+  assert.notEqual(without.status, 0, "negative control: without `vars_files` the same task has no `worker_edge_exe`, the fault this test is for");
+  assert.match(without.out, /worker_edge_exe|worker_node_home/);
+});
+
 /** Run only the above-the-manifest refusal over one invented box with the given pre-upgrade build. */
 const aboveManifest = (build: string) => runLocal({ playbook: PATCH, tags: "patch_above_manifest", hosts: { "a11y-worker-7": {} }, extra: BUILD_OF(build) });
 const [BUILD_NUMBER, BUILD_UBR] = MANIFEST.windows.build.split(".").map(Number);

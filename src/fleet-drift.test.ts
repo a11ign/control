@@ -104,6 +104,12 @@ test("nothing answering is exit 4, not 3 and not 0: no box was compared; and 4 i
   assert.match(driftLines(record).join("\n"), /no box answered: nothing was compared/);
 });
 
+test("an unreadable manifest is exit 3 even when no box answered: a broken manifest must not read as a quiet night", async () => {
+  const none = driftRecordOf({ ...await read([silent(2)], () => { throw new Error("deploy-pins.json declares no `windows`"); }), previous: null, freeze: null, now: NOW });
+  assert.equal(none.reachable, 0);
+  assert.equal(driftExitCode(none), 3);
+});
+
 test("a manifest that cannot be read FAILS the reading with its reason, because a check with no expectation passes every box", async () => {
   const record = await recordOf([answering(2)]);
   assert.equal(driftExitCode(record), 0, "premise: the same fleet passes when the manifest reads");

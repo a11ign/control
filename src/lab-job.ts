@@ -354,6 +354,8 @@ export type DriftReading = { drifting: string[]; } | { cannotAsk: string; };
 /**
  * A BOX THAT DIFFERS FROM THE MANIFEST IS OUT OF CAPTURE (A11-205, docs/adr/0001), decided on a read made just now and not on a ledger up to an hour old.
  *
+ * - ONLY A CAPTURE-BEARING JOB asks: "out of capture" is about captures, and a diagnostic on a drifting box (`capture-check`, `evidence-check`) is how its fault is read.
+ *   `--allow-stale-workers` does not lift it: a box that differs in Windows, Edge or NVDA is not interchangeable for capture whatever the flag says about its code.
  * - A pool the caller did NOT name loses the boxes that differ: they are named on stderr and handed to the playbook as `drift_excluded`, which removes them next to
  *   `a11y_capture: false`. The rest of the fleet keeps capturing.
  * - A pool the caller NAMED keeps its all-or-nothing rule, as `wakeRefusal` does for a box that would not wake: a run whose population is part of what it
@@ -548,9 +550,10 @@ async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: W
   const awake = placed.needed.filter((w) => !leftOut.includes(w.name));
   // DRIFT NEXT (A11-205): after the wake, because a box that was asleep can only be read now, and before the staleness check, which would refuse a box whose worker
   // code differs from the manifest's instead of leaving it out. A box that differs is out of capture; `readDrift` is passed only by the command-line entry.
-  const driftExcluded = readDrift && awake.length ? await excludeDrifting({ job, pool: awake, selected: needs.selected, readDrift }) : [];
+  const capturing = captureBearingJobs(catalogue).includes(job);
+  const driftExcluded = readDrift && capturing && awake.length ? await excludeDrifting({ job, pool: awake, selected: needs.selected, readDrift }) : [];
   const pool = awake.filter((w) => !driftExcluded.includes(w.name)).map((w) => w.url);
-  if (captureBearingJobs(catalogue).includes(job)) {
+  if (capturing) {
     const hash = expected ?? await layerCodeVersion("nvda-worker");
     await checkFleet(hash, pool, {
       when: "before dispatching to the lab", allow: allowStale, bareMetalUrls: pool,

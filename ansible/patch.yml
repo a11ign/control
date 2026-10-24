@@ -52,7 +52,10 @@
 #   - The lift is the role's (`worker_freeze_lift_windows`). `TargetReleaseVersion`, `TargetReleaseVersionInfo` and `ProductVersion` are part of the freeze and
 #     stand at the manifest's `windows.release`, so the Installation Assistant is never steered off the manifest. The target does NOT steer the Assistant:
 #     asked for 25H2, worker 6 went to 26H2 (build 26300), the build the Assistant offers.
-#   - A box already ON the manifest's build has its Windows work skipped and still has Node, NVDA, Edge and the display driver checked against the manifest.
+#   - A box already ON the manifest's build has its Windows work skipped and still has Node, NVDA, Edge and the display driver checked against the manifest. Defender's
+#     signatures are refreshed on every box, every run (they are not a manifest field).
+#   - The Installation Assistant lands a box on the release's CURRENT build, whatever the manifest says. For a run that changes the release, `windows.build` must be the build
+#     the Assistant produces: a box that lands above the manifest is refused at the end, by name, and is not rolled back.
 #   - Put back in the `always`: the whole freeze, the lifted levers included.
 #   - The last task of the box fails it, by worker number, when its build is not the manifest's or cannot be read. A window that moved nothing must not read as
 #     success (#4733). A box that needed a second pass (the new build's own cumulative) fails here and is re-run with `--limit`; `any_errors_fatal` halts the rest.
@@ -131,6 +134,10 @@
   gather_facts: false
   serial: 1
   any_errors_fatal: true
+  # The role's declared paths (Edge's image, Node's home), read where this play uses them for its readback: an `include_role` keeps the role's defaults to itself, so
+  # without this the readback below templated an undefined `worker_edge_exe` and the first box failed (`freeze-proof.yml` does the same).
+  vars_files:
+    - roles/worker/defaults/main.yml
   vars:
     # The fleet's one manifest (A11-205), one directory up from the playbooks, as the role reads it.
     patch_manifest: "{{ lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json }}"
