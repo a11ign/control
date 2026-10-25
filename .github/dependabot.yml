@@ -31,7 +31,9 @@ updates:
       # a workspace package: pnpm links it and `changeset version` owns its version
       - dependency-name: "@a11ign/control"
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/ansible-collections
     schedule:
       interval: weekly
       day: monday

@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { checkDependabotConfig } from "@a11ign/toolchain/dependabot-config";
 import { FROZEN } from "@a11ign/toolchain/dependabot-frozen";
@@ -31,4 +31,17 @@ function unfrozenLayers(): string[] {
 
 test("every package the fleet's pins manifest pins is frozen, so Dependabot never proposes it", () => {
   assert.deepEqual(unfrozenLayers(), [], "a layer of deploy-pins.json is not in FROZEN (@a11ign/toolchain/dependabot-frozen): add it there, release the toolchain, and bump it here");
+});
+
+/** The `/.github/actions/<name>` directory of every local composite action this repository holds. */
+function localActionDirectories(): string[] {
+  const actions = new URL("../.github/actions/", import.meta.url);
+  return readdirSync(actions).filter((name) => existsSync(new URL(`${name}/action.yml`, actions))).map((name) => `/.github/actions/${name}`);
+}
+
+test("Dependabot reads every local composite action, whose pins (actions/cache) it updates only when the directory is named", () => {
+  const written = readFileSync(new URL("../.github/dependabot.yml", import.meta.url), "utf8").split("\n").map((line) => line.trim());
+  const actions = localActionDirectories();
+  assert.ok(actions.includes("/.github/actions/ansible-collections"), "positive control: the composite action this test exists for is found");
+  assert.deepEqual(actions.filter((directory) => !written.includes(`- ${directory}`)), [], "a local action's directory is missing from .github/dependabot.yml");
 });
