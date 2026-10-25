@@ -21,7 +21,7 @@ In the core's lay (`ci.yml` lays this repository into a checkout of a11ign/a11ig
 
 **What the block shows:** the gate runs the one request `fleet` sends and nothing else; the play's text keeps the private key on the lab; every capture job requires a label and is given its boxes, label and wait.
 
-**Live check before merge** (the chairman session, from the agents host; the standing approval of 2026-10-17 covers the Ansible plays; they touch the control plane and the lab, and no fleet box). A pass is the play's last two tasks succeeding: the lab's `fleet lease list --json` answers JSON, and the gate refuses `id` with its own words.
+**Live check, AFTER merge** (the chairman's session, from the agents host; the ticket's Decisions entry "The lab-access play is an after-merge check" (https://linear.app/a11ign/issue/A11-263/the-fleet-job-service-supports-labs-captures-per-case-bodies-same-box) moves it there, because the play needs this code on the control plane and the fleet is frozen). The play touches the control plane and the lab, and no fleet box. A pass is the play's last two tasks succeeding: the lab's `fleet lease list --json` answers JSON, and the gate refuses `id` with its own words.
 
 ```bash
 set -euo pipefail
@@ -29,7 +29,7 @@ BRANCH=admin/a11-263-the-fleet-job-service-supports-labs-captures-per-case-bodie
 pnpm run fleet:jobs-install -- -e fleet_jobs_ref="$BRANCH"        # the service, and so gate.ts, on the plane
 ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-lab-access.yml -e fleet_jobs_ref="$BRANCH"
 # expect: "the lab reads the plane's leases: N held" and "the gate refused `id`: refused: this key runs only the fleet job service's remote half ..."
-# afterwards, once the pull request is merged: pnpm run fleet:jobs-install, then the lab-access play with no -e (the default ref is main)
+# after the merge the branch above is `main`: run fleet:jobs-install and the lab-access play with no -e (the default ref is main), and quote the two read-backs on the ticket
 ```
 
 This step changes nothing a lab client reads yet: the variables are read from step 3. It does make `label` required of the jobs above, so a launch of one (including a lab gate dispatch) needs `-e label=<ticket key>` from now on.
