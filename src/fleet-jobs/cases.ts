@@ -97,6 +97,9 @@ export function parseCasesFile(text: string): { cases: CaseSpec[]; groups: Recor
   return { cases: parsed.cases as CaseSpec[], groups: (parsed.groups ?? {}) as Record<string, GroupSpec> };
 }
 
+/** The note on a capture that was skipped because its group's `skipWhen` matched. */
+export const SKIPPED = "environment matches skipWhen";
+
 /** The record a case's attempt is written to: `<id>.a<attempt>.json`. */
 export const caseRecordFile = (id: string, attempt: number): string => `${id}.a${attempt}.json`;
 
@@ -117,12 +120,12 @@ export function skipsOn(spec: GroupSpec | undefined, reading: BoxReading | null 
  * Mark `skipped` every group on `box` that has not begun and whose `skipWhen` matches the box's reading. Idempotent, and decided once for every group on
  * the box, so a box that leaves, or a box a restart finds gone, skips such a group and does not fail it. Returns the cases it marked.
  */
-export function skipMatchingGroups(captures: CaptureEntry[], groups: Record<string, GroupSpec>, box: string, reading: BoxReading | null | undefined, note: string): CaptureEntry[] {
+export function skipMatchingGroups(captures: CaptureEntry[], groups: Record<string, GroupSpec>, box: string, reading: BoxReading | null | undefined): CaptureEntry[] {
   const skipped: CaptureEntry[] = [];
   for (const group of new Set(captures.filter((c) => c.box === box && c.group !== undefined).map((c) => c.group!))) {
     const entries = entriesOf(captures, group);
     if (!entries.every((c) => c.status === "pending") || !skipsOn(groups[group], reading)) continue;
-    for (const entry of entries) { entry.status = "skipped"; entry.note = note; skipped.push(entry); }
+    for (const entry of entries) { entry.status = "skipped"; entry.note = SKIPPED; skipped.push(entry); }
   }
   return skipped;
 }

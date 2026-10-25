@@ -1,6 +1,6 @@
 import { buildManifest } from "./manifest.ts";
 import type { PinsReading } from "./manifest.ts";
-import { reassignGroups, skipMatchingGroups } from "./cases.ts";
+import { SKIPPED, reassignGroups, skipMatchingGroups } from "./cases.ts";
 import { passesRefusal, planCaptures, planCases, reassign } from "./plan.ts";
 import type { Availability, BoxClaims } from "./claims.ts";
 import type { BoxResolver } from "./boxes.ts";
@@ -39,7 +39,7 @@ export type RunnerDeps = {
 };
 
 export const RE_CAPTURED = "re-captured after a service restart";
-export const SKIPPED = "environment matches skipWhen";
+export { SKIPPED };
 
 /** A box fault is the box's, not the page's: no answer, `429` (busy with something else) or a `5xx`. A page that errors is a record and a box streak of zero. */
 const isBoxFault = (status: number): boolean => status === 0 || status === 429 || status >= 500;
@@ -363,7 +363,7 @@ export class Runner {
   /** Skip the groups of a case job that its box's environment says need no capture. True when any were. */
   private skipMatching(id: string, request: JobRequest, state: JobStateFile, name: string): boolean {
     if (!request.cases) return false;
-    const skipped = skipMatchingGroups(state.captures, request.groups ?? {}, name, state.readings[name], SKIPPED);
+    const skipped = skipMatchingGroups(state.captures, request.groups ?? {}, name, state.readings[name]);
     for (const group of new Set(skipped.map((c) => c.group))) this.d.log(`${id}: group ${group} skipped on ${name}: ${SKIPPED}`);
     return skipped.length > 0;
   }
