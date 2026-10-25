@@ -453,7 +453,7 @@ const REMOTE = new URL("./remote.ts", import.meta.url).pathname;
 const ROUTE_DIR = mkdtempSync(join(tmpdir(), "fleet-cases-route-"));
 cleanups.push(() => rmSync(ROUTE_DIR, { recursive: true, force: true }));
 /** `remote.ts` as the control plane runs it, but with the inventory handed in (the real one is read over ssh), on this machine against the store in `dir`. */
-const ROUTE = join(ROUTE_DIR, "route.ts");
+const ROUTE = join(ROUTE_DIR, "route.mts");
 writeFileSync(ROUTE, `import { readFileSync } from "node:fs";
 import { remote } from ${JSON.stringify(REMOTE)};
 import { JobStore } from ${JSON.stringify(new URL("./store.ts", import.meta.url).pathname)};
