@@ -330,7 +330,7 @@ test("a facts job's status speaks of reads and boxes, not captures and pages, an
   const view = viewJob({ request: (t.store.readRequest(id) as { value: JobRequest }).value, state: t.state(id), cancelled: false, beat: null, now: Date.now() });
   assert.equal(view.kind, "facts");
   const text = renderView(view).join("\n");
-  assert.match(text, /^reads: 2 of 2 done, 1 failed, 0 left  \(2 boxes\)$/m);
+  assert.match(text, /^reads: 2 of 2 done, 1 failed, 0 left {2}\(2 boxes\)$/m);
   assert.match(text, /^ {2}the read on w3: w3 is unreachable$/m);
   assert.ok(!/pages x/.test(text));
   assert.equal(entryNoun(view), "reads");
