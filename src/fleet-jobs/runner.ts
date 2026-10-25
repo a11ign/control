@@ -1,6 +1,6 @@
 import { buildManifest } from "./manifest.ts";
 import type { PinsReading } from "./manifest.ts";
-import { entriesOf, reassignGroups, skipsOn } from "./cases.ts";
+import { reassignGroups, skipMatchingGroups } from "./cases.ts";
 import { passesRefusal, planCaptures, planCases, reassign } from "./plan.ts";
 import type { Availability, BoxClaims } from "./claims.ts";
 import type { BoxResolver } from "./boxes.ts";
@@ -234,6 +234,7 @@ export class Runner {
    */
   private moveOff(request: JobRequest, state: JobStateFile, box: string, live: string[]): void {
     if (!request.cases) { reassign(state.captures, box, live); return; }
+    this.skipMatching(request.id, request, state, box);
     for (const { entry, error } of reassignGroups(state.captures, request.groups ?? {}, box, live).failed) this.failUnsent(request.id, entry, error);
   }
 
@@ -302,6 +303,8 @@ export class Runner {
         this.dropDrifting(run);
         this.releaseFinished(run, inflight);
         this.dispatchIdleBoxes(run, inflight);
+        // A box whose last groups were just skipped has no work left: it is let go now, not when another box's capture ends.
+        this.releaseFinished(run, inflight);
         if (!inflight.size) break;
         await Promise.race(inflight.values());
       }
@@ -353,15 +356,16 @@ export class Runner {
    * sent and no record is written, so what the box already holds stands.
    */
   private nextCapture(run: Run, name: string): CaptureEntry | undefined {
-    for (;;) {
-      const next = run.state.captures.find((c) => c.box === name && c.status === "pending");
-      if (!next?.group) return next;
-      const group = entriesOf(run.state.captures, next.group);
-      if (!group.every((c) => c.status === "pending") || !skipsOn(run.request.groups?.[next.group], run.state.readings[name])) return next;
-      for (const entry of group) { entry.status = "skipped"; entry.note = SKIPPED; }
-      this.persist(run);
-      this.d.log(`${run.id}: group ${next.group} skipped on ${name}: ${SKIPPED}`);
-    }
+    if (this.skipMatching(run.id, run.request, run.state, name)) this.persist(run);
+    return run.state.captures.find((c) => c.box === name && c.status === "pending");
+  }
+
+  /** Skip the groups of a case job that its box's environment says need no capture. True when any were. */
+  private skipMatching(id: string, request: JobRequest, state: JobStateFile, name: string): boolean {
+    if (!request.cases) return false;
+    const skipped = skipMatchingGroups(state.captures, request.groups ?? {}, name, state.readings[name], SKIPPED);
+    for (const group of new Set(skipped.map((c) => c.group))) this.d.log(`${id}: group ${group} skipped on ${name}: ${SKIPPED}`);
+    return skipped.length > 0;
   }
 
   /** The body sent for an entry: a case's own body exactly, else the job's body, with the URL. Nothing else is merged in. */
@@ -410,6 +414,7 @@ export class Runner {
   private leave(run: Run, name: string, why: string): void {
     run.state.dropped.push({ box: name, reason: why });
     const error = leftTheFleet(name, why);
+    this.skipMatching(run.id, run.request, run.state, name);
     for (const entry of run.state.captures.filter((c) => c.box === name && c.status === "pending")) this.failUnsent(run.id, entry, error);
     this.persist(run);
     this.d.log(`${run.id}: ${error}`);
@@ -442,7 +447,7 @@ export class Runner {
     const unserved = run.state.captures.filter((c) => c.status === "pending" || (c.status === "failed" && !c.startedAt));
     if (unserved.length && !this.liveBoxes(run).length) {
       const why = run.state.dropped.map((d) => `${d.box}: ${d.reason}`).join("; ");
-      return this.finish(run, "failed", `no box was left to capture ${unserved.length} pages${why ? ` (${why})` : ""}`);
+      return this.finish(run, "failed", `no box was left to capture ${unserved.length} ${run.request.cases ? "cases" : "pages"}${why ? ` (${why})` : ""}`);
     }
     this.finish(run, "done");
   }

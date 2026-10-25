@@ -66,8 +66,9 @@ export function casesRefusal(cases: unknown, groups: unknown): string | null {
   }
   const specs = cases as CaseSpec[];
   const ids = specs.map((entry) => entry.id);
-  const twice = ids.find((id, i) => ids.indexOf(id) !== i);
-  if (twice !== undefined) return `case ${twice} is given twice: a case id is unique in the job`;
+  const lower = ids.map((id) => id.toLowerCase());
+  const twice = ids.find((_, i) => lower.indexOf(lower[i]!) !== i);
+  if (twice !== undefined) return `case ${twice} is given twice (ids that differ only in letter case are the same file on some disks): a case id is unique in the job`;
   const named = new Set(specs.filter((entry) => entry.group !== undefined).map((entry) => entry.group!));
   const clash = specs.find((entry) => entry.group === undefined && named.has(entry.id));
   if (clash) return `case ${clash.id} has no group, so it is a group of its own, and another case's group has that name`;
@@ -110,6 +111,20 @@ export function skipsOn(spec: GroupSpec | undefined, reading: BoxReading | null 
   const wanted = spec?.skipWhen?.environment;
   if (!wanted || !reading?.environment) return false;
   return Object.entries(wanted).every(([field, value]) => (reading.environment![field] ?? null) === value);
+}
+
+/**
+ * Mark `skipped` every group on `box` that has not begun and whose `skipWhen` matches the box's reading. Idempotent, and decided once for every group on
+ * the box, so a box that leaves, or a box a restart finds gone, skips such a group and does not fail it. Returns the cases it marked.
+ */
+export function skipMatchingGroups(captures: CaptureEntry[], groups: Record<string, GroupSpec>, box: string, reading: BoxReading | null | undefined, note: string): CaptureEntry[] {
+  const skipped: CaptureEntry[] = [];
+  for (const group of new Set(captures.filter((c) => c.box === box && c.group !== undefined).map((c) => c.group!))) {
+    const entries = entriesOf(captures, group);
+    if (!entries.every((c) => c.status === "pending") || !skipsOn(groups[group], reading)) continue;
+    for (const entry of entries) { entry.status = "skipped"; entry.note = note; skipped.push(entry); }
+  }
+  return skipped;
 }
 
 /**

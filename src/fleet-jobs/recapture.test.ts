@@ -326,6 +326,54 @@ test("a box that leaves mid-job fails its unsent cases and the others carry on; 
   t.done();
 });
 
+const MATCHING = { skipWhen: { environment: { v: "1" } } };
+const envOne = async () => ({ busy: false, code: "c", environment: { v: "1" }, policy: {} });
+
+test("a box whose last groups are all skipped is let go at once, while another box is still capturing", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const t = harness({ health: envOne, capture: async (box, body) => { if (body.task === "long good") await gate; return { status: 200, json: {} }; } });
+  // w2 gets the larger group, w3 gets the two pairs that skip
+  caseJob(t, [...pair("long"), { id: "long.c", url: "https://pages.test/long/c", body: { task: "long c" }, group: "long" }, ...pair("a"), ...pair("b")], { a: MATCHING, b: MATCHING }, { kind: "count", count: 2 });
+  await t.runner.tick();
+  await tick(); await tick();
+  assert.deepEqual(Object.keys(t.ledger.held()), ["w2"], "w3 had nothing to capture and was let go while w2 goes on");
+  release();
+  await t.runner.settled();
+  t.done();
+});
+
+test("a box that leaves skips a pending group whose skipWhen matches, and fails only the groups that needed a capture", async () => {
+  const t = harness({ evictAfter: 1, health: envOne, capture: async () => ({ status: 500, json: { error: "wedged" } }) });
+  const id = caseJob(t, [...pair("a"), ...pair("b"), ...pair("c")], { b: MATCHING }, { kind: "count", count: 1 });
+  await t.drain();
+  const byGroup = Object.fromEntries(["a", "b", "c"].map((g) => [g, t.state(id).captures.filter((c) => c.group === g).map((c) => c.status)]));
+  assert.deepEqual(byGroup, { a: ["failed", "failed"], b: ["skipped", "skipped"], c: ["failed", "failed"] });
+  assert.ok(!readdirSync(t.store.resultsDir(id)).some((f) => f.startsWith("b.")), "no record is written for the skipped group");
+  t.done();
+});
+
+test("a restart that finds a box gone skips a group whose skipWhen matches that box's reading, and moves or fails only the rest", async () => {
+  const seen = recording();
+  const t = harness({ capture: seen.capture, boxes: staticResolver(BOXES.filter((b) => b.name !== "w2")) });
+  const id = interruptedCases(t, { c: MATCHING });
+  const state = t.state(id);
+  state.readings = { w2: { code: "c", environment: { v: "1" }, policy: null }, w3: { code: "c", environment: { v: "9" }, policy: null } };
+  t.store.writeState(id, state);
+  await t.drain();
+  assert.deepEqual(t.state(id).captures.filter((c) => c.group === "c").map((c) => c.status), ["skipped", "skipped"]);
+  assert.ok(!seen.asked.some((a) => String(a.body.task).startsWith("c ")));
+  t.done();
+});
+
+test("a job that loses every box says how many cases were left, not pages", async () => {
+  const t = harness({ evictAfter: 1, capture: async () => ({ status: 500, json: { error: "wedged" } }) });
+  const id = caseJob(t, [...pair("a"), ...pair("b")], {}, { kind: "named", names: ["w2"] });
+  await t.drain();
+  assert.match(t.state(id).reason ?? "", /no box was left to capture 3 cases/);
+  t.done();
+});
+
 /** A case job as a killed service leaves it: `a` is partly done on w2 (its bad was not sent), `c` is untouched on w2, `b` is whole on w3. */
 function interruptedCases(t: Harness, groups: Record<string, GroupSpec> = {}): string {
   const id = caseJob(t, [...pair("a"), ...pair("b"), ...pair("c")], groups, { kind: "count", count: 2 });
@@ -471,6 +519,7 @@ test("fleet job recapture prints the new job's ID alone and says what it re-capt
   assert.equal(t.store.list().length, 2);
   assert.match((await cli(t, ["job", "recapture", source, "--label", "A11-263"])).stderr, /needs --cases/);
   assert.match((await cli(t, ["job", "recapture", source, "--cases", "x.bad"])).stderr, /--label is required/);
+  assert.match((await cli(t, ["job", "status", source, "--cases", "x.bad"])).stderr, /--cases is for fleet job recapture/);
   const refused = await cli(t, ["job", "recapture", source, "--cases", "x.nope", "--label", "A11-263"]);
   assert.equal(refused.code, 2);
   assert.match(refused.stderr, /has no case x\.nope/);

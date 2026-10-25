@@ -24,6 +24,7 @@ test("the cases file is read: each case keeps its own body, a case with no group
 test("a cases file is refused in words: a duplicate id, a bad id, manifest, a body that sets url, a URL that is not http, no cases, bad JSON", () => {
   const refusal = (text: string): string => { const parsed = parseCasesFile(text); return "refusal" in parsed ? parsed.refusal : "(accepted)"; };
   assert.match(refusal(file([...pair("a"), ...pair("a")])), /case a\.good is given twice/);
+  assert.match(refusal(file([{ id: "Page", url: "https://pages.test/", body: {} }, { id: "page", url: "https://pages.test/", body: {} }])), /case page is given twice \(ids that differ only in letter case/);
   assert.match(refusal(file([{ id: "../x", url: "https://pages.test/", body: {} }])), /id that is not letters, digits/);
   assert.match(refusal(file([{ id: "manifest", url: "https://pages.test/", body: {} }])), /called manifest/);
   assert.match(refusal(file([{ id: "x", url: "https://pages.test/", body: { url: "https://other.test/" } }])), /case x: the capture body sets url, which the service sets for itself/);

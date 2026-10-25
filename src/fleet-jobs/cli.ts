@@ -343,6 +343,7 @@ function listLeases(args: string[], deps: Deps): number {
 async function job(sub: string | undefined, args: string[], deps: Deps): Promise<number> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
     json: { type: "boolean" }, timeout: { type: "string" }, label: { type: "string" }, state: { type: "string" }, limit: { type: "string" }, to: { type: "string" }, cases: { type: "string" } } });
+  if (values.cases !== undefined && sub !== "recapture") { deps.err(`--cases is for fleet job recapture; fleet job ${sub} does not take it\n`); return EXIT.USAGE; }
   if (sub === "list") return listJobs(values, deps);
   const id = needId(positionals, deps, `fleet job ${sub}`);
   if (id === null) return EXIT.USAGE;
