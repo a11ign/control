@@ -8,8 +8,9 @@
  * injected so this never needs a real control plane.
  */
 import { test } from "node:test";
+import { networkInterfaces } from "node:os";
 import assert from "node:assert/strict";
-import { readControlPlaneFleet, inventoryPathFor, macsByHost } from "./control-plane-fleet.ts";
+import { readControlPlaneFleet, inventoryPathFor, macsByHost, controlPlaneInvocation } from "./control-plane-fleet.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
@@ -203,4 +204,24 @@ test("#3239: the install play derives the copy through inventoryDrift and refuse
   assert.match(play, /inventoryDrift/);
   assert.match(play, /ansible\.builtin\.fetch:/);
   assert.match(play, /\.extra \| length == 0/);
+});
+
+test("A11-243: controlPlaneInvocation is the one route to the control plane: ssh with the key and host from the environment, and a local shell on the plane itself", () => {
+  const was = { host: process.env.A11Y_CONTROL_HOST, key: process.env.A11Y_PVE_KEY };
+  try {
+    process.env.A11Y_CONTROL_HOST = "192.0.2.77";
+    process.env.A11Y_PVE_KEY = "/keys/pve";
+    const away = controlPlaneInvocation("echo hi");
+    assert.equal(away.file, "ssh");
+    assert.deepEqual(away.args.slice(0, 2), ["-i", "/keys/pve"]);
+    assert.deepEqual(away.args.slice(-2), ["root@192.0.2.77", "echo hi"], "the command is the last argument, the host the one before it");
+    assert.ok(away.args.includes("ConnectTimeout=10"));
+    const loopback = Object.values(networkInterfaces() as Record<string, { address: string }[]>).flat()[0]?.address;
+    process.env.A11Y_CONTROL_HOST = loopback;
+    assert.deepEqual(controlPlaneInvocation("echo hi"), { file: "sh", args: ["-c", "cd /root && echo hi"] }, "this machine IS the plane: no ssh to yourself");
+  } finally {
+    for (const [name, value] of [["A11Y_CONTROL_HOST", was.host], ["A11Y_PVE_KEY", was.key]] as const) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
 });

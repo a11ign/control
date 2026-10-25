@@ -35,6 +35,8 @@ const ALLOWED: Array<{ command: RegExp; why: string }> = [
     why: "Powers an idle worker off through sleep.yml. A shutdown, never an install." },
   { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/gate-heartbeat\.ts$/,
     why: "Posts the gate's heartbeat. Read-only on the fleet." },
+  { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/fleet-jobs\/src\/fleet-jobs\/service\.ts$/,
+    why: "The fleet job service (A11-243): a long-lived process, not a timer. It sends each worker its own /capture, wakes a box only through fleet-wake as lab:job does, and writes records to its store; it starts no play and names no playbook (src/fleet-jobs/fleet-jobs-unit.test.ts reads its sources). It installs nothing on any box." },
   { command: /^\/usr\/bin\/systemd-run --unit=a11y-job-corpus-snapshot /,
     why: "Dispatches the corpus snapshot as a lab job on the lab host. It touches no fleet box." },
 ];

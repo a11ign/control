@@ -51,6 +51,8 @@
     "fleet:os-rollback": "node src/fleet-playbook.ts --playbook=os-rollback.yml",
     "fleet:inventory-install": "node src/fleet-playbook.ts --playbook=inventory-install.yml",
     "fleet:control-host-install": "node src/fleet-playbook.ts --playbook=control-host-install.yml",
+    "fleet": "node src/fleet-jobs/cli.ts",
+    "fleet:jobs-install": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-install.yml",
     "typecheck": "tsc --noEmit",
     "test": "rstest run --config scripts/rstest/rstest.config.ts",
     "layout-check": "layout-check",

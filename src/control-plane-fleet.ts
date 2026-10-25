@@ -39,6 +39,20 @@ export function onTheControlPlane(interfaces: Record<string, { address?: string;
   return Object.values(interfaces).flat().some((iface) => iface?.address === host);
 }
 
+/** A process to start: what `sshToControlPlane` runs, and what a caller that wants to stream or feed it runs itself. */
+export type Invocation = { file: string; args: string[]; };
+
+/**
+ * How to run one command on the control plane -- locally if this machine IS the control plane, over ssh otherwise.
+ * Split from `sshToControlPlane` for the callers that need more than its string answer (a binary stream, a bounded
+ * wait that must not block): they start this themselves and keep the one route to the machine.
+ */
+export function controlPlaneInvocation(command: string): Invocation {
+  if (onTheControlPlane()) return { file: "sh", args: ["-c", `cd /root && ${command}`] };
+  return { file: "ssh", args: ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=20", `root@${requireControlPlaneHost()}`, command] };
+}
+
 /**
  * One command on the control plane -- locally if this machine IS the control plane, over ssh otherwise.
  * Synchronous, matching every other read in this file: `readControlPlaneFleet` below is called from
@@ -46,14 +60,8 @@ export function onTheControlPlane(interfaces: Record<string, { address?: string;
  * same rack does not need to be.
  */
 export function sshToControlPlane(command: string, { capture = false, timeoutMs = DEFAULT_SSH_TIMEOUT_MS }: { capture?: boolean; timeoutMs?: number; } = {}): string {
-  if (onTheControlPlane()) {
-    return execFileSync("sh", ["-c", `cd /root && ${command}`], {
-      encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
-    });
-  }
-  const args = ["-i", requireControlPlaneKey(), "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-    "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=20", `root@${requireControlPlaneHost()}`, command];
-  return execFileSync("ssh", args, {
+  const { file, args } = controlPlaneInvocation(command);
+  return execFileSync(file, args, {
     encoding: "utf8", stdio: capture ? "pipe" : ["ignore", "inherit", "inherit"], timeout: timeoutMs,
   });
 }

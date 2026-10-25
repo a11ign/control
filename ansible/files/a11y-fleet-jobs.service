@@ -1,0 +1,29 @@
+[Unit]
+# THE FLEET JOB SERVICE -- A11-243. A long-lived process that owns the job store and runs each submitted capture job against the fleet, so a job outlives the
+# agent that submitted it. It sends the workers' own `/capture` and changes nothing on any box. The CLI (`fleet capture submit`, `fleet job ...`) reaches it
+# over the control plane's ssh (ADR `A11-243-adr-0001`), so there is no listening port.
+Description=a11y: the fleet job service (submit, status, wait, cancel and results by job ID)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# A crash is restarted, and the restart resumes every job it finds running: the store is on disk, and a capture the dead process had sent is taken again.
+Restart=on-failure
+RestartSec=5
+# THE STORE, OUTSIDE EVERY CHECKOUT. systemd creates /var/lib/a11y-fleet-jobs and keeps it across restarts; `reset-checkout.yml` or a re-clone cannot take it.
+StateDirectory=a11y-fleet-jobs
+# THE SERVICE RUNS FROM ITS OWN CHECKOUT, moved only by `fleet-jobs-install.yml`. `/root/control` follows `main` before every auto-off tick (`a11y-fleet-auto-off.service`'s
+# ExecStartPre), and a tree moved under a long-lived process is a process running half of one version and half of another.
+WorkingDirectory=/root/fleet-jobs
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+# THE LOADER IS A HOST FACT, NAMED BY ABSOLUTE PATH (#4292, #4341): `/usr/bin/node` strips types only from 24, and a bare `--import tsx` does not resolve beside a raw checkout.
+# `fleet-jobs-install.yml` runs the loader before it installs this unit, so a plane without it fails there and not as a service that never starts.
+ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/fleet-jobs/src/fleet-jobs/service.ts
+# ON STOP the service stops dispatching and waits for the captures in flight, which the worker's own 600 s limit bounds. The job is left running in the store and the next start
+# resumes it. `TimeoutStopSec` is above that limit, or systemd would kill a capture it was waiting for.
+KillSignal=SIGTERM
+TimeoutStopSec=660
+
+[Install]
+WantedBy=multi-user.target
