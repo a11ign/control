@@ -1,5 +1,6 @@
 import { caseRecordFile, groupOf } from "./cases.ts";
 import { recordFile } from "./pages.ts";
+import { FACTS_PAGE } from "./types.ts";
 import type { CaptureEntry, CaseSpec, GroupSpec } from "./types.ts";
 
 /** A pass needs a box of its own: two passes of a page on one box would be one measurement taken twice. */
@@ -63,3 +64,7 @@ export function planCases(cases: CaseSpec[], groups: Record<string, GroupSpec>, 
     page: entry.url, pass: 1, case: entry.id, group, attempt: entry.attempt ?? 1, file: caseRecordFile(entry.id, entry.attempt ?? 1), box, status: "pending" as const,
   }))));
 }
+
+/** A facts job reads each box once, on that box: one entry per box, whose record is `<box>.facts.json`. PURE. */
+export const planFacts = (boxes: string[]): CaptureEntry[] =>
+  boxes.map((box) => ({ page: FACTS_PAGE, pass: 1, file: `${box}.facts.json`, box, status: "pending" as const }));

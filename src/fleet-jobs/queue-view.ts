@@ -5,7 +5,7 @@ import type { LeaseLedger } from "../fleet-leases/ledger.ts";
 import type { Waiter } from "../fleet-leases/types.ts";
 import { holderOf } from "./claims.ts";
 import type { JobStore } from "./store.ts";
-import { captureCount } from "./types.ts";
+import { FACTS_PAGE, captureCount } from "./types.ts";
 import type { QueueView } from "./view.ts";
 
 /**
@@ -19,14 +19,14 @@ export const MEAN_OVER = 20;
 /** A scheduled unit that waits for a box (the freeze, a shutdown) is assumed to hold it this long: it has no history of its own. */
 export const MAINTAIN_ASSUMED_MS = 10 * 60_000;
 
-/** The mean duration of the service's last `MEAN_OVER` completed captures, or null when it has completed none. */
+/** The mean duration of the service's last `MEAN_OVER` completed captures, or null when it has completed none. A facts read is not a capture and is left out. */
 export function meanCaptureMs(store: JobStore): number | null {
   const durations: number[] = [];
   for (const id of store.list().reverse()) {
     const state = store.readState(id);
     if (!state?.ok) continue;
     for (const c of [...state.value.captures].reverse()) {
-      const took = c.status === "done" && c.startedAt && c.finishedAt ? Date.parse(c.finishedAt) - Date.parse(c.startedAt) : NaN;
+      const took = c.status === "done" && c.page !== FACTS_PAGE && c.startedAt && c.finishedAt ? Date.parse(c.finishedAt) - Date.parse(c.startedAt) : NaN;
       if (Number.isFinite(took) && took >= 0) durations.push(took);
     }
     if (durations.length >= MEAN_OVER) break;

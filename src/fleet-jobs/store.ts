@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { READABLE_VERSIONS, STORE_VERSION } from "./types.ts";
+import type { FactsRecord } from "../fleet-facts/types.ts";
 import type { CaptureRecord, JobRequest, JobStateFile } from "./types.ts";
 
 /**
@@ -89,7 +90,7 @@ export class JobStore {
   markCancelled(id: string, at: string): void { writeFileSync(this.cancelPath(id), `${at}\n`); }
   isCancelled = (id: string): boolean => existsSync(this.cancelPath(id));
 
-  writeRecord(id: string, file: string, record: CaptureRecord): void {
+  writeRecord(id: string, file: string, record: CaptureRecord | FactsRecord): void {
     mkdirSync(this.resultsDir(id), { recursive: true });
     writeJsonAtomic(join(this.resultsDir(id), file), record);
   }
