@@ -164,6 +164,17 @@ export function driftExitCode(record: DriftRecord): number {
   return record.reachable === 0 ? DRIFT_EXIT.NOTHING_ANSWERED : DRIFT_EXIT.ON_MANIFEST;
 }
 
+/** What the daily freeze's last run put back and could not reach or hold, one line each; none when it has not run on this host. */
+function freezeLines(freeze: FreezeRun | null): string[] {
+  if (freeze === null) return [];
+  const lines: string[] = [];
+  const putBack = Object.entries(freeze.putBack).map(([box, levers]) => `${box} (${levers.join(", ")})`);
+  if (putBack.length > 0) lines.push(`the freeze put back, at ${freeze.checkedAt}: ${putBack.join("; ")}`);
+  if (freeze.unreachable.length > 0) lines.push(`the freeze did not reach, at ${freeze.checkedAt}: ${freeze.unreachable.join(", ")}`);
+  if (freeze.failed.length > 0) lines.push(`the freeze did not hold on, at ${freeze.checkedAt}: ${freeze.failed.join(", ")}`);
+  return lines;
+}
+
 /** The lines a person reads, one per fact. A carried difference says so: the box did not answer this hour. */
 export function driftLines(record: DriftRecord): string[] {
   const lines: string[] = [];
@@ -180,14 +191,7 @@ export function driftLines(record: DriftRecord): string[] {
   }
   if (record.unreachable.length > 0) lines.push(`not read (unreachable, not a difference): ${record.unreachable.join(", ")}`);
   if (record.reachable === 0) lines.push("no box answered: nothing was compared");
-  const freeze = record.freeze;
-  if (freeze !== null) {
-    const putBack = Object.entries(freeze.putBack).map(([box, levers]) => `${box} (${levers.join(", ")})`);
-    if (putBack.length > 0) lines.push(`the freeze put back, at ${freeze.checkedAt}: ${putBack.join("; ")}`);
-    if (freeze.unreachable.length > 0) lines.push(`the freeze did not reach, at ${freeze.checkedAt}: ${freeze.unreachable.join(", ")}`);
-    if (freeze.failed.length > 0) lines.push(`the freeze did not hold on, at ${freeze.checkedAt}: ${freeze.failed.join(", ")}`);
-  }
-  return lines;
+  return [...lines, ...freezeLines(record.freeze)];
 }
 
 type Worker = { name: string; url: string; };
