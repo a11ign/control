@@ -23,7 +23,7 @@ import { JOB_ID, JobStore, newJobId } from "./store.ts";
 import { HEARTBEAT_STALE_MS, viewJob } from "./view.ts";
 import type { JobView, ServiceBeat } from "./view.ts";
 import { CASE_STORE_VERSION, STORE_VERSION, isTerminal } from "./types.ts";
-import type { BoxRequest, CaseSpec, Freeze, GroupSpec, JobRequest, JobState } from "./types.ts";
+import type { BoxRequest, CaseSpec, Freeze, GroupSpec, JobRequest, JobState, JobStateFile } from "./types.ts";
 
 /** The remote half's exit codes. `cli.ts` maps them; 1 is left to Node's own "could not run". */
 export const REMOTE_EXIT = { OK: 0, REFUSED: 2, UNKNOWN_JOB: 4, SERVICE_DOWN: 5, ALREADY_ENDED: 6 } as const;
@@ -50,6 +50,7 @@ export type SubmitPayload = {
 export type RecapturePayload = { source: string; cases: string[]; label: string; submittedBy: string };
 
 const LABEL = /^[A-Za-z0-9._-]{1,64}$/;
+const labelRefusal = (label: unknown): string | null => LABEL.test(String(label ?? "")) ? null : "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
 const BOX_NAME = /^[\w.-]+$/;
 const MAX_PASSES = 10;
 
@@ -101,7 +102,8 @@ function caseJobRefusal(p: SubmitPayload, known: (() => string[]) | null): strin
 
 /** The first thing wrong with a submit, in words, or null. */
 export function submitRefusal(p: SubmitPayload, { now, known }: { now: number; known: (() => string[]) | null }): string | null {
-  if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
+  const label = labelRefusal(p.label);
+  if (label) return label;
   if (p.cases !== undefined) return caseJobRefusal(p, known) ?? freezeRefusal(p.freeze, now);
   if (!Array.isArray(p.pages) || !p.pages.length) return "no pages were given";
   if (!Number.isInteger(p.passes) || p.passes < 1 || p.passes > MAX_PASSES) return `--passes is a whole number from 1 to ${MAX_PASSES}`;
@@ -123,12 +125,36 @@ function submit(deps: Required<Pick<RemoteDeps, "store" | "now">> & RemoteDeps):
   return ok({ id: request.id });
 }
 
+/** Each named case as the re-capture runs it: the same URL and body, one attempt on, in its group, with the group pinned to the box it was captured on. */
+function pinnedCases(source: JobRequest, captured: JobStateFile, ids: string[]): { cases: CaseSpec[]; groups: Record<string, GroupSpec> } | string {
+  const cases: CaseSpec[] = [];
+  const groups: Record<string, GroupSpec> = {};
+  for (const id of ids) {
+    const was = source.cases!.find((c) => c.id === id)!;
+    const group = was.group ?? id;
+    const box = captured.captures.find((c) => c.case === id)?.box;
+    if (!box) return `case ${id} of ${source.id} was never placed on a box`;
+    groups[group] = { box };
+    cases.push({ id, url: was.url, body: was.body, group, attempt: (was.attempt ?? 1) + 1 });
+  }
+  return { cases, groups };
+}
+
+/** The first group whose pinned box the inventory no longer has, in words, or null. */
+function goneBoxRefusal(groups: Record<string, GroupSpec>, known: (() => string[]) | null): string | null {
+  let declared: string[] | null;
+  try { declared = known ? known() : null; } catch (error) { return `the inventory could not be read to check the boxes: ${(error as Error).message}`; }
+  const gone = declared && Object.entries(groups).find(([, spec]) => !declared.includes(spec.box!));
+  return gone ? `group ${gone[0]} was captured on ${gone[1].box}, which is not in the inventory now: submit the whole group as a new job` : null;
+}
+
 /**
  * The job a re-capture asks for: the named cases of a `done` case job, each pinned to the box its group was captured on, as a new job that names its
  * source. The first thing wrong with it is returned as words.
  */
 export function recaptureRequest(p: RecapturePayload, { store, now, known, view }: { store: JobStore; now: number; known: (() => string[]) | null; view: JobView }): JobRequest | string {
-  if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
+  const label = labelRefusal(p.label);
+  if (label) return label;
   if (view.state !== "done") return `job ${p.source} is ${view.state}: only a job that is done can be re-captured`;
   const source = store.readRequest(p.source);
   const state = store.readState(p.source);
@@ -138,24 +164,14 @@ export function recaptureRequest(p: RecapturePayload, { store, now, known, view 
   if (!ids.length) return "no cases were named: give --cases <id,id,...>";
   const unknown = ids.filter((id) => !source.value.cases!.some((c) => c.id === id));
   if (unknown.length) return `job ${p.source} has no case ${unknown.join(", ")}`;
-  const cases: CaseSpec[] = [];
-  const groups: Record<string, GroupSpec> = {};
-  for (const id of ids) {
-    const was = source.value.cases.find((c) => c.id === id)!;
-    const group = was.group ?? id;
-    const box = state.value.captures.find((c) => c.case === id)?.box;
-    if (!box) return `case ${id} of ${p.source} was never placed on a box`;
-    groups[group] = { box };
-    cases.push({ id, url: was.url, body: was.body, group, attempt: (was.attempt ?? 1) + 1 });
-  }
-  let declared: string[] | null = null;
-  try { declared = known ? known() : null; } catch (error) { return `the inventory could not be read to check the boxes: ${(error as Error).message}`; }
-  const gone = declared && Object.entries(groups).find(([, spec]) => !declared!.includes(spec.box!));
-  if (gone) return `group ${gone[0]} was captured on ${gone[1].box}, which is not in the inventory now: submit the whole group as a new job`;
-  const names = [...new Set(Object.values(groups).map((spec) => spec.box!))];
+  const pinned = pinnedCases(source.value, state.value, ids);
+  if (typeof pinned === "string") return pinned;
+  const gone = goneBoxRefusal(pinned.groups, known);
+  if (gone) return gone;
+  const names = [...new Set(Object.values(pinned.groups).map((spec) => spec.box!))];
   return {
     version: CASE_STORE_VERSION, id: newJobId(new Date(now)), label: p.label, pages: [], boxes: { kind: "named", names }, passes: 1, body: {},
-    freeze: source.value.freeze, submittedBy: p.submittedBy, submittedAt: new Date(now).toISOString(), cases, groups, recaptureOf: p.source,
+    freeze: source.value.freeze, submittedBy: p.submittedBy, submittedAt: new Date(now).toISOString(), ...pinned, recaptureOf: p.source,
   };
 }
 
