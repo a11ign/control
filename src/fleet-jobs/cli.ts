@@ -159,6 +159,35 @@ function pagesOf(inputs: string[], readFile: (path: string) => string): { pages:
   return pages.size ? { pages: [...pages] } : { refusal: "no pages were named: give --pages <file> or URLs" };
 }
 
+/** The numbers a submit takes: `--passes` (default 1) and `--steps`, each a whole number. */
+function numbersOf(values: { passes?: string; steps?: string }): { passes: number; steps: number } | { refusal: string } {
+  const passes = values.passes === undefined ? 1 : Number(values.passes);
+  const steps = values.steps === undefined ? DEFAULT_BODY.steps : Number(values.steps);
+  if (!Number.isInteger(passes)) return { refusal: "--passes is a whole number" };
+  if (!Number.isInteger(steps) || steps < 1) return { refusal: "--steps is a whole number, at least 1" };
+  return { passes, steps };
+}
+
+/** `--probe tables,typing` as the worker's own flags, or the refusal naming the probe that is not one. */
+function probeFlags(probe: string | undefined): Record<string, true> | { refusal: string } {
+  const probes = (probe ?? "").split(",").filter(Boolean);
+  const unknown = probes.find((name) => !(name in PROBES));
+  if (unknown) return { refusal: `--probe is any of ${Object.keys(PROBES).join(", ")}: ${unknown} is not one` };
+  return Object.fromEntries(probes.map((name) => [PROBES[name]!, true as const]));
+}
+
+/** The two JSON files a submit may name: more of the worker's body, and a freeze reference. */
+function jsonFiles(values: { "body-json"?: string; freeze?: string }, readFile: (path: string) => string): { extra: Record<string, unknown>; freeze: Freeze | null } | { refusal: string } {
+  try {
+    return {
+      extra: values["body-json"] ? JSON.parse(readFile(values["body-json"])) as Record<string, unknown> : {},
+      freeze: values.freeze ? JSON.parse(readFile(values.freeze)) as Freeze : null,
+    };
+  } catch (cause) { return { refusal: `a file could not be read as JSON: ${(cause as Error).message}` }; }
+}
+
+const refused = <T extends object>(value: T | { refusal: string }): value is { refusal: string } => "refusal" in value;
+
 function submitPayload(args: string[], deps: Deps): SubmitPayload | { refusal: string } {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
     pages: { type: "string", multiple: true }, boxes: { type: "string" }, passes: { type: "string" }, steps: { type: "string" }, probe: { type: "string" },
@@ -166,24 +195,15 @@ function submitPayload(args: string[], deps: Deps): SubmitPayload | { refusal: s
   if (!values.label) return { refusal: "--label is required: the ticket key" };
   if (!values.boxes) return { refusal: "--boxes is required: a number of boxes, `ready`, or box names separated by commas" };
   const boxes = parseBoxes(values.boxes);
-  if ("refusal" in boxes) return boxes;
   const pages = pagesOf([...(values.pages ?? []), ...positionals], deps.readFile);
-  if ("refusal" in pages) return pages;
-  const passes = values.passes === undefined ? 1 : Number(values.passes);
-  const steps = values.steps === undefined ? DEFAULT_BODY.steps : Number(values.steps);
-  if (!Number.isInteger(passes)) return { refusal: "--passes is a whole number" };
-  if (!Number.isInteger(steps) || steps < 1) return { refusal: "--steps is a whole number, at least 1" };
-  const probes = (values.probe ?? "").split(",").filter(Boolean);
-  const unknownProbe = probes.find((probe) => !(probe in PROBES));
-  if (unknownProbe) return { refusal: `--probe is any of ${Object.keys(PROBES).join(", ")}: ${unknownProbe} is not one` };
-  let extra: Record<string, unknown> = {};
-  let freeze: Freeze | null = null;
-  try {
-    if (values["body-json"]) extra = JSON.parse(deps.readFile(values["body-json"])) as Record<string, unknown>;
-    if (values.freeze) freeze = JSON.parse(deps.readFile(values.freeze)) as Freeze;
-  } catch (cause) { return { refusal: `a file could not be read as JSON: ${(cause as Error).message}` }; }
-  const body = { ...DEFAULT_BODY, steps, ...Object.fromEntries(probes.map((probe) => [PROBES[probe]!, true])), ...extra };
-  return { label: values.label, pages: pages.pages, boxes, passes, body, freeze, submittedBy: deps.submitter() };
+  const numbers = numbersOf(values);
+  const probes = probeFlags(values.probe);
+  const files = jsonFiles(values, deps.readFile);
+  for (const step of [boxes, pages, numbers, probes, files]) if (refused(step)) return step;
+  const { passes, steps } = numbers as { passes: number; steps: number };
+  const { extra, freeze } = files as { extra: Record<string, unknown>; freeze: Freeze | null };
+  const body = { ...DEFAULT_BODY, steps, ...probes as Record<string, true>, ...extra };
+  return { label: values.label, pages: (pages as { pages: string[] }).pages, boxes: boxes as BoxRequest, passes, body, freeze, submittedBy: deps.submitter() };
 }
 
 function submitJob(args: string[], deps: Deps): number {

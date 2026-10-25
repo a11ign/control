@@ -76,21 +76,27 @@ function boxesRefusal(p: SubmitPayload, known: (() => string[]) | null): string 
 }
 
 /** The first thing wrong with a submit, in words, or null. */
+/** The first thing wrong with the capture body a submit carries, or null. */
+function bodyRefusal(body: unknown): string | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return "the capture body is not an object";
+  const owned = SERVICE_FIELDS.filter((field) => field in body);
+  return owned.length ? `the capture body sets ${owned.join(", ")}, which the service sets for itself` : null;
+}
+
+/** The first thing wrong with a freeze reference, or null: it must name a commit and a time, and the time must not be ahead of now. */
+function freezeRefusal(freeze: Freeze | null, now: number): string | null {
+  if (!freeze) return null;
+  const named = Date.parse(freeze.namedAt);
+  if (typeof freeze.commit !== "string" || Number.isNaN(named)) return "the freeze reference has no commit and namedAt";
+  return named > now ? `the freeze reference is named in the future (${freeze.namedAt}): a freeze names what was fixed BEFORE the captures` : null;
+}
+
+/** The first thing wrong with a submit, in words, or null. */
 export function submitRefusal(p: SubmitPayload, { now, known }: { now: number; known: (() => string[]) | null }): string | null {
   if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
   if (!Array.isArray(p.pages) || !p.pages.length) return "no pages were given";
   if (!Number.isInteger(p.passes) || p.passes < 1 || p.passes > MAX_PASSES) return `--passes is a whole number from 1 to ${MAX_PASSES}`;
-  const boxes = boxesRefusal(p, known);
-  if (boxes) return boxes;
-  if (typeof p.body !== "object" || p.body === null || Array.isArray(p.body)) return "the capture body is not an object";
-  const owned = SERVICE_FIELDS.filter((field) => field in p.body);
-  if (owned.length) return `the capture body sets ${owned.join(", ")}, which the service sets for itself`;
-  if (p.freeze) {
-    const named = Date.parse(p.freeze.namedAt);
-    if (typeof p.freeze.commit !== "string" || Number.isNaN(named)) return "the freeze reference has no commit and namedAt";
-    if (named > now) return `the freeze reference is named in the future (${p.freeze.namedAt}): a freeze names what was fixed BEFORE the captures`;
-  }
-  return null;
+  return boxesRefusal(p, known) ?? bodyRefusal(p.body) ?? freezeRefusal(p.freeze, now);
 }
 
 function submit(deps: Required<Pick<RemoteDeps, "store" | "now">> & RemoteDeps): RemoteResult {
@@ -141,29 +147,36 @@ function list(store: JobStore, { label, state, limit }: { label?: string; state?
 
 const STATES: JobState[] = ["queued", "running", "done", "failed", "cancelled"];
 
+type Handler = (rest: string[], deps: RemoteDeps, now: number) => RemoteResult;
+
+const idCommand = (name: string, run: (store: JobStore, id: string, now: number) => RemoteResult): Handler => (rest, deps, now) =>
+  rest.length === 1 ? run(deps.store, rest[0]!, now) : refuse(`${name} takes one job ID`);
+
+function listCommand(rest: string[], deps: RemoteDeps, now: number): RemoteResult {
+  const { values } = parseArgs({ args: rest, options: { label: { type: "string" }, state: { type: "string" }, limit: { type: "string" } }, strict: true });
+  if (values.state && !STATES.includes(values.state as JobState)) return refuse(`--state is one of ${STATES.join(", ")}`);
+  const limit = values.limit === undefined ? 50 : Number(values.limit);
+  if (!Number.isInteger(limit) || limit < 1) return refuse("--limit is a whole number, at least 1");
+  return list(deps.store, { label: values.label, state: values.state, limit }, now);
+}
+
+const COMMANDS: Record<string, Handler> = {
+  submit: (_rest, deps) => submit({ ...deps, now: deps.now ?? Date.now }),
+  status: idCommand("status", (store, id, now) => { const view = viewOf(store, id, now); return isResult(view) ? view : ok(view); }),
+  cancel: idCommand("cancel", cancel),
+  list: listCommand,
+};
+
 /** One remote command. PURE of process state: the store, the clock and stdin are handed in. */
 export function remote(argv: string[], deps: RemoteDeps): RemoteResult {
-  const now = (deps.now ?? Date.now)();
   const [command, ...rest] = argv;
+  const handler = Object.hasOwn(COMMANDS, command ?? "") ? COMMANDS[command!]! : null;
+  if (!handler) return refuse("usage: remote.ts submit|status <id>|cancel <id>|list [--label k] [--state s] [--limit n]|tar <id>");
   try {
-    if (command === "submit") return submit({ ...deps, now: deps.now ?? Date.now });
-    if (command === "status" || command === "cancel") {
-      if (rest.length !== 1) return refuse(`${command} takes one job ID`);
-      if (command === "cancel") return cancel(deps.store, rest[0]!, now);
-      const view = viewOf(deps.store, rest[0]!, now);
-      return isResult(view) ? view : ok(view);
-    }
-    if (command === "list") {
-      const { values } = parseArgs({ args: rest, options: { label: { type: "string" }, state: { type: "string" }, limit: { type: "string" } }, strict: true });
-      if (values.state && !STATES.includes(values.state as JobState)) return refuse(`--state is one of ${STATES.join(", ")}`);
-      const limit = values.limit === undefined ? 50 : Number(values.limit);
-      if (!Number.isInteger(limit) || limit < 1) return refuse("--limit is a whole number, at least 1");
-      return list(deps.store, { label: values.label, state: values.state, limit }, now);
-    }
+    return handler(rest, deps, (deps.now ?? Date.now)());
   } catch (error) {
     return refuse(`${command}: ${(error as Error).message}`);
   }
-  return refuse("usage: remote.ts submit|status <id>|cancel <id>|list [--label k] [--state s] [--limit n]|tar <id>");
 }
 
 /** `tar <id>`: the job's `results/` as a tar stream on stdout. */

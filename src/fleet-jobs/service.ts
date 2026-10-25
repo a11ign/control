@@ -14,6 +14,7 @@ import { captureTolerantly } from "@a11ign/screenreader-fleet/capture-client";
 import { requestJson } from "@a11ign/screenreader-fleet/worker-http";
 import { readDeployPins } from "../layer-pins.ts";
 import { readFleetPins } from "../fleet-pins.ts";
+import { sandboxGitEnv } from "../git-safe-env.ts";
 import { inventoryResolver } from "./boxes.ts";
 import { memoryClaims } from "./claims.ts";
 import { storeDirFromEnv } from "./paths.ts";
@@ -29,7 +30,7 @@ export const TICK_MS = 2_000;
 export const HEARTBEAT_MS = 5_000;
 
 export function commitOfCheckout(root: string = REPO_ROOT): string {
-  try { return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return "unknown"; }
+  try { return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: sandboxGitEnv() }).trim(); } catch { return "unknown"; }
 }
 
 /** The pinned versions the manifest states; a pin that cannot be read is said, not defaulted. */

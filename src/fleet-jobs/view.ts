@@ -57,35 +57,48 @@ export function estimateFinish(captures: CaptureEntry[], now: number): number | 
 
 export const resultsLocation = (id: string, storeDir: string = STORE_DIR): string => `control:${storeDir}/${id}/results`;
 
+const boxProgress = (captures: CaptureEntry[]): BoxProgress[] => [...new Set(captures.map((c) => c.box))].map((box) => {
+  const mine = captures.filter((c) => c.box === box);
+  return { box, done: mine.filter(finished).length, failed: mine.filter((c) => c.status === "failed").length, total: mine.length };
+});
+
+/** The estimate as `status` states it: nothing once the job has ended, "unknown" before a first capture has, otherwise a time. */
+const estimateText = (ended: boolean, eta: number | null): string =>
+  ended ? "ended" : eta === null ? "unknown until the first capture ends" : new Date(eta).toISOString();
+
+const failedCapturesOf = (captures: CaptureEntry[]): JobView["failedCaptures"] => captures.filter((c) => c.status === "failed").map((c) => ({
+  page: c.page, pass: c.pass, box: c.box, httpStatus: c.httpStatus ?? null, error: c.error ?? null }));
+
+const serviceOf = (beat: ServiceBeat | null, now: number): JobView["service"] =>
+  beat ? { ...beat, alive: now - Date.parse(beat.heartbeatAt) < HEARTBEAT_STALE_MS } : null;
+
+/** What a job with no `state.json` has: nothing done, nothing started. */
+const NOT_STARTED = { state: "queued" as const, reason: null, captures: [] as CaptureEntry[], dropped: [] as { box: string; reason: string }[], startedAt: null, finishedAt: null };
+
+const reasonOf = (reason: string | null | undefined, jobState: JobState, cancelled: boolean): string | null =>
+  reason ?? (jobState === "queued" && cancelled ? "cancel requested" : null);
+
+const isoOrNull = (ms: number | null): string | null => ms === null ? null : new Date(ms).toISOString();
+
 /** One job as `status` shows it. PURE given what the store held. */
 export function viewJob({ request, state, cancelled, beat, now, storeDir = STORE_DIR }: {
   request: JobRequest; state: JobStateFile | null; cancelled: boolean; beat: ServiceBeat | null; now: number; storeDir?: string;
 }): JobView {
-  const captures = state?.captures ?? [];
-  const jobState: JobState = state?.state ?? "queued";
+  const { state: jobState, reason, captures, dropped, startedAt, finishedAt } = state ?? NOT_STARTED;
   const total = captures.length || request.pages.length * request.passes;
-  const done = captures.filter((c) => c.status === "done").length;
-  const failed = captures.filter((c) => c.status === "failed").length;
-  const boxNames = [...new Set(captures.map((c) => c.box))];
-  const boxes = boxNames.map((box): BoxProgress => {
-    const mine = captures.filter((c) => c.box === box);
-    return { box, done: mine.filter(finished).length, failed: mine.filter((c) => c.status === "failed").length, total: mine.length };
-  });
+  const ended = captures.filter(finished).length;
   const eta = isTerminal(jobState) ? null : estimateFinish(captures, now);
-  const estimate = isTerminal(jobState) ? "ended" : eta === null ? "unknown until the first capture ends" : new Date(eta).toISOString();
   return {
-    id: request.id, label: request.label, state: jobState,
-    reason: state?.reason ?? (jobState === "queued" && cancelled ? "cancel requested" : null),
-    submittedAt: request.submittedAt, startedAt: state?.startedAt ?? null, finishedAt: state?.finishedAt ?? null,
-    pages: request.pages.length, passes: request.passes, total, done: done + failed, failed, remaining: total - done - failed,
-    boxes,
-    failedCaptures: captures.filter((c) => c.status === "failed").map((c) => ({
-      page: c.page, pass: c.pass, box: c.box, httpStatus: c.httpStatus ?? null, error: c.error ?? null })),
-    dropped: state?.dropped ?? [],
-    estimatedFinish: eta === null ? null : new Date(eta).toISOString(),
-    estimate,
+    id: request.id, label: request.label, state: jobState, reason: reasonOf(reason, jobState, cancelled),
+    submittedAt: request.submittedAt, startedAt, finishedAt: finishedAt ?? null,
+    pages: request.pages.length, passes: request.passes, total, done: ended, failed: captures.filter((c) => c.status === "failed").length, remaining: total - ended,
+    boxes: boxProgress(captures),
+    failedCaptures: failedCapturesOf(captures),
+    dropped,
+    estimatedFinish: isoOrNull(eta),
+    estimate: estimateText(isTerminal(jobState), eta),
     results: { location: resultsLocation(request.id, storeDir), fetch: `fleet job fetch ${request.id} --to <dir>` },
-    service: beat ? { ...beat, alive: now - Date.parse(beat.heartbeatAt) < HEARTBEAT_STALE_MS } : null,
+    service: serviceOf(beat, now),
   };
 }
 

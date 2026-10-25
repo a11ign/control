@@ -113,7 +113,7 @@ test("a connection that fails is a record naming the worker and never its addres
 });
 
 test("a box that fails three captures in a row is dropped, and its pages move to the others", async () => {
-  const t = harness({ capture: async (box, body) => box.name === "w2" ? { status: 500, json: { error: "worker wedged" } } : { status: 200, json: {} } });
+  const t = harness({ capture: async (box) => box.name === "w2" ? { status: 500, json: { error: "worker wedged" } } : { status: 200, json: {} } });
   const id = t.submit({ kind: "count", count: 2 }, { pages: [...PAGES, "https://x.test/e", "https://x.test/f", "https://x.test/g", "https://x.test/h"] });
   await t.drain();
   const state = t.state(id);
