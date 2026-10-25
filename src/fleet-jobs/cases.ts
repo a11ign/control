@@ -33,8 +33,8 @@ function groupRefusal(name: string, spec: unknown): string | null {
   if (extra.length) return `group ${name} sets ${extra.join(", ")}: only skipWhen is a group's to set (a box is pinned by a re-capture, never by a submit)`;
   if (spec.skipWhen === undefined) return null;
   const skip = spec.skipWhen;
-  const fields = isObject(skip) && isObject(skip.environment) ? skip.environment : null;
-  if (!fields || Object.keys(skip).length !== 1) return `group ${name}: skipWhen is { "environment": { <field>: <value>, ... } }`;
+  if (!isObject(skip) || !isObject(skip.environment) || Object.keys(skip).length !== 1) return `group ${name}: skipWhen is { "environment": { <field>: <value>, ... } }`;
+  const fields = skip.environment;
   if (!Object.keys(fields).length) return `group ${name}: skipWhen.environment names no field, so it would skip on every box`;
   const bad = Object.entries(fields).find(([, value]) => !PRIMITIVE(value));
   return bad ? `group ${name}: skipWhen.environment.${bad[0]} is not a string, number, boolean or null` : null;

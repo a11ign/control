@@ -115,7 +115,7 @@ test("a worker is asked with exactly the case's body over HTTP, through the real
   ];
   const id = caseJob(t, cases, {}, { kind: "count", count: 2 });
   await t.drain();
-  assert.equal(t.state(id).state, "done", t.state(id).reason);
+  assert.equal(t.state(id).state, "done", t.state(id).reason ?? "");
   assert.deepEqual(workers[0]!.bodies, [{ steps: 80, probeForms: true, url: "https://pages.test/one" }]);
   assert.deepEqual(workers[1]!.bodies, [{ probeNavigation: false, reuseScreenReader: true, url: "https://pages.test/two" }]);
   t.done();
@@ -172,7 +172,7 @@ test("a re-capture after a failed evidence check: the bad case is captured again
   await t.drain();
 
   const state = t.state(again);
-  assert.equal(state.state, "done", state.reason);
+  assert.equal(state.state, "done", state.reason ?? "");
   assert.deepEqual(state.captures.map((c) => [c.case, c.attempt, c.box, c.file]), [["x.bad", 2, goodBox, "x.bad.a2.json"]]);
   assert.equal(seen.asked.at(-1)!.box, goodBox, "the worker that took the good variant was asked again");
   assert.deepEqual(seen.asked.at(-1)!.body, { task: "x bad", probeTables: true, url: "https://pages.test/x/bad.html" }, "with the same body");
@@ -391,7 +391,7 @@ test("a restart that finds a box gone moves an untouched group whole to a box th
   const id = interruptedCases(t);
   await t.drain();
   const state = t.state(id);
-  assert.equal(state.state, "done", state.reason);
+  assert.equal(state.state, "done", state.reason ?? "");
   assert.deepEqual(state.captures.filter((c) => c.group === "c").map((c) => [c.box, c.status]), [["w3", "done"], ["w3", "done"]], "c moved whole");
   const bad = state.captures.find((c) => c.case === "a.bad")!;
   assert.equal(bad.status, "failed");
