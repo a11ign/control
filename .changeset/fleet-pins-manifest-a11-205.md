@@ -1,5 +1,0 @@
----
-"@a11ign/control": minor
----
-
-`deploy-pins.json` is the fleet's one pins manifest (A11-205, step 1 of 5). It gains `windows` (release, build and the cumulative-update KB), `edge` (version, MSI URL and hash), `nvda` and `node` (version and a checksum per architecture), beside the worker release and `core.commit` it already held. The worker role derives `worker_edge_*` and `worker_node_*` from it and keeps no Edge, Node, NVDA or Windows literal; the Intel display driver pin stays in `defaults/main.yml` as the one declared exception. `src/fleet-pins.ts` is the one reader. `fleet:status` compares every reachable box with the manifest, field by field (Windows build, Edge, NVDA, worker code), and names the box, the field, what it has and what the manifest wants (`fleet OFF THE MANIFEST`); any difference, or a manifest that cannot be read, exits 3, and `--json` carries `drift` beside `buildSplit`. Its advice no longer says to converge forward to the newest build. Renovate's two managers and `fleet-watch`'s Edge-pin reading read the manifest. Nothing moves a box: this step changes what is compared, not what is installed.
