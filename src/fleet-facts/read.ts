@@ -16,7 +16,7 @@ export const PLAY_TIMEOUT_MS = 600_000;
 
 type Inventory = () => { name: string; url: string; mac?: string }[];
 export type PlayRun = { file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number };
-export type PlayRunner = (run: PlayRun) => Promise<{ stdout: string }>;
+export type PlayRunner = (run: PlayRun) => Promise<{ stdout: string; stderr?: string }>;
 
 /** What the service's environment must say for `ansible-playbook` to run and to print one JSON document (ADR 0005). */
 export function playEnv(checkout: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -34,10 +34,10 @@ export function playEnv(checkout: string, env: NodeJS.ProcessEnv = process.env):
 
 /** The real runner: stdout whatever the exit code, since a play that failed or found a box unreachable still prints the document that says so. */
 export const runPlay: PlayRunner = ({ file, args, cwd, env, timeoutMs }) => new Promise((resolve, reject) => {
-  execFile(file, args, { cwd, env, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (error, stdout) => {
+  execFile(file, args, { cwd, env, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (error && (error as NodeJS.ErrnoException).code === "ENOENT") return reject(new Error(`${file} was not found: the service's environment cannot run Ansible`));
     if (error && (error as { killed?: boolean }).killed) return reject(new Error(`the play took longer than ${Math.round(timeoutMs / 60_000)} minutes and was stopped`));
-    resolve({ stdout });
+    resolve({ stdout, stderr });
   });
 });
 
@@ -79,8 +79,8 @@ export function factsReader({ checkout = SERVICE_CHECKOUT, inventory = readInven
     if (!known) throw new Error(`${box.name} is not in the inventory`);
     const [woken] = await wake([targetOf(known)], { log });
     if (woken && wakeFailed(woken)) throw new Error(`${box.name} did not come up when woken: ${wakeReportLine(woken)}`);
-    const { stdout } = await run({ file: "ansible-playbook", args: [FACTS_PLAYBOOK, "--limit", box.name], cwd: checkout, env: playEnv(checkout), timeoutMs });
-    const outcome = playOutcome(stdout, box.name);
+    const { stdout, stderr } = await run({ file: "ansible-playbook", args: [FACTS_PLAYBOOK, "--limit", box.name], cwd: checkout, env: playEnv(checkout), timeoutMs });
+    const outcome = playOutcome(stdout, box.name, stderr);
     if (!outcome.ok) throw new Error(outcome.error);
     return outcome.read;
   });

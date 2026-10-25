@@ -60,6 +60,12 @@ test("stdout that is not the callback's document is a failure that quotes it", (
   assert.deepEqual(outcome, { ok: false, error: `the play printed no result for ${BOX}: ERROR! the playbook could not be found` });
 });
 
+test("a play that printed nothing says what ansible-playbook wrote to stderr", () => {
+  const outcome = playOutcome("", BOX, "ERROR! Unable to retrieve file contents\nCould not find or access 'ansible/facts.yml'\n");
+  assert.match((outcome as { error: string }).error, /^the play printed no result for .*: nothing on stdout; stderr: ERROR! Unable to retrieve file contents/);
+  assert.deepEqual(playOutcome("", BOX, "  \n"), { ok: false, error: `the play printed no result for ${BOX}: nothing on stdout` });
+});
+
 test("a line printed after the document does not hide it", () => {
   assert.deepEqual(jsonOf(`{\n "stats": {}\n}\nPLAYBOOK RECAP took 3s\n`), { stats: {} });
 });

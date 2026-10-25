@@ -46,9 +46,16 @@ function outputOf(result: Obj): unknown {
   return last;
 }
 
-export function playOutcome(stdout: string, box: string): PlayOutcome {
+/** The end of what `ansible-playbook` wrote to stderr, where it reports a playbook, a config or an inventory it could not open. */
+const STDERR_TAIL = 400;
+
+export function playOutcome(stdout: string, box: string, stderr = ""): PlayOutcome {
   const document = jsonOf(stdout);
-  if (!isObject(document) || !isObject(document.stats)) return { ok: false, error: `the play printed no result for ${box}: ${stdout.trim().slice(0, 200) || "nothing on stdout"}` };
+  if (!isObject(document) || !isObject(document.stats)) {
+    const said = stdout.trim().slice(0, 200) || "nothing on stdout";
+    const complaint = stderr.trim();
+    return { ok: false, error: `the play printed no result for ${box}: ${said}${complaint ? `; stderr: ${complaint.slice(-STDERR_TAIL)}` : ""}` };
+  }
   const stats = document.stats[box];
   if (!isObject(stats)) return { ok: false, error: `the play reached no host named ${box}` };
   const results = hostResults(document, box);
