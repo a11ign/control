@@ -172,16 +172,27 @@ export function qualificationRequest(argv: string[], { job, row, ref, worker, la
     return { refusal: `REFUSING ${QUALIFY_FLAG}: -e ref=${ref} would run the lab at a different commit from the sha `
       + "being qualified. Drop the ref: it is set from the sha." };
   }
-  if (label !== undefined && !validLabel(label)) {
-    // The playbook refuses a label that is not a ticket key too, but after `pending` is posted (#3988), so it is refused here.
-    return { refusal: `REFUSING ${QUALIFY_FLAG}: -e label=${label} is not a ticket key (${LABEL_WORDS}), and the playbook refuses a launch with it, `
-      + "after which a refused launch has no verdict." };
-  }
+  const badLabel = labelRefusal(label);
+  if (badLabel !== null) return { refusal: badLabel };
+  return { sha, row: Number(row), argv: dispatchArgv(argv, { sha, row: Number(row), ref, label }) };
+}
+
+/**
+ * A11-263: the playbook refuses a label that is not a ticket key too, but after `pending` is posted (#3988), so it is refused here; no label is fine, `dispatchArgv` supplies one.
+ */
+function labelRefusal(label: string | undefined): string | null {
+  if (label === undefined || validLabel(label)) return null;
+  return `REFUSING ${QUALIFY_FLAG}: -e label=${label} is not a ticket key (${LABEL_WORDS}), and the playbook refuses a launch with it, after which a refused launch has no verdict.`;
+}
+
+/**
+ * What a qualified run dispatches: the caller's arguments without the flag, the ref pinned to the sha, and a label. The job books the fleet job service under a label, which the playbook REQUIRES
+ * and refuses a launch without AFTER `pending` is posted (the #3988 trap again); the release flow names a row, not a ticket, so a run given no label is booked as `qualify-<row>` and one given a label keeps it.
+ */
+function dispatchArgv(argv: string[], { sha, row, ref, label }: { sha: string; row: number; ref: string | undefined; label: string | undefined }): string[] {
   const forwarded = argv.filter((arg) => !arg.startsWith(QUALIFY_FLAG));
   const pinned = ref === undefined ? [...forwarded, "-e", `ref=${sha}`] : forwarded;
-  // A11-263: the job books the fleet job service under a label, which the playbook REQUIRES and refuses a launch without AFTER `pending` is posted (the #3988 trap again).
-  // The release flow names a row, not a ticket, so a run that was given no label is booked as `qualify-<row>`; one that was given a label keeps it.
-  return { sha, row: Number(row), argv: label === undefined ? [...pinned, "-e", `label=qualify-${row}`] : pinned };
+  return label === undefined ? [...pinned, "-e", `label=qualify-${row}`] : pinned;
 }
 
 /**

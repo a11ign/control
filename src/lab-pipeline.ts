@@ -443,6 +443,16 @@ function caseIds(name: string, pipeline: Pipeline) {
   return only;
 }
 
+/** The label every labelled stage gets, or the refusal that ends the run (exit 2) before its first stage. */
+function labelOrExit(pipeline: Pipeline): string | undefined {
+  const labelled = pipelineLabel(pipeline, flagValue(process.argv, "label"));
+  if ("refusal" in labelled) {
+    process.stderr.write(`${labelled.refusal}\n`);
+    process.exit(2);
+  }
+  return labelled.label;
+}
+
 function usage() {
   const names = Object.entries(PIPELINES)
     .map(([name, p]) => `  ${name.padEnd(12)} ${p.fleet ? "[fleet]" : "[no fleet]"}  ${p.what}\n`
@@ -740,11 +750,7 @@ async function main() {
   }
 
   const only = caseIds(name, pipeline);
-  const labelled = pipelineLabel(pipeline, flagValue(process.argv, "label"));
-  if ("refusal" in labelled) {
-    process.stderr.write(`${labelled.refusal}\n`);
-    process.exit(2);
-  }
+  const ticketLabel = labelOrExit(pipeline);
 
   const ref = flagValue(process.argv, "ref") ?? localBranch();
   if (!validRef(ref)) {
@@ -773,7 +779,7 @@ async function main() {
       const { job, vars = {} } = typeof entry === "string" ? { job: entry } : entry;
       const declared = Object.entries(vars ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
       const label = declared.length ? `${job} (${Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(" ")})` : job;
-      return [label, () => labJob(job, pinned, stageExtras(job, declared, { only, label: labelled.label }))];
+      return [label, () => labJob(job, pinned, stageExtras(job, declared, { only, label: ticketLabel }))];
     }),
   ];
 
