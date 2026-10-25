@@ -1,6 +1,6 @@
 Refs A11-253
 
-Step 2 of 2 (control): `.github/dependabot.yml` is now the output of `dependabot-config --write` from `@a11ign/toolchain` 0.11.0 (^0.1.7 before), not a hand-written file. Every ecosystem runs weekly on Monday at 05:23 UTC, patch and minor updates share one `<ecosystem>-minor-and-patch` group so a major is its own pull request, and the packages frozen by policy are ignored in the npm entry. Toolchain is bumped from `^0.1.7` to `^0.11.0`. `scripts/dependabot-config.test.ts` fails when the committed file drifts, and when a layer of `deploy-pins.json` is not in the toolchain's frozen list.
+Step 2 of 2 (control): `.github/dependabot.yml` is now the output of `dependabot-config --write` from `@a11ign/toolchain` 0.12.0 (^0.1.7 before), not a hand-written file. Every ecosystem runs weekly on Monday at 05:23 UTC, patch and minor updates share one `<ecosystem>-minor-and-patch` group so a major is its own pull request, and the packages frozen by policy are ignored in the npm entry. Toolchain is bumped from `^0.1.7` to `^0.12.0`. `scripts/dependabot-config.test.ts` fails when the committed file drifts, and when a layer of `deploy-pins.json` is not in the toolchain's frozen list.
 
 Acceptance:
 
