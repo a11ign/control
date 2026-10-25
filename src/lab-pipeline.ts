@@ -67,7 +67,7 @@ import { layerCheckoutMove, layerPins, layerRefValues } from "./layer-checkouts.
  * An unrecognised flag is otherwise IGNORED — every CLI here parses argv by looking for the flags it
  * knows — so it runs the default and reports success. See `cli-flags.mjs`.
  */
-refuseUnknownFlags(["--pipeline=", "--ref=", "--layer-ref=", "--only=", "--list", "--local", "--status", "--log"],
+refuseUnknownFlags(["--pipeline=", "--ref=", "--layer-ref=", "--only=", "--label=", "--list", "--local", "--status", "--log"],
   { entry: import.meta.url, command: "npm run lab:pipeline" });
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
@@ -100,6 +100,14 @@ export function jobNames(pipeline: Pick<Pipeline, "jobs">): string[] {
 
 /** One entry of `PIPELINES`, as the runner reads it: a stage is a bare job name or `{ job, vars }`. */
 type Pipeline = { fleet?: boolean; what?: string; jobs: Array<string | { job: string; vars?: Record<string, string> }> };
+
+/**
+ * The `-e` a stage is given beyond its own `vars`: `only` reaches the jobs that take it and `label` the jobs that take it, and nothing else. A pipeline that forwarded every extra var to every
+ * stage would hand `only` to `check-signals`, which does not take it, and Ansible ignores an unused extra var silently, so the operator would think it had been applied.
+ */
+export function stageExtras(job: string, declared: string[], { only, label }: { only?: string | undefined; label?: string | undefined }): string[] {
+  return [...declared, ...(TAKES_ONLY.has(job) && only ? ["-e", `only=${only}`] : []), ...(TAKES_LABEL.has(job) && label ? ["-e", `label=${label}`] : [])];
+}
 
 /** A pipeline stage: the label it prints and the thing that runs it, which answers its exit status. */
 type Stage = [label: string, run: () => number | null];
@@ -297,6 +305,28 @@ export const PIPELINES = {
 const TAKES_ONLY = new Set(["capture-only"]);
 
 /**
+ * Jobs that need `-e label=` (A11-263): the ones that book the fleet job service, which takes a capture only under a label. Named for the same reason as `TAKES_ONLY`, and pinned equal to the
+ * catalogue's `params:` by `lab-pipeline.test.ts`, so a job that gains a label is not left here to be refused at its stage, after the stages before it have run.
+ */
+export const TAKES_LABEL = new Set(["capture", "capture-only", "capture-acceptance", "capture-acceptance-2", "capture-real-pages", "retrain", "everything", "evidence-check",
+  "stability", "gate-stability", "gate-probe-order", "capture-check"]);
+
+/** A ticket key as the service and `lab-job.yml` take it: letters, digits, '.', '_' and '-', at most 64. It reaches a remote shell and an `-e`, so a flag or a path is inexpressible. */
+export const validLabel = (label: string) => /^[A-Za-z0-9._-]{1,64}$/.test(String(label));
+
+/**
+ * The label every labelled stage gets, or the reason there is none. A pipeline with a stage that books the fleet job service NEEDS one, and is refused before its first stage rather than at
+ * the stage that needs it; a label on a pipeline that books nothing would be applied to no stage, so it is refused too (the playbook's rule for a parameter a job does not read).
+ */
+export function pipelineLabel(pipeline: Pipeline, label: string | undefined): { label: string | undefined } | { refusal: string } {
+  const books = jobNames(pipeline).some((job) => TAKES_LABEL.has(job));
+  if (label !== undefined && !validLabel(label)) return { refusal: `refusing --label=${label}: the ticket key the fleet job service books the captures under (letters, digits, '.', '_' and '-', at most 64).` };
+  if (books && label === undefined) return { refusal: "this pipeline captures through the fleet job service, which books a capture under the ticket key it is for: pass --label=<ticket key>." };
+  if (!books && label !== undefined) return { refusal: "this pipeline books nothing on the fleet, so --label would be applied to no stage." };
+  return { label };
+}
+
+/**
  * Case ids, contained by SHAPE — the same rule as `validRef`, and needed for the same reason: this value
  * becomes an `-e` on an Ansible command line. `lab-job.yml` validates it a second time at the far end,
  * deliberately, because a malformed id there means capturing the wrong cases rather than none.
@@ -419,7 +449,8 @@ function usage() {
     .map(([name, p]) => `  ${name.padEnd(12)} ${p.fleet ? "[fleet]" : "[no fleet]"}  ${p.what}\n`
       + `${" ".repeat(16)}${jobNames(p).join(" -> ")}`)
     .join("\n");
-  return `\nnpm run lab:pipeline -- --pipeline=<name> [--ref=<branch>]\n\n${names}\n\n`
+  return `\nnpm run lab:pipeline -- --pipeline=<name> [--ref=<branch>] [--label=<ticket key>]\n\n${names}\n\n`
+    + "  --label=<ticket key> is required of a pipeline that captures: the fleet job service books a capture under it.\n"
     + "  --ref defaults to the branch this checkout is on, and must be pushed: both halves fetch\n"
     + "  from origin, and the fleet and the lab are given the SAME ref rather than defaulting apart.\n";
 }
@@ -590,6 +621,12 @@ function dispatchToControlUnlessLocal() {
     return;
   }
   const args = process.argv.slice(2).filter((a) => a !== "--local");
+  // The arguments below are joined into a command a remote shell runs, so a label is checked by SHAPE before it goes (the other flags are checked where the sequence runs).
+  const sentLabel = flagValue(args, "label");
+  if (sentLabel !== undefined && !validLabel(sentLabel)) {
+    process.stderr.write(`refusing --label=${sentLabel}: the ticket key the fleet job service books the captures under (letters, digits, '.', '_' and '-', at most 64).\n`);
+    process.exit(2);
+  }
   const ref = branchArg(args);
   // DETACHED UNDER SYSTEMD, not run over the SSH connection — and the first version of this DID run it
   // over the connection, which moved the fault to a better host instead of removing it. Proved by killing
@@ -697,6 +734,11 @@ async function main() {
   }
 
   const only = caseIds(name, pipeline);
+  const labelled = pipelineLabel(pipeline, flagValue(process.argv, "label"));
+  if ("refusal" in labelled) {
+    process.stderr.write(`${labelled.refusal}\n`);
+    process.exit(2);
+  }
 
   const ref = flagValue(process.argv, "ref") ?? localBranch();
   if (!validRef(ref)) {
@@ -725,9 +767,7 @@ async function main() {
       const { job, vars = {} } = typeof entry === "string" ? { job: entry } : entry;
       const declared = Object.entries(vars ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
       const label = declared.length ? `${job} (${Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(" ")})` : job;
-      // `-e only=` reaches the jobs that take it and nothing else, for the reason below.
-      const extra = [...declared, ...(TAKES_ONLY.has(job) && only ? ["-e", `only=${only}`] : [])];
-      return [label, () => labJob(job, pinned, extra)];
+      return [label, () => labJob(job, pinned, stageExtras(job, declared, { only, label: labelled.label }))];
     }),
   ];
 

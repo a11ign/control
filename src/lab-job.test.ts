@@ -506,7 +506,7 @@ test("#2334: no existing job's argv changed -- the neighbours that share its ass
   // The three that read `out` beside it, through the assert whose `when` list gained a member.
   assert.ok(jobs.acceptance.argv.at(-1)?.endsWith("model-{{ out | default('candidate') }}/acceptance-report.json"));
   assert.equal(jobs.acceptance.argv[0], "{{ lab_python }}");
-  assert.deepEqual(jobs["capture-only"].params, { only: "required", workers: "optional", capture_root: "optional" });
+  assert.deepEqual(jobs["capture-only"].params, { only: "required", workers: "optional", capture_root: "optional", label: "required" });
   // The one the row added is the only one that reaches the case reader; nothing else grew a `--case=`.
   const withCase = Object.entries(jobs).filter(([, job]) => JSON.stringify(job.argv).includes("--case="));
   assert.deepEqual(withCase.map(([name]) => name), ["explain-case"]);
@@ -1360,7 +1360,7 @@ test("#3289: a refusal BEFORE the dispatch leaves nothing standing on the sha (p
 });
 
 test("#3289: what cannot be a qualified run is refused with its reason, and an absent flag is no request at all", () => {
-  const named = (job: string | undefined, over: { row?: string; ref?: string; describeOnly?: boolean; worker?: string } = {}) =>
+  const named = (job: string | undefined, over: { row?: string; ref?: string; describeOnly?: boolean; worker?: string; label?: string } = {}) =>
     ({ job, row: "3289", ref: undefined, worker: "a11y-worker-2", describeOnly: false, ...over });
   const flag = `--qualify-sha=${QSHA}`;
   assert.equal(qualificationRequest(["-e", "job=gate-stability"], named("gate-stability")), undefined);
@@ -1378,9 +1378,13 @@ test("#3289: what cannot be a qualified run is refused with its reason, and an a
   assert.match(refusal([flag], named("gate-stability", { worker: "" })), /needs -e worker=<n>/);
   // POSITIVE CONTROL: the same request, accepted, with the flag stripped and the ref set from the sha.
   assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag], named("gate-stability")),
-    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`] });
+    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`, "-e", "label=qualify-3289"] });
   assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag, "-e", `ref=${QSHA}`], named("gate-stability", { ref: QSHA })),
-    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`] }, "a ref equal to the sha is not duplicated");
+    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`, "-e", "label=qualify-3289"] }, "a ref equal to the sha is not duplicated");
+  // A11-263: the playbook REQUIRES a label for this job and refuses a launch without one after `pending` is posted, so a qualified run that names none is booked as qualify-<row>,
+  // and one that names its own keeps it (and is not given a second).
+  assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", "-e", "label=A11-263", flag], named("gate-stability", { label: "A11-263" })),
+    { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", "label=A11-263", "-e", `ref=${QSHA}`] });
 });
 
 test("#3988: a launch with no -e worker= posts nothing and dispatches nothing; the same launch WITH one is announced", async () => {

@@ -144,7 +144,7 @@ function runLabel(record: JobRecord | undefined): string | undefined {
  * The qualification request on a command line: the sha, and the argv to dispatch (the flag stripped, the
  * ref pinned), or the reason this cannot be a qualified run. `undefined` when the flag is absent.
  */
-export function qualificationRequest(argv: string[], { job, row, ref, worker, describeOnly }: { job: string | undefined; row: string | undefined; ref: string | undefined; worker?: string | undefined; describeOnly: boolean; }): { sha: string; row: number; argv: string[]; } | { refusal: string; } | undefined {
+export function qualificationRequest(argv: string[], { job, row, ref, worker, label, describeOnly }: { job: string | undefined; row: string | undefined; ref: string | undefined; worker?: string | undefined; label?: string | undefined; describeOnly: boolean; }): { sha: string; row: number; argv: string[]; } | { refusal: string; } | undefined {
   const flag = argv.find((arg) => arg.startsWith(QUALIFY_FLAG));
   if (flag === undefined) return undefined;
   const sha = flag.slice(QUALIFY_FLAG.length);
@@ -173,7 +173,9 @@ export function qualificationRequest(argv: string[], { job, row, ref, worker, de
   }
   const forwarded = argv.filter((arg) => !arg.startsWith(QUALIFY_FLAG));
   const pinned = ref === undefined ? [...forwarded, "-e", `ref=${sha}`] : forwarded;
-  return { sha, row: Number(row), argv: pinned };
+  // A11-263: the job books the fleet job service under a label, which the playbook REQUIRES and refuses a launch without AFTER `pending` is posted (the #3988 trap again).
+  // The release flow names a row, not a ticket, so a run that was given no label is booked as `qualify-<row>`; one that was given a label keeps it.
+  return { sha, row: Number(row), argv: label === undefined ? [...pinned, "-e", `label=qualify-${row}`] : pinned };
 }
 
 /**

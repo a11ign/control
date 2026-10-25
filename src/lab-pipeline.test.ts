@@ -17,9 +17,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { PIPELINES, jobNames, validRef } from "./lab-pipeline.ts";
+import { PIPELINES, TAKES_LABEL, jobNames, pipelineLabel, stageExtras, validLabel, validRef } from "./lab-pipeline.ts";
 
-type Job = { argv?: unknown; setenv?: string[]; timeout?: number };
+type Job = { argv?: unknown; setenv?: string[]; timeout?: number; params?: Record<string, string> };
 
 /** The job catalogue, read from the playbook that owns it. */
 function catalogue(): Record<string, Job> {
@@ -364,5 +364,44 @@ test("a pipeline that gates on acceptance rebuilds the held-out set first", () =
     assert.ok(rebuilt < jobs.indexOf("train"),
       `pipeline '${name}' rebuilds the held-out set AFTER training, so the model is gated against a set `
       + "it was not evaluated on. The rebuild must finish before `train`.");
+  }
+});
+
+test("A11-263: the jobs a pipeline gives -e label= are exactly the jobs the catalogue says take one", () => {
+  const takers = Object.entries(JOBS).filter(([, job]) => "label" in (job.params ?? {})).map(([name]) => name).sort();
+  assert.ok(takers.length >= 10, `only ${takers.length} jobs take a label, so the catalogue read is blind`);
+  assert.deepEqual([...TAKES_LABEL].sort(), takers,
+    "a pipeline that forwarded a label to a job that does not take it would be refused by the playbook, and one that left it off a job that requires it would be refused at that stage");
+});
+
+test("A11-263: a pipeline that captures must be given a label, one that books nothing must not, and a label is a ticket key", () => {
+  const books = Object.entries(PIPELINES).filter(([, p]) => jobNames(p).some((job) => TAKES_LABEL.has(job)));
+  const idle = Object.entries(PIPELINES).filter(([, p]) => !jobNames(p).some((job) => TAKES_LABEL.has(job)));
+  assert.ok(books.length >= 3 && idle.length >= 1, `both kinds of pipeline exist (${books.length} book, ${idle.length} do not), or this examines nothing`);
+  for (const [name, pipeline] of books) {
+    assert.match((pipelineLabel(pipeline, undefined) as { refusal: string }).refusal, /--label=<ticket key>/, `${name} needs a label`);
+    assert.deepEqual(pipelineLabel(pipeline, "A11-263"), { label: "A11-263" }, name);
+  }
+  for (const [name, pipeline] of idle) {
+    assert.deepEqual(pipelineLabel(pipeline, undefined), { label: undefined }, `${name} books nothing and asks for nothing`);
+    assert.match((pipelineLabel(pipeline, "A11-263") as { refusal: string }).refusal, /applied to no stage/, name);
+  }
+  assert.ok(validLabel("A11-263") && validLabel("qualify-3289") && validLabel("a.b_c-d"));
+  for (const bad of ["", "a;rm -rf /", "$(id)", "a b", "../x", "x".repeat(65), "`id`"]) {
+    assert.equal(validLabel(bad), false, JSON.stringify(bad));
+  }
+  const [, first] = books[0]!;
+  assert.match((pipelineLabel(first, "a;b") as { refusal: string }).refusal, /refusing --label=a;b/);
+});
+
+test("A11-263: a stage is given -e label= when its job takes one and -e only= when its job takes that, and a job that takes neither gets neither", () => {
+  const given = { only: "route-title-stale+", label: "A11-263" };
+  assert.deepEqual(stageExtras("capture", [], given), ["-e", "label=A11-263"]);
+  assert.deepEqual(stageExtras("capture-only", [], given), ["-e", "only=route-title-stale+", "-e", "label=A11-263"]);
+  assert.deepEqual(stageExtras("capture-real-pages", ["-e", "role=training"], given), ["-e", "role=training", "-e", "label=A11-263"]);
+  assert.deepEqual(stageExtras("check-signals", [], given), [], "check-signals books nothing and takes no only");
+  assert.deepEqual(stageExtras("capture", [], { only: undefined, label: undefined }), []);
+  for (const job of Object.keys(JOBS)) {
+    assert.equal(stageExtras(job, [], given).includes("label=A11-263"), "label" in (JOBS[job]!.params ?? {}), `${job}: the label goes to exactly the jobs that take one`);
   }
 });

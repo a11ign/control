@@ -85,7 +85,7 @@
     # makes a name a job ignores answerable rather than silently dropped. A name absent from this list is
     # outside the interface and Ansible will discard it — there is no way to enumerate extra vars, so this
     # list is the boundary of what can be checked at all, and adding a parameter means adding it here.
-    lab_caller_params: [only, out, exclude, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply, case, criterion]
+    lab_caller_params: [only, out, exclude, role, shard, model, worker, workers, sample, subtype, feature, capture_root, captures_dir, apply, case, criterion, label]
     # WHICH HEADS `-e exclude=` MAY LEAVE OUT OF A TRAIN, by NAME. The value is a key of this map and never a
     # subtype: the subtype strings live here, in a tracked file, so `-e exclude=4.1.3:status-progress` and
     # `-e exclude=../x` are inexpressible rather than rejected -- the containment `out` and `worker` use.
@@ -137,6 +137,13 @@
       # same reason as the two above: the deriver reads requiredness out of the fact's expression,
       # so a parameter reaching a job only through `setenv` is invisible to it without this line.
       lab_capture_root: capture_root | default('')
+      # THE FLEET JOB SERVICE'S INPUTS (A11-263). A capture job hands the lab's client the label to book under, and WHICH boxes to ask the service for. They are four facts and not one
+      # because the jobs differ in what they may be told: `-e label=` is required of every job that captures; the boxes are `-e workers=` (`capture-only`), `-e worker=` optional
+      # (`evidence-check`) or required (the stability gates and `capture-check`), or the service's `ready` for the jobs that take neither.
+      lab_fleet_label: label
+      lab_fleet_boxes_workers: workers | default('ready')
+      lab_fleet_boxes_worker: worker | default('ready')
+      lab_fleet_box: worker
     # Every job this playbook can run. `timeout` becomes `RuntimeMaxSec`, so it is a real ceiling rather
     # than advice — set it above the slowest honest run, because a deadline that expires early turns "still
     # working" into "failed".
@@ -283,11 +290,11 @@
       # run across separate machines; it is no longer how you use more than one worker.
       capture-real-pages:
         progress: runs/real-page-corpus
-        params: {role: optional, shard: optional}
+        params: {role: optional, shard: optional, label: required}
         argv: ["/usr/bin/node", "packages/lab/src/training/capture-real-pages.mjs",
                "--role={{ role | default('training') }}",
                "--shard={{ shard | default('0/1') }}"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
+        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=28800s"]
         # 77 real pages on one worker measured ~6.5 h; across the fleet ~1.6 h. Generous either way, and a
         # ceiling rather than a cost.
         timeout: 28800
@@ -308,7 +315,7 @@
       # which is the difference between "captured 0 cases" and "you asked for a case that does not exist".
       capture-only:
         progress: runs/screenreader-dataset
-        params: {only: required, workers: optional, capture_root: optional}
+        params: {only: required, workers: optional, capture_root: optional, label: required}
         # `:fresh` — GENERATE, then capture. It ran `training:capture` alone, so a case that did not yet
         # exist as a page could never be captured: `training:capture failed: No generated case matches`.
         # That defeats half of what this job is for. `--pipeline=verify` exists to prove a corpus change
@@ -368,7 +375,7 @@
         # Empty by default, so every existing caller is byte-identical: `DATASET_CAPTURE_ROOT=` unset is
         # what `dataset-paths.mjs` already falls back on (`|| "captures"`). A NAME from a fixed shape, never
         # a path, for the reason every other parameter here is contained that way.
-        setenv: ["A11Y_WORKERS={{ lab_selected_workers }}", "DATASET_CAPTURE_ROOT={{ lab_capture_root }}"]
+        setenv: ["A11Y_WORKERS={{ lab_selected_workers }}", "DATASET_CAPTURE_ROOT={{ lab_capture_root }}", "A11Y_FLEET_BOXES={{ lab_fleet_boxes_workers }}", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=3600s"]
         # Minutes, not hours: this exists precisely because it is small.
         timeout: 3600
       # `--require-complete` because THIS box owns the corpus. Here "no evidence for that case" is a real
@@ -397,9 +404,10 @@
       # testing the previous commit. Generation is idempotent — same code, same bytes — so this costs
       # nothing on a run where the pages were already current, including a `--resume`.
       capture:
+        params: {label: required}
         progress: runs/screenreader-dataset
         argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture:fresh"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
+        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=28800s"]
         # Above the ~4.4 h a full recapture measures, because a ceiling that expires early turns "still
         # working" into "failed" — and this is the most expensive job in the catalogue to lose.
         timeout: 28800
@@ -412,6 +420,7 @@
       # `check-signals` produces a candidate trained on a corpus with a hole in it, and the number at the
       # end looks exactly like a good one.
       retrain:
+        params: {label: required}
         # A COMPOSITE job DOES capture, for part of its life. Declaring `progress:` here was wrong until
         # `training:status` learned `--since`, because after the capture stage this file describes a
         # FINISHED run for every hour the job spends exporting, training and running gates -- and
@@ -420,7 +429,7 @@
         # file is reported during the capture and refused after it.
         progress: runs/screenreader-dataset
         argv: ["/usr/bin/corepack", "pnpm", "run", "lab:retrain"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
+        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=50400s"]
         # A full corpus capture is the long pole; the rest is minutes. Above the ~9.8 h a full recapture
         # measures on this fleet, because a ceiling that expires early turns "still working" into "failed".
         timeout: 50400
@@ -451,14 +460,16 @@
       # from the wire reaches the environment, and an exception that happens to be safe today is an
       # exception somebody widens tomorrow.
       capture-acceptance:
+        params: {label: required}
         progress: runs/screenreader-acceptance
         argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture-acceptance"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "REPEAT=repeat-1"]
+        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "REPEAT=repeat-1", "A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=14400s"]
         timeout: 14400
       capture-acceptance-2:
+        params: {label: required}
         progress: runs/screenreader-acceptance
         argv: ["/usr/bin/corepack", "pnpm", "run", "training:capture-acceptance"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "REPEAT=repeat-2"]
+        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "REPEAT=repeat-2", "A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=14400s"]
         timeout: 14400
       # EVERY repeat, in one job, because the acceptance evaluator reads every repeat.
       #
@@ -580,7 +591,7 @@
       # which is one box for a different reason — aiming a narrowed read at a named guest, not removing a
       # variable — so the comparison would now be wrong in a second way.
       stability:
-        params: {worker: required}
+        params: {worker: required, label: required}
         # fleetVerdict/exitCodeFor, same 0/1/2 contract as gateVerdict -- see rules-gate's entry above for
         # why this is declared rather than left to be inferred.
         exitMeanings:
@@ -592,7 +603,7 @@
             which reduces the denominator rather than counting as stable. "Could not measure" and "it
             varied" need opposite responses; re-run before trusting a PASS or FAIL from this one.
         argv: ["{{ lab_tsx }}", "packages/lab/scripts/stability-gate.ts", "--local"]
-        setenv: ["A11Y_WORKER={{ lab_named_worker }}"]
+        setenv: ["A11Y_WORKER={{ lab_named_worker }}", "A11Y_FLEET_BOXES={{ lab_fleet_box }}", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=5400s"]
         timeout: 5400
       # SCORE THE SHIPPED MODEL FROM A COPY, which is what `release:gate` needs and could not do.
       #
@@ -623,6 +634,7 @@
       # `lab:pipeline` stays and is still the right tool for a SHORT chain you want to watch — it prints
       # per-stage boundaries live, which a single unit cannot. This is for the long unattended one.
       everything:
+        params: {label: required}
         # A COMPOSITE job DOES capture, for part of its life. Declaring `progress:` here was wrong until
         # `training:status` learned `--since`, because after the capture stage this file describes a
         # FINISHED run for every hour the job spends exporting, training and running gates -- and
@@ -631,7 +643,7 @@
         # file is reported during the capture and refused after it.
         progress: runs/screenreader-dataset
         argv: ["/usr/bin/corepack", "pnpm", "run", "--silent", "lab:everything"]
-        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}"]
+        setenv: ["A11Y_WORKERS={{ lab_fleet_workers }}", "A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=50400s"]
         # Above a full recapture plus a train plus every gate, because a ceiling that expires early turns
         # "still working" into "failed" — and this is the most expensive unit in the catalogue to lose.
         timeout: 50400
@@ -696,8 +708,8 @@
         # on `no workers in A11Y_WORKERS and none in inventory.yml`. The script was right to refuse rather
         # than guess; the defect was here. Its recorded failures were read as the OS split and were never
         # that -- `gate:stability` itself passed through `stability` on the same code.
-        params: {worker: required}
-        setenv: ["A11Y_WORKER={{ lab_named_worker }}"]
+        params: {worker: required, label: required}
+        setenv: ["A11Y_WORKER={{ lab_named_worker }}", "A11Y_FLEET_BOXES={{ lab_fleet_box }}", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=3600s"]
         timeout: 3600
       # `--local` IS MANDATORY HERE AND IS NOT AN ESCAPE HATCH. `dispatchUnlessLocal` makes the control
       # plane the DEFAULT, which is right for an operator running the gate from a laptop -- but this entry
@@ -706,6 +718,7 @@
       # which reads like a broken lab rather than a job wired to call itself. Both dispatching gates need
       # it; `lab-job.test.ts` now discovers them rather than trusting this comment.
       gate-probe-order:
+        params: {label: required}
         # fleetVerdict/exitCodeFor, same 0/1/2 contract as rules-gate/stability above.
         exitMeanings:
           "1": >-
@@ -715,6 +728,7 @@
             INCONCLUSIVE -- fewer pages were examined than this sweep's own population (corpus pages plus
             live sites, minus known movers); re-run rather than trusting the result shown.
         argv: ["{{ lab_tsx }}", "packages/lab/scripts/gate-probe-order.ts", "--local"]
+        setenv: ["A11Y_FLEET_BOXES=ready", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=3600s"]
         timeout: 3600
       rules-real-pages:
         # gateVerdict/exitCodeFor -- see rules-gate's entry above for why this is declared.
@@ -1065,7 +1079,7 @@
         argv: ["/usr/bin/corepack", "pnpm", "run", "corpus:backup", "--", "--verify-only"]
         timeout: 1800
       capture-check:
-        params: {worker: required}
+        params: {worker: required, label: required}
         # THE CAPTURE LAYER'S OWN REGRESSION CHECK, dispatchable at last. `capture:check` was documented as
         # MANDATORY after any change to `capture-core.mjs` and had never run once, because running it meant
         # a laptop with a route to a worker — so the one check written for the least testable code in this
@@ -1100,6 +1114,7 @@
         # resolving at all.
         argv: "{{ [lab_tsx, 'packages/lab/src/harnesses/capture-check.ts',
                   '--worker=http://' ~ hostvars[worker].ansible_host ~ ':8765'] }}"
+        setenv: ["A11Y_FLEET_BOXES={{ lab_fleet_box }}", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=1800s"]
         timeout: 1800
 
       # `-e only=<family>` NARROWS THE CHECK TO ONE FAMILY, and without it a targeted question could not
@@ -1133,7 +1148,7 @@
       # `-e worker=` is a NAME from the inventory and the command needs an ADDRESS, resolved through
       # `lab_named_worker`, so `http://:8765` is inexpressible rather than merely rejected.
       evidence-check:
-        params: {sample: optional, only: optional, worker: optional}
+        params: {sample: optional, only: optional, worker: optional, label: required}
         # ITS EXIT CODE IS THE ANSWER, not just a status: 0 safe to ship, 1 the evidence CHANGED so a
         # recapture is required, 2 it could not answer, 3 it THREW and never got to answer (#2197). 1 and 2
         # are successful runs of the check; 3 is a crash. They stay non-zero-is-failure deliberately — 1
@@ -1176,6 +1191,7 @@
                   + ([lab_named_worker] if worker is defined else (lab_fleet_workers | split(',')))
                   + ['--sample=' ~ (sample | default(24) | int)]
                   + (['--only=' ~ only] if only is defined else []) }}"
+        setenv: ["A11Y_FLEET_BOXES={{ lab_fleet_boxes_worker }}", "A11Y_FLEET_LABEL={{ lab_fleet_label }}", "A11Y_FLEET_WAIT=7200s"]
         timeout: 7200
 
   tasks:
@@ -1790,6 +1806,41 @@
         fail_msg: >-
           Refusing to run: A11Y_WORKERS would be {{ lab_selected_workers | truncate(120) }}, which is not
           a plain comma-separated list of worker addresses. Something has overridden the inventory.
+
+    # THE FLEET JOB SERVICE'S INPUTS (A11-263). The lab's capture clients submit their captures to the service on the control plane and book its boxes there, so the job
+    # tells them which boxes to ask for (`A11Y_FLEET_BOXES`), the label to book under (`A11Y_FLEET_LABEL`, the ticket key, which the service requires), and how long to wait
+    # (`A11Y_FLEET_WAIT`, the job's own `timeout`, so the client's one bounded wait ends inside the unit's `RuntimeMaxSec`). Each fact is built from a parameter that was
+    # already refused or checked above, and then asserted below: they reach the child as environment variables, the `A11Y_PYTHON` hazard, so a value that is not a name, a count,
+    # `ready` or a plain label must be INEXPRESSIBLE rather than rejected downstream. A job that takes none of `workers` and `worker` asks for `ready`.
+    - name: Which boxes and which label the fleet job service is given
+      ansible.builtin.set_fact:
+        lab_fleet_boxes_workers: "{{ workers | default('ready') | string }}"
+        lab_fleet_boxes_worker: "{{ worker | default('ready') | string }}"
+        lab_fleet_box: "{{ worker | default('') | string }}"
+        lab_fleet_label: "{{ label | default('') | string }}"
+
+    # `label` is REQUIRED of every job that captures (`params:`), and "Refuse a MISSING parameter" above has already refused its absence by name. This is its SHAPE, the service's own:
+    # the ticket key, letters, digits, '.', '_' and '-'. A job that takes no label is not asked.
+    - name: A fleet label is a ticket key, so a path or a flag cannot be expressed
+      when: "'label' in job_params"
+      ansible.builtin.assert:
+        that:
+          - lab_fleet_label is match('^[A-Za-z0-9._-]{1,64}$')
+        fail_msg: >-
+          -e label={{ lab_fleet_label | truncate(60) }} is not a label. The fleet job service books a capture under the ticket key it is for: letters, digits, '.', '_' and '-', at most 64,
+          e.g. `-e label=A11-263`.
+
+    # NAMES FROM THE INVENTORY (asserted above against `groups['a11y_workers']`), a count, or `ready`: the shapes `fleet capture submit --boxes` takes. An empty value is refused too,
+    # because `--boxes ""` is not "ready" to the service, it is no request.
+    - name: The boxes asked of the fleet job service are inventory names, a count or ready
+      ansible.builtin.assert:
+        that:
+          - lab_fleet_boxes_workers is match('^[A-Za-z0-9_.,-]+$')
+          - lab_fleet_boxes_worker is match('^[A-Za-z0-9_.,-]+$')
+          - "'worker' not in job_params or lab_fleet_box is match('^[A-Za-z0-9_.,-]+$')"
+        fail_msg: >-
+          Refusing to run: the boxes asked of the fleet job service would be {{ [lab_fleet_boxes_workers, lab_fleet_boxes_worker, lab_fleet_box] | join(' / ') | truncate(120) }}, which
+          is not inventory names, a count or `ready`. Something has overridden the inventory.
 
     # STATE THE POPULATION, on every run, not only when a selection was asked for. A measurement that
     # names its boxes when somebody remembered to ask has an optional population, and #21 is about that.
