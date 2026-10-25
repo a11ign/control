@@ -31,11 +31,26 @@ pnpm run fleet -- job list --label A11-243
 
 `wait` polls every 15 s, one ssh round trip each, and holds no stream open. A poll that fails is tried again until the deadline; a poll is given no more time than the deadline leaves.
 
-### A box does one capture at a time, and two jobs never share a box
+### Booking: every job leases its boxes, so jobs queue and never collide (A11-244)
 
-A job claims its boxes when it starts and holds them until it ends; another job waits, `queued`, for boxes it can have. The claim sits behind `src/fleet-jobs/claims.ts`, which A11-244 replaces with fleet-wide leases (so `fleet:deploy`, `fleet:provision` and the drift check take them too).
+A box does one capture at a time (the worker refuses a second with `429`), so a job **leases** its boxes before it starts and lets them go when it ends. The leases are one ledger on the control plane, `/var/lib/a11y-fleet-leases/ledger.json` (a versioned JSON file under a pid-checked mutex, [`docs/adr/0003`](adr/0003-fleet-leases-are-a-control-plane-ledger.md)), which every taker of a box reads and writes: this service, and (in the second step of A11-244) the hourly drift check, the daily freeze and the idle power-off. The code is `src/fleet-leases/`. A *lease* is not screenreader-fleet's `leaseWorker`, which starts a local VM and puts it back.
 
-A capture that fails is a **record** (`status`, and the error in `capture`), as `q3/fleet_capture.mjs` writes it, and the job goes on. A box that fails three captures in a row (no answer, `429` or a `5xx`) is dropped from the job, and its unfinished pages move to the job's other boxes. A job is `failed` only when it cannot finish: no box is left, or its files cannot be read.
+```bash
+pnpm run fleet -- job status fj-20261025T085815Z-315a1b
+# fj-20261025T085815Z-315a1b  queued  label A11-244
+# place: 1 of 2
+# estimated start: 2026-10-25T09:47:00.000Z        <- or: unknown (fleet-jobs:fj-... has no expected end)
+# waiting on: fleet-jobs:fj-20261025T084412Z-9c0d11
+pnpm run fleet -- lease list [--json]              # who holds which boxes, and the queue in the order it is served
+```
+
+- **A job that cannot get its boxes waits in the queue**, `queued`, and `job status` shows its **place**, its **estimated start** and who it **waits on** (`--json` carries `queue: { place, of, estimatedStart, estimateReason, waitingOn }`). The estimate is worked out from the leases' expected ends and the service's last 20 completed captures (⌈pages × passes ÷ boxes⌉ × the mean capture). Where an input is missing it says `unknown` and why; it never guesses.
+- **Fair use.** Jobs are served in the order they were submitted. A job that names boxes reserves only those boxes against the jobs behind it; a job that asks for "any N boxes" or `ready` holds the head of the line while it waits, so a large job is never starved by a stream of small ones. The queue keeps its order across a restart, because a job queues at its own submission time.
+- **A job holds no box longer than its own work, plus a grace period.** A box whose pages are all done is released at once, while the job goes on with the others; the job's lease is released when it ends, whether done, failed or cancelled (a graceful stop is not an end: the next start takes the same lease again). While a job runs, the service renews its lease (and a queued job's place) every 30 s. A lease that is not renewed lapses **5 minutes** after the last renewal, so a holder that dies frees its boxes within the grace and never later. A normal restart is back well inside it.
+- **A box leaving the fleet mid-job fails only that box's part.** A box leaves when three captures in a row fail on it, or when the hourly drift record (`runs/fleet-drift.json`) lists a current, not-carried difference for it. Each page it had not yet sent is a failed record, `<box> left the fleet: <why>`, the box is in the manifest's `dropped`, and its lease is released once the capture still on it, if any, has ended. The pages are **not** moved to the other boxes, and the job goes on. A job whose every box has left fails, naming each. A box the drift record lists is not offered to a new job, and a job that names one fails at start, naming the box and the difference (a drift can last for days, so waiting would be for ever).
+- **A ledger nobody can read holds every box.** A file that is not JSON, or of a version this code does not know (the ledger is written from `/root/fleet-jobs` and `/root/control`, which can be on different refs), is read as every box held: nothing is taken, nothing is written over it, and the reason is logged. A missing file is a first run and reads as empty.
+
+A capture that fails is a **record** (`status`, and the error in `capture`), as `q3/fleet_capture.mjs` writes it, and the job goes on. A job is `failed` only when it cannot finish: no box is left, or its files cannot be read.
 
 ### Cancel
 
@@ -64,4 +79,4 @@ The service sends the workers' own `/capture` and changes nothing on any box. Th
 
 ## Not here yet
 
-Fleet-wide leases (A11-244), the board waking an agent when a job ends, moving `capture_fleet.py`, `q3/fleet_capture.mjs` and lab's clients onto the service (A11-246), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.
+Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` for now), scheduled work taking leases (A11-244, step 2), the board waking an agent when a job ends, moving `capture_fleet.py`, `q3/fleet_capture.mjs` and lab's clients onto the service (A11-246), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.

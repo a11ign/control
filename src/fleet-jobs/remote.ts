@@ -13,7 +13,11 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { readControlPlaneFleet } from "../control-plane-fleet.ts";
 import { storeDirFromEnv } from "./paths.ts";
+import { LeaseLedger } from "../fleet-leases/ledger.ts";
+import { ledgerDirFromEnv, ledgerPathIn } from "../fleet-leases/paths.ts";
+import { availability, inOrder } from "../fleet-leases/grant.ts";
 import { passesRefusal } from "./plan.ts";
+import { estimateFor, queueViewOf } from "./queue-view.ts";
 import { JOB_ID, JobStore, newJobId } from "./store.ts";
 import { HEARTBEAT_STALE_MS, viewJob } from "./view.ts";
 import type { JobView, ServiceBeat } from "./view.ts";
@@ -30,6 +34,8 @@ export type RemoteDeps = {
   /** The names the inventory declares, to check a named box against. */
   known?: () => string[];
   stdin?: () => string;
+  /** The lease ledger, for a queued job's place and `lease list`. Without one, a queued job shows no place. */
+  ledger?: LeaseLedger;
 };
 
 /** What `submit` reads on stdin, from the CLI. */
@@ -112,7 +118,13 @@ function submit(deps: Required<Pick<RemoteDeps, "store" | "now">> & RemoteDeps):
   return ok({ id: request.id });
 }
 
-function viewOf(store: JobStore, id: string, now: number): JobView | RemoteResult {
+/** The inventory's box names for an estimate to choose a count from; empty when the inventory could not be read, and the estimate then says so. */
+function fleetOf(deps: Pick<RemoteDeps, "known">): string[] {
+  try { return deps.known?.() ?? []; } catch { return []; }
+}
+
+function viewOf(deps: Pick<RemoteDeps, "store" | "ledger" | "known">, id: string, now: number): JobView | RemoteResult {
+  const { store } = deps;
   if (!JOB_ID.test(id)) return refuse(`${JSON.stringify(id)} is not a job ID (fj-<time>-<hex>)`, REMOTE_EXIT.UNKNOWN_JOB);
   const request = store.readRequest(id);
   const state = store.readState(id);
@@ -121,18 +133,20 @@ function viewOf(store: JobStore, id: string, now: number): JobView | RemoteResul
     version: STORE_VERSION, id, label: "(unreadable)", pages: [], boxes: { kind: "ready" }, passes: 0, body: {}, freeze: null, submittedBy: "",
     submittedAt: new Date(Date.UTC(+id.slice(3, 7), +id.slice(7, 9) - 1, +id.slice(9, 11), +id.slice(12, 14), +id.slice(14, 16), +id.slice(16, 18))).toISOString(),
   };
+  const queue = deps.ledger && request?.ok && !state ? queueViewOf({ ledger: deps.ledger, store, now, fleet: fleetOf(deps) }, id) : null;
   return viewJob({
     request: request?.ok ? request.value : placeholder,
     state: state?.ok ? state.value : null,
     cancelled: store.isCancelled(id),
-    beat: readBeat(store), now, storeDir: store.dir,
+    beat: readBeat(store), now, storeDir: store.dir, queue,
   });
 }
 
 const isResult = (value: JobView | RemoteResult): value is RemoteResult => "code" in value;
 
-function cancel(store: JobStore, id: string, now: number): RemoteResult {
-  const view = viewOf(store, id, now);
+function cancel(deps: RemoteDeps, id: string, now: number): RemoteResult {
+  const { store } = deps;
+  const view = viewOf({ store }, id, now);
   if (isResult(view)) return view;
   if (isTerminal(view.state)) return refuse(`job ${id} has already ended (${view.state}), so it cannot be cancelled`, REMOTE_EXIT.ALREADY_ENDED);
   store.markCancelled(id, new Date(now).toISOString());
@@ -140,17 +154,31 @@ function cancel(store: JobStore, id: string, now: number): RemoteResult {
 }
 
 function list(store: JobStore, { label, state, limit }: { label?: string; state?: string; limit: number }, now: number): RemoteResult {
-  const views = store.list().reverse().flatMap((id) => { const v = viewOf(store, id, now); return isResult(v) ? [] : [v]; });
+  const views = store.list().reverse().flatMap((id) => { const v = viewOf({ store }, id, now); return isResult(v) ? [] : [v]; });
   const chosen = views.filter((v) => (!label || v.label === label) && (!state || v.state === state)).slice(0, limit);
   return ok(chosen.map(({ id, label: l, state: s, submittedAt, startedAt, finishedAt, total, done, failed }) => ({ id, label: l, state: s, submittedAt, startedAt, finishedAt, total, done, failed })));
+}
+
+/** `fleet lease list`: the live leases and the queue in the order it is served, each waiter with its place and estimated start. Read-only. */
+function leaseList(deps: RemoteDeps, now: number): RemoteResult {
+  if (!deps.ledger) return refuse("no lease ledger is configured");
+  const read = deps.ledger.live();
+  if (!read.ok) return refuse(read.reason);
+  const at = { ledger: deps.ledger, store: deps.store, now, fleet: fleetOf(deps) };
+  const queue = inOrder(read.ledger.queue).map((w, i) => {
+    const estimate = estimateFor(at, w.id);
+    return { ...w, place: i + 1, of: read.ledger.queue.length, estimatedStart: estimate.estimatedStart === null ? null : new Date(estimate.estimatedStart).toISOString(),
+      estimateReason: estimate.reason, waitingOn: availability(read.ledger, w.id).waitingOn };
+  });
+  return ok({ at: new Date(now).toISOString(), leases: read.ledger.leases, queue });
 }
 
 const STATES: JobState[] = ["queued", "running", "done", "failed", "cancelled"];
 
 type Handler = (rest: string[], deps: RemoteDeps, now: number) => RemoteResult;
 
-const idCommand = (name: string, run: (store: JobStore, id: string, now: number) => RemoteResult): Handler => (rest, deps, now) =>
-  rest.length === 1 ? run(deps.store, rest[0]!, now) : refuse(`${name} takes one job ID`);
+const idCommand = (name: string, run: (deps: RemoteDeps, id: string, now: number) => RemoteResult): Handler => (rest, deps, now) =>
+  rest.length === 1 ? run(deps, rest[0]!, now) : refuse(`${name} takes one job ID`);
 
 function listCommand(rest: string[], deps: RemoteDeps, now: number): RemoteResult {
   const { values } = parseArgs({ args: rest, options: { label: { type: "string" }, state: { type: "string" }, limit: { type: "string" } }, strict: true });
@@ -162,16 +190,17 @@ function listCommand(rest: string[], deps: RemoteDeps, now: number): RemoteResul
 
 const COMMANDS: Record<string, Handler> = {
   submit: (_rest, deps) => submit({ ...deps, now: deps.now ?? Date.now }),
-  status: idCommand("status", (store, id, now) => { const view = viewOf(store, id, now); return isResult(view) ? view : ok(view); }),
+  status: idCommand("status", (deps, id, now) => { const view = viewOf(deps, id, now); return isResult(view) ? view : ok(view); }),
   cancel: idCommand("cancel", cancel),
   list: listCommand,
+  "lease-list": (_rest, deps, now) => leaseList(deps, now),
 };
 
 /** One remote command. PURE of process state: the store, the clock and stdin are handed in. */
 export function remote(argv: string[], deps: RemoteDeps): RemoteResult {
   const [command, ...rest] = argv;
   const handler = Object.hasOwn(COMMANDS, command ?? "") ? COMMANDS[command!]! : null;
-  if (!handler) return refuse("usage: remote.ts submit|status <id>|cancel <id>|list [--label k] [--state s] [--limit n]|tar <id>");
+  if (!handler) return refuse("usage: remote.ts submit|status <id>|cancel <id>|list [--label k] [--state s] [--limit n]|lease-list|tar <id>");
   try {
     return handler(rest, deps, (deps.now ?? Date.now)());
   } catch (error) {
@@ -195,7 +224,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.arg
     if (refusal !== null) throw new Error(refusal);
     return workers.map((w) => w.name);
   };
-  const result = remote(argv, { store, known, stdin: () => readFileSync(0, "utf8") });
+  const ledger = new LeaseLedger(ledgerPathIn(ledgerDirFromEnv()));
+  const result = remote(argv, { store, known, ledger, stdin: () => readFileSync(0, "utf8") });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   process.exit(result.code);

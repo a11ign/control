@@ -10,6 +10,9 @@ export const HEARTBEAT_STALE_MS = 30_000;
 
 export type BoxProgress = { box: string; done: number; failed: number; total: number };
 
+/** A queued job's standing in the lease queue. `estimatedStart` is null, with `estimateReason`, when an input to the estimate is missing. */
+export type QueueView = { place: number | null; of: number; estimatedStart: string | null; estimateReason: string | null; waitingOn: string[] };
+
 export type JobView = {
   id: string;
   label: string;
@@ -29,6 +32,8 @@ export type JobView = {
   dropped: { box: string; reason: string }[];
   estimatedFinish: string | null;
   estimate: string;
+  /** Where the job stands in the queue for its boxes, or null when it is not waiting for any. */
+  queue: QueueView | null;
   results: { location: string; fetch: string };
   service: (ServiceBeat & { alive: boolean }) | null;
 };
@@ -81,8 +86,8 @@ const reasonOf = (reason: string | null | undefined, jobState: JobState, cancell
 const isoOrNull = (ms: number | null): string | null => ms === null ? null : new Date(ms).toISOString();
 
 /** One job as `status` shows it. PURE given what the store held. */
-export function viewJob({ request, state, cancelled, beat, now, storeDir = STORE_DIR }: {
-  request: JobRequest; state: JobStateFile | null; cancelled: boolean; beat: ServiceBeat | null; now: number; storeDir?: string;
+export function viewJob({ request, state, cancelled, beat, now, storeDir = STORE_DIR, queue = null }: {
+  request: JobRequest; state: JobStateFile | null; cancelled: boolean; beat: ServiceBeat | null; now: number; storeDir?: string; queue?: QueueView | null;
 }): JobView {
   const { state: jobState, reason, captures, dropped, startedAt, finishedAt } = state ?? NOT_STARTED;
   const total = captures.length || request.pages.length * request.passes;
@@ -97,15 +102,28 @@ export function viewJob({ request, state, cancelled, beat, now, storeDir = STORE
     dropped,
     estimatedFinish: isoOrNull(eta),
     estimate: estimateText(isTerminal(jobState), eta),
+    queue: jobState === "queued" && !cancelled ? queue : null,
     results: { location: resultsLocation(request.id, storeDir), fetch: `fleet job fetch ${request.id} --to <dir>` },
     service: serviceOf(beat, now),
   };
+}
+
+/** What a queued job shows: its place, when it should start, and who it waits on. */
+export function queueLines(queue: QueueView | null): string[] {
+  if (!queue) return [];
+  const start = queue.estimatedStart ?? `unknown (${queue.estimateReason ?? "no reason given"})`;
+  return [
+    `place: ${queue.place ?? "?"} of ${queue.of}`,
+    `estimated start: ${start}`,
+    ...(queue.waitingOn.length ? [`waiting on: ${queue.waitingOn.join(", ")}`] : []),
+  ];
 }
 
 /** The lines `fleet job status` prints (and `wait` prints on a timeout). */
 export function renderView(view: JobView): string[] {
   const lines = [
     `${view.id}  ${view.state}${view.reason ? ` (${view.reason})` : ""}  label ${view.label}`,
+    ...queueLines(view.queue),
     `captures: ${view.done} of ${view.total} done${view.failed ? `, ${view.failed} failed` : ""}, ${view.remaining} left  (${view.pages} pages x ${view.passes} ${view.passes === 1 ? "pass" : "passes"})`,
     ...view.boxes.map((b) => `  ${b.box}: ${b.done}/${b.total}${b.failed ? ` (${b.failed} failed)` : ""}`),
     ...view.dropped.map((d) => `  dropped ${d.box}: ${d.reason}`),

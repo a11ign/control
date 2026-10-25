@@ -1,0 +1,38 @@
+import { readFileSync, statSync } from "node:fs";
+import { CONTROL_PLANE_CHECKOUT_PATH } from "../control-plane-checkout.ts";
+
+/**
+ * WHICH BOXES THE HOURLY DRIFT CHECK SAYS ARE OFF THE MANIFEST (A11-205, A11-244). `runs/fleet-drift.json` on the control plane is the one reading:
+ * `a11y-fleet-drift.service` writes it from `/root/control`, which follows `main`, while this service's checkout may be on an older ref. A box with a
+ * current difference (not a `carried` one: that box did not answer and is unread) is out of capture, so a running job lets it go and a new job is not
+ * given it. A difference can last for days, so waiting for it to clear would be for ever.
+ */
+export const FLEET_DRIFT_PATH = `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-drift.json`;
+
+/** Box -> what differs, in a sentence. An empty answer is also what a record that cannot be read gives: the check is not this service's to redo. */
+export type DriftReader = () => Record<string, string>;
+
+type Entry = { box?: unknown; field?: unknown; has?: unknown; wants?: unknown; carried?: unknown };
+
+export function driftFrom(text: string): Record<string, string> {
+  const parsed = JSON.parse(text) as { differences?: unknown };
+  const found: Record<string, string[]> = {};
+  for (const entry of Array.isArray(parsed.differences) ? parsed.differences as Entry[] : []) {
+    if (typeof entry?.box !== "string" || entry.carried === true) continue;
+    (found[entry.box] ??= []).push(`${String(entry.field)} is ${String(entry.has ?? "unread")}, the manifest wants ${String(entry.wants)}`);
+  }
+  return Object.fromEntries(Object.entries(found).map(([box, lines]) => [box, `off the manifest: ${lines.join("; ")}`]));
+}
+
+/** Reads the record again only when its mtime has moved, so asking on every tick costs one `stat`. */
+export function driftReader(path: string = FLEET_DRIFT_PATH): DriftReader {
+  let seen = -1;
+  let last: Record<string, string> = {};
+  return () => {
+    try {
+      const { mtimeMs } = statSync(path);
+      if (mtimeMs !== seen) { last = driftFrom(readFileSync(path, "utf8")); seen = mtimeMs; }
+    } catch { last = {}; seen = -1; }
+    return last;
+  };
+}

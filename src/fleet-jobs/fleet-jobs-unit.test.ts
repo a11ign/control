@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { deriveShippedUnits } from "../control-unit-drift.ts";
+import { LEDGER_DIR } from "../fleet-leases/paths.ts";
 import { CONTROL_TSX_LOADER, SERVICE_CHECKOUT, SERVICE_UNIT, STORE_DIR } from "./paths.ts";
 
 const ROOT = new URL("../../", import.meta.url);
@@ -20,7 +21,7 @@ const keys = (unit: string, key: string): string[] => [...unit.matchAll(new RegE
 test("the unit runs the service through the loader the plane holds, from the service's own checkout, with the state directory the store is", () => {
   assert.deepEqual(keys(UNIT, "ExecStart"), [`/usr/bin/node --import ${CONTROL_TSX_LOADER} ${SERVICE_CHECKOUT}/src/fleet-jobs/service.ts`]);
   assert.deepEqual(keys(UNIT, "WorkingDirectory"), [SERVICE_CHECKOUT]);
-  assert.deepEqual(keys(UNIT, "StateDirectory"), [STORE_DIR.replace("/var/lib/", "")]);
+  assert.deepEqual(keys(UNIT, "StateDirectory"), [[STORE_DIR, LEDGER_DIR].map((dir) => dir.replace("/var/lib/", "")).join(" ")], "the job store, and the lease ledger beside it");
   assert.deepEqual(keys(UNIT, "Restart"), ["on-failure"]);
   assert.deepEqual(keys(UNIT, "Type"), ["simple"]);
 });
