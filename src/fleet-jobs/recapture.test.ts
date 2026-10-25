@@ -137,14 +137,18 @@ test("the manifest of a case job names its cases, their groups and attempts, eac
   t.done();
 });
 
-test("a page job's manifest is unchanged: still version 1, with no cases", async () => {
-  const t = harness();
-  const id = t.submit({ kind: "count", count: 2 });
+test("a page job is unchanged: version 1 state and manifest with no case fields, pages times passes, and the job's one body for every page", async () => {
+  const seen = recording();
+  const t = harness({ capture: seen.capture });
+  const id = t.submit({ kind: "count", count: 2 }, { passes: 2 });
   await t.drain();
   const manifest = manifestOf(t, id);
-  assert.equal(manifest.version, 1);
-  assert.ok(!("cases" in manifest) && !("environment" in manifest.boxes[0]) && !("case" in manifest.captures[0]));
   assert.equal(t.state(id).version, 1);
+  assert.equal(manifest.version, 1);
+  assert.ok(!("cases" in manifest) && !("recaptureOf" in manifest) && !("environment" in manifest.boxes[0]) && !("case" in manifest.captures[0]));
+  assert.equal(manifest.captures.length, PAGES.length * 2);
+  assert.deepEqual(Object.keys(manifest.captures[0]).sort(), ["box", "error", "file", "finishedAt", "httpStatus", "note", "page", "pass", "startedAt", "status"]);
+  assert.ok(seen.asked.every((a) => a.body.steps === 600 && Object.keys(a.body).sort().join() === "steps,url"), "the job's one body, with the page's URL");
   t.done();
 });
 
@@ -470,15 +474,5 @@ test("fleet job recapture prints the new job's ID alone and says what it re-capt
   const refused = await cli(t, ["job", "recapture", source, "--cases", "x.nope", "--label", "A11-263"]);
   assert.equal(refused.code, 2);
   assert.match(refused.stderr, /has no case x\.nope/);
-  t.done();
-});
-
-test("page jobs keep their paths: the tests above use none of the page fixtures, and PAGES is still what a page job captures", async () => {
-  const seen = recording();
-  const t = harness({ capture: seen.capture });
-  t.submit({ kind: "count", count: 2 });
-  await t.drain();
-  assert.deepEqual(seen.asked.map((a) => a.body.url).sort(), [...PAGES].sort());
-  assert.ok(seen.asked.every((a) => a.body.steps === 600 && !("task" in a.body)), "a page job sends the job's one body");
   t.done();
 });
