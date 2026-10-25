@@ -57,6 +57,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWorkersServe } from "@a11ign/screenreader-fleet/code-drift";
 import { layerCodeVersion, layerSourceDir } from "./layer-checkouts.ts";
+import { LABEL_WORDS, validLabel } from "./fleet-jobs/label.ts";
 // #1356: the CONTROL PLANE's own inventory, never a checkout's `inventory.yml` -- gitignored, and this
 // job is dispatched FROM the control plane (it needs `A11Y_PVE_KEY` to reach the lab at all, the same
 // credential this read needs), so asking it directly costs nothing this job was not already paying.
@@ -102,7 +103,7 @@ export function extraVars(argv: string[]): Record<string, string> {
  *
  * @param {string} catalogueText the raw text of `lab-job.yml`
  */
-function catalogueJobs(catalogueText: string): { name: string; block: string; }[] {
+export function catalogueJobs(catalogueText: string): { name: string; block: string; }[] {
   const from = catalogueText.indexOf("\n    lab_jobs:");
   const to = catalogueText.indexOf("\n  tasks:", from);
   if (from < 0 || to < 0) {
@@ -249,6 +250,20 @@ export function workerDemand(catalogueText: string, job: string): { fleet: boole
     named: /params:\s*\{[^}]*\bworker:/.test(block),
   };
   return demand.fleet || demand.selectable || demand.named ? demand : null;
+}
+
+/**
+ * The refusal of a launch whose job REQUIRES a label (A11-263: the fleet job service books a capture under a ticket key) and was given none, or one that is not a ticket key; null when the job
+ * takes none or the label is good. Read from the job's own `params:` like `workerDemand`, and asked BEFORE anything is resolved or woken, so a refused launch wakes nothing. The playbook
+ * refuses the same launch too (its required-parameter check and the label's shape), for the callers that do not come through here.
+ */
+export function labelRefusal(catalogueText: string, job: string, vars: Record<string, string>): string | null {
+  const block = (catalogueJobs(catalogueText).find((entry) => entry.name === job)?.block ?? "")
+    .split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  if (!/params:\s*\{[^}]*\blabel:\s*required/.test(block)) return null;
+  const label = vars.label;
+  if (label === undefined) return `REFUSING ${job}: it needs -e label=<ticket key>. The fleet job service books a capture under the ticket key it is for, and a launch without one is refused before any box is woken.`;
+  return validLabel(label) ? null : `REFUSING ${job}: -e label=${label} is not a ticket key (${LABEL_WORDS}).`;
 }
 
 /**
@@ -508,13 +523,19 @@ async function runOnce(argv: string[], {
   if (job && !isDescribeOnly(argv)) {
     const catalogue = catalogueText ?? readFileSync(CATALOGUE, "utf8");
     const demand = workerDemand(catalogue, job);
+    // #4405: before the pool is resolved or any box is woken, so a refused job wakes nothing.
+    const buildRefusal = demand ? fleetBuildRefusal(job, openIncident) : null;
+    if (buildRefusal !== null) {
+      process.stderr.write(`${buildRefusal}\n`);
+      return process.exit(3);
+    }
+    // A11-263: a launch without the label its job requires is refused in the same place, before the fleet is woken (or, for a job that wakes nothing, before it is dispatched).
+    const missingLabel = labelRefusal(catalogue, job, extraVars(argv));
+    if (missingLabel !== null) {
+      process.stderr.write(`${missingLabel}\n`);
+      return process.exit(3);
+    }
     if (demand) {
-      // #4405: before the pool is resolved or any box is woken, so a refused job wakes nothing.
-      const buildRefusal = fleetBuildRefusal(job, openIncident);
-      if (buildRefusal !== null) {
-        process.stderr.write(`${buildRefusal}\n`);
-        return process.exit(3);
-      }
       // #1356: the CONTROL PLANE's own inventory when `workers` was not given directly -- never a
       // checkout's `inventory.yml`, gitignored and absent here just as it was on the control plane's own
       // persistent checkout (#1670). Refused in ITS OWN words before anything is asked of a worker,

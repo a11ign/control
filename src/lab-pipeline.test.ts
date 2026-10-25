@@ -17,7 +17,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { PIPELINES, TAKES_LABEL, jobNames, pipelineLabel, stageExtras, validLabel, validRef } from "./lab-pipeline.ts";
+import { PIPELINES, TAKES_LABEL, jobNames, pipelineLabel, stageExtras, validRef } from "./lab-pipeline.ts";
+import { validLabel } from "./fleet-jobs/label.ts";
 
 type Job = { argv?: unknown; setenv?: string[]; timeout?: number; params?: Record<string, string> };
 

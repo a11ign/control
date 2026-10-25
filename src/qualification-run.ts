@@ -61,6 +61,7 @@ import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./git-safe-env.ts";
 import { commitOfTag, publishedCommits, readDeployPins, type DeployPins, type LabPin } from "./layer-pins.ts";
 import { renderResult, requireFullSha, EXIT, type Outcome } from "./post-qualification-status.ts";
+import { LABEL_WORDS, validLabel } from "./fleet-jobs/label.ts";
 
 export const QUALIFY_FLAG = "--qualify-sha=";
 
@@ -170,6 +171,11 @@ export function qualificationRequest(argv: string[], { job, row, ref, worker, la
   if (ref !== undefined && ref !== sha) {
     return { refusal: `REFUSING ${QUALIFY_FLAG}: -e ref=${ref} would run the lab at a different commit from the sha `
       + "being qualified. Drop the ref: it is set from the sha." };
+  }
+  if (label !== undefined && !validLabel(label)) {
+    // The playbook refuses a label that is not a ticket key too, but after `pending` is posted (#3988), so it is refused here.
+    return { refusal: `REFUSING ${QUALIFY_FLAG}: -e label=${label} is not a ticket key (${LABEL_WORDS}), and the playbook refuses a launch with it, `
+      + "after which a refused launch has no verdict." };
   }
   const forwarded = argv.filter((arg) => !arg.startsWith(QUALIFY_FLAG));
   const pinned = ref === undefined ? [...forwarded, "-e", `ref=${sha}`] : forwarded;

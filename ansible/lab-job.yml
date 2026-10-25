@@ -3,12 +3,14 @@
 #
 #     ansible-playbook lab-job.yml -e job=train
 #     ansible-playbook lab-job.yml -e job=sweep -e model=runs/model-candidate
-#     ansible-playbook lab-job.yml -e job=capture-real-pages -e role=training -e shard=0/4
-#     ansible-playbook lab-job.yml -e job=evidence-check -e only=media-autoplay-audio -e worker=a11y-worker-2
+#     ansible-playbook lab-job.yml -e job=capture-real-pages -e role=training -e shard=0/4 -e label=A11-263
+#     ansible-playbook lab-job.yml -e job=evidence-check -e only=media-autoplay-audio -e worker=a11y-worker-2 -e label=A11-263
+#
+# A job that captures through the fleet job service REQUIRES `-e label=<ticket key>` (A11-263): it books the captures under it. `-e job=<name> -e describe=1` lists what a job takes.
 #
 # ## Being told it ended (#2729): `-e row=<n>`
 #
-#     npm run lab:job -- -e job=evidence-check -e row=2718
+#     npm run lab:job -- -e job=evidence-check -e row=2718 -e label=A11-263
 #
 # Name the row that is waiting on the job and the gate's `lab-job-finished` cause wakes that row's holder on
 # its next tick, carrying the outcome and exit code (`tasks/run-job.yml` writes the record). This is what
@@ -1814,7 +1816,7 @@
     # `ready` or a plain label must be INEXPRESSIBLE rather than rejected downstream. A job that takes none of `workers` and `worker` asks for `ready`.
     - name: Which boxes and which label the fleet job service is given
       ansible.builtin.set_fact:
-        lab_fleet_boxes_workers: "{{ workers | default('ready') | string }}"
+        lab_fleet_boxes_workers: "{{ workers | default('ready') | string | split(',') | map('trim') | select | join(',') }}"
         lab_fleet_boxes_worker: "{{ worker | default('ready') | string }}"
         lab_fleet_box: "{{ worker | default('') | string }}"
         lab_fleet_label: "{{ label | default('') | string }}"
@@ -1826,6 +1828,8 @@
       ansible.builtin.assert:
         that:
           - lab_fleet_label is match('^[A-Za-z0-9._-]{1,64}$')
+          # `match`'s `$` also matches before a trailing newline, which would reach the child's environment.
+          - lab_fleet_label == lab_fleet_label | trim
         fail_msg: >-
           -e label={{ lab_fleet_label | truncate(60) }} is not a label. The fleet job service books a capture under the ticket key it is for: letters, digits, '.', '_' and '-', at most 64,
           e.g. `-e label=A11-263`.
@@ -1838,6 +1842,9 @@
           - lab_fleet_boxes_workers is match('^[A-Za-z0-9_.,-]+$')
           - lab_fleet_boxes_worker is match('^[A-Za-z0-9_.,-]+$')
           - "'worker' not in job_params or lab_fleet_box is match('^[A-Za-z0-9_.,-]+$')"
+          - lab_fleet_boxes_workers == lab_fleet_boxes_workers | trim
+          - lab_fleet_boxes_worker == lab_fleet_boxes_worker | trim
+          - lab_fleet_box == lab_fleet_box | trim
         fail_msg: >-
           Refusing to run: the boxes asked of the fleet job service would be {{ [lab_fleet_boxes_workers, lab_fleet_boxes_worker, lab_fleet_box] | join(' / ') | truncate(120) }}, which
           is not inventory names, a count or `ready`. Something has overridden the inventory.

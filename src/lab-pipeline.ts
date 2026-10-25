@@ -59,6 +59,7 @@ import { journalScope } from "./fleet-playbook.ts";
 import { requireControlPlaneHost, requireControlPlaneKey } from "./control-plane-host.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 import { layerCheckoutMove, layerPins, layerRefValues } from "./layer-checkouts.ts";
+import { LABEL_WORDS, validLabel } from "./fleet-jobs/label.ts";
 
 /**
  * a mistyped `--ref=` falls back to the local branch, which is how the fleet and the lab came to be on
@@ -311,8 +312,6 @@ const TAKES_ONLY = new Set(["capture-only"]);
 export const TAKES_LABEL = new Set(["capture", "capture-only", "capture-acceptance", "capture-acceptance-2", "capture-real-pages", "retrain", "everything", "evidence-check",
   "stability", "gate-stability", "gate-probe-order", "capture-check"]);
 
-/** A ticket key as the service and `lab-job.yml` take it: letters, digits, '.', '_' and '-', at most 64. It reaches a remote shell and an `-e`, so a flag or a path is inexpressible. */
-export const validLabel = (label: string) => /^[A-Za-z0-9._-]{1,64}$/.test(String(label));
 
 /**
  * The label every labelled stage gets, or the reason there is none. A pipeline with a stage that books the fleet job service NEEDS one, and is refused before its first stage rather than at
@@ -320,7 +319,7 @@ export const validLabel = (label: string) => /^[A-Za-z0-9._-]{1,64}$/.test(Strin
  */
 export function pipelineLabel(pipeline: Pipeline, label: string | undefined): { label: string | undefined } | { refusal: string } {
   const books = jobNames(pipeline).some((job) => TAKES_LABEL.has(job));
-  if (label !== undefined && !validLabel(label)) return { refusal: `refusing --label=${label}: the ticket key the fleet job service books the captures under (letters, digits, '.', '_' and '-', at most 64).` };
+  if (label !== undefined && !validLabel(label)) return { refusal: `refusing --label=${label}: the ticket key the fleet job service books the captures under (${LABEL_WORDS}).` };
   if (books && label === undefined) return { refusal: "this pipeline captures through the fleet job service, which books a capture under the ticket key it is for: pass --label=<ticket key>." };
   if (!books && label !== undefined) return { refusal: "this pipeline books nothing on the fleet, so --label would be applied to no stage." };
   return { label };
@@ -624,7 +623,14 @@ function dispatchToControlUnlessLocal() {
   // The arguments below are joined into a command a remote shell runs, so a label is checked by SHAPE before it goes (the other flags are checked where the sequence runs).
   const sentLabel = flagValue(args, "label");
   if (sentLabel !== undefined && !validLabel(sentLabel)) {
-    process.stderr.write(`refusing --label=${sentLabel}: the ticket key the fleet job service books the captures under (letters, digits, '.', '_' and '-', at most 64).\n`);
+    process.stderr.write(`refusing --label=${sentLabel}: the ticket key the fleet job service books the captures under (${LABEL_WORDS}).\n`);
+    process.exit(2);
+  }
+  // The label a pipeline needs is asked for here as well, on the laptop: the sequence runs detached on the control plane, and a refusal there would leave this command saying "started".
+  const sentPipeline = (PIPELINES as Record<string, Pipeline | undefined>)[flagValue(args, "pipeline") ?? ""];
+  const labelled = sentPipeline ? pipelineLabel(sentPipeline, sentLabel) : null;
+  if (labelled && "refusal" in labelled) {
+    process.stderr.write(`${labelled.refusal}\n`);
     process.exit(2);
   }
   const ref = branchArg(args);

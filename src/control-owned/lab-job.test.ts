@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { sandboxGitEnv } from "../git-safe-env.ts";
+import { LABEL } from "../fleet-jobs/label.ts";
 
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -1595,9 +1596,11 @@ test("A11-263: a job without a label is refused naming the parameter, and a labe
   assert.ok(params.includes("label"), "-e label= is a published parameter");
   assert.match(LAB_JOB, /needs -e \{\{ item\.key \}\}=/, "the refusal of a missing required parameter names it");
   assert.match(LAB_JOB, /loop: "\{\{ job_params \| dict2items \| selectattr\('value', 'equalto', 'required'\)/);
+  assert.ok(assertClausesWhen(/^'label' in job_params$/).includes("lab_fleet_label == lab_fleet_label | trim"), "a trailing newline, which `match`'s `$` lets through, is refused");
   assert.ok(assertClausesWhen(/^'label' in job_params$/).includes("lab_fleet_label is match('^[A-Za-z0-9._-]{1,64}$')"),
     "a label is the service's own shape (letters, digits, '.', '_', '-', at most 64): it reaches a child as an environment variable");
-  const label = /^[A-Za-z0-9._-]{1,64}$/;
+  const label = LABEL;
+  assert.ok(assertClausesWhen(/^'label' in job_params$/).includes(`lab_fleet_label is match('${LABEL.source}')`), "the playbook states the service's own label shape (src/fleet-jobs/label.ts)");
   for (const good of ["A11-263", "A11-263.retry_2"]) assert.ok(label.test(good), good);
   for (const bad of ["", "../x", "a b", "a;b", "x".repeat(65), "$(id)"]) assert.ok(!label.test(bad), JSON.stringify(bad));
 });
@@ -1608,6 +1611,11 @@ test("A11-263: the boxes asked of the service are built from names the inventory
     assert.ok(clauses.includes(clause), `${clause} is asserted`);
   }
   assert.match(LAB_JOB, /lab_fleet_box: "\{\{ worker \| default\(''\) \| string \}\}"/);
+  // Names are trimmed as the selection above trims them, so `workers=a, b` is the run it always was; and a trailing newline, which `match`'s `$` lets through, is refused.
+  assert.match(LAB_JOB, /lab_fleet_boxes_workers: "\{\{ workers \| default\('ready'\) \| string \| split\(','\) \| map\('trim'\) \| select \| join\(','\) \}\}"/);
+  for (const clause of ["lab_fleet_boxes_workers == lab_fleet_boxes_workers | trim", "lab_fleet_boxes_worker == lab_fleet_boxes_worker | trim", "lab_fleet_box == lab_fleet_box | trim"]) {
+    assert.ok(clauses.includes(clause), `${clause} is asserted`);
+  }
   const built = LAB_JOB.indexOf("Which boxes and which label the fleet job service is given");
   const proved = LAB_JOB.indexOf("The boxes asked of the fleet job service are inventory names");
   const used = LAB_JOB.indexOf("Run {{ job }}");

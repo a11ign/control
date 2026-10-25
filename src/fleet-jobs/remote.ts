@@ -18,6 +18,7 @@ import { ledgerDirFromEnv, ledgerPathIn } from "../fleet-leases/paths.ts";
 import { availability, inOrder } from "../fleet-leases/grant.ts";
 import { bodyRefusal, casesRefusal } from "./cases.ts";
 import { passesRefusal } from "./plan.ts";
+import { LABEL_WORDS, validLabel } from "./label.ts";
 import { estimateFor, queueViewOf } from "./queue-view.ts";
 import { JOB_ID, JobStore, newJobId } from "./store.ts";
 import { HEARTBEAT_STALE_MS, viewJob } from "./view.ts";
@@ -49,8 +50,7 @@ export type SubmitPayload = {
 /** What `recapture` reads on stdin, from the CLI. */
 export type RecapturePayload = { source: string; cases: string[]; label: string; submittedBy: string };
 
-const LABEL = /^[A-Za-z0-9._-]{1,64}$/;
-const labelRefusal = (label: unknown): string | null => LABEL.test(String(label ?? "")) ? null : "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
+const labelRefusal = (label: unknown): string | null => validLabel(label) ? null : `--label is required, as the ticket key: ${LABEL_WORDS}`;
 const BOX_NAME = /^[\w.-]+$/;
 const MAX_PASSES = 10;
 

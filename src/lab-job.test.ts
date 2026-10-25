@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { ansiblePlaybookArgs, captureBearingJobs, driftDecision, extraVars, fleetBuildRefusal, fleetDispatchingJobs, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
+import { ansiblePlaybookArgs, captureBearingJobs, catalogueJobs, driftDecision, extraVars, fleetBuildRefusal, fleetDispatchingJobs, run, poolFor, useTimeArgs, withoutLeadingSeparator } from "./lab-job.ts";
 import type { DriftReading } from "./lab-job.ts";
 import type { OpenIncident } from "./fleet-build-incident.ts";
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
@@ -112,7 +112,7 @@ test("the catalogue boundary markers are load-bearing, and their absence is refu
 test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool it will actually use", () => {
   const seen: { checked?: unknown[]; dispatched?: unknown[] } = {};
   const order: string[] = [];
-  return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
+  return run(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "only=route-title-stale+"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765", "http://203.0.113.59:8765"],
     expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
@@ -129,7 +129,7 @@ test("a capture-bearing job checks the fleet BEFORE dispatching, with the pool i
     assert.equal(seen.checked?.[0], "deadbeefdeadbeef");
     assert.deepEqual(seen.checked?.[1], ["http://203.0.113.107:8765", "http://203.0.113.59:8765"]);
     assert.equal((seen.checked?.[2] as { when?: string })?.when, "before dispatching to the lab");
-    assert.deepEqual(seen.dispatched, ["-e", "job=capture-only", "-e", "only=route-title-stale+"]);
+    assert.deepEqual(seen.dispatched, ["-e", "job=capture-only", "-e", "label=A11-263", "-e", "only=route-title-stale+"]);
   });
 });
 
@@ -164,7 +164,7 @@ test("#1356: a control plane that could not be asked REFUSES in its own words, n
 test("#1356: with no `workers` given, a capture-bearing job's pool comes from the CONTROL PLANE's own "
   + "inventory, never a checkout's inventory.yml -- through run() itself", () => {
   const seen: { checked?: unknown[] } = {};
-  return run(["-e", "job=capture-only", "-e", "only=route-title-stale+"], {
+  return run(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "only=route-title-stale+"], {
     catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     readFleet: () => ({ refusal: null, workers: [{ name: "a11y-worker-2", url: "http://192.0.2.2:8765" }] }),
     checkFleet: async (expected, workers, options) => { seen.checked = [expected, workers, options]; },
@@ -181,7 +181,7 @@ test("a refusing check stops the job from ever reaching dispatch", () => {
   // cannot be exercised here without risking the test runner, the same reason worker-code-check.test.ts
   // never calls the exiting function directly.
   let dispatched = false;
-  return run(["-e", "job=capture"], {
+  return run(["-e", "job=capture", "-e", "label=A11-263"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
     expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
@@ -213,7 +213,7 @@ test("a non-capture-bearing job never checks the fleet at all, and dispatches un
 
 test("-e describe=1 skips the fleet check too — nothing is about to run", () => {
   let checked = false;
-  return run(["-e", "job=capture", "-e", "describe=1"], {
+  return run(["-e", "job=capture", "-e", "label=A11-263", "-e", "describe=1"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
     expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
@@ -229,7 +229,7 @@ test("-e describe=1 skips the fleet check too — nothing is about to run", () =
 test("--allow-stale-workers reaches the check as `allow: true` and is stripped before dispatch", () => {
   let allow: unknown;
   let dispatched: string[] | undefined;
-  return run(["-e", "job=capture", "--allow-stale-workers"], {
+  return run(["-e", "job=capture", "-e", "label=A11-263", "--allow-stale-workers"], {
     catalogueText: CATALOGUE,
     workers: ["http://203.0.113.107:8765"],
     expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
@@ -239,7 +239,7 @@ test("--allow-stale-workers reaches the check as `allow: true` and is stripped b
     assert.equal(allow, true);
     // `ansible-playbook` does not recognise this flag and would refuse the whole command line with it
     // still attached, so it must never reach the forwarded argv.
-    assert.deepEqual(dispatched, ["-e", "job=capture"]);
+    assert.deepEqual(dispatched, ["-e", "job=capture", "-e", "label=A11-263"]);
   });
 });
 
@@ -828,6 +828,28 @@ test("#4405: the positive control -- the derived set is non-empty and holds ever
   }
 });
 
+test("A11-263: a launch of a job that requires a label, with none or a bad one, exits 3 naming the parameter before any box is woken, checked or dispatched", async () => {
+  const labelled = catalogueJobs(CATALOGUE).filter(({ block }) => /params:\s*\{[^}]*\blabel:\s*required/.test(block)).map(({ name }) => name);
+  assert.ok(labelled.length === 12, `the twelve jobs that book the fleet job service: ${labelled}`);
+  for (const job of labelled) {
+    const extra = ["stability", "gate-stability", "capture-check"].includes(job) ? ["-e", "worker=a11y-worker-a"] : job === "capture-only" ? ["-e", "only=x"] : [];
+    for (const [label, why] of [[[], /needs -e label=<ticket key>/], [["-e", "label=a b"], /-e label=a b is not a ticket key/], [["-e", "label=$(id)"], /is not a ticket key/]] as const) {
+      const seen = await drive2803(["-e", `job=${job}`, ...extra, ...label]);
+      assert.equal(seen.exited, 3, `${job} ${label.join(" ")} must exit 3`);
+      assert.deepEqual(seen.events, [], `${job} must not wake, check or dispatch`);
+      assert.equal(seen.dispatched, null, `${job} must not dispatch`);
+      assert.match(seen.stderr, new RegExp(`^REFUSING ${job}: `));
+      assert.match(seen.stderr, why);
+    }
+  }
+  // POSITIVE CONTROL: a job that takes no label is not asked for one, and the same launch WITH a good label is dispatched.
+  const train = await drive2803(["-e", "job=train"]);
+  assert.notEqual(train.exited, 3, "train books nothing and needs no label");
+  const capture = await drive2803(["-e", "job=capture", "-e", "label=A11-263"]);
+  assert.notEqual(capture.exited, 3);
+  assert.ok(capture.dispatched !== null, "a labelled capture is dispatched");
+});
+
 test("#4405: every catalogue job that dispatches to the fleet is refused while the incident is open -- before any box wakes, is checked or is dispatched", async () => {
   for (const job of fleetDispatchingJobs(CATALOGUE)) {
     const seen = await drive2803(["-e", `job=${job}`], { openIncident: INCIDENT_OPEN });
@@ -865,7 +887,7 @@ test("#4405: a caller that hands over no reader refuses, rather than reading the
 });
 
 test("#4405: an unreadable incident refuses through run() before anything wakes, is checked or is dispatched", async () => {
-  const seen = await drive2803(["-e", "job=capture"], { openIncident: INCIDENT_UNREADABLE });
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263"], { openIncident: INCIDENT_UNREADABLE });
   assert.equal(seen.exited, 3);
   assert.deepEqual(seen.events, []);
   assert.equal(seen.dispatched, null);
@@ -873,10 +895,10 @@ test("#4405: an unreadable incident refuses through run() before anything wakes,
 });
 
 test("#4405: -e describe=1 and a job with no fleet demand are not refused while the incident is open", async () => {
-  const described = await drive2803(["-e", "job=capture", "-e", "describe=1"], { openIncident: INCIDENT_OPEN });
+  const described = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "describe=1"], { openIncident: INCIDENT_OPEN });
   assert.equal(described.exited, undefined, "describe=1 runs nothing, so there is nothing to refuse");
   assert.doesNotMatch(described.stderr, /REFUSING/);
-  assert.deepEqual(described.dispatched, ["-e", "job=capture", "-e", "describe=1"]);
+  assert.deepEqual(described.dispatched, ["-e", "job=capture", "-e", "label=A11-263", "-e", "describe=1"]);
 
   assert.ok(!fleetDispatchingJobs(CATALOGUE).includes("train"), "train must have no fleet demand for this to mean anything");
   const train = await drive2803(["-e", "job=train", "-e", "out=varied"], { openIncident: INCIDENT_OPEN });
@@ -889,7 +911,7 @@ const passed = (dispatched: string[] | null) =>
   JSON.parse(String(dispatched?.at(-1) ?? "{}")) as Record<string, unknown>;
 
 test("#2803: a whole-fleet job wakes, checks and is dispatched at the MOVED worker's resolved address, not its pin", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"]);
   assert.equal(seen.exited, undefined);
   assert.deepEqual(seen.woken.find((w) => w.name === "a11y-worker-b")?.url, `http://${MOVED_TO}:8765`,
     "the wake must aim at where the box is, or it waits five minutes on an address nothing answers at");
@@ -897,31 +919,31 @@ test("#2803: a whole-fleet job wakes, checks and is dispatched at the MOVED work
   assert.deepEqual(seen.checkedPool, [PIN(10), `http://${MOVED_TO}:8765`]);
   assert.deepEqual(passed(seen.dispatched), {
     resolved_addresses: { "a11y-worker-b": MOVED_TO }, left_out_workers: ["a11y-worker-c"] });
-  assert.deepEqual(seen.dispatched?.slice(0, 4), ["-e", "job=capture", "-e", "only=x"], "the caller's own arguments are untouched");
+  assert.deepEqual(seen.dispatched?.slice(0, 6), ["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], "the caller's own arguments are untouched");
 });
 
 test("#2803: each moved worker is named with its old AND new address, and each missing worker with why", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"]);
   assert.match(seen.stderr, new RegExp(`MOVED a11y-worker-b: pinned ${PIN(11)}, answers by MAC at http://${MOVED_TO}:8765`));
   assert.match(seen.stderr, new RegExp(`MISSING a11y-worker-c \\(${PIN(12)}\\): no answer at its pin, and its mac is not on the network segment -- left out`));
   assert.doesNotMatch(seen.stderr, /MOVED a11y-worker-[ac]\b/, "a worker that answers at its pin is not reported as moved");
 });
 
 test("#2803: a worker that is missing does not block a job whose pool the caller did not name", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"]);
   assert.deepEqual(seen.events, ["wake", "check", "dispatch"]);
   assert.equal(seen.exited, undefined);
 });
 
 test("#2803: a NAMED pool keeps its all-or-nothing rule -- naming the missing worker is a refusal, never a smaller pool", async () => {
-  const seen = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-c", "-e", "only=x"]);
+  const seen = await drive2803(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "workers=a11y-worker-a,a11y-worker-c", "-e", "only=x"]);
   assert.equal(seen.exited, 3);
   assert.deepEqual(seen.events, ["wake"], "neither the check nor the dispatch may run after the refusal");
   assert.equal(seen.dispatched, null);
 });
 
 test("#2803: a NAMED pool whose members are all found -- one of them moved -- runs, and its moved address goes to the playbook", async () => {
-  const seen = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"]);
+  const seen = await drive2803(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"]);
   assert.equal(seen.exited, undefined);
   assert.deepEqual(passed(seen.dispatched), { resolved_addresses: { "a11y-worker-b": MOVED_TO } },
     "nothing is left out of a pool that named its members");
@@ -929,13 +951,13 @@ test("#2803: a NAMED pool whose members are all found -- one of them moved -- ru
 
 test("#2803: a healthy fleet pays one probe each, and its dispatch line is byte-identical to before this row", async () => {
   const healthy = FLEET_2803.slice(0, 1);
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { workers: healthy, macReads: [] });
-  assert.deepEqual(seen.dispatched, ["-e", "job=capture", "-e", "only=x"]);
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { workers: healthy, macReads: [] });
+  assert.deepEqual(seen.dispatched, ["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"]);
   assert.equal(seen.stderr, "", "nothing moved and nothing missing, so nothing is said");
 });
 
 test("#2803: two neighbour reads that DISAGREE trust no address -- the worker is missing, not moved to whichever read came first", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"],
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"],
     { macReads: [new Map([["a11y-worker-b", MOVED_TO]]), new Map([["a11y-worker-b", "192.0.2.77"]])] });
   assert.doesNotMatch(String(seen.dispatched?.join(" ")), /resolved_addresses/);
   assert.match(seen.stderr, /MISSING a11y-worker-b[^\n]*read as 192\.0\.2\.99 once and not again/);
@@ -943,7 +965,7 @@ test("#2803: two neighbour reads that DISAGREE trust no address -- the worker is
 
 test("#2803: a caller may not supply the use-time variables -- they are what lab:job resolved, and nothing else", async () => {
   for (const attempt of ["resolved_addresses={\"a11y-worker-a\":\"192.0.2.1\"}", "left_out_workers=[]"]) {
-    const seen = await drive2803(["-e", "job=capture", "-e", attempt]);
+    const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", attempt]);
     assert.equal(seen.exited, 3, attempt);
     assert.equal(seen.dispatched, null, attempt);
   }
@@ -964,7 +986,7 @@ const DRIFTING_A: DriftReading = { drifting: ["a11y-worker-a"] };
 const NOTHING_DRIFTS: DriftReading = { drifting: [] };
 
 test("A11-205: a whole-fleet job leaves a drifting box out of the pool it checks and dispatches, and says so", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => DRIFTING_A });
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { readDrift: async () => DRIFTING_A });
   assert.equal(seen.exited, undefined);
   assert.deepEqual(seen.checkedPool, [`http://${MOVED_TO}:8765`], "the box that differs is not in the staleness check's pool, which would refuse its worker code instead of leaving it out");
   assert.deepEqual(passed(seen.dispatched), {
@@ -974,48 +996,48 @@ test("A11-205: a whole-fleet job leaves a drifting box out of the pool it checks
 });
 
 test("A11-205: the drift read comes AFTER the wake (a sleeping box can only be read once it is up) and BEFORE the staleness check", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => NOTHING_DRIFTS });
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { readDrift: async () => NOTHING_DRIFTS });
   assert.deepEqual(seen.events, ["wake", "drift", "check", "dispatch"]);
 });
 
 test("A11-205 NEGATIVE CONTROL: a fleet on the manifest dispatches byte-for-byte as before, and a caller that passes no reader is unchanged", async () => {
   const healthy = FLEET_2803.slice(0, 1);
-  const clean = await drive2803(["-e", "job=capture", "-e", "only=x"], { workers: healthy, macReads: [], readDrift: async () => NOTHING_DRIFTS });
-  assert.deepEqual(clean.dispatched, ["-e", "job=capture", "-e", "only=x"]);
+  const clean = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { workers: healthy, macReads: [], readDrift: async () => NOTHING_DRIFTS });
+  assert.deepEqual(clean.dispatched, ["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"]);
   assert.equal(clean.stderr, "");
-  const unread = await drive2803(["-e", "job=capture", "-e", "only=x"]);
+  const unread = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"]);
   assert.doesNotMatch(String(unread.dispatched?.join(" ")), /drift_excluded/);
   assert.deepEqual(unread.events, ["wake", "check", "dispatch"]);
 });
 
 test("A11-205: a NAMED pool keeps its all-or-nothing rule: naming a drifting box is a refusal naming it, never a smaller pool", async () => {
-  const seen = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"], { readDrift: async () => DRIFTING_A });
+  const seen = await drive2803(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"], { readDrift: async () => DRIFTING_A });
   assert.equal(seen.exited, 3);
   assert.deepEqual(seen.events, ["wake", "drift"], "neither the check nor the dispatch may run after the refusal");
   assert.equal(seen.dispatched, null);
   assert.match(seen.stderr, /REFUSING capture-only: a11y-worker-a differs from deploy-pins\.json .* it named its workers, so a smaller pool is not the run that was asked for/);
   // negative control: naming only boxes that do not differ runs
-  const fine = await drive2803(["-e", "job=capture-only", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"], { readDrift: async () => ({ drifting: ["a11y-worker-c"] }) });
+  const fine = await drive2803(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "workers=a11y-worker-a,a11y-worker-b", "-e", "only=x"], { readDrift: async () => ({ drifting: ["a11y-worker-c"] }) });
   assert.equal(fine.exited, undefined);
   assert.doesNotMatch(String(fine.dispatched?.join(" ")), /drift_excluded/, "a box that differs but is not in the pool is not this run's");
 });
 
 test("A11-205: a pool in which EVERY box differs is refused, in the job's words, before the dispatch", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => ({ drifting: ["a11y-worker-a", "a11y-worker-b", "a11y-worker-c"] }) });
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { readDrift: async () => ({ drifting: ["a11y-worker-a", "a11y-worker-b", "a11y-worker-c"] }) });
   assert.equal(seen.exited, 3);
   assert.equal(seen.dispatched, null);
   assert.match(seen.stderr, /REFUSING capture: every worker it needs differs from deploy-pins\.json \(a11y-worker-a, a11y-worker-b\)/);
 });
 
 test("A11-205: a drift read that cannot be made REFUSES -- could not ask is not may proceed -- before the check and the dispatch", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => ({ cannotAsk: "pnpm install --frozen-lockfile" }) });
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { readDrift: async () => ({ cannotAsk: "pnpm install --frozen-lockfile" }) });
   assert.equal(seen.exited, 3);
   assert.deepEqual(seen.events, ["wake", "drift"]);
   assert.match(seen.stderr, /REFUSING capture: could not ask whether the workers match deploy-pins\.json \(pnpm install --frozen-lockfile\)\. Could not ask is not may proceed\./);
 });
 
 test("A11-205: a job with no fleet demand, and a describe-only run, do not read the fleet for drift", async () => {
-  for (const argv of [["-e", "job=train", "-e", "out=varied"], ["-e", "job=capture", "-e", "describe=1"]]) {
+  for (const argv of [["-e", "job=train", "-e", "out=varied"], ["-e", "job=capture", "-e", "label=A11-263", "-e", "describe=1"]]) {
     const seen = await drive2803(argv, { readDrift: async () => { throw new Error("must not be asked"); } });
     assert.equal(seen.exited, undefined, argv.join(" "));
     assert.ok(!seen.events.includes("drift"), argv.join(" "));
@@ -1026,11 +1048,11 @@ test("A11-205: only a CAPTURE-BEARING job asks: a diagnostic on a drifting box (
   const diagnostics = fleetDispatchingJobs(CATALOGUE).filter((job) => !captureBearingJobs(CATALOGUE).includes(job));
   assert.ok(diagnostics.length > 0, "premise: the catalogue has fleet jobs that are not capture-bearing");
   for (const job of diagnostics) {
-    const seen = await drive2803(["-e", `job=${job}`, "-e", "worker=a11y-worker-a"], { readDrift: async () => { throw new Error(`${job} must not be asked`); } });
+    const seen = await drive2803(["-e", `job=${job}`, "-e", "worker=a11y-worker-a", "-e", "label=A11-263"], { readDrift: async () => { throw new Error(`${job} must not be asked`); } });
     assert.ok(!seen.events.includes("drift"), job);
     assert.doesNotMatch(seen.stderr, /drift|differs from deploy-pins/, job);
   }
-  const capturing = await drive2803(["-e", "job=capture", "-e", "only=x"], { readDrift: async () => NOTHING_DRIFTS });
+  const capturing = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], { readDrift: async () => NOTHING_DRIFTS });
   assert.ok(capturing.events.includes("drift"), "negative control: a capture-bearing job does ask");
 });
 
@@ -1045,7 +1067,7 @@ test("A11-205: driftDecision is the same decision, pure: exclude, refuse a named
 });
 
 test("A11-205: a caller may not supply drift_excluded -- it is what lab:job read, and nothing else", async () => {
-  const seen = await drive2803(["-e", "job=capture", "-e", "drift_excluded=[]"]);
+  const seen = await drive2803(["-e", "job=capture", "-e", "label=A11-263", "-e", "drift_excluded=[]"]);
   assert.equal(seen.exited, 3);
   assert.equal(seen.dispatched, null);
 });
@@ -1376,6 +1398,9 @@ test("#3289: what cannot be a qualified run is refused with its reason, and an a
   // #3988: the playbook refuses a launch without -e worker= AFTER `pending`, so it is refused here, before anything is posted.
   assert.match(refusal([flag], named("gate-stability", { worker: undefined })), /needs -e worker=<n>/);
   assert.match(refusal([flag], named("gate-stability", { worker: "" })), /needs -e worker=<n>/);
+  // A11-263: a label that is not a ticket key is refused before `pending`, as the playbook would refuse it after.
+  assert.match(refusal([flag], named("gate-stability", { label: "a b" })), /-e label=a b is not a ticket key/);
+  assert.match(refusal([flag], named("gate-stability", { label: "" })), /is not a ticket key/);
   // POSITIVE CONTROL: the same request, accepted, with the flag stripped and the ref set from the sha.
   assert.deepEqual(qualificationRequest(["-e", "job=gate-stability", flag], named("gate-stability")),
     { sha: QSHA, row: 3289, argv: ["-e", "job=gate-stability", "-e", `ref=${QSHA}`, "-e", "label=qualify-3289"] });
@@ -1461,7 +1486,7 @@ test("#3289: there is no token file and no second credential: the poster never n
 // `["--", "-e", ...]`, which reads `-e` as a playbook name. The strip is `run`'s first act, so
 // `qualificationRequest` sees the stripped argv and no status is posted for a run that cannot begin.
 
-const PNPM_FORM = ["--", "-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "-e", "row=3289"];
+const PNPM_FORM = ["--", "-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "-e", "row=3289", "-e", "label=A11-263"];
 
 async function dispatchedFor(argv: string[]): Promise<string[][]> {
   const dispatched: string[][] = [];
@@ -1487,7 +1512,7 @@ test("#3919: a leading `--` is dropped under `--qualify-sha` too, and the run is
 });
 
 test("#3919: a `--` NOT in first position is the caller's and is left alone", async () => {
-  const argv = ["-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "--", "extra"];
+  const argv = ["-e", "job=gate-stability", "-e", "worker=a11y-worker-2", "-e", "label=A11-263", "--", "extra"];
   assert.deepEqual(await dispatchedFor(argv), [argv]);
   assert.deepEqual(withoutLeadingSeparator(argv), argv);
 });
