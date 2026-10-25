@@ -10,10 +10,12 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readFleetDrift, driftRecordOf, driftExitCode, DRIFT_EXIT, driftLines, driftingBoxes, parseDriftRecord, parseFreezeRun, previousRecordOf, readPreviousRecord, writeDriftRecord,
+import { bookedReading, readFleetDrift, driftRecordOf, driftExitCode, DRIFT_EXIT, driftLines, driftingBoxes, parseDriftRecord, parseFreezeRun, previousRecordOf, readPreviousRecord, writeDriftRecord,
   FLEET_DRIFT_PATH, FREEZE_RUN_PATH } from "./fleet-drift.ts";
 import type { DriftRecord, FreezeRun } from "./fleet-drift.ts";
 import type { WorkerProbe } from "./fleet-status.ts";
+import { LeaseLedger } from "./fleet-leases/ledger.ts";
+import { rmSync, writeFileSync } from "node:fs";
 
 const EXPECTED = { Windows: "26300.9711", Edge: "156.0.4314.42", NVDA: "2026.1.1", "Worker code": "47dcd71db00697b3" };
 const ON_MANIFEST = { windows: "26300.9711", edge: "156.0.4314.42", nvda: "2026.1.1", code: "47dcd71db00697b3" };
@@ -126,7 +128,7 @@ test("a manifest that cannot be read FAILS the reading with its reason, because 
 
 test("the record's shape: names and versions only, the fields the announcement reads, and no address", async () => {
   const record = await recordOf([answering(2), answering(5, { edge: "157.0.1.1" }), silent(9)]);
-  assert.deepEqual(Object.keys(record).sort(), ["carryLost", "checkedAt", "differences", "expected", "firstSeenAt", "freeze", "reachable", "total", "unreachable", "unreadable"]);
+  assert.deepEqual(Object.keys(record).sort(), ["carryLost", "checkedAt", "differences", "expected", "firstSeenAt", "freeze", "reachable", "skipped", "total", "unreachable", "unreadable"]);
   assert.deepEqual(record.expected, EXPECTED);
   assert.equal(record.checkedAt, NOW.toISOString());
   assert.deepEqual(Object.keys(record.differences[0]).sort(), ["box", "carried", "field", "has", "wants"]);
@@ -171,7 +173,7 @@ test("the daily freeze's last run is carried into the record: what it put back, 
   assert.ok(freeze);
   const record = await recordOf([answering(2)], { freeze });
   assert.deepEqual(record.freeze, { checkedAt: "2026-10-25T04:11:07Z", scope: "the fleet",
-    putBack: { "a11y-worker-3": ["Windows Update service", "edgeupdate task"] }, unreachable: ["a11y-worker-9"], failed: ["a11y-worker-4"] });
+    putBack: { "a11y-worker-3": ["Windows Update service", "edgeupdate task"] }, unreachable: ["a11y-worker-9"], failed: ["a11y-worker-4"], leased: {} });
   const lines = driftLines(record);
   assert.ok(lines.includes("the freeze put back, at 2026-10-25T04:11:07Z: a11y-worker-3 (Windows Update service, edgeupdate task)"));
   assert.ok(lines.includes("the freeze did not reach, at 2026-10-25T04:11:07Z: a11y-worker-9"));
@@ -262,4 +264,102 @@ test("the hourly unit does not run when its refresh of the checkout failed: no `
   assert.ok(active.some((line) => line.startsWith("ExecStartPre=/bin/sh -c ")), "premise: the unit refreshes the checkout before it reads");
   assert.ok(!active.some((line) => line.startsWith("ExecStartPre=-")),
     "a refresh that failed would let the check compare boxes with the manifest the fleet may have just left, and write that as the record");
+});
+
+// --- the hourly check takes a shared `read` lease (A11-244) -----------------------------------------------------------------------------------
+
+function booked() {
+  const dir = mkdtempSync(join(tmpdir(), "fleet-drift-leases-"));
+  const ledger = new LeaseLedger(join(dir, "ledger.json"), { now: () => NOW.getTime() });
+  return { dir, ledger, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** A booked reading of the boxes given; `asked` collects the boxes the probe was sent to and the leases the ledger showed while it was. */
+async function bookedRecord(probes: WorkerProbe[], ledger: LeaseLedger | null, previous: DriftRecord | null = null) {
+  const asked: string[] = [];
+  const during: { kind: string; boxes: string[] }[] = [];
+  const answer = await bookedReading({ workers: probes.map(({ name, url }) => ({ name, url })), ledger, freeze: null, now: NOW,
+    previous: { previous, previousUnreadable: false },
+    deps: { expected: () => EXPECTED, probe: async (worker) => {
+      asked.push(worker.name);
+      for (const lease of ledger?.live().ok ? (ledger.live() as { ledger: { leases: { kind: string; boxes: string[]; holder: string }[] } }).ledger.leases : []) {
+        if (lease.holder.startsWith("fleet-drift:")) during.push({ kind: lease.kind, boxes: lease.boxes });
+      }
+      return probes.find((probe) => probe.name === worker.name) as WorkerProbe;
+    } } });
+  return { ...answer, asked, during };
+}
+
+test("the `--record` run takes a shared `read` lease beside a capture, reads every box, and lets the lease go", async () => {
+  const t = booked();
+  assert.equal(t.ledger.tryTake({ id: "job-a", holder: "fleet-jobs:job-a", kind: "capture", label: "A11-244", boxes: [boxName(3)], ttlMs: 3_600_000 }).taken, true);
+  const { record, asked, during, unbooked } = await bookedRecord([answering(2), answering(3), answering(4)], t.ledger);
+  assert.deepEqual(asked.sort(), [boxName(2), boxName(3), boxName(4)], "the captured box is read too: a read is safe beside a capture");
+  assert.deepEqual(during[0], { kind: "read", boxes: [boxName(2), boxName(3), boxName(4)] }, "while it read, the ledger showed one shared read lease on every box");
+  assert.equal(unbooked, null);
+  assert.deepEqual(record.skipped, {});
+  assert.equal(record.reachable, 3);
+  assert.deepEqual(t.ledger.held(), { [boxName(3)]: ["fleet-jobs:job-a"] }, "afterwards only the capture's lease is left");
+  assert.equal(t.ledger.leaseOf("job-a")?.kind, "capture", "and the capture's lease is as it was");
+  t.done();
+});
+
+test("a box under `maintain` is not read this hour: it is named, recorded as unread, and its last differences are carried", async () => {
+  const t = booked();
+  const first = await recordOf([answering(2), answering(3, { edge: "157.0.1.1" })]);
+  assert.equal(first.differences.length, 1, "premise: a11y-worker-3 differs");
+  t.ledger.tryTake({ id: "freeze:w3", holder: "fleet-freeze:run", kind: "maintain", label: "freeze", boxes: [boxName(3)], ttlMs: 3_600_000 });
+  const { record, asked } = await bookedRecord([answering(2), answering(3), answering(4)], t.ledger, first);
+  assert.deepEqual(asked.sort(), [boxName(2), boxName(4)], "the probe is never sent to the box under maintenance");
+  assert.deepEqual(record.skipped, { [boxName(3)]: "under maintenance by fleet-freeze:run" });
+  assert.deepEqual(record.unreachable, [boxName(3)]);
+  assert.deepEqual(record.differences.map(({ box, carried }) => [box, carried]), [[boxName(3), true]], "its last differences are carried, not cleared");
+  assert.match(driftLines(record).join("\n"), /not read this time \(a lease held the box.*a11y-worker-3 \(under maintenance by fleet-freeze:run\)/);
+  assert.deepEqual(t.ledger.held(), { [boxName(3)]: ["fleet-freeze:run"] }, "the read lease is let go and the maintenance lease untouched");
+  // NEGATIVE CONTROL: the same box with no maintenance lease is read, and nothing is skipped.
+  const free = booked();
+  const read = await bookedRecord([answering(2), answering(3), answering(4)], free.ledger, first);
+  assert.deepEqual(read.asked.sort(), [boxName(2), boxName(3), boxName(4)]);
+  assert.deepEqual(read.record.skipped, {});
+  t.done(); free.done();
+});
+
+test("a person's `fleet:drift` (no ledger) takes no lease and reads every box", async () => {
+  const { record, asked } = await bookedRecord([answering(2), answering(3)], null);
+  assert.deepEqual(asked.sort(), [boxName(2), boxName(3)]);
+  assert.deepEqual(record.skipped, {});
+});
+
+test("a ledger that cannot be read does not blind the check: every box is read, and the reason is returned", async () => {
+  const t = booked();
+  writeFileSync(join(t.dir, "ledger.json"), "{ not json");
+  const { record, asked, unbooked } = await bookedRecord([answering(2), answering(3)], t.ledger);
+  assert.deepEqual(asked.sort(), [boxName(2), boxName(3)]);
+  assert.match(unbooked ?? "", /unreadable/);
+  assert.deepEqual(record.skipped, {});
+  t.done();
+});
+
+test("the freeze run carries `leased` into the record, a record from before it reads as none, and `skipped` survives a round trip", () => {
+  const run = parseFreezeRun(JSON.stringify({ checkedAt: "2026-10-25T04:11:00Z", scope: "the fleet", frozen: [], putBack: {}, unreachable: [], failed: [], leased: { [boxName(2)]: "fleet-jobs:fj-1" } }));
+  assert.deepEqual(run?.leased, { [boxName(2)]: "fleet-jobs:fj-1" });
+  assert.deepEqual(parseFreezeRun(JSON.stringify({ checkedAt: "2026-10-25T04:11:00Z", putBack: {} }))?.leased, {}, "negative control: freeze.yml's own record has none");
+  assert.match(driftLines({ ...recordWith(run) }).join("\n"), /the freeze never got a lease on, so did not freeze today, at 2026-10-25T04:11:00Z: a11y-worker-2 \(fleet-jobs:fj-1\)/);
+  const withSkipped = { ...recordWith(null), skipped: { [boxName(3)]: "under maintenance by x" } };
+  assert.deepEqual(parseDriftRecord(JSON.stringify(withSkipped))?.skipped, withSkipped.skipped);
+  assert.deepEqual(parseDriftRecord(JSON.stringify({ ...withSkipped, skipped: undefined }))?.skipped, {}, "a record from before booking has none");
+});
+
+function recordWith(freeze: FreezeRun | null): DriftRecord {
+  return { checkedAt: NOW.toISOString(), firstSeenAt: null, expected: EXPECTED, unreadable: null, reachable: 1, total: 1, unreachable: [], differences: [], freeze, carryLost: [], skipped: {} };
+}
+
+test("when every box is under a lease the line says so, not that no box answered", async () => {
+  const t = booked();
+  t.ledger.tryTake({ id: "m", holder: "fleet-freeze:run", kind: "maintain", label: "freeze", boxes: [boxName(2), boxName(3)], ttlMs: 3_600_000 });
+  const { record } = await bookedRecord([answering(2), answering(3)], t.ledger);
+  assert.match(driftLines(record).join("\n"), /every box was under a lease: nothing was compared/);
+  assert.doesNotMatch(driftLines(record).join("\n"), /no box answered/);
+  assert.equal(driftExitCode(record), 4, "still excused by the unit: nothing was wrong, nothing could be read");
+  t.done();
 });

@@ -32,6 +32,8 @@ import { driftOf, fleetToProbe, inventoryName, probeWorker } from "./fleet-statu
 import type { Difference, Expectation, FleetDrift, WorkerProbe } from "./fleet-status.ts";
 import { DRIFT_FIELDS, readExpectedFleet } from "./fleet-pins.ts";
 import type { ExpectedFleet } from "./fleet-pins.ts";
+import { bookReads, ledgerOnThisHost } from "./fleet-leases/booking.ts";
+import type { LeaseLedger } from "./fleet-leases/ledger.ts";
 
 refuseUnknownFlags(["--json", "--record"], { entry: import.meta.url, command: "npm run fleet:drift" });
 
@@ -48,7 +50,11 @@ const WORKER_PORT = 8765;
 export type RecordedDifference = Difference & { carried: boolean; };
 
 /** The daily freeze's last run, as `ansible/freeze.yml` wrote it, cut to what an announcement needs. */
-export type FreezeRun = { checkedAt: string; scope: string; putBack: Record<string, string[]>; unreachable: string[]; failed: string[]; };
+export type FreezeRun = {
+  checkedAt: string; scope: string; putBack: Record<string, string[]>; unreachable: string[]; failed: string[];
+  /** Box -> who still held it when the freeze stopped waiting (A11-244): the box was NOT frozen that day. Empty on a record from before booking. */
+  leased: Record<string, string>;
+};
 
 export type DriftRecord = {
   checkedAt: string;
@@ -71,10 +77,17 @@ export type DriftRecord = {
    * (a box that is still silent stays listed in the next record), and ends there. Empty when nothing was lost.
    */
   carryLost: string[];
+  /**
+   * The boxes this reading did not ask because a `maintain` lease held them (A11-244), with who held them. They are also in `unreachable`: unread, not a
+   * difference, and their last differences are carried. Empty when nothing was held.
+   */
+  skipped: Record<string, string>;
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const stringList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+const stringMap = (value: unknown): Record<string, string> =>
+  (isObject(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string")) : {});
 
 /** The freeze run as `ansible/freeze.yml` writes it, out of an already-parsed value; `null` when it is not that shape. */
 function freezeRunFrom(parsed: unknown): FreezeRun | null {
@@ -83,7 +96,7 @@ function freezeRunFrom(parsed: unknown): FreezeRun | null {
     ? Object.fromEntries(Object.entries(parsed.putBack).map(([box, levers]) => [box, stringList(levers)]))
     : {};
   return { checkedAt: parsed.checkedAt, scope: typeof parsed.scope === "string" ? parsed.scope : "the fleet",
-    putBack, unreachable: stringList(parsed.unreachable), failed: stringList(parsed.failed) };
+    putBack, unreachable: stringList(parsed.unreachable), failed: stringList(parsed.failed), leased: stringMap(parsed.leased) };
 }
 
 /** JSON text that may be missing or not JSON, as a value: `undefined` is "no record", never a crash. */
@@ -115,7 +128,7 @@ export function parseDriftRecord(text: string | null): DriftRecord | null {
   return { checkedAt: parsed.checkedAt, firstSeenAt: typeof parsed.firstSeenAt === "string" ? parsed.firstSeenAt : null, expected,
     unreadable: typeof parsed.unreadable === "string" ? parsed.unreadable : null,
     reachable: Number(parsed.reachable) || 0, total: Number(parsed.total) || 0, unreachable: stringList(parsed.unreachable), differences,
-    freeze: freezeRunFrom(parsed.freeze), carryLost: stringList(parsed.carryLost) };
+    freeze: freezeRunFrom(parsed.freeze), carryLost: stringList(parsed.carryLost), skipped: stringMap(parsed.skipped) };
 }
 
 const sameExpectation = (a: ExpectedFleet | null, b: ExpectedFleet | null): boolean =>
@@ -147,7 +160,7 @@ export function driftRecordOf({ drift, probes, previous, previousUnreadable = fa
     checkedAt,
     firstSeenAt: !failing ? null : (previousFailing && previous.firstSeenAt !== null ? previous.firstSeenAt : checkedAt),
     expected: drift.expected, unreadable: drift.unreadable,
-    reachable: probes.length - unreachable.length, total: probes.length, unreachable, differences, freeze, carryLost,
+    reachable: probes.length - unreachable.length, total: probes.length, unreachable, differences, freeze, carryLost, skipped: {},
   };
 }
 
@@ -172,6 +185,21 @@ function freezeLines(freeze: FreezeRun | null): string[] {
   if (putBack.length > 0) lines.push(`the freeze put back, at ${freeze.checkedAt}: ${putBack.join("; ")}`);
   if (freeze.unreachable.length > 0) lines.push(`the freeze did not reach, at ${freeze.checkedAt}: ${freeze.unreachable.join(", ")}`);
   if (freeze.failed.length > 0) lines.push(`the freeze did not hold on, at ${freeze.checkedAt}: ${freeze.failed.join(", ")}`);
+  const leased = Object.entries(freeze.leased).map(([box, holder]) => `${box} (${holder})`);
+  if (leased.length > 0) lines.push(`the freeze never got a lease on, so did not freeze today, at ${freeze.checkedAt}: ${leased.join(", ")}`);
+  return lines;
+}
+
+/** The boxes this reading did not get an answer from, and why: held by a lease, silent, or all of them. */
+function unreadLines(record: DriftRecord): string[] {
+  const lines: string[] = [];
+  const skipped = Object.entries(record.skipped).map(([box, why]) => `${box} (${why})`);
+  if (skipped.length > 0) lines.push(`not read this time (a lease held the box; its last differences are carried): ${skipped.join(", ")}`);
+  const silent = record.unreachable.filter((box) => !(box in record.skipped));
+  if (silent.length > 0) lines.push(`not read (unreachable, not a difference): ${silent.join(", ")}`);
+  if (record.reachable === 0) {
+    lines.push(record.total > 0 && skipped.length === record.total ? "every box was under a lease: nothing was compared" : "no box answered: nothing was compared");
+  }
   return lines;
 }
 
@@ -189,8 +217,7 @@ export function driftLines(record: DriftRecord): string[] {
   if (record.differences.length === 0 && record.unreadable === null && record.carryLost.length === 0 && record.reachable > 0 && record.expected !== null) {
     lines.push(`fleet on the manifest — ${DRIFT_FIELDS.map((field) => `${field}: ${record.expected?.[field]}`).join("; ")}; all ${record.reachable} boxes that answered`);
   }
-  if (record.unreachable.length > 0) lines.push(`not read (unreachable, not a difference): ${record.unreachable.join(", ")}`);
-  if (record.reachable === 0) lines.push("no box answered: nothing was compared");
+  lines.push(...unreadLines(record));
   return [...lines, ...freezeLines(record.freeze)];
 }
 
@@ -273,10 +300,40 @@ export function readPreviousRecord(path: string, read: (path: string, encoding: 
   }
 }
 
+/** A probe for a box that was not asked because a lease held it: unreachable to the record, with the reason in `error`. */
+const heldProbe = (worker: Worker, why: string): WorkerProbe => ({ ...worker, reachable: false, error: why });
+
+/**
+ * The hourly reading, booked (A11-244). With a `ledger` (`--record`, the unit's form) it takes a SHARED `read` lease on every box no `maintain` lease holds,
+ * never queues, and lets it go at the end. A person's `fleet:drift` passes none. A read is safe beside a capture: it sends only `GET /health` and
+ * `GET /progress` (`probeWorker`), the same two the job runner and auto-off send mid-capture on every tick, and the worker's `busy` flag exists to answer
+ * them. A box under `maintain` (the daily freeze, a shutdown) is not asked this hour: it is recorded as unread, with who held it, and its last differences
+ * are carried. `unbooked` is why no lease was taken when the ledger could not be read or locked: the boxes are then read anyway.
+ */
+export async function bookedReading({ workers, ledger, deps = {}, previous, freeze, now }: {
+  workers: Worker[]; ledger: LeaseLedger | null; deps?: Omit<ReadDeps, "workers">; freeze: FreezeRun | null; now: Date;
+  previous: ReturnType<typeof previousRecordOf>;
+}): Promise<{ record: DriftRecord; unbooked: string | null; }> {
+  const booking = ledger === null ? null
+    : bookReads(ledger, { id: `fleet-drift:${process.pid}`, holder: `fleet-drift:${now.toISOString()}`, label: "a11y-fleet-drift", boxes: workers.map(({ name }) => inventoryName(name)) });
+  const skipped = booking?.skipped ?? {};
+  try {
+    const held = workers.filter(({ name }) => inventoryName(name) in skipped);
+    const { drift, probes } = await readFleetDrift({ ...deps, workers: () => workers.filter((worker) => !held.includes(worker)) });
+    const unread = held.map((worker) => heldProbe(worker, skipped[inventoryName(worker.name)] ?? ""));
+    const record = driftRecordOf({ drift, probes: [...probes, ...unread], ...previous, freeze, now });
+    return { record: { ...record, skipped }, unbooked: booking?.unbooked ?? null };
+  } finally {
+    booking?.release();
+  }
+}
+
 async function main() {
-  const record = driftRecordOf({ ...await readFleetDrift(), ...readPreviousRecord(FLEET_DRIFT_PATH),
-    freeze: parseFreezeRun(readOrNull(FREEZE_RUN_PATH)), now: new Date() });
-  if (process.argv.includes("--record")) writeDriftRecord(FLEET_DRIFT_PATH, record);
+  const recording = process.argv.includes("--record");
+  const { record, unbooked } = await bookedReading({ workers: workersToRead(), previous: readPreviousRecord(FLEET_DRIFT_PATH), now: new Date(),
+    ledger: recording ? ledgerOnThisHost((line) => process.stderr.write(`fleet-drift: ${line}\n`)) : null, freeze: parseFreezeRun(readOrNull(FREEZE_RUN_PATH)) });
+  if (unbooked !== null) process.stderr.write(`fleet-drift: no read lease was taken (${unbooked}); the boxes were read without one\n`);
+  if (recording) writeDriftRecord(FLEET_DRIFT_PATH, record);
   if (process.argv.includes("--json")) process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
   else for (const line of driftLines(record)) process.stdout.write(`${line}\n`);
   process.exitCode = driftExitCode(record);

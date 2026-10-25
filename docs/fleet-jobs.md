@@ -33,7 +33,7 @@ pnpm run fleet -- job list --label A11-243
 
 ### Booking: every job leases its boxes, so jobs queue and never collide (A11-244)
 
-A box does one capture at a time (the worker refuses a second with `429`), so a job **leases** its boxes before it starts and lets them go when it ends. The leases are one ledger on the control plane, `/var/lib/a11y-fleet-leases/ledger.json` (a versioned JSON file under a pid-checked mutex, [`docs/adr/0003`](adr/0003-fleet-leases-are-a-control-plane-ledger.md)), which every taker of a box reads and writes: this service, and (in the second step of A11-244) the hourly drift check, the daily freeze and the idle power-off. The code is `src/fleet-leases/`. A *lease* is not screenreader-fleet's `leaseWorker`, which starts a local VM and puts it back.
+A box does one capture at a time (the worker refuses a second with `429`), so a job **leases** its boxes before it starts and lets them go when it ends. The leases are one ledger on the control plane, `/var/lib/a11y-fleet-leases/ledger.json` (a versioned JSON file under a pid-checked mutex, [`docs/adr/0003`](adr/0003-fleet-leases-are-a-control-plane-ledger.md)), which every taker of a box reads and writes: this service, the hourly drift check, the daily freeze and the idle power-off (see "Scheduled work" below). The code is `src/fleet-leases/`. A *lease* is not screenreader-fleet's `leaseWorker`, which starts a local VM and puts it back.
 
 ```bash
 pnpm run fleet -- job status fj-20261025T085815Z-315a1b
@@ -51,6 +51,24 @@ pnpm run fleet -- lease list [--json]              # who holds which boxes, and 
 - **A ledger nobody can read holds every box.** A file that is not JSON, or of a version this code does not know (the ledger is written from `/root/fleet-jobs` and `/root/control`, which can be on different refs), is read as every box held: nothing is taken, nothing is written over it, and the reason is logged. A missing file is a first run and reads as empty.
 
 A capture that fails is a **record** (`status`, and the error in `capture`), as `q3/fleet_capture.mjs` writes it, and the job goes on. A job is `failed` only when it cannot finish: no box is left, or its files cannot be read.
+
+### Scheduled work takes leases too (A11-244)
+
+Three things act on boxes on a timer, from the control plane. Each takes the same ledger, so none lands in the middle of a capture and none reboots or reconfigures a leased box.
+
+| Task | Lease | What it does when a box is booked |
+| --- | --- | --- |
+| The hourly drift check (`a11y-fleet-drift.service`, `fleet-drift.ts --record`) | a shared **`read`** on every box | Reads beside a capture. A box under a `maintain` lease is **not asked** that hour: it is recorded as unread with `under maintenance by <holder>` (`skipped` in `runs/fleet-drift.json`), and its last differences are carried, as for any box that did not answer. It never queues. |
+| The daily freeze re-apply (`a11y-fleet-freeze-daily.service`, `src/fleet-leases/freeze-daily.ts`) | an exclusive **`maintain`** per box | Queues one waiter per inventory box at the run's start, freezes the boxes it can have as a batch (`freeze.yml --limit <boxes>`), lets each go as its batch ends, and takes the rest later. It stops waiting after **6 hours**: a box it never got is named in `leased` in `runs/fleet-freeze-last-run.json` (and in the hourly record's `freeze`), is not frozen that day, and the unit fails (`systemctl --failed`). |
+| The idle power-off (`fleet-auto-off.ts --apply`) | a non-queueing exclusive **`maintain`** across each `sleep.yml` dispatch | A box under a `capture` or `maintain` lease, or named by a queued job, is kept `lease-pending`; every box is kept `batch-queued` while a job waits for "any N" or `ready` boxes. If the shutdown lease cannot be taken, the box is kept. |
+
+**Why a shared `read` lease is safe for the drift check.** It sends only `GET /health` and `GET /progress` to each worker (`probeWorker` in `fleet-status.ts`). Those are the reads that already run *during* every capture: the job runner's health check, auto-off's idle probe on every tick, and `sleep.yml`'s busy re-check. The worker's `busy` flag exists to answer them mid-capture. Waiting behind captures instead would push the "at least hourly" check (A11-205) past an hour whenever the fleet is busy. The lease records that the reading is happening, and it is refused only beside a `maintain`.
+
+A batch whose play writes **no record** (it refused before it froze anything, as its `patch`-running guard does, or it died) is not counted as frozen or as failed: its boxes go back, and are tried again 10 minutes later until the deadline, where a box that never got a record is `failed`. A play is killed after 90 minutes. A box a capture holds for more than 6 hours is therefore skipped that day (`leased`); a freeze that must not wait is `pnpm run fleet:freeze`, which runs `freeze.yml` at once as it always did.
+
+The freeze is not affected by the job's queue: a job queued **before** the run keeps its turn on a box, and a job queued after it waits behind the freeze's turn on that box, so neither side is starved. If the ledger cannot be read, the freeze takes nothing and names every box `leased` at the deadline, and the drift check reads without a lease (a reading grants nothing exclusive) and says so on stderr.
+
+After merge, `pnpm run fleet:freeze-schedule` re-installs the freeze unit with its new `ExecStart`; read it back with `systemctl cat a11y-fleet-freeze-daily.service`. The next 04:11 run's `runs/fleet-freeze-last-run.json` carries `leased: {}`, or names any box that was leased.
 
 ### Cancel
 
@@ -79,4 +97,4 @@ The service sends the workers' own `/capture` and changes nothing on any box. Th
 
 ## Not here yet
 
-Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` for now), scheduled work taking leases (A11-244, step 2), the board waking an agent when a job ends, moving `capture_fleet.py`, `q3/fleet_capture.mjs` and lab's clients onto the service (A11-246), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.
+Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` and the freeze's own `patch`-running guard for now), the board waking an agent when a job ends, moving `capture_fleet.py`, `q3/fleet_capture.mjs` and lab's clients onto the service (A11-246), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.
