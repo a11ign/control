@@ -17,7 +17,7 @@ pnpm run fleet -- facts show --json --boxes a11y-worker-2,a11y-worker-3
 ## What a job does
 
 1. **Books** its boxes with a `capture` lease, as a capture does. It is not subject to the drift record: hardware does not depend on the manifest, so a box that is off it is still read.
-2. **Reads each box in turn** (`src/fleet-facts/read.ts`): wakes that one box, then runs `ansible/facts.yml --limit <box>` from the service's checkout with the JSON stdout callback and a 10-minute limit.
+2. **Reads the boxes together, at most four at a time** (`src/fleet-facts/read.ts`): for each, wakes that one box, then runs `ansible/facts.yml --limit <box>` from the service's checkout with the JSON stdout callback and a 10-minute limit.
 3. **Checks the play**: `changed` for the box must be 0, or the box's entry fails with `the facts play changed <n> things on <box>; it must change nothing`; the output must parse (`parseFacts`), or the entry fails naming the missing field.
 4. **Records** `results/<box>.facts.json` (`{ readAt, worker, status, changed, facts | error }`) and the box's entry in the facts file.
 5. **Lets the box go** as its read ends. The idle power-off (`fleet-auto-off.ts --apply`) sleeps it on its next tick, as after a capture; the job runs no `sleep.yml`.
@@ -68,6 +68,13 @@ One row per box, in the inventory's order, then any box only the file knows. Dis
 | read at | the time, or `STALE: last read <readAt>; last attempt <lastAttemptAt>: <lastError>`, or `never read` |
 
 `--json` prints the file as it is (`--boxes` narrows it). `show` exits 2, saying that no facts job has run, when the file does not exist.
+
+## Limits worth knowing
+
+- **A restart during a read.** `a11y-fleet-jobs.service` waits `TimeoutStopSec=660` for work in flight, sized to a capture. A read is a wake (up to 5 minutes) and a play (up to 10), so a stop can kill one. The job resumes on the next start and reads that box again; no box is changed either way.
+- **A waiting facts job has no estimated start for the jobs behind it**, and its own estimate says "a facts job, whose length is not estimated": a read is not a capture, so the capture mean would only be a guess.
+- **`fleet job recapture` does not apply**; it answers that the job is not a job of cases. To read a box again, submit a facts job for it.
+- **A machine with no `SystemSKUNumber`** (a non-Lenovo box that does not report one) is refused by the parser, naming the field, rather than recorded with a blank machine type.
 
 ## Not here yet
 

@@ -111,3 +111,21 @@ test("two sockets add their cores and threads", () => {
   raw.processors = [{ Name: "Xeon", NumberOfCores: 8, NumberOfLogicalProcessors: 16 }, { Name: "Xeon", NumberOfCores: 8, NumberOfLogicalProcessors: 16 }];
   assert.deepEqual([facts(raw).cpu.cores, facts(raw).cpu.threads], [16, 32]);
 });
+
+test("a size that reads 0 was not read, and is refused; only free space may be 0", () => {
+  const raw = m720q();
+  (raw.systemDrive as Record<string, unknown>).Size = 0;
+  assert.equal(refusal(raw), "systemDrive.Size is 0");
+  const full = m720q();
+  (full.systemDrive as Record<string, unknown>).FreeSpace = 0;
+  assert.equal(facts(full).systemDrive.freeBytes, 0);
+  const noRam = m720q();
+  (noRam.computerSystem as Record<string, unknown>).TotalPhysicalMemory = 0;
+  assert.equal(refusal(noRam), "computerSystem.TotalPhysicalMemory is 0");
+});
+
+test("a free space the play could not read (null) is refused, not recorded as 0", () => {
+  const raw = m720q();
+  (raw.systemDrive as Record<string, unknown>).FreeSpace = null;
+  assert.equal(refusal(raw), "systemDrive.FreeSpace is missing or not a number");
+});

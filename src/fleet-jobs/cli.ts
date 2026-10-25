@@ -37,7 +37,7 @@ import { CONTROL_TSX_LOADER, SERVICE_CHECKOUT } from "./paths.ts";
 import { REMOTE_EXIT } from "./remote.ts";
 import type { RecapturePayload, SubmitPayload } from "./remote.ts";
 import { JOB_ID } from "./store.ts";
-import { leftLines, renderView } from "./view.ts";
+import { entryNoun, leftLines, renderView } from "./view.ts";
 import type { JobView } from "./view.ts";
 import type { BoxRequest, Freeze } from "./types.ts";
 
@@ -135,7 +135,7 @@ export async function waitForJob(deps: Deps, id: string, timeoutMs: number): Pro
 /** The exit code of a job that has ended, with what it says; null while it has not. */
 function endOf(deps: Deps, view: JobView): number | null {
   if (view.state === "done") {
-    deps.out(`${view.id} done: ${view.done - view.failed - view.skipped} captures, ${view.failed} failed${view.skipped ? `, ${view.skipped} skipped` : ""}\nresults: ${view.results.location}  (${view.results.fetch})\n`);
+    deps.out(`${view.id} done: ${view.done - view.failed - view.skipped} ${entryNoun(view)}, ${view.failed} failed${view.skipped ? `, ${view.skipped} skipped` : ""}\nresults: ${view.results.location}  (${view.results.fetch})\n`);
     return EXIT.OK;
   }
   if (view.state === "failed") {
@@ -144,7 +144,7 @@ function endOf(deps: Deps, view: JobView): number | null {
     return EXIT.FAILED;
   }
   if (view.state === "cancelled") {
-    deps.err(`${view.id} was cancelled${view.reason ? `: ${view.reason}` : ""}; ${view.done} of ${view.total} captures had ended\n`);
+    deps.err(`${view.id} was cancelled${view.reason ? `: ${view.reason}` : ""}; ${view.done} of ${view.total} ${entryNoun(view)} had ended\n`);
     return EXIT.CANCELLED;
   }
   return null;

@@ -5,7 +5,7 @@ import type { LeaseLedger } from "../fleet-leases/ledger.ts";
 import type { Waiter } from "../fleet-leases/types.ts";
 import { holderOf } from "./claims.ts";
 import type { JobStore } from "./store.ts";
-import { FACTS_PAGE, captureCount } from "./types.ts";
+import { FACTS_PAGE, captureCount, isFactsJob } from "./types.ts";
 import type { QueueView } from "./view.ts";
 
 /**
@@ -41,6 +41,8 @@ export function durationOf(store: JobStore, mean: number | null): (waiter: Waite
     if (waiter.kind === "maintain") return MAINTAIN_ASSUMED_MS;
     const request = store.readRequest(waiter.id);
     if (!request?.ok || waiter.holder !== holderOf(waiter.id)) return `${waiter.holder}'s length is not known`;
+    // A facts read is a wake and a play, not a capture: the capture mean says nothing about it, and a guess from it would read as a promise.
+    if (isFactsJob(request.value)) return `${waiter.holder} is a facts job, whose length is not estimated`;
     if (mean === null) return "no capture has completed yet, so how long a job holds its boxes is not known";
     const count = captureCount(request.value);
     const boxes = "named" in waiter.want ? waiter.want.named.length : "count" in waiter.want ? waiter.want.count : null;

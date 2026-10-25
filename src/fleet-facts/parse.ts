@@ -17,6 +17,12 @@ const number = (from: unknown, path: string): number => {
   if (typeof from !== "number" || !Number.isFinite(from) || from < 0) throw new Refusal(`${path} is missing or not a number`);
   return from;
 };
+/** A size, a count or a capacity that is 0 was not read: only a free space may be 0. */
+const positive = (from: unknown, path: string): number => {
+  const value = number(from, path);
+  if (value === 0) throw new Refusal(`${path} is 0`);
+  return value;
+};
 const object = (from: unknown, path: string): Obj => {
   if (!isObject(from)) throw new Refusal(`${path} is missing`);
   return from;
@@ -50,7 +56,7 @@ function memory(modules: Obj[], totalBytes: number): BoxFacts["ram"] {
     if (speed === null) throw new Refusal(`memory[${i}] has neither a ConfiguredClockSpeed nor a Speed`);
     return speed;
   });
-  modules.forEach((module, i) => number(module.Capacity, `memory[${i}].Capacity`));
+  modules.forEach((module, i) => positive(module.Capacity, `memory[${i}].Capacity`));
   return { totalBytes, modules: modules.length, speedMtps: Math.min(...speeds) };
 }
 
@@ -81,14 +87,14 @@ function build(output: Obj): BoxFacts {
     bios: { version: text(bios.SMBIOSBIOSVersion, "bios.SMBIOSBIOSVersion"), date: text(bios.ReleaseDate, "bios.ReleaseDate") },
     cpu: {
       name: text(processors[0]!.Name, "processors[0].Name"),
-      cores: processors.reduce((sum, cpu, i) => sum + number(cpu.NumberOfCores, `processors[${i}].NumberOfCores`), 0),
-      threads: processors.reduce((sum, cpu, i) => sum + number(cpu.NumberOfLogicalProcessors, `processors[${i}].NumberOfLogicalProcessors`), 0),
+      cores: processors.reduce((sum, cpu, i) => sum + positive(cpu.NumberOfCores, `processors[${i}].NumberOfCores`), 0),
+      threads: processors.reduce((sum, cpu, i) => sum + positive(cpu.NumberOfLogicalProcessors, `processors[${i}].NumberOfLogicalProcessors`), 0),
     },
-    ram: memory(list(output.memory, "memory"), number(system.TotalPhysicalMemory, "computerSystem.TotalPhysicalMemory")),
+    ram: memory(list(output.memory, "memory"), positive(system.TotalPhysicalMemory, "computerSystem.TotalPhysicalMemory")),
     disks: list(output.disks, "disks").map((disk, i) => ({
       model: text(disk.FriendlyName, `disks[${i}].FriendlyName`), type: text(disk.MediaType, `disks[${i}].MediaType`),
-      bus: text(disk.BusType, `disks[${i}].BusType`), sizeBytes: number(disk.Size, `disks[${i}].Size`) })),
-    systemDrive: { freeBytes: number(drive.FreeSpace, "systemDrive.FreeSpace"), sizeBytes: number(drive.Size, "systemDrive.Size") },
+      bus: text(disk.BusType, `disks[${i}].BusType`), sizeBytes: positive(disk.Size, `disks[${i}].Size`) })),
+    systemDrive: { freeBytes: number(drive.FreeSpace, "systemDrive.FreeSpace"), sizeBytes: positive(drive.Size, "systemDrive.Size") },
     windows: { build: text(windows.CurrentBuild, "windows.CurrentBuild"), ubr, displayVersion: optionalText(windows.DisplayVersion), edition: optionalText(windows.EditionID) },
     tpm: tpm(output.tpm),
     secureBoot: secureBoot(output.secureBoot),

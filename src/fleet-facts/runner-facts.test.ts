@@ -11,7 +11,10 @@ import { staticResolver } from "../fleet-jobs/fake-fleet.ts";
 import { BOXES, harness, tick } from "../fleet-jobs/runner.fixture.ts";
 import { Runner } from "../fleet-jobs/runner.ts";
 import { JobStore } from "../fleet-jobs/store.ts";
-import { meanCaptureMs } from "../fleet-jobs/queue-view.ts";
+import { holderOf } from "../fleet-jobs/claims.ts";
+import { durationOf, meanCaptureMs } from "../fleet-jobs/queue-view.ts";
+import { entryNoun, renderView, viewJob } from "../fleet-jobs/view.ts";
+import type { Waiter } from "../fleet-leases/types.ts";
 import { FACTS_PAGE, FACTS_STORE_VERSION, captureCount } from "../fleet-jobs/types.ts";
 import type { Box, BoxRequest, JobRequest } from "../fleet-jobs/types.ts";
 import { m720q, m720qFacts, prodesk } from "./facts.fixture.ts";
@@ -303,5 +306,68 @@ test("the manifest of a facts job says so, at version 3, and names the reads as 
   assert.equal(manifest.version, 3);
   assert.equal(manifest.state, "done");
   assert.deepEqual(manifest.captures.map((c: { page: string; file: string; status: string }) => [c.page, c.file, c.status]), [[FACTS_PAGE, "w2.facts.json", "done"]]);
+  t.done();
+});
+
+test("a request that says it is a facts job at a store version other than 3, or the reverse, is failed by name and run as neither", async () => {
+  const t = facts();
+  const lie = t.submit(named("w2"), { ...FACTS_REQUEST, version: 1 });
+  const other = t.submit({ kind: "count", count: 1 }, { version: FACTS_STORE_VERSION });
+  await t.drain();
+  assert.equal(t.state(lie).state, "failed");
+  assert.equal(t.state(lie).reason, "request.json is a facts job at store version 1: a facts job is version 3");
+  assert.equal(t.state(other).state, "failed");
+  assert.equal(t.state(other).reason, "request.json is not a facts job at store version 3: a facts job is version 3");
+  assert.deepEqual(t.reads, []);
+  assert.equal(existsSync(t.factsFile), false, "the facts file was not touched");
+  t.done();
+});
+
+test("a facts job's status speaks of reads and boxes, not captures and pages, and --json says what kind it is", async () => {
+  const t = facts({ read: async (box) => { if (box.name === "w3") throw new Error("w3 is unreachable"); return { changed: 0, output: m720q() }; } });
+  const id = t.submit(named("w2", "w3"), FACTS_REQUEST);
+  await t.drain();
+  const view = viewJob({ request: (t.store.readRequest(id) as { value: JobRequest }).value, state: t.state(id), cancelled: false, beat: null, now: Date.now() });
+  assert.equal(view.kind, "facts");
+  const text = renderView(view).join("\n");
+  assert.match(text, /^reads: 2 of 2 done, 1 failed, 0 left  \(2 boxes\)$/m);
+  assert.match(text, /^ {2}the read on w3: w3 is unreachable$/m);
+  assert.ok(!/pages x/.test(text));
+  assert.equal(entryNoun(view), "reads");
+  t.done();
+});
+
+test("a page job's status is as it was: captures, and no kind", async () => {
+  const t = facts();
+  const id = t.submit({ kind: "count", count: 2 });
+  await t.drain();
+  const view = viewJob({ request: (t.store.readRequest(id) as { value: JobRequest }).value, state: t.state(id), cancelled: false, beat: null, now: Date.now() });
+  assert.equal(view.kind, null);
+  assert.match(renderView(view).join("\n"), /^captures: 4 of 4 done, 0 left {2}\(4 pages x 1 pass\)$/m);
+  t.done();
+});
+
+test("a queued facts job's length is not estimated from the capture mean: the estimate says so", async () => {
+  const t = facts();
+  t.submit({ kind: "count", count: 1 });
+  await t.drain();
+  assert.ok(meanCaptureMs(t.store) !== null, "positive control: a capture mean exists");
+  const id = t.submit(named("w2"), FACTS_REQUEST);
+  const duration = durationOf(t.store, meanCaptureMs(t.store));
+  assert.equal(duration({ id, holder: holderOf(id), kind: "capture", label: "A11-283", want: { named: ["w2"] }, enqueuedAt: 0, expiresAt: 1 } as Waiter),
+    `fleet-jobs:${id} is a facts job, whose length is not estimated`);
+  t.done();
+});
+
+test("the version a store refuses is listed in words: one, two, or three", () => {
+  const t = facts();
+  const request = t.submit(named("w2"), FACTS_REQUEST);
+  const reasonFor = (accepts: number[]) => {
+    const read = new JobStore(t.dir, { accepts }).readRequest(request);
+    return read && !read.ok ? read.reason : "";
+  };
+  assert.match(reasonFor([1]), /reads version 1$/);
+  assert.match(reasonFor([1, 2]), /reads version 1 and 2$/);
+  assert.match(reasonFor([1, 2, 4]), /reads version 1, 2 and 4$/);
   t.done();
 });

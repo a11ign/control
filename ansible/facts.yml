@@ -20,6 +20,9 @@
 # with the message, never a failed box, because a box whose TPM cannot be read still has a model and a CPU worth recording. `Confirm-SecureBootUEFI` on a legacy BIOS
 # is `unsupported`.
 #
+# A number is passed on as the CIM or the registry gave it, never cast: `[int64]$null` is 0, and a drive or a UBR that could not be read would be recorded as a zero instead of refused
+# by the parser. (`ConfiguredClockSpeed` and `Speed` are cast: a 0 there is "not reported", and the parser takes the other.)
+#
 # The result is `$Ansible.Result`, not text on stdout, so the callback carries it as structure. Lenovo's model is in `Win32_ComputerSystemProduct.Version` and its machine
 # type in the first four characters of `Win32_ComputerSystem.Model`; the parser (`src/fleet-facts/parse.ts`) takes it from there.
 - name: The workers must be in the inventory
@@ -66,7 +69,7 @@
 
           $Ansible.Result = [ordered]@{
             computerSystem = [ordered]@{
-              Manufacturer = $system.Manufacturer; Model = $system.Model; SystemSKUNumber = $system.SystemSKUNumber; TotalPhysicalMemory = [int64]$system.TotalPhysicalMemory
+              Manufacturer = $system.Manufacturer; Model = $system.Model; SystemSKUNumber = $system.SystemSKUNumber; TotalPhysicalMemory = $system.TotalPhysicalMemory
             }
             product = [ordered]@{ Version = $product.Version }
             bios = [ordered]@{
@@ -74,17 +77,17 @@
               ReleaseDate = $(if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString('yyyy-MM-dd') } else { $null })
             }
             processors = @(Get-CimInstance -ClassName Win32_Processor | ForEach-Object {
-              [ordered]@{ Name = $_.Name; NumberOfCores = [int]$_.NumberOfCores; NumberOfLogicalProcessors = [int]$_.NumberOfLogicalProcessors }
+              [ordered]@{ Name = $_.Name; NumberOfCores = $_.NumberOfCores; NumberOfLogicalProcessors = $_.NumberOfLogicalProcessors }
             })
             memory = @(Get-CimInstance -ClassName Win32_PhysicalMemory | ForEach-Object {
-              [ordered]@{ Capacity = [int64]$_.Capacity; ConfiguredClockSpeed = [int]$_.ConfiguredClockSpeed; Speed = [int]$_.Speed; PartNumber = "$($_.PartNumber)".Trim() }
+              [ordered]@{ Capacity = $_.Capacity; ConfiguredClockSpeed = [int]$_.ConfiguredClockSpeed; Speed = [int]$_.Speed; PartNumber = "$($_.PartNumber)".Trim() }
             })
             disks = @(Get-PhysicalDisk | ForEach-Object {
-              [ordered]@{ FriendlyName = $_.FriendlyName; MediaType = [string]$_.MediaType; BusType = [string]$_.BusType; Size = [int64]$_.Size }
+              [ordered]@{ FriendlyName = $_.FriendlyName; MediaType = [string]$_.MediaType; BusType = [string]$_.BusType; Size = $_.Size }
             })
-            systemDrive = [ordered]@{ DeviceID = $drive.DeviceID; FreeSpace = [int64]$drive.FreeSpace; Size = [int64]$drive.Size }
+            systemDrive = [ordered]@{ DeviceID = $drive.DeviceID; FreeSpace = $drive.FreeSpace; Size = $drive.Size }
             windows = [ordered]@{
-              CurrentBuild = [string]$windows.CurrentBuild; UBR = [int]$windows.UBR; DisplayVersion = [string]$windows.DisplayVersion; EditionID = [string]$windows.EditionID
+              CurrentBuild = [string]$windows.CurrentBuild; UBR = $windows.UBR; DisplayVersion = [string]$windows.DisplayVersion; EditionID = [string]$windows.EditionID
             }
             tpm = $tpm
             secureBoot = $secureBoot

@@ -26,12 +26,15 @@ export function writeJsonAtomic(path: string, value: unknown): void {
 
 export type Read<T> = { ok: true; value: T } | { ok: false; reason: string };
 
+/** `1`, `1 and 2`, `1, 2 and 3`. */
+const versionList = (versions: readonly number[]): string => versions.length < 3 ? versions.join(" and ") : `${versions.slice(0, -1).join(", ")} and ${versions.at(-1)}`;
+
 function readVersioned<T extends { version: unknown }>(path: string, what: string, accepts: readonly number[]): Read<T> | null {
   if (!existsSync(path)) return null;
   let parsed: T;
   try { parsed = JSON.parse(readFileSync(path, "utf8")) as T; } catch (cause) { return { ok: false, reason: `${what} is unreadable: ${(cause as Error).message}` }; }
   if (typeof parsed?.version !== "number" || !accepts.includes(parsed.version)) {
-    return { ok: false, reason: `${what} is store version ${JSON.stringify(parsed?.version)}, and this service reads version ${accepts.join(" and ")}` };
+    return { ok: false, reason: `${what} is store version ${JSON.stringify(parsed?.version)}, and this service reads version ${versionList(accepts)}` };
   }
   return { ok: true, value: parsed };
 }

@@ -7,7 +7,7 @@ import type { BoxResolver, Choose } from "./boxes.ts";
 import type { DriftReader } from "./drift.ts";
 import type { JobStore } from "./store.ts";
 import type { Box, BoxReading, CaptureEntry, CaptureRecord, JobRequest, JobStateFile } from "./types.ts";
-import { isFactsJob, isTerminal } from "./types.ts";
+import { FACTS_STORE_VERSION, isFactsJob, isTerminal } from "./types.ts";
 import { factsFilePath, recordAttempt } from "../fleet-facts/facts-file.ts";
 import type { Attempt } from "../fleet-facts/facts-file.ts";
 import { parseFacts } from "../fleet-facts/parse.ts";
@@ -143,6 +143,10 @@ export class Runner {
   private async startQueued(request: JobRequest): Promise<void> {
     const id = request.id;
     if (this.d.store.isCancelled(id)) return this.endUnstarted(request, "cancelled", "cancelled before it started");
+    // `kind` is the submit's to set: a facts job is store version 3 and a version-3 request is a facts job. One that says otherwise is not run as either.
+    if (isFactsJob(request) !== (request.version === FACTS_STORE_VERSION)) {
+      return this.endUnstarted(request, "failed", `request.json is ${isFactsJob(request) ? "a facts job" : "not a facts job"} at store version ${request.version}: a facts job is version ${FACTS_STORE_VERSION}`);
+    }
     this.keepQueued(request);
     const standing = this.d.claims.availability(id);
     if (!standing.grantable) return;

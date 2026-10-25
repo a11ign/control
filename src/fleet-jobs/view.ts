@@ -1,6 +1,6 @@
 import { SERVICE_CHECKOUT, STORE_DIR } from "./paths.ts";
 import { formatDuration } from "./duration.ts";
-import { captureCount, isTerminal } from "./types.ts";
+import { captureCount, isFactsJob, isTerminal } from "./types.ts";
 import type { CaptureEntry, JobRequest, JobState, JobStateFile } from "./types.ts";
 
 export type ServiceBeat = { pid: number; commit: string; startedAt: string; heartbeatAt: string };
@@ -25,6 +25,8 @@ export type JobView = {
   passes: number;
   /** The number of cases of a case job, or null for a page job. */
   cases: number | null;
+  /** `"facts"` for a job that reads boxes' hardware: its entries are reads, not captures. */
+  kind: "facts" | null;
   recaptureOf: string | null;
   total: number;
   done: number;
@@ -101,7 +103,7 @@ export function viewJob({ request, state, cancelled, beat, now, storeDir = STORE
   return {
     id: request.id, label: request.label, state: jobState, reason: reasonOf(reason, jobState, cancelled),
     submittedAt: request.submittedAt, startedAt, finishedAt: finishedAt ?? null,
-    pages: request.pages.length, passes: request.passes, cases: request.cases?.length ?? null, recaptureOf: request.recaptureOf ?? null,
+    pages: request.pages.length, passes: request.passes, cases: request.cases?.length ?? null, kind: isFactsJob(request) ? "facts" : null, recaptureOf: request.recaptureOf ?? null,
     total, done: ended, failed: captures.filter((c) => c.status === "failed").length, skipped: captures.filter((c) => c.status === "skipped").length, remaining: total - ended,
     boxes: boxProgress(captures),
     failedCaptures: failedCapturesOf(captures),
@@ -125,15 +127,21 @@ export function queueLines(queue: QueueView | null): string[] {
   ];
 }
 
+/** What a job's entries are called: a facts job reads boxes, the others capture pages. */
+export const entryNoun = (view: Pick<JobView, "kind">): string => view.kind === "facts" ? "reads" : "captures";
+
 const shapeOf = (view: JobView): string =>
-  view.cases !== null ? `${view.cases} ${view.cases === 1 ? "case" : "cases"}` : `${view.pages} pages x ${view.passes} ${view.passes === 1 ? "pass" : "passes"}`;
+  view.kind === "facts" ? `${view.total} ${view.total === 1 ? "box" : "boxes"}` : view.cases !== null ? `${view.cases} ${view.cases === 1 ? "case" : "cases"}` : `${view.pages} pages x ${view.passes} ${view.passes === 1 ? "pass" : "passes"}`;
+
+const failedWhat = (view: JobView, f: JobView["failedCaptures"][number]): string =>
+  view.kind === "facts" ? "the read" : f.case !== null ? `case ${f.case} (${f.page})` : `${f.page} pass ${f.pass}`;
 
 /** The lines `fleet job status` prints (and `wait` prints on a timeout). */
 export function renderView(view: JobView): string[] {
   const lines = [
     `${view.id}  ${view.state}${view.reason ? ` (${view.reason})` : ""}  label ${view.label}`,
     ...queueLines(view.queue),
-    `captures: ${view.done} of ${view.total} done${view.failed ? `, ${view.failed} failed` : ""}${view.skipped ? `, ${view.skipped} skipped` : ""}, ${view.remaining} left  (${shapeOf(view)})`,
+    `${entryNoun(view)}: ${view.done} of ${view.total} done${view.failed ? `, ${view.failed} failed` : ""}${view.skipped ? `, ${view.skipped} skipped` : ""}, ${view.remaining} left  (${shapeOf(view)})`,
     ...(view.recaptureOf ? [`re-capture of: ${view.recaptureOf}`] : []),
     ...view.boxes.map((b) => `  ${b.box}: ${b.done}/${b.total}${b.failed ? ` (${b.failed} failed)` : ""}`),
     ...view.dropped.map((d) => `  dropped ${d.box}: ${d.reason}`),
@@ -142,7 +150,7 @@ export function renderView(view: JobView): string[] {
   ];
   if (view.failedCaptures.length) {
     lines.push("failed captures:", ...view.failedCaptures.slice(0, 20).map((f) =>
-      `  ${f.case !== null ? `case ${f.case} (${f.page})` : `${f.page} pass ${f.pass}`} on ${f.box}: ${f.error ?? `HTTP ${f.httpStatus}`}`));
+      `  ${failedWhat(view, f)} on ${f.box}: ${f.error ?? `HTTP ${f.httpStatus}`}`));
     if (view.failedCaptures.length > 20) lines.push(`  ... and ${view.failedCaptures.length - 20} more (status --json lists all)`);
   }
   lines.push(view.service
@@ -155,5 +163,5 @@ export function renderView(view: JobView): string[] {
 export function leftLines(view: JobView, now: number): string[] {
   const left = view.boxes.filter((b) => b.done < b.total).map((b) => `${b.box} has ${b.total - b.done} of ${b.total} left`);
   const eta = view.estimatedFinish ? `, estimated to end in ${formatDuration(Date.parse(view.estimatedFinish) - now)}` : "";
-  return [`${view.remaining} of ${view.total} captures are left${eta}`, ...left];
+  return [`${view.remaining} of ${view.total} ${entryNoun(view)} are left${eta}`, ...left];
 }
