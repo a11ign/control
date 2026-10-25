@@ -12,7 +12,9 @@ Type=simple
 Restart=on-failure
 RestartSec=5
 # THE STORE, OUTSIDE EVERY CHECKOUT. systemd creates /var/lib/a11y-fleet-jobs and keeps it across restarts; `reset-checkout.yml` or a re-clone cannot take it.
-StateDirectory=a11y-fleet-jobs
+# THE LEASE LEDGER (A11-244) is the second state directory, created here so it exists before the first take: every taker of a box on the plane (this service, the drift check, the daily freeze,
+# auto-off) reads and writes `/var/lib/a11y-fleet-leases/ledger.json`, and none of them is sandboxed away from it. It is outside every checkout for the same reason the store is.
+StateDirectory=a11y-fleet-jobs a11y-fleet-leases
 # THE SERVICE RUNS FROM ITS OWN CHECKOUT, moved only by `fleet-jobs-install.yml`. `/root/control` follows `main` before every auto-off tick (`a11y-fleet-auto-off.service`'s
 # ExecStartPre), and a tree moved under a long-lived process is a process running half of one version and half of another.
 WorkingDirectory=/root/fleet-jobs

@@ -8,6 +8,7 @@
  *     fleet job cancel <id>
  *     fleet job list [--label <key>] [--state <s>] [--json]
  *     fleet job fetch <id> --to <dir>
+ *     fleet lease list [--json]
  *
  * This is the thin local side. Every call runs `remote.ts` on the control plane, from the service's own checkout, over the SSH route every control
  * command already uses. What stays here is argument parsing, the wait loop and `fetch`.
@@ -278,6 +279,32 @@ async function fetchResults(id: string, options: JobOptions, deps: Deps): Promis
   return EXIT.OK;
 }
 
+type LeaseListing = {
+  at: string;
+  leases: { holder: string; kind: string; boxes: string[]; label: string; takenAt: number; expiresAt: number; expectedEnd: number | null }[];
+  queue: { holder: string; kind: string; label: string; place: number; of: number; estimatedStart: string | null; estimateReason: string | null; waitingOn: string[] }[];
+};
+
+const clock = (ms: number | null): string => ms === null ? "unknown" : new Date(ms).toISOString();
+
+/** `fleet lease list`: who holds which boxes, and who waits, in the order they are served. Read-only. */
+function listLeases(args: string[], deps: Deps): number {
+  const { values } = parseArgs({ args, strict: true, options: { json: { type: "boolean" } } });
+  const reply = call(deps.transport, ["lease-list"]);
+  if (!reply.reached || reply.code !== REMOTE_EXIT.OK) { deps.err(`${failureOf(reply)}\n`); return EXIT.USAGE; }
+  if (values.json) { deps.out(reply.stdout); return EXIT.OK; }
+  const listing = JSON.parse(reply.stdout) as LeaseListing;
+  deps.out(`leases at ${listing.at}\n`);
+  if (!listing.leases.length) deps.out("  none held\n");
+  for (const l of listing.leases) deps.out(`  ${l.boxes.join(",")}  ${l.kind}  ${l.holder}  ${l.label}  expected end ${clock(l.expectedEnd)}  lapses ${clock(l.expiresAt)}\n`);
+  deps.out("queue\n");
+  if (!listing.queue.length) deps.out("  empty\n");
+  for (const w of listing.queue) {
+    deps.out(`  ${w.place} of ${w.of}  ${w.kind}  ${w.holder}  ${w.label}  estimated start ${w.estimatedStart ?? `unknown (${w.estimateReason})`}${w.waitingOn.length ? `  waiting on ${w.waitingOn.join(", ")}` : ""}\n`);
+  }
+  return EXIT.OK;
+}
+
 async function job(sub: string | undefined, args: string[], deps: Deps): Promise<number> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
     json: { type: "boolean" }, timeout: { type: "string" }, label: { type: "string" }, state: { type: "string" }, limit: { type: "string" }, to: { type: "string" } } });
@@ -298,11 +325,12 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
     const [group, sub, ...rest] = argv[0] === "--" ? argv.slice(1) : argv;
     if (group === "capture" && sub === "submit") return submitJob(rest, deps);
     if (group === "job") return await job(sub, rest, deps);
+    if (group === "lease" && sub === "list") return listLeases(rest, deps);
   } catch (error) {
     deps.err(`${(error as Error).message}\n`);
     return EXIT.USAGE;
   }
-  deps.err("usage: fleet capture submit ... | fleet job status|wait|cancel|list|fetch ...  (see the header of src/fleet-jobs/cli.ts)\n");
+  deps.err("usage: fleet capture submit ... | fleet job status|wait|cancel|list|fetch ... | fleet lease list  (see the header of src/fleet-jobs/cli.ts)\n");
   return EXIT.USAGE;
 }
 

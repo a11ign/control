@@ -16,7 +16,10 @@ import { readDeployPins } from "../layer-pins.ts";
 import { readFleetPins } from "../fleet-pins.ts";
 import { sandboxGitEnv } from "../git-safe-env.ts";
 import { inventoryResolver } from "./boxes.ts";
-import { memoryClaims } from "./claims.ts";
+import { ledgerClaims } from "./claims.ts";
+import { driftReader } from "./drift.ts";
+import { LeaseLedger } from "../fleet-leases/ledger.ts";
+import { ledgerDirFromEnv, ledgerPathIn } from "../fleet-leases/paths.ts";
 import { storeDirFromEnv } from "./paths.ts";
 import { Runner } from "./runner.ts";
 import type { RunnerDeps } from "./runner.ts";
@@ -46,11 +49,12 @@ export function readPins(): PinsReading {
   } catch (error) { return { unreadable: (error as Error).message }; }
 }
 
-/** The real dependencies: the control plane's inventory, the pinned capture client, and each worker's `/health`. */
+/** The real dependencies: the lease ledger, the drift record, the control plane's inventory, the pinned capture client, and each worker's `/health`. */
 export function realDeps(store: JobStore, log: (line: string) => void): RunnerDeps {
   return {
     store, log,
-    claims: memoryClaims(),
+    claims: ledgerClaims(new LeaseLedger(ledgerPathIn(ledgerDirFromEnv()), { log })),
+    drift: driftReader(),
     boxes: inventoryResolver({ log }),
     capture: (box, body) => captureTolerantly({ worker: box.url, body }),
     health: async (box) => (await requestJson(`${box.url}/health`, { timeoutMs: 12_000 })).json ?? null,

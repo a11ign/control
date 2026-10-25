@@ -4,56 +4,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { memoryClaims } from "./claims.ts";
 import { staticResolver } from "./fake-fleet.ts";
-import { RE_CAPTURED, Runner } from "./runner.ts";
-import type { CaptureResult, RunnerDeps } from "./runner.ts";
-import { JobStore, newJobId } from "./store.ts";
+import { BOXES, PAGES, harness, tick } from "./runner.fixture.ts";
+import { RE_CAPTURED } from "./runner.ts";
+import { newJobId } from "./store.ts";
 import { STORE_VERSION } from "./types.ts";
-import type { Box, BoxRequest, JobRequest, JobStateFile } from "./types.ts";
-
-const BOXES: Box[] = ["w2", "w3", "w4"].map((name) => ({ name, url: `http://127.0.0.1:1/${name}` }));
-const PAGES = ["https://x.test/a", "https://x.test/b", "https://x.test/c", "https://x.test/d"];
-const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-
-function harness(over: Partial<RunnerDeps> = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "fleet-jobs-"));
-  const store = new JobStore(dir);
-  const log: string[] = [];
-  const asked: { box: string; page: string }[] = [];
-  const holding = new Map<string, number>();
-  const peak = new Map<string, number>();
-  const capture = async (box: Box, body: Record<string, unknown>): Promise<CaptureResult> => {
-    holding.set(box.name, (holding.get(box.name) ?? 0) + 1);
-    peak.set(box.name, Math.max(peak.get(box.name) ?? 0, holding.get(box.name)!));
-    asked.push({ box: box.name, page: body.url as string });
-    await tick();
-    holding.set(box.name, holding.get(box.name)! - 1);
-    return { status: 200, json: { transcript: [body.url] } };
-  };
-  const deps: RunnerDeps = {
-    store, claims: memoryClaims(), boxes: staticResolver(BOXES), capture, health: async () => ({ busy: false, code: "c", environment: {}, policy: {} }),
-    pins: () => ({ pins: {} }), log: (line) => log.push(line), retryQueuedMs: 0, busyPollMs: 1, busyWaitMs: 5, ...over };
-  const runner = new Runner(deps);
-  let submitted = 0;
-  const submit = (boxes: BoxRequest = { kind: "count", count: 2 }, over: Partial<JobRequest> = {}): string => {
-    // one second apart in the ID's own clock, so the jobs sort in the order they were submitted
-    const id = newJobId(new Date(Date.UTC(2026, 9, 25, 9, 0, submitted)), () => (submitted++).toString(16).padStart(3, "0"));
-    store.writeRequest({ version: STORE_VERSION, id, label: "A11-243", pages: PAGES, boxes, passes: 1, body: { steps: 600 }, freeze: null, submittedBy: "t@h",
-      submittedAt: new Date().toISOString(), ...over });
-    return id;
-  };
-  const state = (id: string): JobStateFile => {
-    const read = store.readState(id);
-    assert.ok(read?.ok, `no readable state for ${id}`);
-    return (read as { ok: true; value: JobStateFile }).value;
-  };
-  const drain = async (runner_: Runner = runner) => { await runner_.tick(); await runner_.settled(); };
-  return { dir, store, runner, deps, log, asked, peak, submit, state, drain, done: () => rmSync(dir, { recursive: true, force: true }) };
-}
 
 test("a job runs every page on every pass to a record, then is done with a manifest", async () => {
   const t = harness();
@@ -112,7 +69,7 @@ test("a connection that fails is a record naming the worker and never its addres
   t.done();
 });
 
-test("a box that fails three captures in a row is dropped, and its pages move to the others", async () => {
+test("a box that fails three captures in a row leaves the job: its unsent pages fail naming it, its lease is freed, and the others carry on", async () => {
   const t = harness({ capture: async (box) => box.name === "w2" ? { status: 500, json: { error: "worker wedged" } } : { status: 200, json: {} } });
   const id = t.submit({ kind: "count", count: 2 }, { pages: [...PAGES, "https://x.test/e", "https://x.test/f", "https://x.test/g", "https://x.test/h"] });
   await t.drain();
@@ -121,9 +78,15 @@ test("a box that fails three captures in a row is dropped, and its pages move to
   assert.equal(state.dropped.length, 1);
   assert.equal(state.dropped[0]!.box, "w2");
   assert.match(state.dropped[0]!.reason, /3 captures in a row failed on it; the last: worker wedged/);
-  assert.equal(state.captures.filter((c) => c.box === "w2").length, 3, "three pages ran on it, then it was dropped");
-  assert.ok(state.captures.filter((c) => c.box === "w3").length >= 5, "the rest moved to w3");
-  assert.ok(state.captures.every((c) => c.status === "done" || c.status === "failed"), "every page ended");
+  const onW2 = state.captures.filter((c) => c.box === "w2");
+  assert.equal(onW2.length, 4, "the box keeps its own share of the pages; nothing moves to the other box");
+  assert.deepEqual(onW2.map((c) => c.status), ["failed", "failed", "failed", "failed"]);
+  assert.match(onW2[3]!.error ?? "", /^w2 left the fleet: 3 captures in a row failed on it/);
+  assert.ok(state.captures.filter((c) => c.box === "w3").every((c) => c.status === "done"), "w3 finished its whole share");
+  assert.equal(state.captures.filter((c) => c.box === "w3").length, 4);
+  const record = JSON.parse(readFileSync(join(t.store.resultsDir(id), onW2[3]!.file), "utf8"));
+  assert.match(record.capture.error, /^w2 left the fleet/, "the part that never ran is a record naming the box");
+  assert.deepEqual(t.ledger.held(), {}, "both leases are gone");
   t.done();
 });
 
@@ -356,7 +319,7 @@ test("a store that cannot write a record fails the job with the reason, after th
   await t.drain();
   assert.equal(t.state(id).state, "failed");
   assert.match(t.state(id).reason ?? "", /internal error: .*ENOSPC/);
-  assert.deepEqual(t.deps.claims.held(), {}, "the job let go of its boxes");
+  assert.deepEqual(t.ledger.held(), {}, "the job let go of its boxes");
   assert.equal(t.state(id).captures.filter((c) => c.status === "done").length, 1, "the other box's capture in flight ended and is recorded before the job gave up");
   t.done();
 });
