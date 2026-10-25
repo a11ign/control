@@ -192,7 +192,7 @@ function submitJob(args: string[], deps: Deps): number {
   if ("refusal" in payload) { deps.err(`${payload.refusal}\n`); return EXIT.USAGE; }
   const reply = call(deps.transport, ["submit"], { input: JSON.stringify(payload) });
   if (!reply.reached || reply.code !== REMOTE_EXIT.OK) {
-    deps.err(`${reply.stderr.trim() || `the control plane answered ${reply.code}`}\n`);
+    deps.err(`${failureOf(reply)}\n`);
     return EXIT.USAGE;
   }
   const { id } = JSON.parse(reply.stdout) as { id: string };
@@ -207,50 +207,68 @@ const needId = (positionals: string[], deps: Deps, what: string): string | null 
   return id;
 };
 
+type JobOptions = { json?: boolean; timeout?: string; label?: string; state?: string; limit?: string; to?: string };
+
+/** A reply that did not come back whole: the words it carried, or what the control plane answered. */
+const failureOf = (reply: Call): string => reply.stderr.trim() || `the control plane answered ${reply.code}`;
+
+function listJobs(options: JobOptions, deps: Deps): number {
+  const remoteArgs = ["list", ...(options.label ? ["--label", options.label] : []), ...(options.state ? ["--state", options.state] : []), ...(options.limit ? ["--limit", options.limit] : [])];
+  const reply = call(deps.transport, remoteArgs);
+  if (!reply.reached || reply.code !== REMOTE_EXIT.OK) { deps.err(`${failureOf(reply)}\n`); return EXIT.USAGE; }
+  const rows = JSON.parse(reply.stdout) as Pick<JobView, "id" | "label" | "state" | "submittedAt" | "total" | "done" | "failed">[];
+  if (options.json) deps.out(`${JSON.stringify(rows)}\n`);
+  else if (!rows.length) deps.out("no jobs\n");
+  else for (const r of rows) deps.out(`${r.id}  ${r.state.padEnd(9)} ${r.label.padEnd(12)} ${r.done}/${r.total}${r.failed ? ` (${r.failed} failed)` : ""}  ${r.submittedAt}\n`);
+  return EXIT.OK;
+}
+
+function showStatus(id: string, options: JobOptions, deps: Deps): number {
+  const status = statusOf(deps, id);
+  if ("unknown" in status) { deps.err(`${status.unknown}\n`); return EXIT.USAGE; }
+  if ("unreached" in status) { deps.err(`could not reach the fleet job service: ${status.unreached}\n`); return EXIT.USAGE; }
+  deps.out(options.json ? `${JSON.stringify(status.view)}\n` : `${renderView(status.view).join("\n")}\n`);
+  return EXIT.OK;
+}
+
+function waitFor(id: string, options: JobOptions, deps: Deps): Promise<number> | number {
+  if (!options.timeout) { deps.err(`fleet job wait needs --timeout <duration> (90s, 30m, 2h, at most ${formatDuration(MAX_WAIT_MS)}): there is no wait without a limit\n`); return EXIT.USAGE; }
+  const timeout = parseDuration(options.timeout);
+  if ("refusal" in timeout) { deps.err(`${timeout.refusal}\n`); return EXIT.USAGE; }
+  return waitForJob(deps, id, timeout.ms);
+}
+
+function cancelJob(id: string, deps: Deps): number {
+  const reply = call(deps.transport, ["cancel", id]);
+  if (!reply.reached || reply.code !== REMOTE_EXIT.OK) {
+    deps.err(`${failureOf(reply)}\n`);
+    return reply.code === REMOTE_EXIT.ALREADY_ENDED ? EXIT.FAILED : EXIT.USAGE;
+  }
+  deps.out(`cancel requested for ${id}: the service stops sending it pages; a capture already on a box ends and is kept\n`);
+  return EXIT.OK;
+}
+
+async function fetchResults(id: string, options: JobOptions, deps: Deps): Promise<number> {
+  if (!options.to) { deps.err("fleet job fetch needs --to <dir>\n"); return EXIT.USAGE; }
+  const dest = join(resolve(options.to), id);
+  mkdirSync(dest, { recursive: true });
+  const code = await deps.untar(deps.transport(["tar", id]), dest);
+  if (code !== 0) { deps.err(`fetch failed (${code}): no results were copied for ${id}\n`); return EXIT.USAGE; }
+  deps.out(`${dest}  (${readdirSync(dest).length} files)\n`);
+  return EXIT.OK;
+}
+
 async function job(sub: string | undefined, args: string[], deps: Deps): Promise<number> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
     json: { type: "boolean" }, timeout: { type: "string" }, label: { type: "string" }, state: { type: "string" }, limit: { type: "string" }, to: { type: "string" } } });
-  if (sub === "list") {
-    const remoteArgs = ["list", ...(values.label ? ["--label", values.label] : []), ...(values.state ? ["--state", values.state] : []), ...(values.limit ? ["--limit", values.limit] : [])];
-    const reply = call(deps.transport, remoteArgs);
-    if (!reply.reached || reply.code !== REMOTE_EXIT.OK) { deps.err(`${reply.stderr.trim() || `the control plane answered ${reply.code}`}\n`); return EXIT.USAGE; }
-    const rows = JSON.parse(reply.stdout) as Pick<JobView, "id" | "label" | "state" | "submittedAt" | "total" | "done" | "failed">[];
-    if (values.json) deps.out(`${JSON.stringify(rows)}\n`);
-    else if (!rows.length) deps.out("no jobs\n");
-    else for (const r of rows) deps.out(`${r.id}  ${r.state.padEnd(9)} ${r.label.padEnd(12)} ${r.done}/${r.total}${r.failed ? ` (${r.failed} failed)` : ""}  ${r.submittedAt}\n`);
-    return EXIT.OK;
-  }
+  if (sub === "list") return listJobs(values, deps);
   const id = needId(positionals, deps, `fleet job ${sub}`);
   if (id === null) return EXIT.USAGE;
-  if (sub === "status") {
-    const status = statusOf(deps, id);
-    if ("unknown" in status) { deps.err(`${status.unknown}\n`); return EXIT.USAGE; }
-    if ("unreached" in status) { deps.err(`could not reach the fleet job service: ${status.unreached}\n`); return EXIT.USAGE; }
-    deps.out(values.json ? `${JSON.stringify(status.view)}\n` : `${renderView(status.view).join("\n")}\n`);
-    return EXIT.OK;
-  }
-  if (sub === "wait") {
-    if (!values.timeout) { deps.err(`fleet job wait needs --timeout <duration> (90s, 30m, 2h, at most ${formatDuration(MAX_WAIT_MS)}): there is no wait without a limit\n`); return EXIT.USAGE; }
-    const timeout = parseDuration(values.timeout);
-    if ("refusal" in timeout) { deps.err(`${timeout.refusal}\n`); return EXIT.USAGE; }
-    return waitForJob(deps, id, timeout.ms);
-  }
-  if (sub === "cancel") {
-    const reply = call(deps.transport, ["cancel", id]);
-    if (!reply.reached || reply.code !== REMOTE_EXIT.OK) { deps.err(`${reply.stderr.trim() || `the control plane answered ${reply.code}`}\n`); return reply.code === REMOTE_EXIT.ALREADY_ENDED ? EXIT.FAILED : EXIT.USAGE; }
-    deps.out(`cancel requested for ${id}: the service stops sending it pages; a capture already on a box ends and is kept\n`);
-    return EXIT.OK;
-  }
-  if (sub === "fetch") {
-    if (!values.to) { deps.err("fleet job fetch needs --to <dir>\n"); return EXIT.USAGE; }
-    const dest = join(resolve(values.to), id);
-    mkdirSync(dest, { recursive: true });
-    const code = await deps.untar(deps.transport(["tar", id]), dest);
-    if (code !== 0) { deps.err(`fetch failed (${code}): no results were copied for ${id}\n`); return EXIT.USAGE; }
-    deps.out(`${dest}  (${readdirSync(dest).length} files)\n`);
-    return EXIT.OK;
-  }
-  deps.err(`usage: fleet job status|wait|cancel|list|fetch ...\n`);
+  if (sub === "status") return showStatus(id, values, deps);
+  if (sub === "wait") return waitFor(id, values, deps);
+  if (sub === "cancel") return cancelJob(id, deps);
+  if (sub === "fetch") return fetchResults(id, values, deps);
+  deps.err("usage: fleet job status|wait|cancel|list|fetch ...\n");
   return EXIT.USAGE;
 }
 

@@ -58,11 +58,8 @@ export function serviceRefusal(store: JobStore, now: number): string | null {
   return age < HEARTBEAT_STALE_MS ? null : `the fleet job service is not running (last heartbeat ${Math.round(age / 1000)}s ago): nothing would run this job, so it was not accepted`;
 }
 
-/** The first thing wrong with a submit, in words, or null. */
-export function submitRefusal(p: SubmitPayload, { now, known }: { now: number; known: (() => string[]) | null }): string | null {
-  if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
-  if (!Array.isArray(p.pages) || !p.pages.length) return "no pages were given";
-  if (!Number.isInteger(p.passes) || p.passes < 1 || p.passes > MAX_PASSES) return `--passes is a whole number from 1 to ${MAX_PASSES}`;
+/** The first thing wrong with the boxes a submit asked for, and with how many passes they can carry. */
+function boxesRefusal(p: SubmitPayload, known: (() => string[]) | null): string | null {
   const { boxes } = p;
   if (boxes.kind === "count" && !(Number.isInteger(boxes.count) && boxes.count >= 1)) return "--boxes is a whole number of boxes (at least 1), `ready`, or a list of box names";
   if (boxes.kind === "named") {
@@ -74,9 +71,17 @@ export function submitRefusal(p: SubmitPayload, { now, known }: { now: number; k
     const unknown = boxes.names.filter((name) => !declared.includes(name));
     if (unknown.length) return `not boxes in the inventory: ${unknown.join(", ")}`;
   }
-  const count = boxes.kind === "named" ? boxes.names.length : boxes.kind === "count" ? boxes.count : 1;
-  const passes = boxes.kind === "ready" ? null : passesRefusal(count, p.passes);
-  if (passes) return passes;
+  if (boxes.kind === "ready") return null;
+  return passesRefusal(boxes.kind === "named" ? boxes.names.length : boxes.count, p.passes);
+}
+
+/** The first thing wrong with a submit, in words, or null. */
+export function submitRefusal(p: SubmitPayload, { now, known }: { now: number; known: (() => string[]) | null }): string | null {
+  if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
+  if (!Array.isArray(p.pages) || !p.pages.length) return "no pages were given";
+  if (!Number.isInteger(p.passes) || p.passes < 1 || p.passes > MAX_PASSES) return `--passes is a whole number from 1 to ${MAX_PASSES}`;
+  const boxes = boxesRefusal(p, known);
+  if (boxes) return boxes;
   if (typeof p.body !== "object" || p.body === null || Array.isArray(p.body)) return "the capture body is not an object";
   const owned = SERVICE_FIELDS.filter((field) => field in p.body);
   if (owned.length) return `the capture body sets ${owned.join(", ")}, which the service sets for itself`;

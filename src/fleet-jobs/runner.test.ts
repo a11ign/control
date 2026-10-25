@@ -346,3 +346,17 @@ test("a graceful stop lets the captures in flight end and be recorded, and the n
   assert.deepEqual(resent.sort(), [PAGES[2], PAGES[3]], "only the two pages that were never sent");
   t.done();
 });
+
+test("a store that cannot write a record fails the job with the reason, after the captures in flight have ended, and frees its boxes", async () => {
+  const t = harness();
+  const real = t.store.writeRecord.bind(t.store);
+  let writes = 0;
+  t.store.writeRecord = (id, file, record) => { if (++writes === 1) throw new Error("ENOSPC: no space left on device"); real(id, file, record); };
+  const id = t.submit({ kind: "count", count: 2 });
+  await t.drain();
+  assert.equal(t.state(id).state, "failed");
+  assert.match(t.state(id).reason ?? "", /internal error: .*ENOSPC/);
+  assert.deepEqual(t.deps.claims.held(), {}, "the job let go of its boxes");
+  assert.equal(t.state(id).captures.filter((c) => c.status === "done").length, 1, "the other box's capture in flight ended and is recorded before the job gave up");
+  t.done();
+});

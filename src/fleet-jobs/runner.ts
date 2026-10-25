@@ -102,35 +102,46 @@ export class Runner {
   private later(id: string): void { this.retryAt.set(id, this.d.now() + this.d.retryQueuedMs); }
 
   private async startQueued(request: JobRequest): Promise<void> {
-    const { store, claims, boxes } = this.d;
     const id = request.id;
-    if (store.isCancelled(id)) return this.endUnstarted(request, "cancelled", "cancelled before it started");
+    if (this.d.store.isCancelled(id)) return this.endUnstarted(request, "cancelled", "cancelled before it started");
     if ((this.retryAt.get(id) ?? 0) > this.d.now()) return;
-
-    const claimed = new Set(Object.keys(claims.held()));
-    if (request.boxes.kind === "named" && request.boxes.names.some((name) => claimed.has(name))) return this.later(id);
-    const othersRun = claimed.size > 0;
-
-    let choice;
-    try { choice = await boxes.choose(request.boxes, claimed); } catch (error) {
-      this.d.log(`${id}: the fleet could not be read, so the job stays queued: ${(error as Error).message}`);
-      return this.later(id);
-    }
-    if ("refusal" in choice) return othersRun ? this.later(id) : this.endUnstarted(request, "failed", choice.refusal);
-    const { boxes: chosen, short, notes } = choice.chosen;
-    if (short && othersRun) return this.later(id);
-    const refusal = passesRefusal(chosen.length, request.passes);
-    if (refusal) return this.endUnstarted(request, "failed", refusal);
-    if (!claims.tryClaim(id, chosen.map((b) => b.name)).claimed) return this.later(id);
-
-    const names = chosen.map((b) => b.name);
-    const readings = Object.fromEntries(await Promise.all(chosen.map(async (box) => [box.name, await this.read(box)] as const)));
+    const outcome = await this.boxesFor(request);
+    if ("wait" in outcome) return this.later(id);
+    if ("fail" in outcome) return this.endUnstarted(request, "failed", outcome.fail);
+    const { boxes, notes } = outcome;
+    const names = boxes.map((b) => b.name);
+    const readings = Object.fromEntries(await Promise.all(boxes.map(async (box) => [box.name, await this.read(box)] as const)));
     const state: JobStateFile = {
       version: STORE_VERSION, state: "running", boxes: names, readings, dropped: [], notes,
       captures: planCaptures(request.pages, names, request.passes), startedAt: this.iso(),
     };
-    store.writeState(id, state);
-    this.launch({ id, request, state, boxes: new Map(chosen.map((b) => [b.name, b])), streak: new Map() });
+    this.d.store.writeState(id, state);
+    this.launch({ id, request, state, boxes: new Map(boxes.map((b) => [b.name, b])), streak: new Map() });
+  }
+
+  /**
+   * The boxes a queued job may start on, now, and they are CLAIMED: or `wait` (other jobs hold boxes it needs, so ask again later), or `fail` with
+   * the reason (nothing else is running that would free a box, so waiting would be for ever).
+   */
+  private async boxesFor(request: JobRequest): Promise<{ boxes: Box[]; notes: string[] } | { wait: true } | { fail: string }> {
+    const { claims } = this.d;
+    const claimed = new Set(Object.keys(claims.held()));
+    if (request.boxes.kind === "named" && request.boxes.names.some((name) => claimed.has(name))) return { wait: true };
+    const othersRun = claimed.size > 0;
+    const waitOr = (reason: string) => othersRun ? { wait: true as const } : { fail: reason };
+
+    let choice;
+    try { choice = await this.d.boxes.choose(request.boxes, claimed); } catch (error) {
+      this.d.log(`${request.id}: the fleet could not be read, so the job stays queued: ${(error as Error).message}`);
+      return { wait: true };
+    }
+    if ("refusal" in choice) return waitOr(choice.refusal);
+    const { boxes, short, notes } = choice.chosen;
+    if (short && othersRun) return { wait: true };
+    const refusal = passesRefusal(boxes.length, request.passes);
+    if (refusal) return { fail: refusal };
+    if (!claims.tryClaim(request.id, boxes.map((b) => b.name)).claimed) return { wait: true };
+    return { boxes, notes };
   }
 
   private async read(box: Box): Promise<BoxReading | null> {
@@ -190,21 +201,30 @@ export class Runner {
 
   private async execute(run: Run): Promise<void> {
     const inflight = new Map<string, Promise<void>>();
-    while (!this.stopping && !this.d.store.isCancelled(run.id)) {
-      for (const name of this.liveBoxes(run)) {
-        if (inflight.has(name)) continue;
-        const next = run.state.captures.find((c) => c.box === name && c.status === "pending");
-        if (!next) continue;
-        next.status = "dispatched";
-        next.startedAt = this.iso();
-        this.persist(run);
-        inflight.set(name, this.captureOne(run, name, next).finally(() => inflight.delete(name)));
+    try {
+      while (!this.stopping && !this.d.store.isCancelled(run.id)) {
+        this.dispatchIdleBoxes(run, inflight);
+        if (!inflight.size) break;
+        await Promise.race(inflight.values());
       }
-      if (!inflight.size) break;
-      await Promise.race(inflight.values());
+    } finally {
+      // Whatever ended the loop, no capture is left running unrecorded behind a job that has let go of its boxes.
+      await Promise.allSettled(inflight.values());
     }
-    await Promise.all(inflight.values());
     this.conclude(run);
+  }
+
+  /** Send each live box that is idle its next pending capture, marking it `dispatched` in `state.json` BEFORE it is sent. */
+  private dispatchIdleBoxes(run: Run, inflight: Map<string, Promise<void>>): void {
+    for (const name of this.liveBoxes(run)) {
+      if (inflight.has(name)) continue;
+      const next = run.state.captures.find((c) => c.box === name && c.status === "pending");
+      if (!next) continue;
+      next.status = "dispatched";
+      next.startedAt = this.iso();
+      this.persist(run);
+      inflight.set(name, this.captureOne(run, name, next).finally(() => inflight.delete(name)));
+    }
   }
 
   private async captureOne(run: Run, name: string, entry: CaptureEntry): Promise<void> {
