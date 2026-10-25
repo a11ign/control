@@ -14,7 +14,7 @@ import type { Deps, Transport } from "../fleet-jobs/cli.ts";
 import { JobStore } from "../fleet-jobs/store.ts";
 import { FACTS_STORE_VERSION } from "../fleet-jobs/types.ts";
 import { m720qFacts } from "./facts.fixture.ts";
-import { factsBoxes } from "./commands.ts";
+import { factsBoxes, factsCommand } from "./commands.ts";
 import { remote } from "./remote.ts";
 import type { FactsRemoteDeps } from "./remote.ts";
 import type { FactsFile } from "./types.ts";
@@ -141,8 +141,42 @@ test("show answers the file as it is, with the inventory's order", () => {
   writeFileSync(t.factsFile, JSON.stringify(file));
   const result = remote(["show"], t.deps());
   assert.equal(result.code, 0);
-  assert.deepEqual(JSON.parse(result.stdout), { file, inventory: INVENTORY });
+  assert.deepEqual(JSON.parse(result.stdout), { file, inventory: INVENTORY, inventoryError: null });
   t.done();
+});
+
+test("show says when the inventory could not be read, rather than answering an empty one", () => {
+  const t = scratch();
+  const file: FactsFile = { version: 1, boxes: { "a11y-worker-2": { readAt: "2026-10-25T09:00:00.000Z", stale: false, lastAttemptAt: "2026-10-25T09:00:00.000Z", lastJob: "fj-1", lastError: null, facts: m720qFacts() } } };
+  writeFileSync(t.factsFile, JSON.stringify(file));
+  const result = remote(["show"], t.deps(undefined, { known: () => { throw new Error("the control plane could not be reached"); } }));
+  assert.equal(result.code, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { file, inventory: [], inventoryError: "the control plane could not be reached" });
+  t.done();
+});
+
+test("fleet facts show prints what it has, says the inventory was unreadable on stderr, and exits 1; an inventory it read exits 0", () => {
+  const file: FactsFile = { version: 1, boxes: { "a11y-worker-2": { readAt: "2026-10-25T09:00:00.000Z", stale: false, lastAttemptAt: "2026-10-25T09:00:00.000Z", lastJob: "fj-1", lastError: null, facts: m720qFacts() } } };
+  const run = (inventoryError: string | null, args: string[] = []) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = factsCommand("show", args, {
+      call: () => ({ reached: true, code: 0, stdout: JSON.stringify({ file, inventory: inventoryError === null ? ["a11y-worker-2", "a11y-worker-3"] : [], inventoryError }), stderr: "" }),
+      out: (text) => { out.push(text); }, err: (text) => { err.push(text); }, submitter: () => "t@h",
+    });
+    return { code, out: out.join(""), err: err.join("") };
+  };
+  const read = run(null);
+  assert.equal(read.code, 0);
+  assert.match(read.out, /a11y-worker-3 .*never read/);
+  assert.equal(read.err, "");
+  for (const args of [[], ["--json"]]) {
+    const unread = run("the control plane could not be reached", args);
+    assert.equal(unread.code, 1);
+    assert.match(unread.out, /a11y-worker-2/);
+    assert.doesNotMatch(unread.out, /never read/);
+    assert.match(unread.err, /the inventory could not be read \(the control plane could not be reached\): only the boxes the facts file holds are shown, so a box that has never been read is missing/);
+  }
 });
 
 test("--boxes of the CLI: all, a number, names; ready and zero are refused", () => {
@@ -204,13 +238,15 @@ test("fleet facts show prints the table, --json the file, and exits 2 when no fa
     "a11y-worker-5": { readAt: "2026-10-24T09:00:00.000Z", stale: true, lastAttemptAt: "2026-10-25T09:00:00.000Z", lastJob: "fj-2", lastError: "unreachable", facts: m720qFacts() } } };
   writeFileSync(t.factsFile, JSON.stringify(file));
   const table = route(t);
-  assert.equal(await main(["facts", "show"], table.deps), 0, table.err.join(""));
+  // The route reaches no control plane, so the inventory is unreadable: the table is printed from the file, the reason is said, and the exit is 1.
+  assert.equal(await main(["facts", "show"], table.deps), 1);
+  assert.match(table.err.join(""), /the inventory could not be read \(/);
   const lines = table.out.join("").trimEnd().split("\n");
   assert.equal(lines.length, 3);
   assert.match(lines[1]!, /^a11y-worker-2 .*LENOVO ThinkCentre M720q \(10T8\)/);
   assert.match(lines[2]!, /STALE: last read 2026-10-24T09:00:00.000Z; last attempt 2026-10-25T09:00:00.000Z: unreachable$/);
   const json = route(t);
-  assert.equal(await main(["facts", "show", "--json", "--boxes", "a11y-worker-5"], json.deps), 0);
+  assert.equal(await main(["facts", "show", "--json", "--boxes", "a11y-worker-5"], json.deps), 1);
   assert.deepEqual(Object.keys(JSON.parse(json.out.join("")).boxes), ["a11y-worker-5"]);
   t.done();
 });

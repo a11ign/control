@@ -67,7 +67,7 @@ One row per box, in the inventory's order, then any box only the file knows. Dis
 | Secure Boot | the state |
 | read at | the time, or `STALE: last read <readAt>; last attempt <lastAttemptAt>: <lastError>`, or `never read` |
 
-`--json` prints the file as it is (`--boxes` narrows it). `show` exits 2, saying that no facts job has run, when the file does not exist.
+`--json` prints the file as it is (`--boxes` narrows it). `show` exits 2, saying that no facts job has run, when the file does not exist. When the control plane's inventory cannot be read, `show` still prints what the file holds, says on stderr why, and exits 1: a box that has never been read is then missing from the table, and an empty inventory is never assumed.
 
 ## Limits worth knowing
 

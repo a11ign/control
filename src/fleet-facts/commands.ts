@@ -6,7 +6,8 @@
  *     fleet facts show [--json] [--boxes <name,name>]
  *
  * `submit` prints the job ID at once and the job is followed like any other (`fleet job status|wait|list|fetch <id>`). `show` prints the facts file as a table, or
- * as it is with `--json`; it exits 2 when no facts job has run.
+ * as it is with `--json`; it exits 2 when no facts job has run, and 1 when the inventory could not be read: the table or the file is still printed, but a box the
+ * facts file has never heard of is missing from it, and the reason is on stderr.
  */
 import { parseArgs } from "node:util";
 import { REMOTE_EXIT } from "../fleet-jobs/remote.ts";
@@ -23,6 +24,8 @@ export type FactsContext = {
 };
 
 const OK = 0;
+/** The answer was printed, but it is not the whole fleet. */
+const INCOMPLETE = 1;
 const USAGE = 2;
 
 /** `--boxes` of a facts job: `all`, a number of boxes, or names. `ready` is a capture's and is refused by name. */
@@ -56,14 +59,14 @@ function show(args: string[], context: FactsContext): number {
   const only = values.boxes === undefined ? null : values.boxes.split(",").map((n) => n.trim()).filter(Boolean);
   const reply = context.call(["show"]);
   if (!reply.reached || reply.code !== REMOTE_EXIT.OK) { context.err(`${failureOf(reply)}\n`); return USAGE; }
-  const { file, inventory } = JSON.parse(reply.stdout) as { file: FactsFile; inventory: string[] };
+  const { file, inventory, inventoryError } = JSON.parse(reply.stdout) as { file: FactsFile; inventory: string[]; inventoryError: string | null };
   if (values.json) {
     const kept = only === null ? file.boxes : Object.fromEntries(Object.entries(file.boxes).filter(([name]) => only.includes(name)));
     context.out(`${JSON.stringify({ ...file, boxes: kept }, null, 1)}\n`);
-    return OK;
-  }
-  for (const line of renderTable(factsRows(file, inventory, only))) context.out(`${line}\n`);
-  return OK;
+  } else for (const line of renderTable(factsRows(file, inventory, only))) context.out(`${line}\n`);
+  if (inventoryError === null) return OK;
+  context.err(`the inventory could not be read (${inventoryError}): only the boxes the facts file holds are shown, so a box that has never been read is missing\n`);
+  return INCOMPLETE;
 }
 
 export function factsCommand(sub: string | undefined, args: string[], context: FactsContext): number {

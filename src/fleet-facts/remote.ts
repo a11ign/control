@@ -79,7 +79,7 @@ function submit(deps: FactsRemoteDeps, now: number): RemoteResult {
 
 /**
  * `show`: the facts file as it is, and the inventory's order for the table. A file that is missing means no facts job has run (a refusal, exit 2); one that
- * cannot be read is said.
+ * cannot be read is said. An inventory that cannot be read is said too, in `inventoryError`: without it the table cannot list a box the file has never heard of.
  */
 function show(deps: FactsRemoteDeps, rest: string[]): RemoteResult {
   parseArgs({ args: rest, options: {}, strict: true });
@@ -88,8 +88,9 @@ function show(deps: FactsRemoteDeps, rest: string[]): RemoteResult {
   const read = readFactsFile(path);
   if (!read.ok) return refuse(read.reason);
   let inventory: string[] = [];
-  try { inventory = deps.known?.() ?? []; } catch { /* the table then lists the file's own boxes, sorted */ }
-  return ok({ file: read.value, inventory });
+  let inventoryError: string | null = null;
+  try { inventory = deps.known?.() ?? []; } catch (error) { inventoryError = (error as Error).message; }
+  return ok({ file: read.value, inventory, inventoryError });
 }
 
 /** One remote command. PURE of process state: the store, the clock, the inventory and stdin are handed in. */
