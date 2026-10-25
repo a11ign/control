@@ -107,6 +107,45 @@ written can do it. `run-server.cmd` re-applies it per session, which works. The 
 which is the opposite behaviour; and `build-lean-worker-image.ps1`, because offline DISM servicing has no
 module and it builds an ISO rather than configuring a host.
 
+## Deliberate fleet upgrade
+
+**Nothing on a box upgrades by itself** ([ADR 0001](../docs/adr/0001-the-fleet-is-frozen-between-deliberate-upgrades.md)). Every box stays on the versions in `deploy-pins.json` until a person edits that manifest and
+runs the upgrade, and then all boxes move together in one run. The manifest holds the Windows release, build and cumulative-update KB (`windows`), Edge (`edge`), NVDA (`nvda`), Node (`node`) and the
+worker code (`layers.nvda-worker` and `core.commit`; the expected `/health.code` is derived from them, never written down). The Intel display driver is the one pin that stays in
+`roles/worker/defaults/main.yml`, because no box reports its version and that file's hash is what puts it in the capture cache key.
+
+To upgrade the fleet:
+
+1. **Edit `deploy-pins.json` in a pull request and merge it.** Merging moves no box. `nvda.version` and `core.commit` move together (NVDA arrives with guidepup, from the core's lockfile). `windows.kb` is
+   the cumulative update that produces `windows.build`, so the run lands on that build and not on whatever Microsoft published after the edit. **When the release changes,** the Installation Assistant lands
+   a box on the release's *current* build whatever the manifest says, so `windows.build` must be the build the Assistant produces: a box that lands above the manifest fails the run, by name, and is not rolled back.
+2. **Read the plan:** `pnpm run fleet:patch` prints, per box, what it would do (`a feature update first`, or `ABOVE the manifest`) and changes nothing.
+3. **Run it:** `pnpm run fleet:patch -- --apply`. It runs, in order, and stops at the first one that fails, naming the box:
+   - the upgrade's own gates (`patch.yml --preflight`): a box that is busy, did not answer, or is above the manifest's Windows build refuses the run **before any code is delivered**;
+   - `deploy.yml`, the worker code the manifest pins, with its own read-back;
+   - `patch.yml`, **one box at a time** (`serial: 1`, `any_errors_fatal`): refuse the box if it is capturing or ABOVE the manifest; lift the Windows freeze; bring Windows to the manifest's release (the
+     Installation Assistant, when the box is on an older release) and to exactly its KB; restart if Windows asks; install the manifest's Node, NVDA and Edge and the display driver pin through the role's own task
+     files; freeze again in an `always:`; read the box back;
+   - a closing read of **every** box against the whole manifest (the reading `pnpm run fleet:drift` makes), which fails the run on any difference and on any box that does not answer (a box that was just
+     restarted is asked again for up to five minutes). Under `--limit` it reads the boxes the run touched, and says so.
+4. **If it stops,** the output names the box and nothing is rolled back. Fix it and run `fleet:patch -- --apply` again, or `--limit=<box>` for that box: a box already on the manifest is checked and left as it is.
+
+What stops a run: a box that is busy, a box that did not answer (wake it first: the closing read fails on a box it could not read), a box **above** the manifest (never rolled back; edit
+the manifest to catch up with it, or decide what becomes of the box), a freeze that did not read back, or a box whose build, Edge, NVDA or Node is not the manifest's at the end. A box above the
+manifest by revision only (`/health` reports no revision) is refused by `patch.yml` when its turn comes, not by the gates. Defender's signatures are refreshed on every box, every run; they are not
+a manifest field and not part of the closing read.
+
+**Between upgrades the boxes are watched, and re-frozen.** `fleet:freeze-schedule` installs two control-plane timers (read them with `systemctl list-timers 'a11y-fleet-*'` on the control host):
+
+| timer | runs | what it does |
+|---|---|---|
+| `a11y-fleet-drift.timer` | hourly | `src/fleet-drift.ts --record`: reads every box's Windows build, Edge, NVDA and worker code against the manifest and writes `runs/fleet-drift.json`. **Read-only.** A box that is asleep is unread, not a difference. `fleet:watch` mirrors the record for the chairman's announcement channel. |
+| `a11y-fleet-freeze-daily.timer` | daily | `freeze.yml` on every reachable box: the freeze levers only, idempotent, no installs. Names the boxes it could not reach, so a box that was off is frozen the next day it is awake; `runs/fleet-freeze-last-run.json` is the record. |
+
+`pnpm run fleet:status` and `pnpm run fleet:drift` exit 3 on any difference from the manifest, and a box that differs is out of capture: `lab:job` reads the workers it needs just before it dispatches and leaves a
+drifting one out of a whole-fleet pool (a job that names one is refused). The idle-off timer powers workers off and the drift check never wakes one, so a box seen off the manifest that then sleeps keeps its last
+difference in the record until it answers and agrees.
+
 ## Check mode
 
 `--check` is safe on this role. It was not, and the fix is worth recording because the trap is easy to

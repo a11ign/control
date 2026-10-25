@@ -29,7 +29,7 @@ import { validRef, guestCommitVars, startPlaybookUnit, moveControlPlane, install
   fleetHoldUntil, fleetHoldWorkers, fleetHoldReachesTarget, activeFleetHolds, allowHoldNumbers, sequenceHoldGate,
   GH_TOKEN_FILE, ghEnvironment, fleetHoldReadRefusal, readFleetGatedIssues, readGateSnapshot, tokenSetOf,
   writeIdentityFor, overrideUnitParts, limitTouches, identityStepFailure, readLocalProtocol, guardProtocolChange,
-  lockTakeStep, lockEndStep, patchTargetReadCommand, ANSIBLE_ON_THE_PLANE, planeUnitStart }
+  lockTakeStep, lockEndStep, ANSIBLE_ON_THE_PLANE, planeUnitStart }
   from "./fleet-playbook.ts";
 import { FLEET_LOCK_PLAYBOOKS, FLEET_LOCK_PATH, LOCK_GRACE_MINUTES, LOCK_GRACE_MS, takeFleetLock, expireFleetLock } from "./fleet-lock.ts";
 import { installedLayersRead, layersFrom, manifestOf } from "./layer-checkouts.ts";
@@ -275,8 +275,6 @@ test("#5310: the checkout, its ansible/ directory and the daily freeze unit's wo
 
   assert.equal(ANSIBLE_ON_THE_PLANE, `${cdTarget}/ansible`);
   assert.equal(`/root/${ANSIBLE_ON_THE_PLANE}`, `${patchCheckout}/ansible`);
-  assert.ok(patchTargetReadCommand(["w1"]).startsWith(`cd ${ANSIBLE_ON_THE_PLANE} && `),
-    "the read-only target probe runs from the same ansible/ directory");
 
   // The unit the deploy starts runs from that same directory: run the builder, not a regex over its source.
   assert.equal(planeUnitStart("a11y-fleet-w1"),
@@ -2057,7 +2055,7 @@ test("#5515: a missing core pin refuses BEFORE the control plane is written to (
 function startUnitObserved({ chosen, pin }: { chosen: string; pin: string }) {
   const calls: string[] = [];
   const unit = startPlaybookUnit({ chosen, ref: "HEAD", limitFlag: undefined, serialFlag: undefined, allowEdgeDowngrade: false,
-    apply: false, displayMode: undefined, layerCommits: {}, aim: { addresses: {}, workers: [] }, patchTarget: null, followBudgetMs: 1000 },
+    apply: false, displayMode: undefined, layerCommits: {}, aim: { addresses: {}, workers: [] }, followBudgetMs: 1000 },
   { ssh: (command) => { calls.push(`ssh ${command}`); return ""; },
     takeLock: ({ chosen: held }) => { calls.push(`lock ${held}`); },
     declaredCore: () => { calls.push("pin"); return pin; } });

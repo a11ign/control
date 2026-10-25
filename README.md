@@ -20,13 +20,21 @@ src/                   fleet-playbook.mjs   drives Ansible against the fleet: pr
                        fleet-wake.mjs       power the fleet on (Wake-on-LAN) or check it answered
 ansible/               the playbooks themselves, and ansible/README.md is the map:
                        why SSH and not WinRM, why the fleet is defined once in inventory.yml
-deploy-pins.json       what control deploys: the published worker and fleet (version and tarball integrity) and the lab's tag (read through src/layer-pins.ts)
+deploy-pins.json       what control deploys and what every box runs: the published worker and fleet (version and tarball integrity), the lab's tag (src/layer-pins.ts), and the Windows build, Edge, NVDA and Node (src/fleet-pins.ts)
 layers.json            the list the playbooks' own layer tasks still read, until the host row; no file of src/ reads it
 scripts/               this repository's own tests: the workflows, the arming filter, the manifest
 ```
 
 Exports three entry points other packages import: `./fleet-playbook`, `./lab-pipeline` and `./fleet-wake` (#2682: `packages/lab`'s by-hand entries wake exactly the workers they name, the same
 credential-free call `fleet-wake.mjs`'s own CLI makes), and `./layer-checkouts`.
+
+## The fleet is frozen; an upgrade is one deliberate run
+
+Nothing on a fleet box upgrades by itself (Windows Update, the Edge updater, NVDA's update checks and the Store are all held off), and every box stays on the versions in `deploy-pins.json` until a person
+upgrades the whole fleet at once. To do that: edit `deploy-pins.json` in a pull request and merge it; read the plan with `pnpm run fleet:patch`; run `pnpm run fleet:patch -- --apply`. The run is
+`deploy.yml`, then `patch.yml` one box at a time (lift the Windows freeze, upgrade, freeze again in an `always:`), then a read of **every** box against the manifest; it stops at the first box that cannot be
+upgraded, and names it. `pnpm run fleet:drift` is that read on its own (exit 3 on any difference), and it runs hourly on the control plane. The decision is
+[ADR 0001](docs/adr/0001-the-fleet-is-frozen-between-deliberate-upgrades.md); the steps, what stops a run and the two timers are in [`ansible/README.md`](ansible/README.md#deliberate-fleet-upgrade).
 
 ## Reaching the control plane itself
 

@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,8 +118,8 @@ test("refuses a busy worker BEFORE anything changes, and an unanswered /health c
   noCheck.tasks = noCheck.tasks.filter((task: Task) => !moduleOf(task, "ansible.builtin.uri"));
   assert.ok(!refusesOnBusyBeforeChanging(noCheck), "with the check removed the predicate must say so");
   const checkAfter = clone(PATCH_PLAY);
-  const [first, second, third] = checkAfter.tasks;
-  checkAfter.tasks = [first, third, second, ...checkAfter.tasks.slice(3)];
+  const [busyCheck] = checkAfter.tasks.splice(checkAfter.tasks.findIndex((task: Task) => moduleOf(task, "ansible.builtin.uri")), 1);
+  checkAfter.tasks.push(busyCheck);
   assert.ok(!refusesOnBusyBeforeChanging(checkAfter), "a check AFTER the block is no refusal");
   const failsOpen = clone(PATCH_PLAY);
   failsOpen.tasks[1].failed_when = "patch_worker_health.json.busy | default(false)";
@@ -186,159 +186,232 @@ test("A11-205: the daily freeze is refused while it runs, so it cannot undo a li
   assert.match(JSON.stringify(refusal), /not in/, "the refusal is on the unit being in those states");
 });
 
-// --- the verdict, through the real Ansible over invented readings -----------------------------------------
+// --- the manifest, through the real Ansible over invented readings -------------------------------------------------
 
 const ANSIBLE_PLAYBOOK = spawnSync("ansible-playbook", ["--version"], { encoding: "utf8" });
 const HAVE_ANSIBLE = ANSIBLE_PLAYBOOK.status === 0;
 const NO_ANSIBLE = "ansible-playbook is not installed on this machine, so the verdict cannot be run (the control plane has it)";
 
-/** The boxes the failure message lists as odd, read from its bracketed list (not the whole line, which also lists every reading). */
-const oddBoxes = (out: string): string[] =>
-  [...(/Odd box\(es\) \(not on [^)]*\): \[([^\]]*)\]/.exec(out)?.[1] ?? "").matchAll(/a11y-worker-\d+/g)].map((m) => m[0]);
-
-/** Run only the verdict play over local-connection hosts that carry the given readings. */
-function verdict(readings: Record<string, string | null>): { status: number | null, out: string } {
-  const dir = mkdtempSync(join(tmpdir(), "patch-verdict-"));
-  const hosts = Object.fromEntries(Object.entries(readings).map(([name, reading]) =>
-    [name, { ansible_connection: "local", ...(reading === null ? {} : { patch_build_reading: reading }) }]));
-  const inventory = join(dir, "inventory.json");
-  writeFileSync(inventory, JSON.stringify({ a11y_workers: { hosts } }));
-  const config = join(dir, "ansible.cfg");
-  writeFileSync(config, "[defaults]\nlocalhost_warning = False\n");
-  const run = spawnSync("ansible-playbook", ["-i", inventory, PATCH, "--tags", "patch_verdict"], {
-    cwd: dir, encoding: "utf8", env: { ...process.env, ANSIBLE_CONFIG: config, ANSIBLE_NOCOLOR: "1" } });
-  return { status: run.status, out: `${run.stdout}\n${run.stderr}` };
-}
-
-test("the verdict fails on two distinct builds and names the odd box", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const { status, out } = verdict({ "a11y-worker-2": "26100.1742", "a11y-worker-3": "26100.1742", "a11y-worker-4": "26100.1000" });
-  assert.notEqual(status, 0, out);
-  assert.deepEqual(oddBoxes(out), ["a11y-worker-4"], "a box on the majority build is not odd");
-});
-
-test("the verdict passes on one build", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const { status, out } = verdict({ "a11y-worker-2": "26100.1742", "a11y-worker-3": "26100.1742" });
-  assert.equal(status, 0, out);
-  assert.match(out, /2 box\(es\) read, 0 unreadable/);
-});
-
-test("an unreadable box is reported as unreadable, never as a differing build", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const { status, out } = verdict({ "a11y-worker-2": "26100.1742", "a11y-worker-3": "unreadable", "a11y-worker-4": "26100.1742", "a11y-worker-5": null });
-  assert.equal(status, 0, `unreadable boxes must not fail the play\n${out}`);
-  assert.match(out, /2 box\(es\) read, 2 unreadable/);
-  assert.match(out, /a11y-worker-3/);
-  assert.match(out, /a11y-worker-5/, "a box that never recorded a reading is unreadable too");
-  // ...and a real mismatch alongside an unreadable box still fails, naming only the box that differs.
-  const mixed = verdict({ "a11y-worker-2": "26100.1742", "a11y-worker-3": "unreadable", "a11y-worker-4": "26100.1000", "a11y-worker-5": "26100.1742" });
-  assert.notEqual(mixed.status, 0, mixed.out);
-  assert.deepEqual(oddBoxes(mixed.out), ["a11y-worker-4"], "the unreadable box is not an odd build");
-});
-
-test("the verdict play exists and is tagged, so the behavioural tests cannot silently run nothing", () => {
-  assert.deepEqual(VERDICT_PLAY.tags, ["patch_verdict"]);
-  assert.ok(allTasks(VERDICT_PLAY.tasks).some((task) => task["ansible.builtin.fail"]), "the verdict play must be able to fail");
-});
-
-// --- #4897: a box below the target build is brought up to it, a feature update included ---------------------
-
-const TARGET = { patch_target_release: "26H2", patch_target_build: "26300.9711" };
-const NO_TARGET = {};
 type Extra = Record<string, unknown>;
+const MANIFEST = JSON.parse(readFileSync(join(ANSIBLE, "../deploy-pins.json"), "utf8")) as {
+  windows: { release: string; build: string; kb: string; }; edge: { version: string; }; nvda: { version: string; }; node: { version: string; }; };
+/** What a box that is on the manifest reads back as, from the manifest itself: nothing in this file restates a version. */
+const ON_MANIFEST = { Windows: MANIFEST.windows.build, Edge: MANIFEST.edge.version, NVDA: MANIFEST.nvda.version, Node: MANIFEST.node.version };
 
 /** Run `ansible-playbook` on `playbook` in a scratch directory over the given hosts' local connections. */
-function runLocal(opts: { playbook: string, hosts: Record<string, Record<string, unknown>>, extra: Extra, tags?: string }):
+function runLocal(opts: { playbook: string, hosts: Record<string, Record<string, unknown>>, extra?: Extra, tags?: string }):
   { status: number | null, out: string, dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "patch-target-"));
+  const dir = mkdtempSync(join(tmpdir(), "patch-run-"));
   const inventory = join(dir, "inventory.json");
   const hosts = Object.fromEntries(Object.entries(opts.hosts).map(([name, vars]) => [name, { ansible_connection: "local", ...vars }]));
   writeFileSync(inventory, JSON.stringify({ a11y_workers: { hosts } }));
   const config = join(dir, "ansible.cfg");
   writeFileSync(config, "[defaults]\nlocalhost_warning = False\n");
-  const argv = ["-i", inventory, opts.playbook, "-e", JSON.stringify(opts.extra), ...(opts.tags ? ["--tags", opts.tags] : [])];
+  const argv = ["-i", inventory, opts.playbook, "-e", JSON.stringify(opts.extra ?? {}), ...(opts.tags ? ["--tags", opts.tags] : [])];
   const run = spawnSync("ansible-playbook", argv, { cwd: dir, encoding: "utf8", env: { ...process.env, ANSIBLE_CONFIG: config, ANSIBLE_NOCOLOR: "1" } });
   return { status: run.status, out: `${run.stdout}\n${run.stderr}`, dir };
 }
 
+/** The differences the closing play names, as `box field` pairs, read from its message. */
+const differencesNamed = (out: string): string[] =>
+  [...new Set([...out.matchAll(/(a11y-worker-\d+) (Windows|Edge|NVDA|Node) has/g)].map((m) => `${m[1]} ${m[2]}`))];
+
+/** Run only the whole-fleet play over invented local hosts that carry the given readbacks (`null` is a box that recorded none). */
+function verdict(readbacks: Record<string, Record<string, string> | null>): { status: number | null, out: string } {
+  return runLocal({ playbook: PATCH, tags: "patch_verdict",
+    hosts: Object.fromEntries(Object.entries(readbacks).map(([name, readback]) => [name, readback === null ? {} : { patch_readback: readback }])) });
+}
+
+test("A11-205: the whole-fleet play passes when every box reads as the manifest", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const { status, out } = verdict({ "a11y-worker-2": ON_MANIFEST, "a11y-worker-3": ON_MANIFEST });
+  assert.equal(status, 0, out);
+  assert.match(out, /2 box\(es\) read against the manifest/);
+  assert.match(out, /0 difference\(s\)/);
+});
+
+for (const field of ["Windows", "Edge", "NVDA", "Node"] as const) {
+  test(`A11-205: the whole-fleet play fails on ${field} alone and names the box, the field, what it has and what the manifest wants`, { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+    const { status, out } = verdict({ "a11y-worker-2": ON_MANIFEST, "a11y-worker-3": { ...ON_MANIFEST, [field]: "0.0.0" }, "a11y-worker-4": ON_MANIFEST });
+    assert.notEqual(status, 0, out);
+    assert.deepEqual(differencesNamed(out), [`a11y-worker-3 ${field}`], "only the box that differs, only the field that differs");
+    assert.match(out, new RegExp(`a11y-worker-3 ${field} has 0\\.0\\.0, the manifest wants ${ON_MANIFEST[field].replace(/\./g, "\\.")}`));
+  });
+}
+
+test("A11-205: a fleet that AGREES but not with the manifest fails: the upgrade is judged against the manifest, never against the majority", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const old = { ...ON_MANIFEST, Windows: "22631.6199" };
+  const { status, out } = verdict({ "a11y-worker-2": old, "a11y-worker-3": old, "a11y-worker-4": old });
+  assert.notEqual(status, 0, out);
+  assert.deepEqual(differencesNamed(out), ["a11y-worker-2 Windows", "a11y-worker-3 Windows", "a11y-worker-4 Windows"]);
+});
+
+test("A11-205: a box that recorded no readback, or an unreadable field, is a difference: the run must SHOW the fleet on the manifest", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const none = verdict({ "a11y-worker-2": ON_MANIFEST, "a11y-worker-5": null });
+  assert.notEqual(none.status, 0, none.out);
+  assert.deepEqual(differencesNamed(none.out), ["a11y-worker-5 Windows", "a11y-worker-5 Edge", "a11y-worker-5 NVDA", "a11y-worker-5 Node"]);
+  const unreadable = verdict({ "a11y-worker-2": { ...ON_MANIFEST, NVDA: "unreadable" } });
+  assert.notEqual(unreadable.status, 0, unreadable.out);
+  assert.deepEqual(differencesNamed(unreadable.out), ["a11y-worker-2 NVDA"]);
+});
+
+test("A11-205: the whole-fleet play is the LAST play, runs once, and can fail", () => {
+  assert.equal(PLAYS.at(-1), VERDICT_PLAY, "the upgrade ends with the whole-fleet read");
+  assert.deepEqual(VERDICT_PLAY.tags, ["patch_verdict"]);
+  assert.equal(VERDICT_PLAY.run_once, true);
+  assert.ok(allTasks(VERDICT_PLAY.tasks).some((task) => task["ansible.builtin.fail"]), "the verdict play must be able to fail");
+  // Every version it judges against comes from the manifest it reads, not from a literal in the play.
+  assert.doesNotMatch(JSON.stringify(VERDICT_PLAY.vars), /\d+\.\d+\.\d+|26[0-9]{3}\./, "no version literal in the verdict play");
+});
+
+// --- the target is the manifest's, from nowhere else -------------------------------------------------------------
+
+const BUILD_OF = (build: string) => ({ patch_build_before: build });
+
+/** A scratch tree shaped like the repository (`<tmp>/ansible/<play>`, `<tmp>/deploy-pins.json`), so a lookup of `playbook_dir/../deploy-pins.json` finds the real manifest. */
+function scratchPlaybook(play: Record<string, unknown>[]): string {
+  const root = mkdtempSync(join(tmpdir(), "patch-vars-"));
+  mkdirSync(join(root, "ansible"));
+  copyFileSync(join(ANSIBLE, "../deploy-pins.json"), join(root, "deploy-pins.json"));
+  const playbook = join(root, "ansible", "vars.yml");
+  writeFileSync(playbook, JSON.stringify(play));
+  return playbook;
+}
+
 interface Evaluated {
-  categories: string[], pending: boolean, restart: boolean, rebootTimeout: number,
+  categories: string[], pending: boolean, current: boolean, restart: boolean, rebootTimeout: number, release: string, build: string, kb: string,
 }
 
 /**
- * The patch play's OWN vars, templated by the real Ansible over the role's real defaults, with `extra` as the
- * caller's `-e` (and, for the per-box facts the play sets itself, `patch_build_before` / `patch_updates`). Reads what the
- * play would hand `win_updates` and `win_regedit` and whether it would take the feature route; reaches no box.
+ * The patch play's OWN vars, templated by the real Ansible over the real manifest, with `extra` as the caller's `-e` (and, for the per-box facts the play sets itself,
+ * `patch_build_before` / `patch_updates`). Reads what the play would hand `win_updates` and whether it would take the feature route; reaches no box.
  */
 function evaluatedVars(extra: Record<string, unknown>): Evaluated {
-  const dir = mkdtempSync(join(tmpdir(), "patch-vars-"));
-  const out = join(dir, "out.json");
-  const playbook = join(dir, "vars.yml");
-  const result = "{'categories': patch_categories, 'pending': patch_feature_pending | bool, 'restart': patch_restart_wanted | bool, "
-    + "'rebootTimeout': patch_reboot_timeout | int}";
-  writeFileSync(playbook, JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false,
-    vars: PATCH_PLAY.vars,
-    tasks: [{ "ansible.builtin.copy": { dest: out, content: `{{ ${result} | to_json }}` } }] }]));
-  const run = runLocal({ playbook, hosts: { localhost: {} }, extra: extra as Extra });
+  const out = join(mkdtempSync(join(tmpdir(), "patch-out-")), "out.json");
+  const result = "{'categories': patch_categories, 'pending': patch_feature_pending | bool, 'current': patch_windows_current | bool, 'restart': patch_restart_wanted | bool, "
+    + "'rebootTimeout': patch_reboot_timeout | int, 'release': patch_target_release, 'build': patch_target_build, 'kb': patch_target_kb}";
+  const playbook = scratchPlaybook([{ hosts: "localhost", connection: "local", gather_facts: false, vars: PATCH_PLAY.vars,
+    tasks: [{ "ansible.builtin.copy": { dest: out, content: `{{ ${result} | to_json }}` } }] }]);
+  const run = runLocal({ playbook, hosts: { localhost: {} }, extra });
   assert.equal(run.status, 0, run.out);
   return JSON.parse(readFileSync(out, "utf8"));
 }
 const BASE_CATEGORIES = ["SecurityUpdates", "CriticalUpdates", "UpdateRollups", "Updates"];
 
-test("#4897 negative control: with no target the categories and the reboot rule are what they were", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const none = evaluatedVars(NO_TARGET);
-  assert.deepEqual(none.categories, BASE_CATEGORIES, "no Upgrades category without a target");
-  assert.equal(none.rebootTimeout, 1800, "the reboot timeout is the cumulative one");
-  assert.equal(none.pending, false, "no target, no feature route");
-  assert.ok(rebootsOnlyItself(PATCH_PLAY));
-  // The reboot rule never mentions the target: a box already on it installs nothing, so it is not restarted.
-  assert.doesNotMatch(JSON.stringify(tasksUsing(PATCH_PLAY, "ansible.windows.win_reboot")[0].when), /patch_target/);
-});
-
-test("#4897: with a target Upgrades is NOT a category, and the play still writes no policy value (A11-205: the target release is the freeze's)", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const set = evaluatedVars(TARGET);
-  assert.deepEqual(set.categories, BASE_CATEGORIES, "win_updates cannot switch a feature update (A11-31), so it is not asked to");
+test("A11-205: the target is the manifest's release, build and update, templated by the real Ansible", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const set = evaluatedVars({});
+  assert.deepEqual([set.release, set.build, set.kb], [MANIFEST.windows.release, MANIFEST.windows.build, MANIFEST.windows.kb]);
+  assert.deepEqual(set.categories, BASE_CATEGORIES, "win_updates cannot switch a feature update (A11-31), so Upgrades is not a category");
   assert.ok(writesNoRegistryValue(PATCH_PLAY), "the lift and the target release are written by the role's freeze, from deploy-pins.json");
 });
 
-/** Run only the box-level target verdict over invented readings, with the caller's `-e`. */
-const targetVerdict = (readings: Record<string, string>, extra: Extra): { status: number | null, out: string } =>
-  runLocal({ playbook: PATCH, tags: "patch_target_verdict", extra,
-    hosts: Object.fromEntries(Object.entries(readings).map(([name, reading]) => [name, { patch_build_reading: reading }])) });
-
-test("#4897: the closing task fails a box whose build is below the target, by worker number", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const below = targetVerdict({ "a11y-worker-7": "26200.9711" }, TARGET);
-  assert.notEqual(below.status, 0, below.out);
-  assert.match(below.out, /a11y-worker-7 is on 26200\.9711, below\s+the target build 26300\.9711/);
-  const lowerRevision = targetVerdict({ "a11y-worker-8": "26300.9000" }, TARGET);
-  assert.notEqual(lowerRevision.status, 0, "the same release at an older revision is still below");
-  const unreadable = targetVerdict({ "a11y-worker-9": "unreadable" }, TARGET);
-  assert.notEqual(unreadable.status, 0, "a box nobody could read has not been shown to have reached the target");
-  assert.match(unreadable.out, /a11y-worker-9 is UNREADABLE/);
+test("A11-205: the target is read only from the manifest: the fleet is not asked, and the wrapper passes no target", () => {
+  const text = readFileSync(PATCH, "utf8");
+  const executable = text.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  // Nothing in the play reads a box's build to MAKE a target: the only build reads are the box's own before and after, never the fleet's newest.
+  assert.doesNotMatch(executable, /fleetTopBuild|patchTargetOf|highest build|majority/i);
+  const wrapper = readFileSync(join(ANSIBLE, "../src/fleet-playbook.ts"), "utf8");
+  for (const gone of ["fleetTopBuild", "patchTargetOf", "parsePatchTargetRead", "patchTargetReadCommand", "patchTargetExtraVars"]) {
+    assert.doesNotMatch(wrapper, new RegExp(gone), `${gone} is deleted from the wrapper`);
+  }
+  assert.doesNotMatch(wrapper, /-e patch_target/, "the wrapper hands the play no -e target");
 });
 
-test("#4897: the closing task passes a box at or above the target, compares numbers not text, and is inert without one", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  assert.equal(targetVerdict({ "a11y-worker-2": "26300.9711" }, TARGET).status, 0, "exactly on the target");
-  assert.equal(targetVerdict({ "a11y-worker-3": "26300.10000" }, TARGET).status, 0, "10000 is above 9457; as text it would sort below");
-  assert.equal(targetVerdict({ "a11y-worker-4": "26400.1" }, TARGET).status, 0, "a later release is above");
-  // negative control: no target given is the play as it was. The unreadable box is the discriminating one: a
-  // below-target reading alone would pass even with the target guard removed, an empty build comparing as 0.
-  assert.equal(targetVerdict({ "a11y-worker-5": "22631.1", "a11y-worker-6": "unreadable" }, NO_TARGET).status, 0, "no target, no verdict");
-});
-
-/** The input check on its own, over one invented local host. */
 const targetInputs = (extra: Extra): number | null =>
   runLocal({ playbook: PATCH, tags: "patch_target_inputs", extra, hosts: { "a11y-worker-2": {} } }).status;
 
-test("#4897: a target is given whole and well-formed, or not at all", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  assert.equal(targetInputs(TARGET), 0);
-  assert.equal(targetInputs(NO_TARGET), 0, "the default is no target");
-  assert.notEqual(targetInputs({ patch_target_release: "26H2" }), 0, "a release with no build could never be checked");
-  assert.notEqual(targetInputs({ patch_target_build: "26300.9711" }), 0, "a build with no release would change nothing");
-  assert.notEqual(targetInputs({ patch_target_release: "Windows 11", patch_target_build: "26300.9711" }), 0, "a release is NNHn");
-  assert.notEqual(targetInputs({ patch_target_release: "26H2", patch_target_build: "26300" }), 0, "a build is <build>.<UBR>");
-  // A11-205: the freeze holds Windows Update at the manifest's release for the whole run, so a target for another release could never be reached.
-  const manifestRelease = (JSON.parse(readFileSync(join(ANSIBLE, "../deploy-pins.json"), "utf8")) as { windows: { release: string } }).windows.release;
-  assert.equal(targetInputs({ patch_target_release: manifestRelease, patch_target_build: "26300.9711" }), 0, "the manifest's own release is accepted");
-  assert.notEqual(targetInputs({ patch_target_release: "25H2", patch_target_build: "26200.1" }), 0, "another release than the manifest's is refused");
+test("A11-205: a caller's -e cannot move the target off the manifest; the manifest's own values are accepted", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  assert.equal(targetInputs({}), 0, "negative control: no -e is the manifest's target");
+  assert.equal(targetInputs({ patch_target_release: MANIFEST.windows.release, patch_target_build: MANIFEST.windows.build, patch_target_kb: MANIFEST.windows.kb }), 0,
+    "the manifest's own values, given explicitly, are the same target");
+  assert.notEqual(targetInputs({ patch_target_build: "26300.1" }), 0, "another build");
+  assert.notEqual(targetInputs({ patch_target_release: MANIFEST.windows.release, patch_target_build: "26300.1" }), 0, "another build beside the manifest's own release (the pair the play used to accept)");
+  assert.notEqual(targetInputs({ patch_target_release: "25H2" }), 0, "another release");
+  assert.notEqual(targetInputs({ patch_target_kb: "KB5000000" }), 0, "another update");
+  assert.notEqual(targetInputs({ patch_target_kb: "kb" }), 0, "a KB that is not shaped as one");
+});
+
+/**
+ * The parameters of the readback task, templated by the real Ansible in a play that has (or lacks) the upgrade play's own `vars_files`. An `include_role` keeps the role's
+ * defaults to itself, so a play that uses `worker_edge_exe` outside the role must load them itself or its first box fails on an undefined variable.
+ */
+function readbackParameters(withVarsFiles: boolean): { status: number | null; out: string; parameters: Record<string, string> | null } {
+  const root = mkdtempSync(join(tmpdir(), "patch-readback-"));
+  mkdirSync(join(root, "ansible", "roles", "worker", "defaults"), { recursive: true });
+  for (const file of ["deploy-pins.json", "layers.json"]) copyFileSync(join(ANSIBLE, "..", file), join(root, file));
+  copyFileSync(join(ANSIBLE, "roles/worker/defaults/main.yml"), join(root, "ansible/roles/worker/defaults/main.yml"));
+  const task = allTasks(PATCH_PLAY.tasks).find((candidate) => candidate.name === "Ask the box what Edge and Node it has now");
+  const out = join(root, "out.json");
+  const playbook = join(root, "ansible", "readback.yml");
+  writeFileSync(playbook, JSON.stringify([{ hosts: "localhost", connection: "local", gather_facts: false,
+    ...(withVarsFiles ? { vars_files: PATCH_PLAY.vars_files } : {}),
+    tasks: [{ "ansible.builtin.set_fact": { readback: task?.["ansible.windows.win_powershell"].parameters } },
+      { "ansible.builtin.copy": { dest: out, content: "{{ readback | to_json }}" } }] }]));
+  const run = runLocal({ playbook, hosts: { localhost: {} } });
+  const parameters = (() => {
+    try { return JSON.parse(readFileSync(out, "utf8")) as Record<string, string>; } catch { return null; }
+  })();
+  return { status: run.status, out: run.out, parameters };
+}
+
+test("A11-205: the readback's Edge and Node paths template in the upgrade play's own scope, which an include_role does not provide", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const loaded = readbackParameters(true);
+  assert.equal(loaded.status, 0, loaded.out);
+  assert.match(loaded.parameters?.EdgeExe ?? "", /\\msedge\.exe$/);
+  assert.match(loaded.parameters?.NodeExe ?? "", /\\node\.exe$/);
+  const without = readbackParameters(false);
+  assert.notEqual(without.status, 0, "negative control: without `vars_files` the same task has no `worker_edge_exe`, the fault this test is for");
+  assert.match(without.out, /worker_edge_exe|worker_node_home/);
+});
+
+/** Run only the above-the-manifest refusal over one invented box with the given pre-upgrade build. */
+const aboveManifest = (build: string) => runLocal({ playbook: PATCH, tags: "patch_above_manifest", hosts: { "a11y-worker-7": {} }, extra: BUILD_OF(build) });
+const [BUILD_NUMBER, BUILD_UBR] = MANIFEST.windows.build.split(".").map(Number);
+
+test("A11-205: a box ABOVE the manifest is refused by name before anything is lifted, and is never rolled back", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  for (const above of [`${BUILD_NUMBER}.${BUILD_UBR + 1}`, `${BUILD_NUMBER}.${BUILD_UBR * 10}`, `${BUILD_NUMBER + 100}.1`]) {
+    const run = aboveManifest(above);
+    assert.notEqual(run.status, 0, `${above}: ${run.out}`);
+    assert.match(run.out, new RegExp(`a11y-worker-7 is on ${above.replace(/\./g, "\\.")}, ABOVE the manifest's build ${MANIFEST.windows.build.replace(/\./g, "\\.")}`));
+    assert.match(run.out, /It is not rolled back/);
+  }
+  const unreadable = aboveManifest("unreadable");
+  assert.notEqual(unreadable.status, 0, "a box nobody could read is not shown to be at or below the manifest");
+  assert.match(unreadable.out, /a11y-worker-7 build could not be read/);
+});
+
+test("A11-205: a box at or below the manifest is not refused (compared as numbers: UBR 10000 is above 9457, not below)", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  assert.equal(aboveManifest(MANIFEST.windows.build).status, 0, "exactly on the manifest");
+  assert.equal(aboveManifest(`${BUILD_NUMBER}.${BUILD_UBR - 1}`).status, 0, "the same release, an older revision: the cumulative's job");
+  assert.equal(aboveManifest("22631.6199").status, 0, "an older release: the Installation Assistant's job");
+  assert.equal(aboveManifest(`${BUILD_NUMBER}.${BUILD_UBR * 10}`).status === 0, false, "as text '97110' would sort below '9711'; as numbers it is above");
+});
+
+test("A11-205: the above-the-manifest refusal comes BEFORE the block, so a refused box is left frozen and nothing is lifted", () => {
+  const refusal = PATCH_PLAY.tasks.findIndex((task: Task) => (task.tags ?? []).includes("patch_above_manifest"));
+  const block = PATCH_PLAY.tasks.findIndex((task: Task) => Array.isArray(task.block));
+  assert.ok(refusal > -1 && refusal < block, "the refusal is a task of the play, before the block");
+  assert.equal(PATCH_PLAY.tasks.slice(refusal).findIndex((task: Task) => "ansible.builtin.fail" in task || "ansible.builtin.assert" in task), 0, "and it is an assert");
+  const stripped = clone(PATCH_PLAY);
+  stripped.tasks.splice(refusal, 1);
+  assert.equal(stripped.tasks.findIndex((task: Task) => (task.tags ?? []).includes("patch_above_manifest")), -1, "negative control: the predicate sees its absence");
+});
+
+/** Run only the box's closing verdict over an invented reading. */
+const closing = (reading: string) => runLocal({ playbook: PATCH, tags: "patch_target_verdict", hosts: { "a11y-worker-7": { patch_build_reading: reading } } });
+
+test("A11-205: the closing task fails a box whose build is not the manifest's -- below, above, or unreadable -- by worker number", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const below = closing(`${BUILD_NUMBER - 100}.${BUILD_UBR}`);
+  assert.notEqual(below.status, 0, below.out);
+  assert.match(below.out, new RegExp(`a11y-worker-7 is on ${BUILD_NUMBER - 100}\\.${BUILD_UBR}, below\\s+the manifest's build ${MANIFEST.windows.build.replace(/\./g, "\\.")}`));
+  const olderRevision = closing(`${BUILD_NUMBER}.${BUILD_UBR - 1}`);
+  assert.notEqual(olderRevision.status, 0, "the same release at an older revision is still below");
+  const above = closing(`${BUILD_NUMBER}.${BUILD_UBR + 1}`);
+  assert.notEqual(above.status, 0, "a box ahead of the manifest differs from it too");
+  assert.match(above.out, /ABOVE\s+the manifest's build/);
+  const unreadable = closing("unreadable");
+  assert.notEqual(unreadable.status, 0, "a box nobody could read has not been shown to have reached the manifest");
+  assert.match(unreadable.out, /a11y-worker-7 is UNREADABLE/);
+  assert.equal(closing(MANIFEST.windows.build).status, 0, "negative control: exactly on the manifest passes");
 });
 
 // --- A11-31: a feature update goes through the Installation Assistant, then ONE restart once Setup has finished ----
@@ -381,7 +454,7 @@ test("A11-31: the Assistant route runs space, fetch, launch, wait and ONE restar
   assert.match(String(FEATURE_BLOCK(PATCH_PLAY).find(isReboot)?.timeout), /patch_reboot_timeout/);
   // The re-freeze still sits in the `always`, and the install is not asked to do the feature pass's job.
   assert.ok(liftsThenRefreezes(PATCH_PLAY));
-  const install = FEATURE_BLOCK(PATCH_PLAY).find(nameStarts("Install the pending quality updates"));
+  const install = FEATURE_BLOCK(PATCH_PLAY).find(nameStarts("Install the manifest's cumulative update"));
   assert.match(JSON.stringify(install?.when), /not \(patch_feature_pending/, "a feature pass installs nothing beside the Assistant");
 });
 
@@ -472,26 +545,78 @@ const UPDATES_AND_REBOOT = { installed_update_count: 1, reboot_required: true };
 const UPDATES_NO_REBOOT = { installed_update_count: 1, reboot_required: false };
 const REBOOT_NO_UPDATES = { installed_update_count: 0, reboot_required: true };
 
-test("A11-31: a box whose CurrentBuild is below the target's takes the feature route; any other box does not", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
-  const on = (build: string, extra: Record<string, unknown> = TARGET): Evaluated => evaluatedVars({ ...extra, patch_build_before: build });
+test("A11-31: a box whose CurrentBuild is below the manifest's takes the feature route; any other box does not", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const on = (build: string): Evaluated => evaluatedVars({ patch_build_before: build });
   assert.equal(on("22631.6199").pending, true, "a 22631 box");
-  assert.equal(on("26200.9711").pending, true, "the previous release");
-  assert.equal(on("26300.9000").pending, false, "the target's release, an older UBR: the cumulative's job");
-  assert.equal(on("26300.9711").pending, false, "on the target");
-  assert.equal(on("26400.1").pending, false, "above the target");
-  assert.equal(on("26300.10000").pending, false, "numbers, not text");
-  assert.equal(on("unreadable").pending, false, "a box nobody could read is left for the closing task to fail");
-  assert.equal(on("22631.6199", NO_TARGET).pending, false, "no target, no feature route (the play as it was)");
+  assert.equal(on(`${BUILD_NUMBER - 100}.${BUILD_UBR}`).pending, true, "the previous release");
+  assert.equal(on(`${BUILD_NUMBER}.${BUILD_UBR - 700}`).pending, false, "the manifest's release, an older UBR: the cumulative's job");
+  assert.equal(on(MANIFEST.windows.build).pending, false, "on the manifest");
+  assert.equal(on(`${BUILD_NUMBER + 100}.1`).pending, false, "above the manifest (refused before this is asked)");
+  assert.equal(on(`${BUILD_NUMBER}.${BUILD_UBR * 10}`).pending, false, "numbers, not text");
+  assert.equal(on("unreadable").pending, false, "a box nobody could read is refused before the route is chosen");
   assert.equal(on("22631.6199").rebootTimeout, 3600, "only a feature pass lengthens the restart");
-  assert.equal(on("26300.9711").rebootTimeout, 1800);
+  assert.equal(on(MANIFEST.windows.build).rebootTimeout, 1800);
+});
+
+test("A11-205: a box already on the manifest's build skips its Windows work; one below it does not", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const current = (build: string) => evaluatedVars({ patch_build_before: build }).current;
+  assert.equal(current(MANIFEST.windows.build), true);
+  assert.equal(current(`${BUILD_NUMBER}.${BUILD_UBR - 1}`), false, "an older revision is installed");
+  assert.equal(current("22631.6199"), false, "an older release is upgraded");
+  const install = FEATURE_BLOCK(PATCH_PLAY).find(nameStarts("Install the manifest's cumulative update"));
+  assert.match(JSON.stringify(install?.when), /patch_windows_current/, "the install is skipped on a box that is current");
+});
+
+test("A11-205: win_updates installs exactly the manifest's update: accept_list is the KB, not the newest one", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const [install] = tasksUsing(PATCH_PLAY, "ansible.windows.win_updates");
+  assert.deepEqual(install["ansible.windows.win_updates"].accept_list, ["{{ patch_target_kb }}"]);
+  assert.equal(evaluatedVars({}).kb, MANIFEST.windows.kb);
+  // negative control: the predicate is not satisfied by a list that names another update, or none
+  assert.notDeepEqual(["KB1"], install["ansible.windows.win_updates"].accept_list);
+  assert.equal(tasksUsing(PATCH_PLAY, "ansible.windows.win_updates").every((task) => task["ansible.windows.win_updates"].accept_list !== undefined), true);
 });
 
 test("A11-31: the restart fires for a feature pass, or for an install Windows asked a restart for -- and for nothing else", { skip: HAVE_ANSIBLE ? false : NO_ANSIBLE }, () => {
+  const older = `${BUILD_NUMBER}.${BUILD_UBR - 700}`;
   const restart = (build: string, updates: Record<string, unknown> | undefined): boolean =>
-    evaluatedVars({ ...TARGET, patch_build_before: build, ...(updates ? { patch_updates: updates } : {}) }).restart;
-  assert.equal(restart("26200.9711", undefined), true, "a feature pass installs nothing else and still restarts");
-  assert.equal(restart("26300.9000", UPDATES_AND_REBOOT), true, "a cumulative that asked");
-  assert.equal(restart("26300.9000", UPDATES_NO_REBOOT), false, "a cumulative that did not ask");
-  assert.equal(restart("26300.9000", REBOOT_NO_UPDATES), false, "a pending restart this run did not cause is left alone");
-  assert.equal(restart("26300.9000", undefined), false, "nothing installed");
+    evaluatedVars({ patch_build_before: build, ...(updates ? { patch_updates: updates } : {}) }).restart;
+  assert.equal(restart(`${BUILD_NUMBER - 100}.${BUILD_UBR}`, undefined), true, "a feature pass installs nothing else and still restarts");
+  assert.equal(restart(older, UPDATES_AND_REBOOT), true, "a cumulative that asked");
+  assert.equal(restart(older, UPDATES_NO_REBOOT), false, "a cumulative that did not ask");
+  assert.equal(restart(older, REBOOT_NO_UPDATES), false, "a pending restart this run did not cause is left alone");
+  assert.equal(restart(older, undefined), false, "nothing installed");
+});
+
+// --- the rest of what a box runs is installed from the manifest, in the same lift-and-freeze ---------------------------
+
+/** The role task files the block includes, in order. */
+const roleFilesOf = (play: Play): string[] =>
+  FEATURE_BLOCK(play).flatMap((task: Task) => {
+    const include = task["ansible.builtin.include_role"];
+    return include?.name === "worker" ? [String(include.tasks_from)] : [];
+  });
+const UPGRADE_FILES = ["freeze.yml", "packages.yml", "nvda.yml", "edge-version.yml", "display.yml"];
+
+test("A11-205: each box's upgrade runs the role's Node, NVDA, Edge and display-driver installs after Windows, inside the lift", () => {
+  assert.deepEqual(roleFilesOf(PATCH_PLAY), UPGRADE_FILES);
+  const block = FEATURE_BLOCK(PATCH_PLAY);
+  const at = (file: string) => block.findIndex((task: Task) => task["ansible.builtin.include_role"]?.tasks_from === file);
+  const reboot = block.findIndex(isReboot);
+  for (const file of UPGRADE_FILES.slice(1)) assert.ok(at(file) > reboot, `${file} runs after the Windows restart`);
+  assert.ok(liftsThenRefreezes(PATCH_PLAY), "and the freeze is still the last thing in `always:`");
+  // each is the role's own file: the play restates no version and installs nothing the role does not
+  for (const task of tasksUsing(PATCH_PLAY, "ansible.windows.win_package")) assert.fail(`the play installs a package itself: ${task.name}`);
+  // negative control: without one of them the predicate says so
+  for (const file of UPGRADE_FILES.slice(1)) {
+    const without = clone(PATCH_PLAY);
+    const inner = without.tasks.find((task: Task) => task.block);
+    inner.block = inner.block.filter((task: Task) => task["ansible.builtin.include_role"]?.tasks_from !== file);
+    assert.notDeepEqual(roleFilesOf(without), UPGRADE_FILES, file);
+  }
+});
+
+test("A11-205: the install files take their versions from the manifest: no Edge, Node or NVDA literal in the play", () => {
+  const executable = readFileSync(PATCH, "utf8").split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
+  assert.doesNotMatch(executable, new RegExp(`${MANIFEST.edge.version.replace(/\./g, "\\.")}|${MANIFEST.node.version.replace(/\./g, "\\.")}|${MANIFEST.nvda.version.replace(/\./g, "\\.")}`));
+  assert.doesNotMatch(executable, /26300\.\d+|KB\d{6,8}/, "nor a Windows build or update");
 });

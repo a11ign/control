@@ -68,6 +68,8 @@ import { postQualificationStatus } from "./post-qualification-status.ts";
 // #2803: the SAME two-read-plus-`/health` rule `doctor` and `worker:code` use (#2790), imported rather than
 // restated -- a second copy of "when is a neighbour-table address to be trusted" is the one that drifts.
 import { resolvePoolAtUseTime } from "./with-control-plane-fleet.ts";
+// A11-205: a box that differs from `deploy-pins.json` is out of capture, read just before the dispatch.
+import { driftingBoxes } from "./fleet-drift.ts";
 // #4405 (ruling, 2026-10-11): an OPEN fleet build incident stops every job that puts a box to work. The read lives beside the incident.
 import { openFleetBuildIncident, type OpenIncident } from "./fleet-build-incident.ts";
 
@@ -335,14 +337,49 @@ export function wakeRefusal(results: { name: string; host: string; state: string
  * an address reaches the playbook other than the inventory; the playbook still proves each is a bare IPv4
  * address of an inventory worker before using it.
  */
-const USE_TIME_VARS = ["resolved_addresses", "left_out_workers"];
+const USE_TIME_VARS = ["resolved_addresses", "left_out_workers", "drift_excluded"];
 
-/** @returns {string[]} `-e` arguments, none when nothing moved and nothing was left out */
-export function useTimeArgs({ moved, leftOut }: { moved: Record<string, string>; leftOut: string[]; }): string[] {
+/** @returns {string[]} `-e` arguments, none when nothing moved, nothing was left out and nothing was held out for drift */
+export function useTimeArgs({ moved, leftOut, driftExcluded = [] }: { moved: Record<string, string>; leftOut: string[]; driftExcluded?: string[]; }): string[] {
   const vars: Record<string, unknown> = {};
   if (Object.keys(moved).length) vars.resolved_addresses = moved;
   if (leftOut.length) vars.left_out_workers = leftOut;
+  if (driftExcluded.length) vars.drift_excluded = driftExcluded;
   return Object.keys(vars).length ? ["-e", JSON.stringify(vars)] : [];
+}
+
+/** What the read of the fleet against `deploy-pins.json` answers: the boxes that differ, or why it could not be made. */
+export type DriftReading = { drifting: string[]; } | { cannotAsk: string; };
+
+/**
+ * A BOX THAT DIFFERS FROM THE MANIFEST IS OUT OF CAPTURE (A11-205, docs/adr/0001), decided on a read made just now and not on a ledger up to an hour old.
+ *
+ * - ONLY A CAPTURE-BEARING JOB asks: "out of capture" is about captures, and a diagnostic on a drifting box (`capture-check`, `evidence-check`) is how its fault is read.
+ *   `--allow-stale-workers` does not lift it: a box that differs in Windows, Edge or NVDA is not interchangeable for capture whatever the flag says about its code.
+ * - A pool the caller did NOT name loses the boxes that differ: they are named on stderr and handed to the playbook as `drift_excluded`, which removes them next to
+ *   `a11y_capture: false`. The rest of the fleet keeps capturing.
+ * - A pool the caller NAMED keeps its all-or-nothing rule, as `wakeRefusal` does for a box that would not wake: a run whose population is part of what it
+ *   states (`#21`) may not proceed with a smaller one. Naming a box that differs is a refusal naming it.
+ * - A pool in which EVERY box differs is a refusal, not an empty pool (`lab-job.yml` refuses that too, in its own words, after the dispatch).
+ * - A read that cannot be made REFUSES: with no manifest every box would pass, and could not ask is not may proceed (`fleetBuildRefusal`).
+ *
+ * @param {Worker[]} pool the workers this run will use, after the wake
+ */
+export function driftDecision({ job, pool, selected, reading }: { job: string; pool: Worker[]; selected: boolean; reading: DriftReading; }):
+  { refusal: string; } | { excluded: string[]; } {
+  if ("cannotAsk" in reading) {
+    return { refusal: `REFUSING ${job}: could not ask whether the workers match deploy-pins.json (${reading.cannotAsk}). Could not ask is not may proceed.` };
+  }
+  const excluded = pool.map((w) => w.name).filter((name) => reading.drifting.includes(name));
+  if (excluded.length === 0) return { excluded };
+  const names = excluded.join(", ");
+  if (selected) {
+    return { refusal: `REFUSING ${job}: ${names} differ${excluded.length === 1 ? "s" : ""} from deploy-pins.json (\`npm run fleet:status\` says how), and it named its workers, so a smaller pool is not the run that was asked for.` };
+  }
+  if (excluded.length === pool.length) {
+    return { refusal: `REFUSING ${job}: every worker it needs differs from deploy-pins.json (${names}). A job on no worker is not a clean run.` };
+  }
+  return { excluded };
 }
 
 /**
@@ -434,7 +471,7 @@ export async function run(rawArgv: string[], deps: Parameters<typeof runOnce>[1]
  *
  *
  *   `wake`, `resolvePool` and `qualify` have NO default: only the command-line entry passes the real ones
- *   (#2655, #2803, #3289), so a test that leaves one out cannot reach a socket or post a status.
+ *   (#2655, #2803, #3289, A11-205's `readDrift`), so a test that leaves one out cannot reach a socket or post a status.
  * @returns {Promise<number | void>} the dispatch's status, which the entry point exits with
  */
 async function runOnce(argv: string[], {
@@ -444,6 +481,7 @@ async function runOnce(argv: string[], {
   readFleet = readControlPlaneFleet,
   wake,
   resolvePool,
+  readDrift,
   openIncident,
 }: {
         catalogueText?: string; workers?: string[]; expected?: string; sourceDir?: string;
@@ -452,6 +490,7 @@ async function runOnce(argv: string[], {
         readFleet?: () => { workers: Worker[]; refusal: string | null; };
         wake?: (needed: Worker[]) => Promise<{ name: string; host: string; state: string; detail?: string; }[]>;
         resolvePool?: typeof resolvePoolAtUseTime;
+        readDrift?: (pool: Worker[]) => Promise<DriftReading>;
         qualify?: import("./qualification-run.ts").Poster;
         openIncident?: () => OpenIncident | null;
     } = {}): Promise<number | void> {
@@ -485,7 +524,7 @@ async function runOnce(argv: string[], {
         process.stderr.write(`${needs.refusal}\n`);
         return process.exit(3);
       }
-      const usable = await placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool });
+      const usable = await placeWakeAndCheck({ needs, catalogue, job }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool, readDrift });
       return dispatch([...forwarded, ...useTimeArgs(usable)]);
     }
   }
@@ -494,11 +533,12 @@ async function runOnce(argv: string[], {
 }
 
 /** Resolve, wake, then check staleness -- in that order, each for a reason the comments below give. */
-async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: Worker[]; selected: boolean; }; catalogue: string; job: string; }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool }: {
+async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: Worker[]; selected: boolean; }; catalogue: string; job: string; }, { expected, sourceDir, checkFleet, allowStale, wake, resolvePool, readDrift }: {
         expected?: string; sourceDir?: string; checkFleet: (expected: string, workers: string[], options: { sourceDir: string; when?: string; allow?: boolean; bareMetalUrls?: string[]; }) => Promise<void>;
         allowStale: boolean; wake?: (needed: Worker[]) => Promise<{ name: string; host: string; state: string; detail?: string; }[]>;
         resolvePool?: typeof resolvePoolAtUseTime;
-    }): Promise<{ moved: Record<string, string>; leftOut: string[]; }> {
+        readDrift?: (pool: Worker[]) => Promise<DriftReading>;
+    }): Promise<{ moved: Record<string, string>; leftOut: string[]; driftExcluded: string[]; }> {
   // RESOLVE FIRST (#2803): the wake and the staleness check below both aim at an address, and a worker that
   // moved answers nothing at its pin -- which the wake would wait five minutes on and then call missing.
   const placed = resolvePool && needs.needed.length
@@ -507,8 +547,13 @@ async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: W
   // WAKE NEXT (#2655): the staleness check below reads `/health`, and a worker that is powered off
   // between jobs answers nothing, which `describeCodeDrift` refuses as "none answered".
   const leftOut = wake && placed.needed.length ? await wakeOrRefuse({ ...needs, needed: placed.needed }, wake, placed.why) : [];
-  const pool = placed.needed.filter((w) => !leftOut.includes(w.name)).map((w) => w.url);
-  if (captureBearingJobs(catalogue).includes(job)) {
+  const awake = placed.needed.filter((w) => !leftOut.includes(w.name));
+  // DRIFT NEXT (A11-205): after the wake, because a box that was asleep can only be read now, and before the staleness check, which would refuse a box whose worker
+  // code differs from the manifest's instead of leaving it out. A box that differs is out of capture; `readDrift` is passed only by the command-line entry.
+  const capturing = captureBearingJobs(catalogue).includes(job);
+  const driftExcluded = readDrift && capturing && awake.length ? await excludeDrifting({ job, pool: awake, selected: needs.selected, readDrift }) : [];
+  const pool = awake.filter((w) => !driftExcluded.includes(w.name)).map((w) => w.url);
+  if (capturing) {
     const hash = expected ?? await layerCodeVersion("nvda-worker");
     await checkFleet(hash, pool, {
       when: "before dispatching to the lab", allow: allowStale, bareMetalUrls: pool,
@@ -516,7 +561,20 @@ async function placeWakeAndCheck({ needs, catalogue, job }: { needs: { needed: W
     });
     // A real checkFleet exits the process on refusal; reaching here means it passed (or --allow-stale-workers).
   }
-  return { moved: placed.moved, leftOut };
+  return { moved: placed.moved, leftOut, driftExcluded };
+}
+
+/** The boxes of `pool` that differ from the manifest right now, each said on stderr, or the process exits 3 with the refusal. */
+async function excludeDrifting({ job, pool, selected, readDrift }: { job: string; pool: Worker[]; selected: boolean; readDrift: (pool: Worker[]) => Promise<DriftReading>; }): Promise<string[]> {
+  const decision = driftDecision({ job, pool, selected, reading: await readDrift(pool) });
+  if ("refusal" in decision) {
+    process.stderr.write(`${decision.refusal}\n`);
+    return process.exit(3);
+  }
+  for (const name of decision.excluded) {
+    process.stderr.write(`lab-job: DRIFT ${name} (${pool.find((w) => w.name === name)?.url}): differs from deploy-pins.json -- out of capture, left out of this run\n`);
+  }
+  return decision.excluded;
 }
 
 /**
@@ -579,5 +637,5 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     readRecord: (query: { job: string; row: number; since: number; }) =>
       readRecordFrom(recordDir, query, (text) => process.stderr.write(text)),
   };
-  process.exit(await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, qualify, openIncident: openFleetBuildIncident }) ?? 0);
+  process.exit(await run(process.argv.slice(2), { wake: wakeNeeded, resolvePool: resolvePoolAtUseTime, readDrift: driftingBoxes, qualify, openIncident: openFleetBuildIncident }) ?? 0);
 }

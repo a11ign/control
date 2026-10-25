@@ -45,10 +45,9 @@
  * never QUIET (#4714's rule). Without `--post` the effects are replaced by `readOnlyIncidentDeps`: reading is free, a dry
  * run files nothing.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { readPlaysInFlight } from "./fleet-auto-off.ts";
 import { readFleetLock, type FleetLockReading } from "./fleet-lock.ts";
 import { boxValues, workerKey, type BoxValue, type Drift, type FleetRow } from "./fleet-watch.ts";
@@ -293,9 +292,9 @@ function patchOutcome(status: number, refusal: string): string {
 }
 
 function patchCommentBody({ issue, outcome }: PatchStart): string {
-  return `**The forward patch for the laggards was started by \`fleet-watch\`** (#4405), once for this incident. Outcome: ${outcome}. `
-    + "A refused or failed start is NOT retried by the watch: the line stays stopped until the orchestrator moves the boxes "
-    + `(\`fleet:patch\`), or closes this incident (#${issue}).`;
+  return `**\`fleet-watch\` does not upgrade the fleet** (#4405, A11-205), and said so once for this incident. Outcome: ${outcome}. `
+    + "It is never retried by the watch: the line stays stopped until a person edits `deploy-pins.json` and moves the boxes "
+    + `(\`fleet:patch -- --apply\`), or closes this incident (#${issue}).`;
 }
 
 export type Gh = (args: string[]) => string;
@@ -339,12 +338,12 @@ export function ghIncidentDeps(gh: Gh = runGh, patch: PatchStartDeps = ghPatchSt
 /** The record of starts, beside `fleet-watch-state.json`: relative to the control checkout, as that file's path is. */
 export const FLEET_BUILD_INCIDENT_STATE_PATH = "runs/fleet-build-incident-state.json";
 
-/** The patch entry, the same file `fleet:patch --apply` runs. The start is spawned, never re-implemented. */
-const PATCH_ENTRY = fileURLToPath(new URL("./fleet-playbook.ts", import.meta.url));
-
 /**
- * The real start: the record on disk, the busy readers `fleet-auto-off` and `fleet-lock` already answer with, and the patch
- * entry spawned synchronously (as `fleet-playbook`'s `runApplyChild` does), so the reading that starts it waits for it.
+ * The real start: the record on disk, the busy readers `fleet-auto-off` and `fleet-lock` already answer with, and a start that REFUSES.
+ *
+ * It used to spawn `patch.yml --apply` from this watch. Nothing on a box upgrades by itself (A11-205, docs/adr/0001): an upgrade is a person's run from an edited
+ * `deploy-pins.json`, and a machine that started one whenever two boxes read different builds was the converge-forward drift that ADR ends (it also targeted the newest
+ * build, which is no longer anything). The incident is still filed and still stops the line; the start is recorded once as refused, with the command a person runs.
  */
 export function ghPatchStartDeps(path = FLEET_BUILD_INCIDENT_STATE_PATH, gh: Gh = runGh, now: () => number = Date.now): PatchStartDeps {
   return {
@@ -354,7 +353,7 @@ export function ghPatchStartDeps(path = FLEET_BUILD_INCIDENT_STATE_PATH, gh: Gh 
       writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
     },
     busyReason: () => busyReasonAt(now()),
-    runPatch: runPatchEntry,
+    runPatch: refuseUnattendedUpgrade,
     comment: (issue, body) => {
       gh(["issue", "comment", String(issue), "--repo", FLEET_BUILD_INCIDENT_REPO, "--body", body]);
     },
@@ -374,13 +373,9 @@ export function busyReasonAt(now: number, readers: { plays?: () => ReturnType<ty
   return null;
 }
 
-/** Child process, same argv shape as `runApplyChild`: its stderr is shown, and its REFUSING line is returned. */
-function runPatchEntry(): { status: number, refusal: string } {
-  const child = spawnSync(process.execPath, [...process.execArgv, PATCH_ENTRY, "--playbook=patch.yml", "--apply"],
-    { encoding: "utf8", stdio: ["ignore", "inherit", "pipe"] });
-  if (child.stderr) process.stderr.write(child.stderr);
-  const refusal = String(child.stderr ?? "").split("\n").find((line) => line.startsWith("REFUSING") || line.startsWith("refusing")) ?? "";
-  return { status: child.status ?? 1, refusal };
+/** The start that is not made: the deliberate upgrade is a person's (`fleet:patch -- --apply`, after editing `deploy-pins.json`). */
+export function refuseUnattendedUpgrade(): { status: number, refusal: string } {
+  return { status: 2, refusal: "REFUSING: the fleet upgrade is a person's run, not the watch's (A11-205, docs/adr/0001): edit deploy-pins.json and run `pnpm run fleet:patch -- --apply`" };
 }
 
 /** Reading is free and a dry run writes nothing: the effects are said, not done, and a start is said with its target. */
@@ -396,7 +391,7 @@ export function readOnlyIncidentDeps(deps: IncidentDeps, say: (line: string) => 
       ...deps.patch,
       writeRecord: () => {},
       runPatch: () => {
-        say("WOULD START: fleet:patch --apply (the forward patch for the laggards)");
+        say("WOULD NOT START an upgrade: it is a person's run (fleet:patch --apply, after editing deploy-pins.json)");
         return { status: 0, refusal: "" };
       },
       comment: (issue) => say(`WOULD COMMENT on #${issue}: the patch's outcome`),

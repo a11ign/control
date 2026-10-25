@@ -1,15 +1,22 @@
 ---
-# PATCH THE FLEET ON PURPOSE: every box, the same quality updates, now, then back to frozen -- #4445, under #4405, rewritten for the freeze by A11-205.
+# THE DELIBERATE UPGRADE: every box, to the versions `deploy-pins.json` names, one at a time, then back to frozen -- #4445, under #4405, rewritten by A11-205.
 #
-#     ansible-playbook patch.yml                       # the upgrade: each box in turn
+#     pnpm run fleet:patch -- --apply                  # the upgrade: `deploy.yml`, then this play, then the whole-fleet read (`src/fleet-upgrade.ts`)
+#     ansible-playbook patch.yml                       # this play alone: each box in turn
 #     ansible-playbook patch.yml --limit a11y-worker-4 # one box (a re-run after a refusal)
 #
 # ## Why this exists
 #
-# Nothing on a box upgrades by itself (A11-205, docs/adr/0001): Windows Update is stopped, not deferred (`roles/worker/tasks/freeze.yml`). That makes the OS
-# build a thing the fleet DOES rather than a thing that happens, and this is the doing: lift the Windows levers on ONE box, install what is pending, reboot,
-# put the freeze back, and read the build off every box so the play ends by NAMING them. The OS build is a capture-cache key (`environmentKey()`), so "the
-# fleet is on one build" is the claim the whole play exists to prove, not to assume. There is no schedule: the 28-day patch window is gone, and a person runs this.
+# Nothing on a box upgrades by itself (A11-205, docs/adr/0001): Windows Update is stopped, not deferred (`roles/worker/tasks/freeze.yml`), and the Edge updater,
+# NVDA's update check and the Store are off. So a version moves ONLY here, when a person has edited `deploy-pins.json` in a pull request, merged it, and run
+# `fleet:patch -- --apply`. For each box, in turn: lift the Windows levers, bring Windows to the manifest's release and to exactly the manifest's cumulative update,
+# restart, install the manifest's Node, NVDA and Edge (and the display driver pin), put the freeze back in an `always:`, and read the box back against the
+# manifest. The play then ends by reading EVERY box. There is no schedule: the 28-day patch window is gone.
+#
+# THE TARGET IS THE MANIFEST'S AND NOTHING ELSE'S. It used to be "the newest build any box reports", so a box that updated itself set the target for the
+# fleet. Now `patch_target_release`, `patch_target_build` and `patch_target_kb` are derived from `deploy-pins.json` and the first task refuses a run in which any
+# of them was given another value with `-e`. A box ABOVE the manifest is refused by name before anything is lifted and is NEVER rolled back: the manifest is
+# edited to catch up with it, or a person decides what becomes of that box.
 #
 # ## ONE BOX AT A TIME, and a refusal HALTS the rest
 #
@@ -34,26 +41,24 @@
 # is reported and left alone; rebooting a box that installed nothing is a restart nobody asked for, on a
 # machine that may be holding a capture.
 #
-# ## A box BELOW the fleet's target build is brought up to it, a feature update included -- #4897, under #4405
+# ## A box BELOW the manifest's build is brought up to it, a feature update included -- #4897, under #4405, from the manifest by A11-205
 #
-# The categories above carry cumulative updates only, so a 22631 box
-# could never reach 26100 or 26200 here (#4894 read 14 boxes below the target). The chairman's amendment
-# (a11ign#4795) is "a box below the target is patched, never excluded". So the play takes a TARGET, and only
-# when one is given:
+# The categories below carry cumulative updates only, so a 22631 box could never reach 26300 here (#4894 read 14 boxes below the target). The chairman's
+# amendment (a11ign#4795) is "a box below the target is patched, never excluded". The target is the manifest's `windows` section:
 #
-#     ansible-playbook patch.yml -e patch_target_release=26H2 -e patch_target_build=26300.9711
-#
-#   - `patch_target_release` is the release NAME (`TargetReleaseVersionInfo`), `patch_target_build` the
-#     `<CurrentBuild>.<UBR>` the boxes must reach. Both are read from the fleet by the CALLER and never written
-#     into this file: the fleet's target moves with its cumulative update. Both empty (the default) is the
-#     play without a feature pass: same categories, same reboot rule. (Step 3 of A11-205 takes the target from `deploy-pins.json` instead of the fleet's newest box.)
-#   - The lift is the role's (`worker_freeze_lift_windows`), the same for a targeted pass as an untargeted one. `TargetReleaseVersion`, `TargetReleaseVersionInfo`
-#     and `ProductVersion` are part of the freeze and stand at `deploy-pins.json`'s `windows.release`, so the Installation Assistant is never steered off the
-#     manifest. The target does NOT steer the Assistant: asked for 25H2, worker 6 went to 26H2 (build 26300), the build the Assistant offers.
+#   - `release` is the release NAME (`TargetReleaseVersionInfo`), `build` the `<CurrentBuild>.<UBR>` the boxes must reach, and `kb` the cumulative update that
+#     produces it. `win_updates` is given that KB as its `accept_list`, so a run lands on the manifest's build and not on whatever Microsoft published after
+#     the manifest was edited; a box that lands above it could not be moved back.
+#   - The lift is the role's (`worker_freeze_lift_windows`). `TargetReleaseVersion`, `TargetReleaseVersionInfo` and `ProductVersion` are part of the freeze and
+#     stand at the manifest's `windows.release`, so the Installation Assistant is never steered off the manifest. The target does NOT steer the Assistant:
+#     asked for 25H2, worker 6 went to 26H2 (build 26300), the build the Assistant offers.
+#   - A box already ON the manifest's build has its Windows work skipped and still has Node, NVDA, Edge and the display driver checked against the manifest. Defender's
+#     signatures are refreshed on every box, every run (they are not a manifest field).
+#   - The Installation Assistant lands a box on the release's CURRENT build, whatever the manifest says. For a run that changes the release, `windows.build` must be the build
+#     the Assistant produces: a box that lands above the manifest is refused at the end, by name, and is not rolled back.
 #   - Put back in the `always`: the whole freeze, the lifted levers included.
-#   - The last task of the box fails it, by worker number, when its build is below the target or cannot be read.
-#     A window that moved nothing must not read as success (#4733). A box that needed a second pass (the new
-#     build's own cumulative) fails here and is re-run with `--limit`; `any_errors_fatal` halts the rest.
+#   - The last task of the box fails it, by worker number, when its build is not the manifest's or cannot be read. A window that moved nothing must not read as
+#     success (#4733). A box that needed a second pass (the new build's own cumulative) fails here and is re-run with `--limit`; `any_errors_fatal` halts the rest.
 #
 # ## A feature update goes through Microsoft's Windows 11 Installation Assistant -- A11-31, under #4405
 #
@@ -88,7 +93,7 @@
 # this fleet chose, not a Microsoft figure; the ten boxes rolled together held 72 GB or more.
 
 - name: The workers must be in the inventory
-  # A run that matches no host prints "skipping: no hosts matched" and EXITS 0, so a patch window could "pass"
+  # A run that matches no host prints "skipping: no hosts matched" and EXITS 0, so an upgrade could "pass"
   # having patched nothing and named no build. Settled on localhost, where the refusal can speak.
   hosts: localhost
   gather_facts: false
@@ -129,27 +134,32 @@
   gather_facts: false
   serial: 1
   any_errors_fatal: true
+  # The role's declared paths (Edge's image, Node's home), read where this play uses them for its readback: an `include_role` keeps the role's defaults to itself, so
+  # without this the readback below templated an undefined `worker_edge_exe` and the first box failed (`freeze-proof.yml` does the same).
+  vars_files:
+    - roles/worker/defaults/main.yml
   vars:
-    # The target, supplied by the caller (`-e`, which outranks this). Empty means no target: the play is
-    # then what it was before #4897, and nothing below changes a value, a category or a rule.
-    patch_target_release: ''
-    patch_target_build: ''
-    patch_target_set: "{{ (patch_target_release | string | length) > 0 }}"
     # The fleet's one manifest (A11-205), one directory up from the playbooks, as the role reads it.
     patch_manifest: "{{ lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json }}"
+    # THE TARGET, from the manifest and from nowhere else. These stay variables so the tasks below read one name; the first task refuses a run in which a caller's `-e`
+    # (which outranks this) gave any of them another value.
+    patch_target_release: "{{ patch_manifest.windows.release }}"
+    patch_target_build: "{{ patch_manifest.windows.build }}"
+    patch_target_kb: "{{ patch_manifest.windows.kb }}"
     # Cumulative updates only: `Upgrades` is not a category here. `win_updates` marks a feature update installed
     # without running Setup (see the header), so the feature update has its own route below.
     patch_categories: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates]
-    # The box's `<CurrentBuild>.<UBR>` before the window changes anything, set by a task below; `unreadable` until then.
+    # The box's `<CurrentBuild>.<UBR>` before the upgrade changes anything, set by a task below; `unreadable` until then (and a box that stays so is refused).
     patch_build_before: unreadable
     # True for a pass on a box whose `CurrentBuild` is BELOW the target's: the one pass that runs the Installation
     # Assistant and restarts once Setup has finished. A box on the target's `CurrentBuild` (any UBR) is never sent
-    # to it: a lower UBR is a cumulative's, and an unreadable box is left for the closing task to fail.
+    # to it: a lower UBR is a cumulative's.
     patch_feature_pending: >-
-      {{ (patch_target_set | bool)
-         and ((patch_build_before | string) is match('^[0-9]+\.[0-9]+$'))
+      {{ ((patch_build_before | string) is match('^[0-9]+\.[0-9]+$'))
          and ((((patch_build_before | string).split('.') | first) | int)
               < (((patch_target_build | string).split('.') | first) | int)) }}
+    # True when the box already stands on the manifest's build: its Windows work is skipped, and the rest of the upgrade still checks it.
+    patch_windows_current: "{{ (patch_build_before | string) == (patch_target_build | string) }}"
     # Microsoft's Windows 11 Installation Assistant, the fwlink Microsoft publishes for it. The Authenticode check
     # below refuses anything that is not validly signed by Microsoft Corporation.
     patch_feature_installer_url: 'https://go.microsoft.com/fwlink/?linkid=2171764'
@@ -169,22 +179,22 @@
          or ((patch_updates.installed_update_count | default(0) | int) > 0
              and (patch_updates.reboot_required | default(false) | bool)) }}
   tasks:
-    - name: The target is given whole, or the window would do nothing
-      # A release with no build could never be checked at the end, a build with no release would change nothing: either is a window that reads as patched.
-      # The shapes are checked because both land in a comparison. One task, so that nothing sits between the guard and the busy check below.
+    - name: The target is the manifest's, whoever said otherwise
+      # Extra vars outrank the play's own, so `-e patch_target_build=...` would move the target off the manifest. The manifest is read here a second time, directly, and
+      # the three must equal it: a target that does not come from `deploy-pins.json` is the converge-forward drift this ticket ends. The shapes are checked too, because
+      # all three land in a comparison or in `accept_list`.
       tags: [patch_target_inputs]
       ansible.builtin.assert:
         that:
-          - (patch_target_release | string | length > 0) == (patch_target_build | string | length > 0)
-          - not (patch_target_set | bool) or (patch_target_release | string) is match('^[0-9]{2}H[12]$')
-          - not (patch_target_set | bool) or (patch_target_build | string) is match('^[0-9]+\.[0-9]+$')
-          # The freeze holds `TargetReleaseVersionInfo` at the manifest's release for the whole run (lifted levers do not include it), so a target for another release
-          # would be compared at the end against a build the policy forbids Windows Update to install. Until the target is read from the manifest itself, it must AGREE.
-          - not (patch_target_set | bool) or (patch_target_release | string) == patch_manifest.windows.release
+          - patch_target_release == (lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json).windows.release
+          - patch_target_build == (lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json).windows.build
+          - patch_target_kb == (lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json).windows.kb
+          - (patch_target_release | string) is match('^[0-9]{2}H[12]$')
+          - (patch_target_build | string) is match('^[0-9]+\.[0-9]+$')
+          - (patch_target_kb | string) is match('^KB[0-9]{6,8}$')
         fail_msg: >-
-          patch_target_release ('{{ patch_target_release }}') and patch_target_build ('{{ patch_target_build }}') are not given
-          together, as a release and a build number, or not at all; or the release is not the one `deploy-pins.json` pins
-          ({{ patch_manifest.windows.release }}), which is the one the freeze holds Windows Update to.
+          The upgrade's target (release '{{ patch_target_release }}', build '{{ patch_target_build }}', update '{{ patch_target_kb }}') is not what `deploy-pins.json` pins
+          for Windows, or is not shaped as a release, a <CurrentBuild>.<UBR> build and a KB. The target comes from the manifest only: edit it in a pull request.
 
     - name: Refuse to patch a worker that is mid-capture
       # Same shape and same reason as display.yml's and edge-version.yml's check: an install that ends in a
@@ -198,6 +208,42 @@
       register: patch_worker_health
       failed_when: patch_worker_health.json.busy | default(true)
 
+    - name: Read the build before anything is lifted or installed
+      # The feature route is chosen on this, and a box ABOVE the manifest is refused on it, so it is read once, from the registry, before the block lifts anything, as the
+      # closing task reads it. A read, so it runs under `--check` too. Unreadable leaves `patch_build_before` as `unreadable`, and that box is refused below.
+      become: true
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $v = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          "$($v.CurrentBuild).$($v.UBR)"
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      register: patch_build_before_read
+
+    - name: Record the build before, or that it could not be read
+      ansible.builtin.set_fact:
+        patch_build_before: >-
+          {{ (patch_build_before_read.output | default([]) | first | default('', true) | trim)
+             if (patch_build_before_read.failed is not defined or not patch_build_before_read.failed)
+                and (patch_build_before_read.output | default([]) | first | default('', true) | trim) is match('^[0-9]+\.[0-9]+$')
+             else 'unreadable' }}
+
+    - name: A box above the manifest, or one that cannot be read, is refused by name and nothing is lifted
+      # NEVER ROLLED BACK. The standing rule is never back to an older build, and the manifest is the only thing that says which build the fleet is on:
+      # a box above it stops the run, and a person edits the manifest to catch up with it or decides what becomes of the box. Numbers compare as `[build, UBR]`, never as text
+      # ('9457' sorts above '10000'). An unreadable box has not been shown to be at or below the manifest, so it is refused too. Before the block, so a refusal leaves the box frozen.
+      tags: [patch_above_manifest]
+      ansible.builtin.assert:
+        that:
+          - patch_build_before != 'unreadable'
+          - (patch_build_before.split('.') | map('int') | list) <= (patch_target_build.split('.') | map('int') | list)
+        fail_msg: >-
+          {{ inventory_hostname }} {{ 'build could not be read, so it is not shown to be at or below' if patch_build_before == 'unreadable'
+          else 'is on ' ~ patch_build_before ~ ', ABOVE' }} the manifest's build {{ patch_target_build }} (`deploy-pins.json`). It is not rolled back, and the upgrade stops
+          here with nothing lifted. Edit the manifest to a build this box is not above, or decide what becomes of the box.
+
     - name: Lift the Windows levers, install, reboot if it installed something -- and always freeze again
       block:
         - name: Windows Update may be asked to scan and install now, and the lift is read back
@@ -208,28 +254,6 @@
             tasks_from: freeze.yml
           vars:
             worker_freeze_lift_windows: true
-
-        - name: Read the build before anything is installed
-          # The feature route is chosen on this, so it is read once, from the registry, as the closing task reads it.
-          # A read, so it runs under `--check` too. Unreadable leaves `patch_build_before` as `unreadable`.
-          become: true
-          ansible.windows.win_powershell:
-            script: |
-              $Ansible.Changed = $false
-              $v = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-              "$($v.CurrentBuild).$($v.UBR)"
-          changed_when: false
-          failed_when: false
-          check_mode: false
-          register: patch_build_before_read
-
-        - name: Record the build before, or that it could not be read
-          ansible.builtin.set_fact:
-            patch_build_before: >-
-              {{ (patch_build_before_read.output | default([]) | first | default('', true) | trim)
-                 if (patch_build_before_read.failed is not defined or not patch_build_before_read.failed)
-                    and (patch_build_before_read.output | default([]) | first | default('', true) | trim) is match('^[0-9]+\.[0-9]+$')
-                 else 'unreadable' }}
 
         - name: A feature update needs room for Setup, and a box short of it is refused before anything is fetched
           when:
@@ -330,14 +354,19 @@
           retries: "{{ patch_feature_wait_retries }}"
           delay: "{{ patch_feature_wait_delay }}"
 
-        - name: Install the pending quality updates, WITHOUT letting the module reboot
+        - name: Install the manifest's cumulative update, WITHOUT letting the module reboot
           # `reboot: false` is load-bearing: the reboot below is this play's own, visible and conditional.
+          # `accept_list` is the manifest's KB, so this installs THAT update and not the newest one Microsoft has published since: a box that landed above the
+          # manifest could not be moved back, and every later run would stop on its first box. A box already on the manifest's build installs nothing.
           # Not on a feature pass: the Assistant lands the box on the release's current build, and a restart
           # while Setup is waiting for one is the commit, so nothing is installed beside it.
-          when: not (patch_feature_pending | bool)
+          when:
+            - not (patch_feature_pending | bool)
+            - not (patch_windows_current | bool)
           become: true
           ansible.windows.win_updates:
             category_names: "{{ patch_categories }}"
+            accept_list: ["{{ patch_target_kb }}"]
             state: installed
             reboot: false
             log_path: 'C:\Windows\Temp\a11y-patch-updates.log'
@@ -374,7 +403,7 @@
           ansible.windows.win_reboot:
             # A feature update's servicing reboots run longer than a cumulative's; only a feature pass lengthens it.
             reboot_timeout: "{{ patch_reboot_timeout }}"
-            msg: "{{ 'A11-31 commit of the feature update' if patch_feature_pending | bool else 'patch window' }}"
+            msg: "{{ 'A11-31 commit of the feature update' if patch_feature_pending | bool else 'fleet upgrade' }}"
 
         - name: Wait for the worker to be READY again
           # `ready`, not `ok` -- see the busy check above. Only after a reboot we made.
@@ -397,6 +426,45 @@
             msg: >-
               {{ inventory_hostname }} has a reboot pending that THIS run did not cause (nothing was
               installed), so it was not rebooted. It restarts on its own schedule.
+
+        - name: Defender's security intelligence moves with the upgrade, and a refusal is reported, not fought
+          # Signature updates are held by the freeze (policy, `soft`) and arrive through Windows Update, which the lift opens only for this run. Naming the source
+          # makes the update explicit. Tamper Protection or a policy that refuses it is SAID and the box carries on: signatures are not a manifest field.
+          when: not ansible_check_mode
+          become: true
+          ansible.windows.win_powershell:
+            script: |
+              $Ansible.Changed = $false
+              try { Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Stop; $Ansible.Changed = $true; "SIGNATURES: updated" }
+              catch { "SIGNATURES: not updated: $($_.Exception.Message)" }
+          register: patch_signatures
+          failed_when: false
+
+        - name: Say what Defender did
+          ansible.builtin.debug:
+            msg: "{{ inventory_hostname }}: {{ patch_signatures.output | default(['(not run)']) | first | default('(no answer)', true) }}"
+
+        # THE REST OF WHAT A BOX RUNS, from the manifest and from the display driver pin, through the role's own task files: one installer for each, the same one
+        # `fleet:provision` uses. Each is idempotent and installs only when the box is not already on the pin, so a box that is current pays for a read.
+        - name: Node, from the manifest
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: packages.yml
+
+        - name: NVDA, refused if it is not the manifest's, with its update checks off
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: nvda.yml
+
+        - name: Edge, from the manifest, with its own re-freeze in an `always:`
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: edge-version.yml
+
+        - name: The display driver pin
+          ansible.builtin.include_role:
+            name: worker
+            tasks_from: display.yml
 
       always:
         - name: Freeze the box again, the lifted levers included, and read it back
@@ -431,69 +499,96 @@
                 and (patch_build_read.output | default([]) | first | default('', true) | trim) is match('^[0-9]+\.[0-9]+$')
              else 'unreadable' }}
 
-    - name: Name the build
-      ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: {{ patch_build_reading }}"
+    - name: Ask the box what Edge and Node it has now
+      # From the binaries, as the role reads them (`edge-version.yml`, `packages.yml`): the registry's "installed version" is not what runs.
+      become: true
+      ansible.windows.win_powershell:
+        parameters:
+          EdgeExe: "{{ worker_edge_exe }}"
+          NodeExe: "{{ worker_node_home }}\\node.exe"
+        script: |
+          param($EdgeExe, $NodeExe)
+          $Ansible.Changed = $false
+          $edge = if (Test-Path -LiteralPath $EdgeExe) { (Get-Item -LiteralPath $EdgeExe).VersionInfo.ProductVersion } else { '' }
+          $node = if (Test-Path -LiteralPath $NodeExe) { "$(& $NodeExe --version)".Trim() } else { '' }
+          [pscustomobject]@{ Edge = "$edge"; Node = "$node" }
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      register: patch_versions_read
 
-    - name: A box below the target build, or one that cannot be read, is a failed window
+    - name: Record what this box runs, every field of the manifest it can be compared on
+      # NVDA is the role's own reading of `nvda.exe` (`nvda.yml` registered it and refused a version that is not the manifest's). A field that could not be read is
+      # `unreadable`, and the verdict play below counts it as a difference: the upgrade ends by SHOWING every box on the manifest.
+      ansible.builtin.set_fact:
+        patch_readback:
+          Windows: "{{ patch_build_reading }}"
+          Edge: "{{ (patch_versions_read.output | default([]) | first | default({}, true)).Edge | default('', true) | trim or 'unreadable' }}"
+          NVDA: "{{ (nvda_installed.output | default([]) | first | default('', true)) | trim or 'unreadable' }}"
+          Node: "{{ (patch_versions_read.output | default([]) | first | default({}, true)).Node | default('', true) | trim or 'unreadable' }}"
+
+    - name: Name what the box runs
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ patch_readback }}"
+
+    - name: A box whose build is not the manifest's, or cannot be read, is a failed upgrade
       # Last on purpose: everything above ran, so this is the box's own reading after the run. Numbers
       # compare as `[build, UBR]`, never as text ('9457' sorts above '10000'). Unreadable fails here although
       # the verdict play does not count it a mismatch: that play judges agreement, this one a promise to
       # reach a build, and a box nobody could read has not been shown to have reached it.
       tags: [patch_target_verdict]
       when:
-        - patch_target_set | bool
         - >-
           patch_build_reading | default('unreadable', true) == 'unreadable'
-          or (patch_build_reading.split('.') | map('int') | list) < (patch_target_build.split('.') | map('int') | list)
+          or (patch_build_reading.split('.') | map('int') | list) != (patch_target_build.split('.') | map('int') | list)
       ansible.builtin.fail:
         msg: >-
           {{ inventory_hostname }} is {{ 'UNREADABLE, so it is not shown to have reached' if
-          patch_build_reading | default('unreadable', true) == 'unreadable' else 'on ' ~ patch_build_reading ~ ', below' }}
-          the target build {{ patch_target_build }} (release {{ patch_target_release }}). Re-run with
+          patch_build_reading | default('unreadable', true) == 'unreadable' else 'on ' ~ patch_build_reading ~
+          (', below' if (patch_build_reading.split('.') | map('int') | list) < (patch_target_build.split('.') | map('int') | list) else ', ABOVE') }}
+          the manifest's build {{ patch_target_build }} (release {{ patch_target_release }}). Re-run with
           `--limit {{ inventory_hostname }}`: a box that needed a feature update may need a second pass for the
-          new build's own cumulative update.
+          new build's own cumulative update. A box above the manifest is not rolled back.
 
-# The proof (a) asks for: after the window, ONE build. A separate play so it sees every box's reading, and
-# tagged so a test can run it alone over a synthetic inventory (`patch-playbook.test.ts`).
-- name: The fleet is on one build, or the odd boxes are named
+# THE UPGRADE ENDS BY READING EVERY BOX against the whole manifest: Windows build, Edge, NVDA and Node, as each box's own readback recorded them. A separate play so it
+# sees every box's reading, and tagged so a test can run it alone over a synthetic inventory (`patch-playbook.test.ts`). The worker code is the wrapper's to read
+# (`fleet:drift` over `/health.code`, after this play): the code is the hash of the pinned worker release and is delivered by `deploy.yml`, which `fleet:patch` runs first.
+- name: Every box is on the manifest, or the boxes that are not are named
   hosts: a11y_workers
   gather_facts: false
   run_once: true
   tags: [patch_verdict]
   vars:
-    patch_readings: >-
-      {%- set r = {} -%}
-      {%- for h in ansible_play_hosts_all -%}
-        {%- set _ = r.update({h: hostvars[h].patch_build_reading | default('unreadable', true)}) -%}
+    patch_verdict_manifest: "{{ lookup('file', playbook_dir ~ '/../deploy-pins.json') | from_json }}"
+    # What the manifest wants of each field, in the order the lines are said. The keys are the readback's.
+    patch_wants:
+      Windows: "{{ patch_verdict_manifest.windows.build }}"
+      Edge: "{{ patch_verdict_manifest.edge.version }}"
+      NVDA: "{{ patch_verdict_manifest.nvda.version }}"
+      Node: "{{ patch_verdict_manifest.node.version }}"
+    # One entry per box and field that does not read as the manifest. A box that recorded no readback at all is `unreadable` on every field: the run SHOWS the fleet on
+    # the manifest, so a box nobody read has not been shown to be.
+    patch_differences: >-
+      {%- set found = [] -%}
+      {%- for h in ansible_play_hosts_all | sort -%}
+        {%- set have = hostvars[h].patch_readback | default({}) -%}
+        {%- for field in patch_wants -%}
+          {%- if (have[field] | default('unreadable', true)) != patch_wants[field] -%}
+            {%- set _ = found.append({'box': h, 'field': field, 'has': have[field] | default('unreadable', true), 'wants': patch_wants[field]}) -%}
+          {%- endif -%}
+        {%- endfor -%}
       {%- endfor -%}
-      {{ r }}
-    patch_read_boxes: "{{ patch_readings | dict2items | rejectattr('value', 'equalto', 'unreadable') | list }}"
-    patch_unreadable_boxes: "{{ patch_readings | dict2items | selectattr('value', 'equalto', 'unreadable') | map(attribute='key') | list }}"
-    patch_builds: "{{ patch_read_boxes | map(attribute='value') | unique | sort | list }}"
-    # The build most boxes share, ties broken by sort order; the boxes NOT on it are the odd ones.
-    patch_majority: >-
-      {%- set ns = namespace(best='', n=0) -%}
-      {%- for b in patch_builds -%}
-        {%- set n = patch_read_boxes | selectattr('value', 'equalto', b) | list | length -%}
-        {%- if n > ns.n -%}{%- set ns.best = b -%}{%- set ns.n = n -%}{%- endif -%}
-      {%- endfor -%}
-      {{ ns.best }}
-    patch_odd_boxes: "{{ patch_read_boxes | rejectattr('value', 'equalto', patch_majority) | map(attribute='key') | sort | list }}"
+      {{ found }}
   tasks:
-    - name: Say every box's build, and which could not be asked
+    - name: Say how many boxes were read against the manifest
       ansible.builtin.debug:
         msg: >-
-          {{ patch_read_boxes | length }} box(es) read, {{ patch_unreadable_boxes | length }} unreadable
-          {{ patch_unreadable_boxes }}; builds seen: {{ patch_builds }}.
-          {{ 'NO box could be read, so agreement is NOT established.' if patch_read_boxes | length == 0 else '' }}
+          {{ ansible_play_hosts_all | length }} box(es) read against the manifest ({{ patch_wants }});
+          {{ patch_differences | length }} difference(s){{ ': ' ~ (patch_differences | map(attribute='box') | unique | list) if patch_differences | length > 0 else '' }}.
 
-    - name: Fail when the readable boxes are not all on one build
-      # Unreadable boxes are not counted as a mismatch: absence of a reading is "could not determine", not
-      # "differs". Only two distinct READ builds fail.
+    - name: Fail when any box does not read as the manifest
       ansible.builtin.fail:
         msg: >-
-          The fleet is on {{ patch_builds | length }} Windows builds: {{ patch_builds }}.
-          Odd box(es) (not on {{ patch_majority }}): {{ patch_odd_boxes }}.
-          Readings: {{ patch_readings }}.
-      when: patch_builds | length > 1
+          The fleet is NOT on the manifest after the upgrade: {% for d in patch_differences %}{{ d.box }} {{ d.field }} has {{ d.has }}, the manifest wants {{ d.wants }}{{ '; ' if not loop.last }}{% endfor %}.
+          A box that was not upgraded stays named here; fix it and run `fleet:patch -- --apply --limit <box>` again.
+      when: patch_differences | length > 0

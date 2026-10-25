@@ -19,6 +19,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { deriveShippedUnits } from "../control-unit-drift.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const ANSIBLE = `${ROOT}ansible/`;
@@ -28,6 +29,8 @@ const read = (relative: string) => readFileSync(`${ROOT}${relative}`, "utf8");
 const ALLOWED: Array<{ command: RegExp; why: string }> = [
   { command: /^\/usr\/bin\/env ansible-playbook freeze\.yml$/,
     why: "The daily freeze: the role's freeze.yml only, which sets policy values, disables services and tasks, and renames and firewalls the Edge updater. No install module is reachable from it (reading 2)." },
+  { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/fleet-drift\.ts --record$/,
+    why: "The hourly drift check: it asks each box's /health what it runs, compares that with deploy-pins.json and writes runs/fleet-drift.json. It reads; `fleet-drift.ts` starts no process and runs no play (the test below reads it)." },
   { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/fleet-auto-off\.ts --apply$/,
     why: "Powers an idle worker off through sleep.yml. A shutdown, never an install." },
   { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/gate-heartbeat\.ts$/,
@@ -80,7 +83,9 @@ test("every unit control ships runs only commands on the read-only or freeze-onl
   const units = shippedUnits();
   assert.ok(units.length >= 4, `positive control: found ${units.length} units, so the reading is not of nothing`);
   assert.deepEqual(unitViolations(units), [], "a unit control ships starts a command that is not on the allowlist");
-  assert.ok(units.some(({ source }) => source === "ansible/files/a11y-fleet-freeze-daily.service"), "the daily freeze is among them");
+  for (const unit of ["a11y-fleet-freeze-daily", "a11y-fleet-drift"]) {
+    assert.ok(units.some(({ source }) => source === `ansible/files/${unit}.service`), `${unit} is among them`);
+  }
 });
 
 test("control: the old patch window's service, and any unit that starts an installing play, is REFUSED", () => {
@@ -118,6 +123,31 @@ test("the patch window is gone: no unit, playbook or package script installs or 
   assert.match(freezeSchedule, /state: absent/, "and deletes their files");
   assert.match(freezeSchedule, /patch_window_files\.stdout \| trim \| length == 0/, "and reads the removal back");
   // The package scripts are pinned in `scripts/control-commands.test.ts`: the package.json this test sees laid inside the core carries no `scripts`.
+});
+
+test("the hourly drift check READS: its program starts no process and runs no play, and its unit is the only thing that schedules it", () => {
+  const program = read("src/fleet-drift.ts").replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((line) => !line.trimStart().startsWith("//")).join("\n");
+  assert.doesNotMatch(program, /child_process|spawn|execFile|ansible|systemctl|\bssh\b/, "fleet-drift.ts must not run anything");
+  const unit = read("ansible/files/a11y-fleet-drift.service");
+  assert.match(unit, /^ExecStart=.*\/root\/control\/src\/fleet-drift\.ts --record$/m);
+  assert.match(read("ansible/files/a11y-fleet-drift.timer"), /^OnCalendar=\*-\*-\* \*:\d\d:00$/m, "hourly");
+  // negative control: the predicate sees a program that does run something
+  assert.match("import { spawnSync } from 'node:child_process';", /child_process|spawn/);
+});
+
+test("control-unit-drift derives the freeze and drift pairs as shipped, and the patch window's names as NOT shipped", () => {
+  const playbooks = readdirSync(ANSIBLE).filter((name) => name.endsWith(".yml")).map((name) => read(`ansible/${name}`));
+  const derived = deriveShippedUnits({ playbooks: () => playbooks });
+  assert.ok("units" in derived, JSON.stringify(derived));
+  for (const unit of ["a11y-fleet-freeze-daily.timer", "a11y-fleet-freeze-daily.service", "a11y-fleet-drift.timer", "a11y-fleet-drift.service"]) {
+    assert.ok(derived.units.includes(unit), `${unit} is derived as shipped`);
+  }
+  // Listed beside the units a play installs, a removed unit is derived as shipped, its repository copy is gone, and the whole control-plane reading is CANNOT_TELL.
+  assert.deepEqual(derived.units.filter((unit) => unit.startsWith("a11y-fleet-patch-window")), []);
+  const together = deriveShippedUnits({ playbooks: () => [`- name: x\n  hosts: a11y_control\n  tasks:\n    - ansible.builtin.copy:\n        src: "files/{{ item }}"\n        dest: "/etc/systemd/system/{{ item }}"\n      loop:\n        - a11y-fleet-patch-window.timer\n`] });
+  assert.ok("units" in together && together.units.includes("a11y-fleet-patch-window.timer"), "negative control: in the same play the name IS derived as shipped");
+  // and every derived unit has the repository copy `shippedText` will read
+  for (const unit of derived.units) assert.ok(existsSync(`${ANSIBLE}files/${unit}`), `${unit} has a file under ansible/files`);
 });
 
 // ---- reading 2: the freeze reaches no install module ---------------------------------------------------------------------------------------------

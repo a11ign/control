@@ -894,7 +894,7 @@ export function readLinkLayer(rows: { name: string; url: string; }[], { run = sp
 }
 
 /** @param {string} name a row name, `<inventory name>  <address>` when the inventory supplied it */
-function inventoryName(name: string) {
+export function inventoryName(name: string) {
   return String(name).split(/\s+/)[0];
 }
 

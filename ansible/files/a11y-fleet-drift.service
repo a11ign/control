@@ -1,0 +1,30 @@
+[Unit]
+# THE HOURLY DRIFT CHECK -- A11-205, docs/adr/0001. Reads every box's Windows build, Edge, NVDA and worker code and compares them with `deploy-pins.json`, then writes
+# `runs/fleet-drift.json`. It READS: it installs nothing, wakes nothing and restarts nothing, so `no-scheduled-install.test.ts` lets this unit run. Installed by
+# `freeze-schedule.yml`, which also ships the daily freeze that PUTS levers back; this one says whether anything moved.
+#
+# The agents host's `fleet-watch` copies the record to `runs/fleet-drift-mirror.json`, and agent-org's `incident:fleet-drift` tells the chairman's announcement
+# channel while it lists a difference.
+Description=a11y: read every box against the pins manifest and record any difference
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/control
+# Exit 3 is a DIFFERENCE and FAILS the unit, so `systemctl --failed` shows it. Exit 4 is "no box answered" -- the idle-off timer powers workers off and this read never
+# wakes one -- so a fleet asleep overnight is the record saying so, not a failed unit. It is 4 and not 1 because Node exits 1 for a script it cannot load, and a unit
+# that excused 1 would read a missing program as a quiet night. Nothing else is excused.
+SuccessExitStatus=4
+# The loader is a host fact, named by absolute path, as `a11y-fleet-auto-off.service` does: the file is TypeScript and `/usr/bin/node` strips types only from 24.
+# `--record` writes the record; without it the command only prints, which is what a person running `fleet:drift` by hand wants.
+ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-drift.ts --record
+# The checkout follows `main` first, or a stale one compares boxes with an old manifest. There is NO `-` on this line, unlike `a11y-fleet-auto-off.service`'s: a
+# refresh that failed (GitHub unreachable, a checkout that cannot fast-forward) must not let the check run against the manifest the fleet may have just left, because
+# a record made from the wrong contract is worse than no record. The unit FAILS instead (`systemctl --failed` shows it), writes nothing, and the mirror ages: two
+# hours later `incident:fleet-drift` reads `cannot-ask`. Not while a play that moves control's checkout is running (Ansible loads task files lazily): that
+# branch exits 0 and leaves the checkout alone, and the play is what moves it. `--ff-only`, never a checkout.
+ExecStartPre=/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
+    a11y-fleet-deploy.service a11y-fleet-provision-role.service a11y-fleet-patch.service a11y-fleet-freeze.service a11y-fleet-freeze-proof.service \
+    a11y-fleet-recover.service a11y-fleet-os-rollback.service) && \
+  { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \
+  { find .git/FETCH_HEAD -mmin -1 2>/dev/null | grep -q . || git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; } && \
+  git merge --ff-only --quiet origin/main'

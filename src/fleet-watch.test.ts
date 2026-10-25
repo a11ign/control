@@ -8,11 +8,14 @@
 // subsystem over.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   readState, writeState, advance, overdue, watchBody, watch, advanceCaptures, DEFAULT_THRESHOLD_MS,
   offFleetLines, offFleetBody, watchFleet, DEFAULT_OFF_FLEET_STATE_PATH, fleetLockLines,
   unitDriftTick, unitDriftBody, exitCodeFor, EXIT, UNREAD,
+  FLEET_DRIFT_MIRROR_PATH, mirrorFleetDriftRecord, readFleetDriftRecord, mirrorDriftOrSay,
   withUseTick, useReading, useBody, postUseOnce, readCapturesState, MIN_USE_TICKS, USE_RESERVATION_MAX_MS, pidAlive, type CapturesState,
   type Drift, type FleetRow as WatchRow, type StatusReader,
 } from "./fleet-watch.ts";
@@ -949,4 +952,73 @@ test("exitCodeFor: a filed build incident is ATTENTION; one that could not be as
   assert.equal(exitCodeFor(incident({ cannotAsk: "gh: HTTP 502" }), null), EXIT.CANNOT_ASK);
   assert.equal(exitCodeFor(incident({ cannotAsk: "gh: HTTP 502", fresh: ["filed #9001"] }), null), EXIT.ATTENTION);
   assert.equal(exitCodeFor(incident({ closed: [5100] }), null), EXIT.QUIET, "a close is the line lifting, not a finding");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A11-205: the hourly drift record is mirrored for the chairman's announcement channel, as the auto-off record is mirrored for org-health.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const DRIFT_RECORD = JSON.stringify({ checkedAt: "2026-10-25T10:17:00.000Z", firstSeenAt: "2026-10-25T09:17:00.000Z",
+  expected: { Windows: "26300.9711", Edge: "156.0.4314.42", NVDA: "2026.1.1", "Worker code": "47dcd71db00697b3" }, unreadable: null, reachable: 14, total: 15, unreachable: ["a11y-worker-9"],
+  differences: [{ box: "a11y-worker-5", field: "Windows", has: "22631.6199", wants: "26300.9711", carried: false }], freeze: null });
+
+/** A write that records what it was given instead of touching a disk. */
+const recordingWrite = () => {
+  const writes: { path: string; data: string; }[] = [];
+  return { writes, write: (path: string, data: string) => { writes.push({ path, data }); } };
+};
+
+test("A11-205: the drift mirror is `{ readAt, record }`, the record verbatim, at the path the agents host reads", () => {
+  assert.equal(FLEET_DRIFT_MIRROR_PATH, "runs/fleet-drift-mirror.json");
+  const out = recordingWrite();
+  mirrorFleetDriftRecord(DRIFT_RECORD, { readAt: 1_700_000_000_000, write: out.write });
+  assert.equal(out.writes.length, 1);
+  assert.equal(out.writes[0].path, FLEET_DRIFT_MIRROR_PATH);
+  assert.deepEqual(JSON.parse(out.writes[0].data), { readAt: 1_700_000_000_000, record: JSON.parse(DRIFT_RECORD) });
+  assert.doesNotMatch(out.writes[0].data, /https?:\/\/|\b\d{1,3}(\.\d{1,3}){3}\b/, "names only: no address reaches the agents host");
+});
+
+test("A11-205: a read that succeeded is mirrored; a read that threw, or a record that is not JSON, writes NOTHING, so the mirror ages", () => {
+  const out = recordingWrite();
+  assert.equal(readFleetDriftRecord(() => DRIFT_RECORD, { readAt: 5, write: out.write }), DRIFT_RECORD);
+  assert.equal(out.writes.length, 1);
+  assert.throws(() => readFleetDriftRecord(() => { throw new Error("ssh: no route to host"); }, { readAt: 6, write: out.write }), /no route to host/);
+  assert.throws(() => readFleetDriftRecord(() => "{\"checkedAt\": ", { readAt: 7, write: out.write }));
+  assert.equal(out.writes.length, 1, "neither failed read wrote: an old `readAt` says nobody looked");
+  // a check that never ran is `{}` (the read's own `|| echo '{}'`), and it is mirrored as that
+  readFleetDriftRecord(() => "{}", { readAt: 8, write: out.write });
+  assert.deepEqual(JSON.parse(out.writes[1].data), { readAt: 8, record: {} });
+});
+
+test("A11-205: the default read asks the control plane for control's own runs/fleet-drift.json, and nothing else", () => {
+  const source = readFileSync(fileURLToPath(new URL("./fleet-watch.ts", import.meta.url)), "utf8");
+  assert.match(source, /sshToControlPlane\(`cat \$\{CONTROL_PLANE_CHECKOUT\}\/\$\{FLEET_DRIFT_PATH\} 2>\/dev\/null \|\| echo '\{\}'`, \{ capture: true \}\)/);
+});
+
+test("A11-205: mirrorDriftOrSay answers whether the mirror is fresh, and SAYS when it could not be made", () => {
+  const said: string[] = [];
+  const spy = console.error; console.error = (message: string) => { said.push(message); };
+  try {
+    const out = recordingWrite();
+    assert.equal(mirrorDriftOrSay({ readState: () => DRIFT_RECORD, now: () => 9, write: out.write }), true, "positive control: a fresh read is mirrored");
+    assert.equal(out.writes.length, 1);
+    assert.equal(mirrorDriftOrSay({ readState: () => { throw new Error("ssh: connect timed out"); }, write: out.write }), false);
+    assert.equal(mirrorDriftOrSay({ readState: () => DRIFT_RECORD, write: () => { throw new Error("EACCES: runs/"); } }), false, "a mirror that cannot be written is not fresh either");
+    assert.equal(out.writes.length, 1, "and the failed read wrote nothing");
+  } finally { console.error = spy; }
+  assert.match(said.join("\n"), /CANNOT MIRROR the fleet drift record from the control host: ssh: connect timed out/);
+});
+
+test("A11-205: a tick that could not mirror the drift record is CANNOT_ASK and never QUIET; a finding outranks it; the old calls are unchanged", () => {
+  const nothing = { overdue: [], offFleet: [], unitDrift: { fresh: [], notShipped: [], cannotTell: null }, buildIncident: NO_INCIDENT_TICK };
+  assert.equal(exitCodeFor(nothing, null, true), EXIT.QUIET, "positive control: mirrored, nothing to say");
+  assert.equal(exitCodeFor(nothing, null, false), EXIT.CANNOT_ASK);
+  assert.equal(exitCodeFor({ ...nothing, offFleet: ["a11y-worker-5: build x (fleet y)"] }, null, false), EXIT.ATTENTION);
+  assert.equal(exitCodeFor(nothing, null), EXIT.QUIET, "a caller that does not say is as it was");
+});
+
+test("A11-205: the patch window is no longer read: no state path, no run record, no health line", () => {
+  const source = readFileSync(fileURLToPath(new URL("./fleet-watch.ts", import.meta.url)), "utf8");
+  assert.doesNotMatch(source, /patch-window-missed|PATCH_RUN_PATH|fleet-patch-last-run|patchWindowMissed/);
+  assert.match(source, /export const FLEET_DRIFT_MIRROR_PATH/);
 });
