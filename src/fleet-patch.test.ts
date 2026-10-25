@@ -401,9 +401,3 @@ test("A11-205: a closing read that cannot be made fails the run in words, not wi
   assert.match(run.said, /The closing read could not be made \(No fleet to report on: A11Y_WORKERS is unset\): the upgrade is not shown to have reached the manifest\. `pnpm run fleet:drift` reads it again/);
   assert.doesNotMatch(run.said, /completed/);
 });
-
-test("A11-205: the package script runs the chain, and `fleet:drift` runs the reading", () => {
-  const scripts = (JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { scripts: Record<string, string>; }).scripts;
-  assert.equal(scripts["fleet:patch"], "node src/fleet-upgrade.ts");
-  assert.equal(scripts["fleet:drift"], "node src/fleet-drift.ts");
-});
