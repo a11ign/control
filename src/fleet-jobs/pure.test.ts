@@ -4,7 +4,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { memoryClaims } from "./claims.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LeaseLedger } from "../fleet-leases/ledger.ts";
+import { holderOf, ledgerClaims } from "./claims.ts";
 import { MAX_WAIT_MS, formatDuration, parseDuration } from "./duration.ts";
 import { buildManifest } from "./manifest.ts";
 import { parsePages, recordFile } from "./pages.ts";
@@ -101,14 +105,20 @@ test("a job ID sorts by time and is safe in a path", () => {
   for (const bad of ["../x", "fj-1", "fj-20261025T085815Z-A1B2C3", `${id}/../..`]) assert.ok(!JOB_ID.test(bad));
 });
 
-test("two jobs never hold one box: a claim is all of a job's boxes or none, and a release frees them", () => {
-  const claims = memoryClaims();
-  assert.deepEqual(claims.tryClaim("j1", ["w2", "w3"]), { claimed: true });
-  assert.deepEqual(claims.tryClaim("j2", ["w3", "w4"]), { claimed: false, heldBy: { w3: "j1" } });
-  assert.deepEqual(claims.held(), { w2: "j1", w3: "j1" }, "a refused claim takes nothing, not even the free box");
-  assert.deepEqual(claims.tryClaim("j1", ["w2"]), { claimed: true }, "a job's own claim is not a conflict");
+test("two jobs never hold one box: a take is all of a job's boxes or none, naming who holds the rest, and a release frees them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fleet-claims-"));
+  const ledger = new LeaseLedger(join(dir, "ledger.json"));
+  const claims = ledgerClaims(ledger);
+  const job = (id: string, names: string[]) => ({ id, label: "A11-244", boxes: { kind: "named" as const, names }, submittedAt: "2026-10-25T09:00:00.000Z" });
+  claims.enqueue(job("j1", ["w2", "w3"]));
+  claims.enqueue(job("j2", ["w3", "w4"]));
+  assert.deepEqual(claims.take("j1", ["w2", "w3"]), { claimed: true });
+  assert.deepEqual(claims.take("j2", ["w3", "w4"]), { claimed: false, heldBy: { w3: [holderOf("j1")] } });
+  assert.deepEqual(ledger.held(), { w2: [holderOf("j1")], w3: [holderOf("j1")] }, "a refused take takes nothing, not even the free box");
+  assert.deepEqual(claims.retake(job("j1", []), ["w2"]), { claimed: true }, "a job's own lease is not a conflict");
   claims.release("j1");
-  assert.deepEqual(claims.tryClaim("j2", ["w3", "w4"]), { claimed: true });
+  assert.deepEqual(claims.take("j2", ["w3", "w4"]), { claimed: true });
+  rmSync(dir, { recursive: true, force: true });
 });
 
 const entry = (box: string, start: number | null, end: number | null, status: CaptureEntry["status"]): CaptureEntry => ({

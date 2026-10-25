@@ -43,6 +43,9 @@ async function fleetOf(count: number, options: FakeWorkerOptions = {}): Promise<
   return workers;
 }
 
+/** The lease ledger sits beside the jobs, in a folder the store does not read as a job. */
+const leasesIn = (dir: string): string => join(dir, "leases");
+
 function storeDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "fleet-jobs-e2e-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -53,7 +56,7 @@ type Service = { child: ChildProcess; exited: Promise<number | null>; log: () =>
 
 async function startServiceProcess(dir: string, workers: FakeWorker[]): Promise<Service> {
   const child = spawn(process.execPath, ["--import", TSX, join(HERE, "service.fixture.ts")], {
-    env: { ...process.env, A11Y_FLEET_JOBS_DIR: dir, FAKE_FLEET: JSON.stringify(workers.map(({ name, url }) => ({ name, url }))) },
+    env: { ...process.env, A11Y_FLEET_JOBS_DIR: dir, A11Y_FLEET_LEASES_DIR: leasesIn(dir), FAKE_FLEET: JSON.stringify(workers.map(({ name, url }) => ({ name, url }))) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   children.add(child);
@@ -69,7 +72,7 @@ type Ran = { code: number | null; stdout: string; stderr: string };
 
 function fleetCommand(dir: string, args: string[], { pollMs = 300 }: { pollMs?: number } = {}): { done: Promise<Ran>; child: ChildProcess } {
   const child = spawn(process.execPath, ["--import", TSX, join(HERE, "cli.fixture.ts"), ...args], {
-    env: { ...process.env, A11Y_FLEET_JOBS_DIR: dir, FLEET_WAIT_POLL_MS: String(pollMs) }, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, A11Y_FLEET_JOBS_DIR: dir, A11Y_FLEET_LEASES_DIR: leasesIn(dir), FLEET_WAIT_POLL_MS: String(pollMs) }, stdio: ["ignore", "pipe", "pipe"],
   });
   children.add(child);
   let stdout = "";
