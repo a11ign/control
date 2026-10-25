@@ -222,11 +222,11 @@ test("a file of a version the service does not know fails the job and names the 
 test("an unreadable state.json is moved aside and the job fails with the reason", async () => {
   const t = harness();
   const id = t.submit();
-  writeFileSync(join(t.dir, id, "state.json"), JSON.stringify({ version: 2, state: "running" }));
+  writeFileSync(join(t.dir, id, "state.json"), JSON.stringify({ version: 7, state: "running" }));
   await t.drain();
   assert.equal(t.state(id).state, "failed");
-  assert.match(t.state(id).reason ?? "", /state\.json is store version 2/);
-  assert.ok(readFileSync(join(t.dir, id, "state.unreadable.json"), "utf8").includes('"version":2'), "the file of the unknown version is kept");
+  assert.match(t.state(id).reason ?? "", /state\.json is store version 7/);
+  assert.ok(readFileSync(join(t.dir, id, "state.unreadable.json"), "utf8").includes('"version":7'), "the file of the unknown version is kept");
   t.done();
 });
 

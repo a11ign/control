@@ -5,6 +5,7 @@ import type { LeaseLedger } from "../fleet-leases/ledger.ts";
 import type { Waiter } from "../fleet-leases/types.ts";
 import { holderOf } from "./claims.ts";
 import type { JobStore } from "./store.ts";
+import { captureCount } from "./types.ts";
 import type { QueueView } from "./view.ts";
 
 /**
@@ -34,16 +35,16 @@ export function meanCaptureMs(store: JobStore): number | null {
   return last.length ? last.reduce((a, b) => a + b, 0) / last.length : null;
 }
 
-/** How long a waiter will hold its boxes: ⌈pages × passes ÷ boxes⌉ × the mean capture, or why that is not known. */
+/** How long a waiter will hold its boxes: ⌈captures ÷ boxes⌉ × the mean capture, or why that is not known. */
 export function durationOf(store: JobStore, mean: number | null): (waiter: Waiter) => number | string {
   return (waiter) => {
     if (waiter.kind === "maintain") return MAINTAIN_ASSUMED_MS;
     const request = store.readRequest(waiter.id);
     if (!request?.ok || waiter.holder !== holderOf(waiter.id)) return `${waiter.holder}'s length is not known`;
     if (mean === null) return "no capture has completed yet, so how long a job holds its boxes is not known";
-    const { pages, passes } = request.value;
+    const count = captureCount(request.value);
     const boxes = "named" in waiter.want ? waiter.want.named.length : "count" in waiter.want ? waiter.want.count : null;
-    return boxes === null ? `${waiter.holder} asks for every ready box, so how long it holds them is not known` : Math.ceil(pages.length * passes / boxes) * mean;
+    return boxes === null ? `${waiter.holder} asks for every ready box, so how long it holds them is not known` : Math.ceil(count / boxes) * mean;
   };
 }
 

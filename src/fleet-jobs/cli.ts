@@ -3,6 +3,8 @@
  *
  *     fleet capture submit --pages <file>|<url>... --boxes <N>|ready|<name,name> --label <ticket key> [--passes N] [--steps N]
  *                          [--probe tables,typing,dialog] [--body-json <file>] [--freeze <freeze.json>]
+ *     fleet capture submit --cases <file> --boxes <N>|ready|<name,name> --label <ticket key> [--freeze <freeze.json>]
+ *     fleet job recapture <id> --cases <case id,case id> --label <ticket key>
  *     fleet job status <id> [--json]
  *     fleet job wait <id> --timeout <90s|30m|2h>
  *     fleet job cancel <id>
@@ -26,10 +28,11 @@ import { pathToFileURL } from "node:url";
 import { controlPlaneInvocation } from "../control-plane-fleet.ts";
 import type { Invocation } from "../control-plane-fleet.ts";
 import { MAX_WAIT_MS, formatDuration, parseDuration } from "./duration.ts";
+import { parseCasesFile } from "./cases.ts";
 import { parsePages } from "./pages.ts";
 import { CONTROL_TSX_LOADER, SERVICE_CHECKOUT } from "./paths.ts";
 import { REMOTE_EXIT } from "./remote.ts";
-import type { SubmitPayload } from "./remote.ts";
+import type { RecapturePayload, SubmitPayload } from "./remote.ts";
 import { JOB_ID } from "./store.ts";
 import { leftLines, renderView } from "./view.ts";
 import type { JobView } from "./view.ts";
@@ -123,7 +126,7 @@ export async function waitForJob(deps: Deps, id: string, timeoutMs: number): Pro
 /** The exit code of a job that has ended, with what it says; null while it has not. */
 function endOf(deps: Deps, view: JobView): number | null {
   if (view.state === "done") {
-    deps.out(`${view.id} done: ${view.done - view.failed} captures, ${view.failed} failed\nresults: ${view.results.location}  (${view.results.fetch})\n`);
+    deps.out(`${view.id} done: ${view.done - view.failed - view.skipped} captures, ${view.failed} failed${view.skipped ? `, ${view.skipped} skipped` : ""}\nresults: ${view.results.location}  (${view.results.fetch})\n`);
     return EXIT.OK;
   }
   if (view.state === "failed") {
@@ -189,12 +192,29 @@ function jsonFiles(values: { "body-json"?: string; freeze?: string }, readFile: 
 
 const refused = <T extends object>(value: T | { refusal: string }): value is { refusal: string } => "refusal" in value;
 
+/** What a job of cases takes from its cases file, so each of these beside `--cases` would be a second place for a body to come from. */
+const CASE_CONFLICTS = ["pages", "passes", "steps", "probe", "body-json"] as const;
+
+function casesPayload(values: Record<string, string | string[] | undefined>, positionals: string[], deps: Deps): SubmitPayload | { refusal: string } {
+  const conflict = CASE_CONFLICTS.find((flag) => values[flag] !== undefined) ?? (positionals.length ? "a page URL" : undefined);
+  if (conflict) return { refusal: `--cases cannot be used with ${conflict === "a page URL" ? conflict : `--${conflict}`}: a job's bodies come from one place, the cases file` };
+  const boxes = parseBoxes(values.boxes as string);
+  let text: string;
+  try { text = deps.readFile(values.cases as string); } catch (cause) { return { refusal: `--cases ${values.cases}: ${(cause as Error).message}` }; }
+  const parsed = parseCasesFile(text);
+  const files = jsonFiles({ freeze: values.freeze as string | undefined }, deps.readFile);
+  for (const step of [boxes, parsed, files]) if (refused(step)) return step;
+  const { cases, groups } = parsed as Exclude<typeof parsed, { refusal: string }>;
+  return { label: values.label as string, pages: [], boxes: boxes as BoxRequest, passes: 1, body: {}, freeze: (files as { freeze: Freeze | null }).freeze, submittedBy: deps.submitter(), cases, groups };
+}
+
 function submitPayload(args: string[], deps: Deps): SubmitPayload | { refusal: string } {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
     pages: { type: "string", multiple: true }, boxes: { type: "string" }, passes: { type: "string" }, steps: { type: "string" }, probe: { type: "string" },
-    "body-json": { type: "string" }, freeze: { type: "string" }, label: { type: "string" } } });
+    "body-json": { type: "string" }, freeze: { type: "string" }, label: { type: "string" }, cases: { type: "string" } } });
   if (!values.label) return { refusal: "--label is required: the ticket key" };
   if (!values.boxes) return { refusal: "--boxes is required: a number of boxes, `ready`, or box names separated by commas" };
+  if (values.cases !== undefined) return casesPayload(values, positionals, deps);
   const boxes = parseBoxes(values.boxes);
   const pages = pagesOf([...(values.pages ?? []), ...positionals], deps.readFile);
   const numbers = numbersOf(values);
@@ -218,7 +238,22 @@ function submitJob(args: string[], deps: Deps): number {
   }
   const { id } = JSON.parse(reply.stdout) as { id: string };
   deps.out(`${id}\n`);
-  deps.err(`submitted ${payload.pages.length} pages x ${payload.passes} ${payload.passes === 1 ? "pass" : "passes"} as ${id}; follow it with: fleet job wait ${id} --timeout 30m\n`);
+  const what = payload.cases ? `${payload.cases.length} ${payload.cases.length === 1 ? "case" : "cases"}` : `${payload.pages.length} pages x ${payload.passes} ${payload.passes === 1 ? "pass" : "passes"}`;
+  deps.err(`submitted ${what} as ${id}; follow it with: fleet job wait ${id} --timeout 30m\n`);
+  return EXIT.OK;
+}
+
+/** `fleet job recapture <id> --cases a,b --label key`: a new job of those cases of a done job, each on the box its group was captured on. */
+function recaptureJob(id: string, options: JobOptions, deps: Deps): number {
+  if (!options.label) { deps.err("--label is required: the ticket key\n"); return EXIT.USAGE; }
+  const cases = (options.cases ?? "").split(",").map((c) => c.trim()).filter(Boolean);
+  if (!cases.length) { deps.err("fleet job recapture needs --cases <case id,case id,...>\n"); return EXIT.USAGE; }
+  const payload: RecapturePayload = { source: id, cases, label: options.label, submittedBy: deps.submitter() };
+  const reply = call(deps.transport, ["recapture"], { input: JSON.stringify(payload) });
+  if (!reply.reached || reply.code !== REMOTE_EXIT.OK) { deps.err(`${failureOf(reply)}\n`); return EXIT.USAGE; }
+  const { id: newId } = JSON.parse(reply.stdout) as { id: string };
+  deps.out(`${newId}\n`);
+  deps.err(`re-capturing ${cases.length} ${cases.length === 1 ? "case" : "cases"} of ${id} as ${newId}; follow it with: fleet job wait ${newId} --timeout 30m\n`);
   return EXIT.OK;
 }
 
@@ -228,7 +263,7 @@ const needId = (positionals: string[], deps: Deps, what: string): string | null 
   return id;
 };
 
-type JobOptions = { json?: boolean; timeout?: string; label?: string; state?: string; limit?: string; to?: string };
+type JobOptions = { json?: boolean; timeout?: string; label?: string; state?: string; limit?: string; to?: string; cases?: string };
 
 /** A reply that did not come back whole: the words it carried, or what the control plane answered. */
 const failureOf = (reply: Call): string => reply.stderr.trim() || `the control plane answered ${reply.code}`;
@@ -307,15 +342,16 @@ function listLeases(args: string[], deps: Deps): number {
 
 async function job(sub: string | undefined, args: string[], deps: Deps): Promise<number> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
-    json: { type: "boolean" }, timeout: { type: "string" }, label: { type: "string" }, state: { type: "string" }, limit: { type: "string" }, to: { type: "string" } } });
+    json: { type: "boolean" }, timeout: { type: "string" }, label: { type: "string" }, state: { type: "string" }, limit: { type: "string" }, to: { type: "string" }, cases: { type: "string" } } });
   if (sub === "list") return listJobs(values, deps);
   const id = needId(positionals, deps, `fleet job ${sub}`);
   if (id === null) return EXIT.USAGE;
   if (sub === "status") return showStatus(id, values, deps);
   if (sub === "wait") return waitFor(id, values, deps);
   if (sub === "cancel") return cancelJob(id, deps);
+  if (sub === "recapture") return recaptureJob(id, values, deps);
   if (sub === "fetch") return fetchResults(id, values, deps);
-  deps.err("usage: fleet job status|wait|cancel|list|fetch ...\n");
+  deps.err("usage: fleet job status|wait|cancel|recapture|list|fetch ...\n");
   return EXIT.USAGE;
 }
 
@@ -330,7 +366,7 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
     deps.err(`${(error as Error).message}\n`);
     return EXIT.USAGE;
   }
-  deps.err("usage: fleet capture submit ... | fleet job status|wait|cancel|list|fetch ... | fleet lease list  (see the header of src/fleet-jobs/cli.ts)\n");
+  deps.err("usage: fleet capture submit ... | fleet job status|wait|cancel|recapture|list|fetch ... | fleet lease list  (see the header of src/fleet-jobs/cli.ts)\n");
   return EXIT.USAGE;
 }
 

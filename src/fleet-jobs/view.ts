@@ -1,6 +1,6 @@
 import { SERVICE_CHECKOUT, STORE_DIR } from "./paths.ts";
 import { formatDuration } from "./duration.ts";
-import { isTerminal } from "./types.ts";
+import { captureCount, isTerminal } from "./types.ts";
 import type { CaptureEntry, JobRequest, JobState, JobStateFile } from "./types.ts";
 
 export type ServiceBeat = { pid: number; commit: string; startedAt: string; heartbeatAt: string };
@@ -23,12 +23,17 @@ export type JobView = {
   finishedAt: string | null;
   pages: number;
   passes: number;
+  /** The number of cases of a case job, or null for a page job. */
+  cases: number | null;
+  recaptureOf: string | null;
   total: number;
   done: number;
   failed: number;
+  /** Captures skipped because their group's `skipWhen` matched; they count as done. */
+  skipped: number;
   remaining: number;
   boxes: BoxProgress[];
-  failedCaptures: { page: string; pass: number; box: string; httpStatus: number | null; error: string | null }[];
+  failedCaptures: { page: string; pass: number; case: string | null; box: string; httpStatus: number | null; error: string | null }[];
   dropped: { box: string; reason: string }[];
   estimatedFinish: string | null;
   estimate: string;
@@ -38,7 +43,7 @@ export type JobView = {
   service: (ServiceBeat & { alive: boolean }) | null;
 };
 
-const finished = (c: CaptureEntry): boolean => c.status === "done" || c.status === "failed";
+const finished = (c: CaptureEntry): boolean => c.status === "done" || c.status === "failed" || c.status === "skipped";
 const duration = (c: CaptureEntry): number | null =>
   c.startedAt && c.finishedAt ? Date.parse(c.finishedAt) - Date.parse(c.startedAt) : null;
 const mean = (values: number[]): number | null => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
@@ -72,7 +77,7 @@ const estimateText = (ended: boolean, eta: number | null): string =>
   ended ? "ended" : eta === null ? "unknown until the first capture ends" : new Date(eta).toISOString();
 
 const failedCapturesOf = (captures: CaptureEntry[]): JobView["failedCaptures"] => captures.filter((c) => c.status === "failed").map((c) => ({
-  page: c.page, pass: c.pass, box: c.box, httpStatus: c.httpStatus ?? null, error: c.error ?? null }));
+  page: c.page, pass: c.pass, case: c.case ?? null, box: c.box, httpStatus: c.httpStatus ?? null, error: c.error ?? null }));
 
 const serviceOf = (beat: ServiceBeat | null, now: number): JobView["service"] =>
   beat ? { ...beat, alive: now - Date.parse(beat.heartbeatAt) < HEARTBEAT_STALE_MS } : null;
@@ -90,13 +95,14 @@ export function viewJob({ request, state, cancelled, beat, now, storeDir = STORE
   request: JobRequest; state: JobStateFile | null; cancelled: boolean; beat: ServiceBeat | null; now: number; storeDir?: string; queue?: QueueView | null;
 }): JobView {
   const { state: jobState, reason, captures, dropped, startedAt, finishedAt } = state ?? NOT_STARTED;
-  const total = captures.length || request.pages.length * request.passes;
+  const total = captures.length || captureCount(request);
   const ended = captures.filter(finished).length;
   const eta = isTerminal(jobState) ? null : estimateFinish(captures, now);
   return {
     id: request.id, label: request.label, state: jobState, reason: reasonOf(reason, jobState, cancelled),
     submittedAt: request.submittedAt, startedAt, finishedAt: finishedAt ?? null,
-    pages: request.pages.length, passes: request.passes, total, done: ended, failed: captures.filter((c) => c.status === "failed").length, remaining: total - ended,
+    pages: request.pages.length, passes: request.passes, cases: request.cases?.length ?? null, recaptureOf: request.recaptureOf ?? null,
+    total, done: ended, failed: captures.filter((c) => c.status === "failed").length, skipped: captures.filter((c) => c.status === "skipped").length, remaining: total - ended,
     boxes: boxProgress(captures),
     failedCaptures: failedCapturesOf(captures),
     dropped,
@@ -119,12 +125,16 @@ export function queueLines(queue: QueueView | null): string[] {
   ];
 }
 
+const shapeOf = (view: JobView): string =>
+  view.cases !== null ? `${view.cases} ${view.cases === 1 ? "case" : "cases"}` : `${view.pages} pages x ${view.passes} ${view.passes === 1 ? "pass" : "passes"}`;
+
 /** The lines `fleet job status` prints (and `wait` prints on a timeout). */
 export function renderView(view: JobView): string[] {
   const lines = [
     `${view.id}  ${view.state}${view.reason ? ` (${view.reason})` : ""}  label ${view.label}`,
     ...queueLines(view.queue),
-    `captures: ${view.done} of ${view.total} done${view.failed ? `, ${view.failed} failed` : ""}, ${view.remaining} left  (${view.pages} pages x ${view.passes} ${view.passes === 1 ? "pass" : "passes"})`,
+    `captures: ${view.done} of ${view.total} done${view.failed ? `, ${view.failed} failed` : ""}${view.skipped ? `, ${view.skipped} skipped` : ""}, ${view.remaining} left  (${shapeOf(view)})`,
+    ...(view.recaptureOf ? [`re-capture of: ${view.recaptureOf}`] : []),
     ...view.boxes.map((b) => `  ${b.box}: ${b.done}/${b.total}${b.failed ? ` (${b.failed} failed)` : ""}`),
     ...view.dropped.map((d) => `  dropped ${d.box}: ${d.reason}`),
     `estimated finish: ${view.estimate}`,
@@ -132,7 +142,7 @@ export function renderView(view: JobView): string[] {
   ];
   if (view.failedCaptures.length) {
     lines.push("failed captures:", ...view.failedCaptures.slice(0, 20).map((f) =>
-      `  ${f.page} pass ${f.pass} on ${f.box}: ${f.error ?? `HTTP ${f.httpStatus}`}`));
+      `  ${f.case !== null ? `case ${f.case} (${f.page})` : `${f.page} pass ${f.pass}`} on ${f.box}: ${f.error ?? `HTTP ${f.httpStatus}`}`));
     if (view.failedCaptures.length > 20) lines.push(`  ... and ${view.failedCaptures.length - 20} more (status --json lists all)`);
   }
   lines.push(view.service

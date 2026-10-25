@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { STORE_VERSION } from "./types.ts";
+import { READABLE_VERSIONS, STORE_VERSION } from "./types.ts";
 import type { CaptureRecord, JobRequest, JobStateFile } from "./types.ts";
 
 /**
@@ -25,11 +25,13 @@ export function writeJsonAtomic(path: string, value: unknown): void {
 
 export type Read<T> = { ok: true; value: T } | { ok: false; reason: string };
 
-function readVersioned<T extends { version: unknown }>(path: string, what: string): Read<T> | null {
+function readVersioned<T extends { version: unknown }>(path: string, what: string, accepts: readonly number[]): Read<T> | null {
   if (!existsSync(path)) return null;
   let parsed: T;
   try { parsed = JSON.parse(readFileSync(path, "utf8")) as T; } catch (cause) { return { ok: false, reason: `${what} is unreadable: ${(cause as Error).message}` }; }
-  if (parsed?.version !== STORE_VERSION) return { ok: false, reason: `${what} is store version ${JSON.stringify(parsed?.version)}, and this service reads version ${STORE_VERSION}` };
+  if (typeof parsed?.version !== "number" || !accepts.includes(parsed.version)) {
+    return { ok: false, reason: `${what} is store version ${JSON.stringify(parsed?.version)}, and this service reads version ${accepts.join(" and ")}` };
+  }
   return { ok: true, value: parsed };
 }
 
@@ -39,8 +41,10 @@ function readVersioned<T extends { version: unknown }>(path: string, what: strin
  */
 export class JobStore {
   readonly dir: string;
+  private readonly accepts: readonly number[];
 
-  constructor(dir: string) { this.dir = dir; }
+  /** `accepts` is every store version this code reads; only a test narrows it, to stand in for an older service. */
+  constructor(dir: string, { accepts = READABLE_VERSIONS }: { accepts?: readonly number[] } = {}) { this.dir = dir; this.accepts = accepts; }
 
   jobDir = (id: string): string => join(this.dir, id);
   resultsDir = (id: string): string => join(this.jobDir(id), "results");
@@ -63,8 +67,8 @@ export class JobStore {
     writeJsonAtomic(this.requestPath(request.id), request);
   }
 
-  readRequest = (id: string): Read<JobRequest> | null => readVersioned<JobRequest>(this.requestPath(id), "request.json");
-  readState = (id: string): Read<JobStateFile> | null => readVersioned<JobStateFile>(this.statePath(id), "state.json");
+  readRequest = (id: string): Read<JobRequest> | null => readVersioned<JobRequest>(this.requestPath(id), "request.json", this.accepts);
+  readState = (id: string): Read<JobStateFile> | null => readVersioned<JobStateFile>(this.statePath(id), "state.json", this.accepts);
 
   writeState(id: string, state: JobStateFile): void {
     mkdirSync(this.jobDir(id), { recursive: true });

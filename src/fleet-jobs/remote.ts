@@ -1,7 +1,7 @@
 /**
  * THE REMOTE HALF OF THE `fleet` COMMAND (A11-243, ADR `A11-243-adr-0001`).
  *
- *     node --import <tsx> src/fleet-jobs/remote.ts submit|status|cancel|list|tar ...
+ *     node --import <tsx> src/fleet-jobs/remote.ts submit|recapture|status|cancel|list|tar ...
  *
  * `cli.ts` reaches the control plane over its SSH and runs this from the service's OWN checkout, so the store is only ever read by code of the
  * same version as the service that writes it. Everything it answers is one JSON object (or list) on stdout; a refusal is a sentence on stderr and
@@ -16,13 +16,14 @@ import { storeDirFromEnv } from "./paths.ts";
 import { LeaseLedger } from "../fleet-leases/ledger.ts";
 import { ledgerDirFromEnv, ledgerPathIn } from "../fleet-leases/paths.ts";
 import { availability, inOrder } from "../fleet-leases/grant.ts";
+import { bodyRefusal, casesRefusal } from "./cases.ts";
 import { passesRefusal } from "./plan.ts";
 import { estimateFor, queueViewOf } from "./queue-view.ts";
 import { JOB_ID, JobStore, newJobId } from "./store.ts";
 import { HEARTBEAT_STALE_MS, viewJob } from "./view.ts";
 import type { JobView, ServiceBeat } from "./view.ts";
-import { STORE_VERSION, isTerminal } from "./types.ts";
-import type { BoxRequest, Freeze, JobRequest, JobState } from "./types.ts";
+import { CASE_STORE_VERSION, STORE_VERSION, isTerminal } from "./types.ts";
+import type { BoxRequest, CaseSpec, Freeze, GroupSpec, JobRequest, JobState } from "./types.ts";
 
 /** The remote half's exit codes. `cli.ts` maps them; 1 is left to Node's own "could not run". */
 export const REMOTE_EXIT = { OK: 0, REFUSED: 2, UNKNOWN_JOB: 4, SERVICE_DOWN: 5, ALREADY_ENDED: 6 } as const;
@@ -41,12 +42,15 @@ export type RemoteDeps = {
 /** What `submit` reads on stdin, from the CLI. */
 export type SubmitPayload = {
   label: string; pages: string[]; boxes: BoxRequest; passes: number; body: Record<string, unknown>; freeze: Freeze | null; submittedBy: string;
+  /** A job of cases has these and no pages, one pass and an empty body. */
+  cases?: CaseSpec[]; groups?: Record<string, GroupSpec>;
 };
+
+/** What `recapture` reads on stdin, from the CLI. */
+export type RecapturePayload = { source: string; cases: string[]; label: string; submittedBy: string };
 
 const LABEL = /^[A-Za-z0-9._-]{1,64}$/;
 const BOX_NAME = /^[\w.-]+$/;
-/** Fields of the worker's `/capture` body that the service sets for itself. */
-const SERVICE_FIELDS = ["url", "captureId", "async"];
 const MAX_PASSES = 10;
 
 const ok = (value: unknown): RemoteResult => ({ code: REMOTE_EXIT.OK, stdout: `${JSON.stringify(value)}\n`, stderr: "" });
@@ -81,14 +85,6 @@ function boxesRefusal(p: SubmitPayload, known: (() => string[]) | null): string 
   return passesRefusal(boxes.kind === "named" ? boxes.names.length : boxes.count, p.passes);
 }
 
-/** The first thing wrong with a submit, in words, or null. */
-/** The first thing wrong with the capture body a submit carries, or null. */
-function bodyRefusal(body: unknown): string | null {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return "the capture body is not an object";
-  const owned = SERVICE_FIELDS.filter((field) => field in body);
-  return owned.length ? `the capture body sets ${owned.join(", ")}, which the service sets for itself` : null;
-}
-
 /** The first thing wrong with a freeze reference, or null: it must name a commit and a time, and the time must not be ahead of now. */
 function freezeRefusal(freeze: Freeze | null, now: number): string | null {
   if (!freeze) return null;
@@ -97,9 +93,16 @@ function freezeRefusal(freeze: Freeze | null, now: number): string | null {
   return named > now ? `the freeze reference is named in the future (${freeze.namedAt}): a freeze names what was fixed BEFORE the captures` : null;
 }
 
+/** A job of cases takes its URLs and bodies from the cases, so a page list, passes or a job body beside them are refused. */
+function caseJobRefusal(p: SubmitPayload, known: (() => string[]) | null): string | null {
+  if (p.pages?.length || p.passes !== 1 || Object.keys(p.body ?? {}).length) return "a job of cases takes its bodies from the cases: it has no pages, passes or job body";
+  return casesRefusal(p.cases, p.groups) ?? boxesRefusal(p, known);
+}
+
 /** The first thing wrong with a submit, in words, or null. */
 export function submitRefusal(p: SubmitPayload, { now, known }: { now: number; known: (() => string[]) | null }): string | null {
   if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
+  if (p.cases !== undefined) return caseJobRefusal(p, known) ?? freezeRefusal(p.freeze, now);
   if (!Array.isArray(p.pages) || !p.pages.length) return "no pages were given";
   if (!Number.isInteger(p.passes) || p.passes < 1 || p.passes > MAX_PASSES) return `--passes is a whole number from 1 to ${MAX_PASSES}`;
   return boxesRefusal(p, known) ?? bodyRefusal(p.body) ?? freezeRefusal(p.freeze, now);
@@ -113,9 +116,47 @@ function submit(deps: Required<Pick<RemoteDeps, "store" | "now">> & RemoteDeps):
   if (why) return refuse(why);
   const down = serviceRefusal(deps.store, now);
   if (down) return refuse(down, REMOTE_EXIT.SERVICE_DOWN);
-  const request: JobRequest = { version: STORE_VERSION, id: newJobId(new Date(now)), ...payload, submittedAt: new Date(now).toISOString() };
+  const request: JobRequest = {
+    version: payload.cases ? CASE_STORE_VERSION : STORE_VERSION, id: newJobId(new Date(now)), ...payload, ...(payload.cases ? { groups: payload.groups ?? {} } : {}),
+    submittedAt: new Date(now).toISOString() };
   deps.store.writeRequest(request);
   return ok({ id: request.id });
+}
+
+/**
+ * The job a re-capture asks for: the named cases of a `done` case job, each pinned to the box its group was captured on, as a new job that names its
+ * source. The first thing wrong with it is returned as words.
+ */
+export function recaptureRequest(p: RecapturePayload, { store, now, known, view }: { store: JobStore; now: number; known: (() => string[]) | null; view: JobView }): JobRequest | string {
+  if (!LABEL.test(p.label ?? "")) return "--label is required, as the ticket key: letters, digits, '.', '_' and '-', at most 64";
+  if (view.state !== "done") return `job ${p.source} is ${view.state}: only a job that is done can be re-captured`;
+  const source = store.readRequest(p.source);
+  const state = store.readState(p.source);
+  if (!source?.ok || !state?.ok) return `job ${p.source} cannot be read to re-capture it`;
+  if (!source.value.cases) return `job ${p.source} is a job of pages: only a job of cases can be re-captured`;
+  const ids = [...new Set(p.cases)];
+  if (!ids.length) return "no cases were named: give --cases <id,id,...>";
+  const unknown = ids.filter((id) => !source.value.cases!.some((c) => c.id === id));
+  if (unknown.length) return `job ${p.source} has no case ${unknown.join(", ")}`;
+  const cases: CaseSpec[] = [];
+  const groups: Record<string, GroupSpec> = {};
+  for (const id of ids) {
+    const was = source.value.cases.find((c) => c.id === id)!;
+    const group = was.group ?? id;
+    const box = state.value.captures.find((c) => c.case === id)?.box;
+    if (!box) return `case ${id} of ${p.source} was never placed on a box`;
+    groups[group] = { box };
+    cases.push({ id, url: was.url, body: was.body, group, attempt: (was.attempt ?? 1) + 1 });
+  }
+  let declared: string[] | null = null;
+  try { declared = known ? known() : null; } catch (error) { return `the inventory could not be read to check the boxes: ${(error as Error).message}`; }
+  const gone = declared && Object.entries(groups).find(([, spec]) => !declared!.includes(spec.box!));
+  if (gone) return `group ${gone[0]} was captured on ${gone[1].box}, which is not in the inventory now: submit the whole group as a new job`;
+  const names = [...new Set(Object.values(groups).map((spec) => spec.box!))];
+  return {
+    version: CASE_STORE_VERSION, id: newJobId(new Date(now)), label: p.label, pages: [], boxes: { kind: "named", names }, passes: 1, body: {},
+    freeze: source.value.freeze, submittedBy: p.submittedBy, submittedAt: new Date(now).toISOString(), cases, groups, recaptureOf: p.source,
+  };
 }
 
 /** The inventory's box names for an estimate to choose a count from; empty when the inventory could not be read, and the estimate then says so. */
@@ -143,6 +184,20 @@ function viewOf(deps: Pick<RemoteDeps, "store" | "ledger" | "known">, id: string
 }
 
 const isResult = (value: JobView | RemoteResult): value is RemoteResult => "code" in value;
+
+function recapture(deps: Required<Pick<RemoteDeps, "store" | "now">> & RemoteDeps): RemoteResult {
+  let payload: RecapturePayload;
+  try { payload = JSON.parse(deps.stdin?.() ?? "") as RecapturePayload; } catch (cause) { return refuse(`recapture reads a JSON request on stdin: ${(cause as Error).message}`); }
+  const now = deps.now();
+  const view = viewOf({ store: deps.store }, payload.source, now);
+  if (isResult(view)) return view;
+  const request = recaptureRequest(payload, { store: deps.store, now, known: deps.known ?? null, view });
+  if (typeof request === "string") return refuse(request);
+  const down = serviceRefusal(deps.store, now);
+  if (down) return refuse(down, REMOTE_EXIT.SERVICE_DOWN);
+  deps.store.writeRequest(request);
+  return ok({ id: request.id, recaptureOf: request.recaptureOf, boxes: request.boxes });
+}
 
 function cancel(deps: RemoteDeps, id: string, now: number): RemoteResult {
   const { store } = deps;
@@ -192,6 +247,7 @@ const COMMANDS: Record<string, Handler> = {
   submit: (_rest, deps) => submit({ ...deps, now: deps.now ?? Date.now }),
   status: idCommand("status", (deps, id, now) => { const view = viewOf(deps, id, now); return isResult(view) ? view : ok(view); }),
   cancel: idCommand("cancel", cancel),
+  recapture: (_rest, deps) => recapture({ ...deps, now: deps.now ?? Date.now }),
   list: listCommand,
   "lease-list": (_rest, deps, now) => leaseList(deps, now),
 };
@@ -200,7 +256,7 @@ const COMMANDS: Record<string, Handler> = {
 export function remote(argv: string[], deps: RemoteDeps): RemoteResult {
   const [command, ...rest] = argv;
   const handler = Object.hasOwn(COMMANDS, command ?? "") ? COMMANDS[command!]! : null;
-  if (!handler) return refuse("usage: remote.ts submit|status <id>|cancel <id>|list [--label k] [--state s] [--limit n]|lease-list|tar <id>");
+  if (!handler) return refuse("usage: remote.ts submit|recapture|status <id>|cancel <id>|list [--label k] [--state s] [--limit n]|lease-list|tar <id>");
   try {
     return handler(rest, deps, (deps.now ?? Date.now)());
   } catch (error) {
