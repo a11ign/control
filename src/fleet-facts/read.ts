@@ -9,6 +9,8 @@ import { playOutcome } from "./play-result.ts";
 import type { PlayRead } from "./play-result.ts";
 
 export const FACTS_PLAYBOOK = "ansible/facts.yml";
+/** Plays running at once. The runner reads every idle box together, and each play is an `ansible-playbook` process of its own on the control plane. */
+export const MAX_PLAYS = 4;
 /** One box's play: a Windows box that has just woken answers ssh in a minute or two, and its CIM reads take seconds. */
 export const PLAY_TIMEOUT_MS = 600_000;
 
@@ -48,16 +50,31 @@ function readInventory(): ReturnType<Inventory> {
   return workers;
 }
 
+/** A gate that lets `limit` calls through at once and holds the rest, in order, until one ends. */
+function gate(limit: number): <T>(work: () => Promise<T>) => Promise<T> {
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  return async (work) => {
+    if (running >= limit) await new Promise<void>((resume) => waiting.push(resume));
+    running += 1;
+    try { return await work(); } finally {
+      running -= 1;
+      waiting.shift()?.();
+    }
+  };
+}
+
 /**
  * THE REAL `readFacts` (A11-283): wake the one box, run `ansible/facts.yml --limit <box>` from the service's own checkout, and return what the play said about
  * it. It rejects, naming the box, when the box does not come up, is unreachable or fails the play; it does not decide whether the play changed anything or
  * whether its output is whole, which are the runner's.
  */
-export function factsReader({ checkout = SERVICE_CHECKOUT, inventory = readInventory, wake = wakeFleet, run = runPlay, log = () => {}, timeoutMs = PLAY_TIMEOUT_MS }: {
+export function factsReader({ checkout = SERVICE_CHECKOUT, inventory = readInventory, wake = wakeFleet, run = runPlay, log = () => {}, timeoutMs = PLAY_TIMEOUT_MS, maxPlays = MAX_PLAYS }: {
   checkout?: string; inventory?: Inventory; wake?: (targets: WakeTarget[], options: { log: (line: string) => void }) => Promise<WakeResult[]>;
-  run?: PlayRunner; log?: (line: string) => void; timeoutMs?: number;
+  run?: PlayRunner; log?: (line: string) => void; timeoutMs?: number; maxPlays?: number;
 } = {}): (box: Box) => Promise<PlayRead> {
-  return async (box) => {
+  const oneAtATime = gate(maxPlays);
+  return (box) => oneAtATime(async () => {
     const known = inventory().find((candidate) => candidate.name === box.name);
     if (!known) throw new Error(`${box.name} is not in the inventory`);
     const [woken] = await wake([targetOf(known)], { log });
@@ -66,5 +83,5 @@ export function factsReader({ checkout = SERVICE_CHECKOUT, inventory = readInven
     const outcome = playOutcome(stdout, box.name);
     if (!outcome.ok) throw new Error(outcome.error);
     return outcome.read;
-  };
+  });
 }

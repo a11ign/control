@@ -283,15 +283,14 @@ test("a facts job running at a restart is resumed: the read it had sent is made 
 
 test("a facts read is not a capture: it does not move the capture estimate, and a queued facts job counts one read per box", async () => {
   const t = facts();
-  const id = t.submit(named("w2", "w3"), FACTS_REQUEST);
+  t.submit(named("w2", "w3"), FACTS_REQUEST);
   await t.drain();
   assert.equal(meanCaptureMs(t.store), null, "the two finished reads are not captures, so no capture has completed");
-  const mean = t.submit({ kind: "count", count: 1 });
+  t.submit({ kind: "count", count: 1 });
   await t.drain();
   assert.ok(meanCaptureMs(t.store) !== null, "positive control: a finished capture counts");
   assert.equal(captureCount({ pages: [], passes: 1, ...FACTS_REQUEST, boxes: named("w2", "w3") }), 2);
   assert.equal(captureCount({ pages: [], passes: 1, ...FACTS_REQUEST, boxes: { kind: "count", count: 3 } }), 3);
-  assert.ok(id && mean);
   t.done();
 });
 

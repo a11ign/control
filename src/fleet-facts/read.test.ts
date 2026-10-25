@@ -110,3 +110,24 @@ test("a box that is not in the inventory is refused before anything is woken", a
   const read = factsReader({ inventory: () => [], wake: async () => { throw new Error("woke"); }, run: async () => { throw new Error("ran"); } });
   await assert.rejects(read({ name: BOX, url: "http://10.0.0.2:8765" }), new RegExp(`${BOX} is not in the inventory`));
 });
+
+test("no more than the limit of plays run at once: the other boxes wait their turn, in order", async () => {
+  let running = 0;
+  let peak = 0;
+  const started: string[] = [];
+  const read = factsReader({
+    maxPlays: 2, wake: woken("already-up"),
+    inventory: () => ["a", "b", "c", "d", "e"].map((name) => ({ name, url: `http://10.0.0.${name.charCodeAt(0) - 90}:8765` })),
+    run: async ({ args }) => {
+      running += 1; peak = Math.max(peak, running); started.push(args[2]!);
+      await new Promise((resolve) => setImmediate(resolve));
+      running -= 1;
+      const box = args[2]!;
+      return { stdout: JSON.stringify({ plays: [{ tasks: [{ task: { name: FACTS_TASK }, hosts: { [box]: { result: m720q() } } }] }], stats: { [box]: { changed: 0, failures: 0, unreachable: 0 } } }) };
+    },
+  });
+  const names = ["a", "b", "c", "d", "e"];
+  await Promise.all(names.map((name) => read({ name, url: "http://10.0.0.1:8765" })));
+  assert.equal(peak, 2);
+  assert.deepEqual(started, names);
+});

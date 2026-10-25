@@ -57,6 +57,12 @@ type Run = { id: string; request: JobRequest; state: JobStateFile; boxes: Map<st
 
 const leftTheFleet = (box: string, why: string): string => `${box} left the fleet: ${why}`;
 
+/** Why a facts entry failed, or null when it did not: the read's own failure, the facts file's, or both. A box that was read but not filed is still a failed entry. */
+const entryError = (box: string, outcome: { facts: BoxFacts } | { error: string }, notFiled: string | null): string | null => {
+  if ("facts" in outcome) return notFiled === null ? null : `${box} was read but ${notFiled}`;
+  return notFiled === null ? outcome.error : `${outcome.error}; ${notFiled}`;
+};
+
 const planOf = (request: JobRequest, names: string[]): CaptureEntry[] =>
   isFactsJob(request) ? planFacts(names) : request.cases ? planCases(request.cases, request.groups ?? {}, names) : planCaptures(request.pages, names, request.passes);
 
@@ -441,8 +447,7 @@ export class Runner {
     const outcome = await this.factsOutcome(box);
     const at = this.iso();
     const attempt: Attempt = { box: name, job: run.id, at, ...("facts" in outcome ? { facts: outcome.facts } : { error: outcome.error }) };
-    const filed = this.fileFacts(attempt);
-    const error = "facts" in outcome ? (filed === null ? null : `${name} was read but ${filed}`) : (filed === null ? outcome.error : `${outcome.error}; ${filed}`);
+    const error = entryError(name, outcome, this.fileFacts(attempt));
     const record: FactsRecord = { readAt: at, worker: name, status: error === null ? "done" : "failed", changed: outcome.changed,
       ...("facts" in outcome ? { facts: outcome.facts } : {}), ...(error === null ? {} : { error }) };
     this.d.store.writeRecord(run.id, entry.file, record);
@@ -463,7 +468,7 @@ export class Runner {
     return "refusal" in parsed ? { error: `the facts of ${box.name} could not be read: ${parsed.refusal}`, changed: read.changed } : { facts: parsed.facts, changed: read.changed };
   }
 
-  /** Put an attempt in the facts file. Null when it landed, else why not: a file that cannot be read is left alone, and the entry says so. */
+  /** Put an attempt in the facts file. Returns why it did not land, or null when it did: a file that cannot be read is left alone, and the entry says so. */
   private fileFacts(attempt: Attempt): string | null {
     try {
       const filed = recordAttempt(this.d.factsFile, attempt);
@@ -527,7 +532,7 @@ export class Runner {
     // A facts job fails only when no box could be read; a box that did not answer is its own failed entry and stale in the file.
     if (isFactsJob(run.request)) {
       const failed = run.state.captures.filter((c) => c.status === "failed");
-      if (failed.length === run.state.captures.length) return this.finish(run, "failed", `no box could be read: ${failed.map((c) => `${c.box}: ${c.error}`).join("; ")}`);
+      if (failed.length === run.state.captures.length && failed.length > 0) return this.finish(run, "failed", `no box could be read: ${failed.map((c) => `${c.box}: ${c.error}`).join("; ")}`);
       return this.finish(run, "done");
     }
     // pending, or failed without ever being sent: the pages of a box that left
