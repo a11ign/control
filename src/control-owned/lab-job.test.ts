@@ -1603,7 +1603,7 @@ test("A11-263: a job without a label is refused naming the parameter, and a labe
 });
 
 test("A11-263: the boxes asked of the service are built from names the inventory has, a count or ready, and proved before the job is dispatched", () => {
-  const clauses = assertClausesWhen(/^$/).concat(assertClausesWhen(/./));
+  const clauses = assertClausesWhen(/^/);
   for (const clause of ["lab_fleet_boxes_workers is match('^[A-Za-z0-9_.,-]+$')", "lab_fleet_boxes_worker is match('^[A-Za-z0-9_.,-]+$')"]) {
     assert.ok(clauses.includes(clause), `${clause} is asserted`);
   }
@@ -1614,6 +1614,10 @@ test("A11-263: the boxes asked of the service are built from names the inventory
   assert.ok(built > 0 && built < proved && proved < used, "build, then prove, then use");
   // The worker's NAME was asserted against the inventory above, so these facts are inventory names; a count is checked against the fleet by "A worker selection must name a pool the fleet can actually give".
   assert.ok(assertClausesWhen(/^workers is defined$/).includes("lab_selected_hosts | difference(groups['a11y_workers']) | length == 0"));
-  assert.deepEqual(PLAY_VARS.lab_param_aliases, { ...PLAY_VARS.lab_param_aliases, lab_fleet_label: "label", lab_fleet_boxes_workers: "workers | default('ready')",
-    lab_fleet_boxes_worker: "worker | default('ready')", lab_fleet_box: "worker" });
+  // The derivation (`derivedParams` above) reads which parameter each fact stands for from these aliases, so each must say the right one.
+  const aliases = PLAY_VARS.lab_param_aliases;
+  assert.equal(aliases.lab_fleet_label, "label");
+  assert.equal(aliases.lab_fleet_boxes_workers, "workers | default('ready')");
+  assert.equal(aliases.lab_fleet_boxes_worker, "worker | default('ready')");
+  assert.equal(aliases.lab_fleet_box, "worker");
 });
