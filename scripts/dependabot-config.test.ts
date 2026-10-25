@@ -23,8 +23,12 @@ test(".github/dependabot.yml is exactly what `dependabot-config --write` produce
   assert.ok(result.ok, result.message);
 });
 
-test("every package the fleet's pins manifest pins is frozen, so Dependabot never proposes it", () => {
+/** The layers of the manifest whose package the toolchain does not list as frozen, named `layer: package`. */
+function unfrozenLayers(): string[] {
   const frozen = new Set(FROZEN.map(({ name }) => name));
-  const unfrozen = Object.entries(MANIFEST.layers).filter(([, { package: name }]) => !frozen.has(name)).map(([layer, { package: name }]) => `${layer}: ${name}`);
-  assert.deepEqual(unfrozen, [], "a layer of deploy-pins.json is not in FROZEN (@a11ign/toolchain/dependabot-frozen): add it there, release the toolchain, and bump it here");
+  return Object.entries(MANIFEST.layers).filter(([, { package: name }]) => !frozen.has(name)).map(([layer, { package: name }]) => `${layer}: ${name}`);
+}
+
+test("every package the fleet's pins manifest pins is frozen, so Dependabot never proposes it", () => {
+  assert.deepEqual(unfrozenLayers(), [], "a layer of deploy-pins.json is not in FROZEN (@a11ign/toolchain/dependabot-frozen): add it there, release the toolchain, and bump it here");
 });
