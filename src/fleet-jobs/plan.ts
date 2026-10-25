@@ -1,5 +1,6 @@
+import { caseRecordFile, groupOf } from "./cases.ts";
 import { recordFile } from "./pages.ts";
-import type { CaptureEntry } from "./types.ts";
+import type { CaptureEntry, CaseSpec, GroupSpec } from "./types.ts";
 
 /** A pass needs a box of its own: two passes of a page on one box would be one measurement taken twice. */
 export function passesRefusal(boxes: number, passes: number): string | null {
@@ -35,4 +36,30 @@ export function reassign(captures: CaptureEntry[], from: string, live: string[])
     moved.push(capture);
   }
   return moved;
+}
+
+/**
+ * Place a job of cases. A group is held to ONE box, so whole groups are placed: pinned ones on their box first, then the rest largest first, each on
+ * the box with the fewest cases so far (the first such box on a tie). A box's entries are emitted group by group, in file order, so the runner's "next
+ * pending capture on this box" finishes one group before it starts the next. PURE.
+ */
+export function planCases(cases: CaseSpec[], groups: Record<string, GroupSpec>, boxes: string[]): CaptureEntry[] {
+  const byGroup = new Map<string, CaseSpec[]>();
+  for (const entry of cases) byGroup.set(groupOf(entry), [...(byGroup.get(groupOf(entry)) ?? []), entry]);
+  const placed = new Map<string, string[]>(boxes.map((box) => [box, []]));
+  const load = (box: string): number => placed.get(box)!.reduce((sum, group) => sum + byGroup.get(group)!.length, 0);
+  const pinned = [...byGroup.keys()].filter((group) => groups[group]?.box !== undefined);
+  const free = [...byGroup.keys()].filter((group) => groups[group]?.box === undefined).sort((a, b) => byGroup.get(b)!.length - byGroup.get(a)!.length);
+  for (const group of pinned) {
+    const box = groups[group]!.box!;
+    if (!placed.has(box)) throw new Error(`group ${group} is pinned to ${box}, which the job does not have`);
+    placed.get(box)!.push(group);
+  }
+  for (const group of free) {
+    const box = boxes.reduce((best, candidate) => load(candidate) < load(best) ? candidate : best);
+    placed.get(box)!.push(group);
+  }
+  return boxes.flatMap((box) => placed.get(box)!.flatMap((group) => byGroup.get(group)!.map((entry) => ({
+    page: entry.url, pass: 1, case: entry.id, group, attempt: entry.attempt ?? 1, file: caseRecordFile(entry.id, entry.attempt ?? 1), box, status: "pending" as const,
+  }))));
 }

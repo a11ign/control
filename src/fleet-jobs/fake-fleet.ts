@@ -12,6 +12,8 @@ import type { Box } from "./types.ts";
 export type FakeWorker = Box & {
   /** The pages this worker was asked to capture, in order, and how many captures it ever held at once. */
   asked: string[];
+  /** The body each capture was asked with, in order, as the worker received it, without the `captureId` and `async` the capture client adds. */
+  bodies: Record<string, unknown>[];
   peak: number;
   close(): Promise<void>;
 };
@@ -28,7 +30,7 @@ export type FakeWorkerOptions = {
 export async function fakeWorker(name: string, { durationMs = 0, statusOf, environment }: FakeWorkerOptions = {}): Promise<FakeWorker> {
   const results = new Map<string, { status: number; body: unknown }>();
   let running = 0;
-  const worker: { asked: string[]; peak: number } = { asked: [], peak: 0 };
+  const worker: { asked: string[]; bodies: Record<string, unknown>[]; peak: number } = { asked: [], bodies: [], peak: 0 };
   const server: Server = createServer((req, res) => {
     const send = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.method === "GET" && req.url === "/health") {
@@ -47,6 +49,10 @@ export async function fakeWorker(name: string, { durationMs = 0, statusOf, envir
         running += 1;
         worker.peak = Math.max(worker.peak, running);
         worker.asked.push(body.url);
+        const asked: Record<string, unknown> = { ...body };
+        delete asked.captureId;
+        delete asked.async;
+        worker.bodies.push(asked);
         results.set(body.captureId, { status: 0, body: null });
         setTimeout(() => {
           const status = statusOf?.(body.url) ?? 200;

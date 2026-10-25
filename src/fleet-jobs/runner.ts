@@ -1,12 +1,13 @@
 import { buildManifest } from "./manifest.ts";
 import type { PinsReading } from "./manifest.ts";
-import { passesRefusal, planCaptures, reassign } from "./plan.ts";
+import { SKIPPED, reassignGroups, skipMatchingGroups } from "./cases.ts";
+import { passesRefusal, planCaptures, planCases, reassign } from "./plan.ts";
 import type { Availability, BoxClaims } from "./claims.ts";
 import type { BoxResolver } from "./boxes.ts";
 import type { DriftReader } from "./drift.ts";
 import type { JobStore } from "./store.ts";
 import type { Box, BoxReading, CaptureEntry, CaptureRecord, JobRequest, JobStateFile } from "./types.ts";
-import { STORE_VERSION, isTerminal } from "./types.ts";
+import { isTerminal } from "./types.ts";
 import { estimateFinish } from "./view.ts";
 import { RENEW_EVERY_MS } from "../fleet-leases/types.ts";
 
@@ -38,6 +39,7 @@ export type RunnerDeps = {
 };
 
 export const RE_CAPTURED = "re-captured after a service restart";
+export { SKIPPED };
 
 /** A box fault is the box's, not the page's: no answer, `429` (busy with something else) or a `5xx`. A page that errors is a record and a box streak of zero. */
 const isBoxFault = (status: number): boolean => status === 0 || status === 429 || status >= 500;
@@ -133,8 +135,8 @@ export class Runner {
     const names = boxes.map((b) => b.name);
     const readings = Object.fromEntries(await Promise.all(boxes.map(async (box) => [box.name, await this.read(box)] as const)));
     const state: JobStateFile = {
-      version: STORE_VERSION, state: "running", boxes: names, readings, dropped: [], notes,
-      captures: planCaptures(request.pages, names, request.passes), startedAt: this.iso(),
+      version: request.version, state: "running", boxes: names, readings, dropped: [], notes,
+      captures: request.cases ? planCases(request.cases, request.groups ?? {}, names) : planCaptures(request.pages, names, request.passes), startedAt: this.iso(),
     };
     this.d.store.writeState(id, state);
     this.launch({ id, request, state, boxes: new Map(boxes.map((b) => [b.name, b])), streak: new Map(), released: new Set() });
@@ -188,7 +190,7 @@ export class Runner {
   /** A job that never started ends here, with a state that says why: it is never dropped from the list. */
   private endUnstarted(request: JobRequest, state: "failed" | "cancelled", reason: string): void {
     const ended: JobStateFile = {
-      version: STORE_VERSION, state, reason, boxes: [], readings: {}, dropped: [], captures: [], notes: [],
+      version: request.version, state, reason, boxes: [], readings: {}, dropped: [], captures: [], notes: [],
       startedAt: null, finishedAt: this.iso(),
     };
     this.d.store.writeState(request.id, ended);
@@ -210,7 +212,7 @@ export class Runner {
       entry.note = RE_CAPTURED;
       delete entry.startedAt;
     }
-    for (const box of missing) reassign(state.captures, box, stillLive);
+    for (const box of missing) this.moveOff(request, state, box, stillLive);
     state.notes.push(`resumed after a service restart at ${this.iso()}`);
     // Only the boxes with pages left are taken again: a box the dead service had already let go of may be another job's by now, and is not this job's to resume.
     const released = new Set(stillLive.filter((name) => !this.hasWork(state, name)));
@@ -224,6 +226,16 @@ export class Runner {
     }
     this.d.store.writeState(id, state);
     this.launch({ id, request, state, boxes: new Map(found.map((b) => [b.name, b])), streak: new Map(), released });
+  }
+
+  /**
+   * What a box gone from the inventory leaves behind. A page job's pages go to the boxes that are left. A case job's groups go only whole, and only when
+   * untouched (`reassignGroups`); the rest of its cases fail with the reason.
+   */
+  private moveOff(request: JobRequest, state: JobStateFile, box: string, live: string[]): void {
+    if (!request.cases) { reassign(state.captures, box, live); return; }
+    this.skipMatching(request.id, request, state, box);
+    for (const { entry, error } of reassignGroups(state.captures, request.groups ?? {}, box, live).failed) this.failUnsent(request.id, entry, error);
   }
 
   /** Whether the job still has a page to send, or one in flight, on the box. */
@@ -291,6 +303,8 @@ export class Runner {
         this.dropDrifting(run);
         this.releaseFinished(run, inflight);
         this.dispatchIdleBoxes(run, inflight);
+        // A box whose last groups were just skipped has no work left: it is let go now, not when another box's capture ends.
+        this.releaseFinished(run, inflight);
         if (!inflight.size) break;
         await Promise.race(inflight.values());
       }
@@ -328,13 +342,36 @@ export class Runner {
   private dispatchIdleBoxes(run: Run, inflight: Map<string, Promise<void>>): void {
     for (const name of this.liveBoxes(run)) {
       if (inflight.has(name)) continue;
-      const next = run.state.captures.find((c) => c.box === name && c.status === "pending");
+      const next = this.nextCapture(run, name);
       if (!next) continue;
       next.status = "dispatched";
       next.startedAt = this.iso();
       this.persist(run);
       inflight.set(name, this.captureOne(run, name, next).finally(() => inflight.delete(name)));
     }
+  }
+
+  /**
+   * The box's next pending capture. A group that has not begun and whose `skipWhen` matches the box's environment is skipped whole, first: no capture is
+   * sent and no record is written, so what the box already holds stands.
+   */
+  private nextCapture(run: Run, name: string): CaptureEntry | undefined {
+    if (this.skipMatching(run.id, run.request, run.state, name)) this.persist(run);
+    return run.state.captures.find((c) => c.box === name && c.status === "pending");
+  }
+
+  /** Skip the groups of a case job that its box's environment says need no capture. True when any were. */
+  private skipMatching(id: string, request: JobRequest, state: JobStateFile, name: string): boolean {
+    if (!request.cases) return false;
+    const skipped = skipMatchingGroups(state.captures, request.groups ?? {}, name, state.readings[name]);
+    for (const group of new Set(skipped.map((c) => c.group))) this.d.log(`${id}: group ${group} skipped on ${name}: ${SKIPPED}`);
+    return skipped.length > 0;
+  }
+
+  /** The body sent for an entry: a case's own body exactly, else the job's body, with the URL. Nothing else is merged in. */
+  private bodyFor(run: Run, entry: CaptureEntry): Record<string, unknown> {
+    const own = entry.case === undefined ? undefined : run.request.cases?.find((c) => c.id === entry.case);
+    return { ...(own ? own.body : run.request.body), url: entry.page };
   }
 
   private async captureOne(run: Run, name: string, entry: CaptureEntry): Promise<void> {
@@ -344,7 +381,7 @@ export class Runner {
     let status = 0;
     let capture: unknown;
     try {
-      const result = await this.d.capture(box, { ...run.request.body, url: entry.page });
+      const result = await this.d.capture(box, this.bodyFor(run, entry));
       status = result.status;
       capture = result.json ?? { error: (result.text ?? "").slice(0, 300) };
     } catch (error) {
@@ -377,15 +414,19 @@ export class Runner {
   private leave(run: Run, name: string, why: string): void {
     run.state.dropped.push({ box: name, reason: why });
     const error = leftTheFleet(name, why);
-    for (const entry of run.state.captures.filter((c) => c.box === name && c.status === "pending")) {
-      entry.status = "failed";
-      entry.error = error;
-      entry.httpStatus = 0;
-      entry.finishedAt = this.iso();
-      this.d.store.writeRecord(run.id, entry.file, { capturedAt: entry.finishedAt, worker: name, status: 0, capture: { error } });
-    }
+    this.skipMatching(run.id, run.request, run.state, name);
+    for (const entry of run.state.captures.filter((c) => c.box === name && c.status === "pending")) this.failUnsent(run.id, entry, error);
     this.persist(run);
     this.d.log(`${run.id}: ${error}`);
+  }
+
+  /** A capture that was never sent, as a failed record that says why. */
+  private failUnsent(id: string, entry: CaptureEntry, error: string): void {
+    entry.status = "failed";
+    entry.error = error;
+    entry.httpStatus = 0;
+    entry.finishedAt = this.iso();
+    this.d.store.writeRecord(id, entry.file, { capturedAt: entry.finishedAt, worker: entry.box, status: 0, capture: { error } });
   }
 
   private async waitIdle(box: Box, entry: CaptureEntry): Promise<void> {
@@ -406,7 +447,7 @@ export class Runner {
     const unserved = run.state.captures.filter((c) => c.status === "pending" || (c.status === "failed" && !c.startedAt));
     if (unserved.length && !this.liveBoxes(run).length) {
       const why = run.state.dropped.map((d) => `${d.box}: ${d.reason}`).join("; ");
-      return this.finish(run, "failed", `no box was left to capture ${unserved.length} pages${why ? ` (${why})` : ""}`);
+      return this.finish(run, "failed", `no box was left to capture ${unserved.length} ${run.request.cases ? "cases" : "pages"}${why ? ` (${why})` : ""}`);
     }
     this.finish(run, "done");
   }

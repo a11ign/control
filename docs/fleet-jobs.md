@@ -44,7 +44,7 @@ pnpm run fleet -- job status fj-20261025T085815Z-315a1b
 pnpm run fleet -- lease list [--json]              # who holds which boxes, and the queue in the order it is served
 ```
 
-- **A job that cannot get its boxes waits in the queue**, `queued`, and `job status` shows its **place**, its **estimated start** and who it **waits on** (`--json` carries `queue: { place, of, estimatedStart, estimateReason, waitingOn }`). The estimate is worked out from the leases' expected ends and the service's last 20 completed captures (⌈pages × passes ÷ boxes⌉ × the mean capture). Where an input is missing it says `unknown` and why; it never guesses.
+- **A job that cannot get its boxes waits in the queue**, `queued`, and `job status` shows its **place**, its **estimated start** and who it **waits on** (`--json` carries `queue: { place, of, estimatedStart, estimateReason, waitingOn }`). The estimate is worked out from the leases' expected ends and the service's last 20 completed captures (⌈captures ÷ boxes⌉ × the mean capture, where a page job's captures are its pages × passes and a case job's are its cases). Where an input is missing it says `unknown` and why; it never guesses.
 - **Fair use.** Jobs are served in the order they were submitted. A job that names boxes reserves only those boxes against the jobs behind it; a job that asks for "any N boxes" or `ready` holds the head of the line while it waits, so a large job is never starved by a stream of small ones. The queue keeps its order across a restart, because a job queues at its own submission time.
 - **A job holds no box longer than its own work, plus a grace period.** A box whose pages are all done is released at once, while the job goes on with the others; the job's lease is released when it ends, whether done, failed or cancelled (a graceful stop is not an end: the next start takes the same lease again). While a job runs, the service renews its lease (and a queued job's place) every 30 s. A lease that is not renewed lapses **5 minutes** after the last renewal, so a holder that dies frees its boxes within the grace and never later. A normal restart is back well inside it.
 - **A box leaving the fleet mid-job fails only that box's part.** A box leaves when three captures in a row fail on it, or when the hourly drift record (`runs/fleet-drift.json`) lists a current, not-carried difference for it. Each page it had not yet sent is a failed record, `<box> left the fleet: <why>`, the box is in the manifest's `dropped`, and its lease is released once the capture still on it, if any, has ended. The pages are **not** moved to the other boxes, and the job goes on. A job whose every box has left fails, naming each. A drift record that exists but cannot be read (not JSON, no list of differences) is not read as "no box differs": a job that has not started stays queued until it can be read, and a running job loses no box on a guess. A record that does not exist (the hourly check has not run yet) reads as no difference known. A box the drift record lists is not offered to a new job, and a job that names one fails at start, naming the box and the difference (a drift can last for days, so waiting would be for ever).
@@ -70,15 +70,53 @@ The freeze is not affected by the job's queue: a job queued **before** the run k
 
 After merge, `pnpm run fleet:freeze-schedule` re-installs the freeze unit with its new `ExecStart`; read it back with `systemctl cat a11y-fleet-freeze-daily.service`. The next 04:11 run's `runs/fleet-freeze-last-run.json` carries `leased: {}`, or names any box that was leased.
 
+### Cases and groups: a body of its own for each capture, and cases held to one box (A11-263)
+
+A page job sends every page the same body and spreads a page's passes across boxes. Work that needs a different body per capture, or captures that must come from one box (a good/bad pair, a page's repeats, an A1/B/A2 order), is a **job of cases**:
+
+```bash
+pnpm run fleet -- capture submit --cases cases.json --boxes 2 --label A11-263
+```
+
+```json
+{ "cases": [
+    { "id": "form-error-silent.good", "url": "http://…/good.html", "body": { "task": "…", "probeForms": true }, "group": "form-error-silent" },
+    { "id": "form-error-silent.bad",  "url": "http://…/bad.html",  "body": { "task": "…", "probeForms": true }, "group": "form-error-silent" } ],
+  "groups": { "form-error-silent": { "skipWhen": { "environment": { "screenReaderVersion": "2026.1", "guidepupVersion": null } } } } }
+```
+
+- **`id`** is unique in the job, matches `^[A-Za-z0-9][A-Za-z0-9._+-]{0,160}$` and is not `manifest`. **`url`** is http(s). **`body`** is the worker's own `/capture` body for that case and is sent **exactly**, with `url` added: the page job's defaults (`DEFAULT_BODY`) are not merged in, because a client may use that body as its cache key. A body that sets `url`, `captureId` or `async` is refused, since the service sets them.
+- **`group`** is optional; a case with none is a group of its own. **Every case of a group is captured on one box, in file order, one after another**, and a group is never split across boxes. Whole groups are placed largest first, each on the box with the fewest cases so far, and a box is sent one group before the next, so the lease keeps every other job off the box in between. A box left with no group is let go at once.
+- `--cases` is refused beside `--pages`, `--passes`, `--steps`, `--probe`, `--body-json` and page URLs, naming the one: a job's bodies come from one place. `--boxes`, `--label` and `--freeze` are as for a page job.
+- **A box that leaves mid-job** fails the cases it had not sent, as for pages. **A restart that finds a box gone from the inventory** moves a group only whole and only when none of its cases had ended on the old box. Otherwise its pending cases fail with `<box> left the fleet; group <g> was already partly captured there, and a group is never split across boxes`.
+- **Records** are `results/<case id>.a<attempt>.json` in the same shape as a page's (`{ capturedAt, worker, status, capture }`). The manifest (`"version": 2` for a case job) gains `cases` (each with `id`, `url`, `group`, `body`, `attempt`), `recaptureOf`, for each capture its `case`, `group` and `attempt`, and for each box its whole `/health` `environment` beside the fields it names today.
+- **Store version.** A job of cases, or a re-capture, is written as store version 2 (`request.json` and `state.json`). The service reads versions 1 and 2. A page job is still written as version 1. A service that reads only version 1 (`fleet:jobs-install -e fleet_jobs_ref=<older>`) fails a case job naming the version, and never captures its URLs as plain pages.
+
+### `skipWhen`: leave a group alone when the box has not changed
+
+A group may carry `skipWhen: { "environment": { <field>: <value>, … } }`. Before the group's first capture the service compares each named field with the `/health` `environment` it read from that box when the job started; an absent field reads as `null`. If every field matches, the group's cases are marked `skipped` (`note: "environment matches skipWhen"`): nothing is sent and no record is written. A box whose health was not read never skips. It is for a client whose cache key includes the box's environment, which only the service knows before the box is chosen: the client sends `skipWhen` for a group whose stored result already matches on everything except the environment. An empty `environment` is refused, since it would skip on every box.
+
+### Re-capture: the same cases again, on the same boxes
+
+```bash
+pnpm run fleet -- job recapture fj-20261025T085815Z-315a1b --cases form-error-silent.bad --label A11-263
+# fj-20261025T091500Z-4d5e6f     <- a NEW job ID, printed at once; wait on this one
+```
+
+- Accepted only for a **case job in state `done`**; any other state is refused, naming it. Every named case must exist in that job.
+- The new job copies those cases (their URLs and bodies) and names the source in `recaptureOf`. Each case's `attempt` is one more than its last attempt in the source, so its record is `<case id>.a2.json`, and a fetch of both jobs into one directory never overwrites a record. A re-capture of a re-capture works the same way, from that job. The service sets no attempt limit: the client keeps its own.
+- **Each case is pinned to the box its group was captured on in the source job**, so a re-captured bad variant is taken on the same box as the good variant it is compared with. Cases of one group named together stay a group. The new job asks for those boxes **by name**, so it queues, leases, renews, releases and drift-fails like any named job (A11-244). If a pinned box is not in the inventory, the re-capture is refused, naming the box and the group, and saying to submit the whole group as a new job. A restart does not move a pinned group to another box; its pending cases fail naming the pin.
+- A skipped case can be re-captured like any other: a re-capture never carries `skipWhen`.
+
 ### Cancel
 
 `cancel` stops the service sending the job pages. A capture already on a box ends, because the worker has no abort route, and its record is kept. Cancelling a job that has ended is refused, naming its state.
 
 ## Where the results are
 
-`control:/var/lib/a11y-fleet-jobs/<job ID>/results/`, one record per page and pass (`<page>-<hash>.p<pass>.json`, the shape `fleet_capture.mjs` writes: `{ capturedAt, worker, status, capture }`, naming the worker and never its address) and `manifest.json`: the pages, the label, the capture body, the freeze, the pinned versions from `deploy-pins.json`, each box with its worker code, Windows build, Edge and NVDA as its `/health` reported them when the job began, whether the boxes agree on the fields that must match (recorded; it does not refuse the job), the boxes dropped and why, and every capture with its file, box, pass, status and times. `fleet job fetch` copies the directory to the agents host.
+`control:/var/lib/a11y-fleet-jobs/<job ID>/results/`, one record per page and pass (`<page>-<hash>.p<pass>.json`; for a job of cases, `<case id>.a<attempt>.json`, the shape `fleet_capture.mjs` writes: `{ capturedAt, worker, status, capture }`, naming the worker and never its address) and `manifest.json`: the pages, the label, the capture body, the freeze, the pinned versions from `deploy-pins.json`, each box with its worker code, Windows build, Edge and NVDA as its `/health` reported them when the job began, whether the boxes agree on the fields that must match (recorded; it does not refuse the job), the boxes dropped and why, and every capture with its file, box, pass, status and times. `fleet job fetch` copies the directory to the agents host.
 
-The store is files, and each has one writer: `request.json` (`submit`, once), `state.json` and `results/` (the service), `cancel` (a marker). Each carries `"version": 1`; a file of a version the service does not know fails that job and names the version.
+The store is files, and each has one writer: `request.json` (`submit`, once), `state.json` and `results/` (the service), `cancel` (a marker). Each carries `"version"`: 1 for a job of pages, 2 for a job of cases or a re-capture. A file of a version the service does not know fails that job and names the version.
 
 ## A restart
 
@@ -97,4 +135,4 @@ The service sends the workers' own `/capture` and changes nothing on any box. Th
 
 ## Not here yet
 
-Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` and the freeze's own `patch`-running guard for now), the board waking an agent when a job ends, moving `capture_fleet.py`, `q3/fleet_capture.mjs` and lab's clients onto the service (A11-246), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.
+Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` and the freeze's own `patch`-running guard for now), the board waking an agent when a job ends, moving `capture_fleet.py` and `q3/fleet_capture.mjs` onto the service (A11-246) and lab's clients (A11-263 steps 3 and 4: the service side is above, the lab's side follows), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.

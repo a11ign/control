@@ -16,8 +16,9 @@ export function buildManifest({ request, state, pins }: { request: JobRequest; s
     ...(state.readings[worker]?.policy ? { policy: state.readings[worker]!.policy! } : {}),
   }));
   const agreement = fleetConsistency(guests);
+  const cases = request.cases !== undefined;
   return {
-    version: 1,
+    version: cases ? 2 : 1,
     job: request.id,
     label: request.label,
     state: state.state,
@@ -28,6 +29,7 @@ export function buildManifest({ request, state, pins }: { request: JobRequest; s
     pages: request.pages,
     passes: request.passes,
     body: request.body,
+    ...(cases ? { cases: request.cases!.map(({ id, url, group, body, attempt }) => ({ id, url, group: group ?? id, body, attempt: attempt ?? 1 })), recaptureOf: request.recaptureOf ?? null } : {}),
     freeze: request.freeze ? { commit: request.freeze.commit, namedAt: request.freeze.namedAt } : null,
     pins,
     boxes: state.boxes.map((name) => {
@@ -40,12 +42,15 @@ export function buildManifest({ request, state, pins }: { request: JobRequest; s
         edge: environment.browserVersion ?? null,
         nvda: environment.screenReaderVersion ?? null,
         read: reading !== null && reading !== undefined,
+        // A case job's records are stamped by the client from the whole environment, so it is kept whole, beside the fields above.
+        ...(cases ? { environment: reading?.environment ?? null } : {}),
       };
     }),
     dropped: state.dropped,
     agreement: { consistent: agreement.consistent, mismatches: describeMismatches(agreement.mismatches), reportedOnly: describeReportedOnly(agreement.reportedOnly), compared: agreement.compared },
     notes: state.notes,
-    captures: state.captures.map(({ page, pass, file, box, status, startedAt, finishedAt, httpStatus, error, note }) =>
-      ({ page, pass, file, box, status, startedAt: startedAt ?? null, finishedAt: finishedAt ?? null, httpStatus: httpStatus ?? null, error: error ?? null, note: note ?? null })),
+    captures: state.captures.map(({ page, pass, file, box, status, startedAt, finishedAt, httpStatus, error, note, case: caseId, group, attempt }) =>
+      ({ page, pass, ...(cases ? { case: caseId ?? null, group: group ?? null, attempt: attempt ?? 1 } : {}),
+        file, box, status, startedAt: startedAt ?? null, finishedAt: finishedAt ?? null, httpStatus: httpStatus ?? null, error: error ?? null, note: note ?? null })),
   };
 }
