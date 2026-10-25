@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { sandboxGitEnv } from "../git-safe-env.ts";
+import { LABEL } from "../fleet-jobs/label.ts";
 
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -32,6 +33,10 @@ const executable = (text: string) => text
 
 const RUN_JOB = executable(read("tasks/run-job.yml"));
 const LAB_JOB = executable(read("lab-job.yml"));
+
+/** The three variables a capture job gives the lab's client for the fleet job service (A11-263), in the order the catalogue writes them. */
+const FLEET_ENV = (boxes: string, timeout: number): string[] =>
+  [`A11Y_FLEET_BOXES=${boxes}`, "A11Y_FLEET_LABEL={{ lab_fleet_label }}", `A11Y_FLEET_WAIT=${timeout}s`];
 
 test("the waiter polls SubState, never `systemctl is-active`", () => {
   // Measured on the lab: with `--remain-after-exit` an exited unit stays `active (exited)` for good, so
@@ -268,7 +273,10 @@ test("a job's environment additions come from the CATALOGUE, never from an extra
     const ASSERTED_FACTS = new Set(["lab_fleet_workers", "lab_named_worker", "lab_selected_workers",
       // Asserted by "A capture root must be a name, so a path cannot be expressed" -- it reaches a child
       // as an environment variable, so a path must be inexpressible rather than rejected downstream.
-      "lab_capture_root"]);
+      "lab_capture_root",
+      // The fleet job service's inputs (A11-263), asserted by "The boxes asked of the fleet job service are
+      // inventory names, a count or ready" and "A fleet label is a ticket key": see the test of that name.
+      "lab_fleet_label", "lab_fleet_boxes_workers", "lab_fleet_boxes_worker", "lab_fleet_box"]);
     for (const [, expression] of value.matchAll(/\{\{\s*([a-z_]+)[^}]*\}\}/g)) {
       assert.ok(ASSERTED_FACTS.has(expression),
         `setenv may only interpolate asserted facts; found ${expression}`);
@@ -330,13 +338,15 @@ test("evidence-check addresses the whole fleet unless it is AIMED, with a bounde
   // look identical from a dispatch. Omitted, the addresses come from `lab_fleet_workers`, built from the
   // inventory and proved to be an address list before use ("the pooled corpus job addresses the whole
   // fleet" pins that half, for the fact rather than for this job).
-  assert.deepEqual(entry.params, { sample: "optional", only: "optional", worker: "optional" },
-    "evidence-check takes a sample size, a family and a named worker, all three optional");
-  assert.deepEqual(entry.setenv ?? [], [],
-    "it needs no per-job environment even when aimed: the worker reaches it as a POSITIONAL argument, "
-    + "which is why naming one is a narrower list rather than a flag. The positive control for this "
-    + "emptiness is \"the two gates are jobs, and the one needing a worker validates it\", which pins "
-    + "`stability`'s setenv to exactly [A11Y_WORKER={{ lab_named_worker }}]");
+  assert.deepEqual(entry.params, { sample: "optional", only: "optional", worker: "optional", label: "required" },
+    "evidence-check takes a sample size, a family and a named worker, all three optional, and the "
+    + "label the fleet job service books its captures under (A11-263), which is not");
+  assert.deepEqual(entry.setenv ?? [], FLEET_ENV("{{ lab_fleet_boxes_worker }}", 7200),
+    "it needs no per-job environment for its WORKERS even when aimed: the worker reaches it as a "
+    + "POSITIONAL argument, which is why naming one is a narrower list rather than a flag. What it is "
+    + "given is only the fleet job service's inputs (A11-263), and no A11Y_WORKER(S). The positive "
+    + "control for that is \"the two gates are jobs, and the one needing a worker validates it\", which "
+    + "pins `stability`'s setenv to A11Y_WORKER plus the same three");
   const argv = [entry.argv ?? ""].flat().join(" ");
   assert.match(argv, /lab_fleet_workers/,
     "it asks whether the evidence MOVED across the corpus, and unaimed it reads that from every worker "
@@ -584,9 +594,9 @@ test("the two gates are jobs, and the one needing a worker validates it", () => 
   assert.ok(validates.includes("worker in groups['a11y_workers']"),
     "and it must be a name the inventory has: resolving a NAME is what makes a malformed address "
     + "inexpressible rather than merely rejected");
-  assert.deepEqual(jobs["stability"].setenv, ["A11Y_WORKER={{ lab_named_worker }}"],
+  assert.deepEqual(jobs["stability"].setenv, ["A11Y_WORKER={{ lab_named_worker }}", ...FLEET_ENV("{{ lab_fleet_box }}", 5400)],
     "the named worker reaches the job as an environment variable, through the derived fact and not "
-    + "through the caller's own string");
+    + "through the caller's own string, and the fleet job service is told the same box by NAME");
 
   // The address assert is guarded on the FACT rather than on the job, because every single-guest job
   // reaches it the same way — so this reads the task that actually runs, not the file.
@@ -853,9 +863,9 @@ test("a job requires a parameter exactly when its command has no fallback", () =
   // The worked cases, spelled out, because a deepEqual over 36 entries says nothing about WHY.
   const required = (name: string) => Object.entries(PLAY_VARS.lab_jobs[name].params ?? {})
     .filter(([, kind]) => kind === "required").map(([param]) => param);
-  assert.deepEqual(required("capture-only"), ["only"],
+  assert.deepEqual(required("capture-only"), ["only", "label"],
     "an empty --only= captures the WHOLE corpus, which is the run this job exists to avoid");
-  assert.deepEqual(required("stability"), ["worker"],
+  assert.deepEqual(required("stability"), ["worker", "label"],
     "A11Y_WORKER would be `http://:8765` — reached through lab_named_worker, so the derivation must "
     + "follow that fact or this correct usage is refused");
   assert.deepEqual(required("sweep"), [],
@@ -1550,4 +1560,72 @@ test("#1041: each of the THREE declaration forms is read, asserted one job per f
   assert.equal(declaresWorker(jobs.train), false,
     "a job that declares no worker must read as undeclared — without this, `declaresWorker: () => true` "
     + "passes every assertion above");
+});
+
+/**
+ * THE FLEET JOB SERVICE'S INPUTS (A11-263): which jobs hand the lab's capture clients a label, boxes and a wait, and what each is.
+ *
+ * The jobs are listed, and the list is checked both ways against the catalogue: a job that captures through the service has all three and requires a label, and a job that
+ * is not on the list has none of them, so the variables cannot spread to a job that books nothing, or be dropped from one that does.
+ */
+const FLEET_JOBS: Record<string, string> = {
+  capture: "ready", "capture-only": "{{ lab_fleet_boxes_workers }}", "capture-acceptance": "ready", "capture-acceptance-2": "ready", "capture-real-pages": "ready",
+  retrain: "ready", everything: "ready", "evidence-check": "{{ lab_fleet_boxes_worker }}", stability: "{{ lab_fleet_box }}", "gate-stability": "{{ lab_fleet_box }}",
+  "gate-probe-order": "ready", "capture-check": "{{ lab_fleet_box }}",
+};
+
+test("A11-263: every job that captures hands the lab's client its boxes, its label and a wait equal to the job's own timeout; no other job does", () => {
+  const jobs = catalogueJobs();
+  for (const [name, boxes] of Object.entries(FLEET_JOBS)) {
+    const entry = jobs[name];
+    assert.ok(entry, `${name} has left the catalogue; the fleet job service's inputs are no longer examined for it`);
+    const fleet = (entry.setenv ?? []).filter((item) => item.startsWith("A11Y_FLEET_"));
+    assert.deepEqual(fleet, FLEET_ENV(boxes, entry.timeout!), `${name}: boxes, then the label, then a wait of exactly its timeout (${entry.timeout}s), so the client's one bounded wait ends inside RuntimeMaxSec`);
+    assert.equal(entry.params?.label, "required", `${name} cannot run without a label: the service refuses a job with none`);
+  }
+  const others = Object.entries(jobs).filter(([name]) => !(name in FLEET_JOBS));
+  assert.ok(others.length > 30, `only ${others.length} other jobs were read, so this examined too little of the catalogue`);
+  for (const [name, entry] of others) {
+    assert.deepEqual((entry.setenv ?? []).filter((item) => item.startsWith("A11Y_FLEET_")), [], `${name} books nothing on the fleet and is given nothing for it`);
+    assert.ok(!("label" in (entry.params ?? {})), `${name} takes no label: Ansible would discard it and the caller would believe it was applied`);
+  }
+});
+
+test("A11-263: a job without a label is refused naming the parameter, and a label that is not a ticket key is refused", () => {
+  const params = PLAY_VARS.lab_caller_params;
+  assert.ok(params.includes("label"), "-e label= is a published parameter");
+  assert.match(LAB_JOB, /needs -e \{\{ item\.key \}\}=/, "the refusal of a missing required parameter names it");
+  assert.match(LAB_JOB, /loop: "\{\{ job_params \| dict2items \| selectattr\('value', 'equalto', 'required'\)/);
+  assert.ok(assertClausesWhen(/^'label' in job_params$/).includes("lab_fleet_label == lab_fleet_label | trim"), "a trailing newline, which `match`'s `$` lets through, is refused");
+  assert.ok(assertClausesWhen(/^'label' in job_params$/).includes("lab_fleet_label is match('^[A-Za-z0-9._-]{1,64}$')"),
+    "a label is the service's own shape (letters, digits, '.', '_', '-', at most 64): it reaches a child as an environment variable");
+  const label = LABEL;
+  assert.ok(assertClausesWhen(/^'label' in job_params$/).includes(`lab_fleet_label is match('${LABEL.source}')`), "the playbook states the service's own label shape (src/fleet-jobs/label.ts)");
+  for (const good of ["A11-263", "A11-263.retry_2"]) assert.ok(label.test(good), good);
+  for (const bad of ["", "../x", "a b", "a;b", "x".repeat(65), "$(id)"]) assert.ok(!label.test(bad), JSON.stringify(bad));
+});
+
+test("A11-263: the boxes asked of the service are built from names the inventory has, a count or ready, and proved before the job is dispatched", () => {
+  const clauses = assertClausesWhen(/^/);
+  for (const clause of ["lab_fleet_boxes_workers is match('^[A-Za-z0-9_.,-]+$')", "lab_fleet_boxes_worker is match('^[A-Za-z0-9_.,-]+$')"]) {
+    assert.ok(clauses.includes(clause), `${clause} is asserted`);
+  }
+  assert.match(LAB_JOB, /lab_fleet_box: "\{\{ worker \| default\(''\) \| string \}\}"/);
+  // Names are trimmed as the selection above trims them, so `workers=a, b` is the run it always was; and a trailing newline, which `match`'s `$` lets through, is refused.
+  assert.match(LAB_JOB, /lab_fleet_boxes_workers: "\{\{ workers \| default\('ready'\) \| string \| split\(','\) \| map\('trim'\) \| select \| join\(','\) \}\}"/);
+  for (const clause of ["lab_fleet_boxes_workers == lab_fleet_boxes_workers | trim", "lab_fleet_boxes_worker == lab_fleet_boxes_worker | trim", "lab_fleet_box == lab_fleet_box | trim"]) {
+    assert.ok(clauses.includes(clause), `${clause} is asserted`);
+  }
+  const built = LAB_JOB.indexOf("Which boxes and which label the fleet job service is given");
+  const proved = LAB_JOB.indexOf("The boxes asked of the fleet job service are inventory names");
+  const used = LAB_JOB.indexOf("Run {{ job }}");
+  assert.ok(built > 0 && built < proved && proved < used, "build, then prove, then use");
+  // The worker's NAME was asserted against the inventory above, so these facts are inventory names; a count is checked against the fleet by "A worker selection must name a pool the fleet can actually give".
+  assert.ok(assertClausesWhen(/^workers is defined$/).includes("lab_selected_hosts | difference(groups['a11y_workers']) | length == 0"));
+  // The derivation (`derivedParams` above) reads which parameter each fact stands for from these aliases, so each must say the right one.
+  const aliases = PLAY_VARS.lab_param_aliases;
+  assert.equal(aliases.lab_fleet_label, "label");
+  assert.equal(aliases.lab_fleet_boxes_workers, "workers | default('ready')");
+  assert.equal(aliases.lab_fleet_boxes_worker, "worker | default('ready')");
+  assert.equal(aliases.lab_fleet_box, "worker");
 });

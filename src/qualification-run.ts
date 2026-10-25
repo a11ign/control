@@ -61,6 +61,7 @@ import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./git-safe-env.ts";
 import { commitOfTag, publishedCommits, readDeployPins, type DeployPins, type LabPin } from "./layer-pins.ts";
 import { renderResult, requireFullSha, EXIT, type Outcome } from "./post-qualification-status.ts";
+import { LABEL_WORDS, validLabel } from "./fleet-jobs/label.ts";
 
 export const QUALIFY_FLAG = "--qualify-sha=";
 
@@ -144,7 +145,7 @@ function runLabel(record: JobRecord | undefined): string | undefined {
  * The qualification request on a command line: the sha, and the argv to dispatch (the flag stripped, the
  * ref pinned), or the reason this cannot be a qualified run. `undefined` when the flag is absent.
  */
-export function qualificationRequest(argv: string[], { job, row, ref, worker, describeOnly }: { job: string | undefined; row: string | undefined; ref: string | undefined; worker?: string | undefined; describeOnly: boolean; }): { sha: string; row: number; argv: string[]; } | { refusal: string; } | undefined {
+export function qualificationRequest(argv: string[], { job, row, ref, worker, label, describeOnly }: { job: string | undefined; row: string | undefined; ref: string | undefined; worker?: string | undefined; label?: string | undefined; describeOnly: boolean; }): { sha: string; row: number; argv: string[]; } | { refusal: string; } | undefined {
   const flag = argv.find((arg) => arg.startsWith(QUALIFY_FLAG));
   if (flag === undefined) return undefined;
   const sha = flag.slice(QUALIFY_FLAG.length);
@@ -171,9 +172,27 @@ export function qualificationRequest(argv: string[], { job, row, ref, worker, de
     return { refusal: `REFUSING ${QUALIFY_FLAG}: -e ref=${ref} would run the lab at a different commit from the sha `
       + "being qualified. Drop the ref: it is set from the sha." };
   }
+  const badLabel = labelRefusal(label);
+  if (badLabel !== null) return { refusal: badLabel };
+  return { sha, row: Number(row), argv: dispatchArgv(argv, { sha, row: Number(row), ref, label }) };
+}
+
+/**
+ * A11-263: the playbook refuses a label that is not a ticket key too, but after `pending` is posted (#3988), so it is refused here; no label is fine, `dispatchArgv` supplies one.
+ */
+function labelRefusal(label: string | undefined): string | null {
+  if (label === undefined || validLabel(label)) return null;
+  return `REFUSING ${QUALIFY_FLAG}: -e label=${label} is not a ticket key (${LABEL_WORDS}), and the playbook refuses a launch with it, after which a refused launch has no verdict.`;
+}
+
+/**
+ * What a qualified run dispatches: the caller's arguments without the flag, the ref pinned to the sha, and a label. The job books the fleet job service under a label, which the playbook REQUIRES
+ * and refuses a launch without AFTER `pending` is posted (the #3988 trap again); the release flow names a row, not a ticket, so a run given no label is booked as `qualify-<row>` and one given a label keeps it.
+ */
+function dispatchArgv(argv: string[], { sha, row, ref, label }: { sha: string; row: number; ref: string | undefined; label: string | undefined }): string[] {
   const forwarded = argv.filter((arg) => !arg.startsWith(QUALIFY_FLAG));
   const pinned = ref === undefined ? [...forwarded, "-e", `ref=${sha}`] : forwarded;
-  return { sha, row: Number(row), argv: pinned };
+  return label === undefined ? [...pinned, "-e", `label=qualify-${row}`] : pinned;
 }
 
 /**

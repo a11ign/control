@@ -1,48 +1,35 @@
-A11-263 (https://linear.app/a11ign/issue/A11-263/the-fleet-job-service-supports-labs-captures-per-case-bodies-same-box), step 1 of 4. The fleet job service takes jobs of cases: a body per case, cases held to one box (a good/bad pair, a page's repeats), `skipWhen`, and `fleet job recapture` for named cases of a finished job under the same lease rules (A11-244).
+A11-263 (https://linear.app/a11ign/issue/A11-263/the-fleet-job-service-supports-labs-captures-per-case-bodies-same-box), step 2 of 4. The lab reaches the fleet job service, and the lab catalogue hands its capture jobs a label and boxes.
 
-What the change does: `src/fleet-jobs/` (`cases.ts` new; the plan, runner, manifest, store, remote half, CLI, views and fake fleet), `docs/fleet-jobs.md`, and two new test files, `cases.test.ts` and `recapture.test.ts`. Lab's clients move in steps 3 and 4; the lab's route to the service is step 2.
+What the change does: `src/fleet-jobs/gate.ts` is the forced command for the lab's key: it runs `remote.ts` only in the form `controlPlaneTransport` sends and refuses everything else (exit 2). `ansible/fleet-jobs-lab-access.yml` makes the key on the lab, installs it on the control plane behind the gate, lays the `fleet` command on the lab, and reads back from the lab. `ansible/lab-job.yml` makes `label` a required parameter of every job that captures and gives those jobs `A11Y_FLEET_BOXES`, `A11Y_FLEET_LABEL` and `A11Y_FLEET_WAIT`. `lab:pipeline` takes `--label`, and a qualified `gate-stability` run with no label is booked as `qualify-<row>`. Lab's own clients move in steps 3 and 4.
 
 Acceptance:
 
 ```bash
 set -euo pipefail
 pnpm install --frozen-lockfile
-# A pair on one box, a body per case, a re-capture after a failed evidence check (on the pair's box, as <case>.a2.json), the re-capture queueing behind a held box, skipWhen, a restart moving or failing a group, a store version 2 refused by a version-1 reader, and the CLI's refusals.
-node --import tsx --test --test-concurrency=1 src/fleet-jobs/cases.test.ts src/fleet-jobs/recapture.test.ts
-# Everything the page job did before still does.
+# The gate: the exact form runs (a submit, a tar, a quote inside an argument); a second command, another path or loader, an unquoted argument, an empty command are refused with exit 2, run as a real process too; and the play installs the key as restrict,command=<the gate>, makes it on the lab, reads only the public half, and reads back from the lab.
+node --import tsx --test --test-concurrency=1 src/fleet-jobs/gate.test.ts
+# The service is unchanged: its import rule holds with the gate beside it, and step 1's tests still pass.
 node --import tsx --test --test-concurrency=1 src/fleet-jobs/*.test.ts src/fleet-leases/*.test.ts
+ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook --syntax-check -i localhost, ansible/fleet-jobs-lab-access.yml
+ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook --syntax-check -i localhost, ansible/lab-job.yml
 pnpm typecheck
 pnpm test
 ```
 
-**What the block shows:** every group of a case job sits on one box, good before bad; each worker is asked with exactly its case's body plus `url`; a rejected `bad` is re-captured by `fleet job recapture` on the box its `good` was taken on, as `x.bad.a2.json`, and the new manifest names `recaptureOf`; a re-capture queues while another job holds its box; a group whose `skipWhen` matches sends nothing and writes no record; a version-2 request is failed by name by a reader that accepts only version 1; page jobs are unchanged.
+In the core's lay (`ci.yml` lays this repository into a checkout of a11ign/a11ign as `packages/control`, which has `yaml` and the toolchain these import), these also pass: `src/control-owned/lab-job.test.ts` (the `label` parameter is required on exactly the twelve jobs and the three variables are set on exactly those; a malformed label and a bad box are refused), `src/lab-job.test.ts` (a qualified run with no label is booked as `qualify-<row>`) and `src/lab-pipeline.test.ts` (`--label` reaches exactly the stages that take one).
 
-**Live check before merge** (the chairman session, from the agents host; the standing approval of 2026-10-17 covers the Ansible play): put this branch on the control plane, run two case jobs of two public pages each, then re-capture one case. A pass is both manifests showing each group on one box, and the re-capture's case on the box of its group in the source job, with `recaptureOf` set.
+**What the block shows:** the gate runs the one request `fleet` sends and nothing else; the play's text keeps the private key on the lab; every capture job requires a label and is given its boxes, label and wait.
+
+**Live check, AFTER merge** (the chairman's session, from the agents host; the ticket's Decisions entry "The lab-access play is an after-merge check" (https://linear.app/a11ign/issue/A11-263/the-fleet-job-service-supports-labs-captures-per-case-bodies-same-box) moves it there, because the play needs this code on the control plane and the fleet is frozen). The play touches the control plane and the lab, and no fleet box. A pass is the play's last two tasks succeeding: the lab's `fleet lease list --json` answers JSON, and the gate refuses `id` with its own words.
 
 ```bash
 set -euo pipefail
-set -a; . ~/.config/a11ign/fleet.env; set +a
 BRANCH=admin/a11-263-the-fleet-job-service-supports-labs-captures-per-case-bodies
-OUT="${TMPDIR:-/tmp}/a11-263-live"; mkdir -p "$OUT"
-pnpm run fleet:jobs-install -- -e fleet_jobs_ref="$BRANCH"
-cat > "$OUT/cases.json" <<'JSON'
-{ "cases": [
-  { "id": "ex-com.one", "url": "https://example.com/", "body": { "steps": 40, "probeTables": true }, "group": "ex-com" },
-  { "id": "ex-com.two", "url": "https://example.com/", "body": { "steps": 40 }, "group": "ex-com" },
-  { "id": "ex-org.one", "url": "https://example.org/", "body": { "steps": 40, "probeForms": true }, "group": "ex-org" },
-  { "id": "ex-org.two", "url": "https://example.org/", "body": { "steps": 40 }, "group": "ex-org" } ] }
-JSON
-ID=$(pnpm run --silent fleet -- capture submit --cases "$OUT/cases.json" --boxes 2 --label A11-263)
-pnpm run --silent fleet -- job wait "$ID" --timeout 60m
-pnpm run --silent fleet -- job status "$ID" --json
-pnpm run --silent fleet -- job fetch "$ID" --to "$OUT"
-RE=$(pnpm run --silent fleet -- job recapture "$ID" --cases ex-com.two --label A11-263)
-pnpm run --silent fleet -- job wait "$RE" --timeout 60m
-pnpm run --silent fleet -- job status "$RE" --json
-pnpm run --silent fleet -- job fetch "$RE" --to "$OUT"
-# the boxes: each group on one, and the re-captured case on its group's box
-OUT="$OUT" node -e 'for (const id of process.argv.slice(1)) { const m = require(process.env.OUT + "/" + id + "/manifest.json"); console.log(id, m.recaptureOf, m.captures.map((c) => `${c.case}.a${c.attempt}@${c.box}:${c.status}`).join(" ")); }' "$ID" "$RE"
-# afterwards, put the service back on main once the pull request is merged: pnpm run fleet:jobs-install
+pnpm run fleet:jobs-install -- -e fleet_jobs_ref="$BRANCH"        # the service, and so gate.ts, on the plane
+ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-lab-access.yml -e fleet_jobs_ref="$BRANCH"
+# expect: "the lab reads the plane's leases: N held" and "the gate refused `id`: refused: this key runs only the fleet job service's remote half ..."
+# after the merge the branch above is `main`: run fleet:jobs-install and the lab-access play with no -e (the default ref is main), and quote the two read-backs on the ticket
 ```
 
-This step changes the service and its CLI only; lab's clients are not moved yet, so nothing else submits case jobs until step 3.
+This step changes nothing a lab client reads yet: the variables are read from step 3. It does make `label` required of the jobs above, so a launch of one (including a lab gate dispatch) needs `-e label=<ticket key>` from now on.

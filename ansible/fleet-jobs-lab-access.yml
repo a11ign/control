@@ -1,0 +1,226 @@
+---
+# Give the lab its way to the fleet job service, and nothing else on the control plane. A11-263.
+#
+#     ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-lab-access.yml
+#     ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-lab-access.yml -e fleet_jobs_ref=<branch|tag>   # the lab's CLI on another ref, to prove a branch before it merges
+#
+# Run it from the agents host, which reaches both the lab and the control plane. ADR `0004-the-lab-submits-fleet-jobs-through-a-forced-command-key` gives the reasons.
+#
+# ## What it does
+#
+# 1. On the lab it makes `/root/.ssh/a11y-fleet-jobs` (ed25519) if it is absent, and reads the public half. The private half is made on the lab and never leaves it: nothing here fetches,
+#    copies or reads it (ADR 0012 keeps every key that can reach the control plane off a machine that was not meant to hold one, and this key reaches it only through the gate below).
+# 2. On the control plane it puts that public key in root's `authorized_keys` as `restrict,command="… src/fleet-jobs/gate.ts" <key> a11y-lab-fleet-jobs`, replacing any earlier line
+#    with that comment. The gate runs the job service's remote half with the arguments `fleet` sends and refuses every other command, so the key can submit, re-capture, follow,
+#    cancel, list and fetch capture jobs, and cannot provision, deploy, sleep or reconfigure a box. The gate is in the service's own checkout (`/root/fleet-jobs`), which
+#    `fleet-jobs-install.yml` moves: run that first, at a ref that holds `gate.ts`.
+# 3. On the lab it checks out control at `fleet_jobs_ref` into `/opt/a11y-fleet-cli` and installs its lockfile alone (`--frozen-lockfile --ignore-scripts`, as `fleet-jobs-install.yml`
+#    does), writes `/etc/a11ign/fleet.env` (the key and the plane's address) and `/usr/local/bin/fleet`, which sources it and runs the CLI.
+# 4. It reads back FROM THE LAB: `fleet lease list --json` answers JSON, and `ssh -i <the key> root@<control plane> id` is refused by the gate (exit 2).
+#
+# ## Rotating the key
+#
+# Remove `/root/.ssh/a11y-fleet-jobs` and `.pub` on the lab and run this play again: it makes a new key and replaces the line on the plane, which is found by its comment.
+#
+# ## What it changes on a fleet box
+#
+# Nothing. It touches the lab and the control plane, and the lab's key reaches the job service only (A11-243).
+- name: The lab and the control plane must be in the inventory before anything claims to have run
+  # `ansible-playbook` prints `skipping: no hosts matched` and exits 0 on zero hosts (#1980), so this precondition runs on localhost first.
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The lab must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_lab
+        inventory_group_noun: lab
+
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control plane
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: The lab makes its own key for the fleet job service (A11-263)
+  hosts: a11y_lab
+  gather_facts: false
+  tasks:
+    - name: The lab's .ssh directory exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # `creates` makes this a no-op once the key exists, so a re-run never replaces a key the plane already trusts. Rotation is removing the files first.
+    - name: Make the key, on the lab, if it is absent
+      ansible.builtin.command:
+        argv: [ssh-keygen, -t, ed25519, -N, "", -C, a11y-lab-fleet-jobs, -f, /root/.ssh/a11y-fleet-jobs]
+        creates: /root/.ssh/a11y-fleet-jobs
+
+    # THE ONE FILE READ OFF THE LAB IS THE PUBLIC HALF.
+    - name: Read the public half
+      ansible.builtin.slurp:
+        src: /root/.ssh/a11y-fleet-jobs.pub
+      register: lab_fleet_jobs_pub_file
+
+    # `<type> <base64>` and no comment: the line on the plane adds its own, which is how the earlier line is found.
+    - name: The public key is one ed25519 key
+      ansible.builtin.set_fact:
+        lab_fleet_jobs_pub: "{{ (lab_fleet_jobs_pub_file.content | b64decode | trim).split(' ')[:2] | join(' ') }}"
+
+    - name: Refuse anything that is not exactly an ed25519 public key
+      ansible.builtin.assert:
+        that:
+          - lab_fleet_jobs_pub is match('^ssh-ed25519 AAAA[A-Za-z0-9+/]+=*$')
+        fail_msg: "/root/.ssh/a11y-fleet-jobs.pub on the lab does not hold one ssh-ed25519 key, so nothing was put on the control plane."
+
+- name: The control plane accepts that key for the gate only (A11-263)
+  hosts: a11y_control
+  gather_facts: false
+  vars:
+    fleet_jobs_ref: main
+    fleet_jobs_checkout: /root/fleet-jobs
+    # The `tsx` the control plane's TypeScript runs under, the same install `fleet-jobs-install.yml` asserts and the unit names.
+    control_tsx_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
+    lab_fleet_jobs_pub: "{{ hostvars[groups['a11y_lab'][0]].lab_fleet_jobs_pub }}"
+  tasks:
+    - name: The gate is in the service's own checkout
+      ansible.builtin.stat:
+        path: "{{ fleet_jobs_checkout }}/src/fleet-jobs/gate.ts"
+      register: lab_fleet_jobs_gate
+
+    - name: Refuse to install a key whose forced command is not there
+      ansible.builtin.assert:
+        that: lab_fleet_jobs_gate.stat.exists
+        fail_msg: >-
+          {{ fleet_jobs_checkout }}/src/fleet-jobs/gate.ts is not on the control plane, so the key would run nothing. Put the service on a ref that holds it first:
+          `pnpm run fleet:jobs-install -- -e fleet_jobs_ref=<branch|main>`.
+
+    # The line is found by its comment, so a rotation replaces it and a re-run with the same key changes nothing. `restrict` turns off every ssh feature (forwarding, pty, agent,
+    # X11, user rc), and `command=` makes sshd run the gate whatever the lab asked for.
+    - name: The lab's key runs the gate and nothing else
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        regexp: ' a11y-lab-fleet-jobs$'
+        line: 'restrict,command="/usr/bin/node --import {{ control_tsx_loader }} {{ fleet_jobs_checkout }}/src/fleet-jobs/gate.ts" {{ lab_fleet_jobs_pub }} a11y-lab-fleet-jobs'
+        create: false
+        owner: root
+        group: root
+        mode: "0600"
+
+- name: The lab gets the fleet command, and proves it reaches the service and only the service (A11-263)
+  hosts: a11y_lab
+  gather_facts: false
+  vars:
+    fleet_jobs_ref: main
+    fleet_jobs_repo_url: https://github.com/a11ign/control.git
+    fleet_cli_checkout: /opt/a11y-fleet-cli
+    control_corepack: /usr/bin/corepack
+    lab_control_host: "{{ hostvars[groups['a11y_control'][0]].ansible_host }}"
+  tasks:
+    - name: The lab's checkout of control is at the ref asked for
+      ansible.builtin.git:
+        repo: "{{ fleet_jobs_repo_url }}"
+        dest: "{{ fleet_cli_checkout }}"
+        version: "{{ fleet_jobs_ref }}"
+        update: true
+
+    - name: Read the pnpm version that checkout's package.json pins
+      ansible.builtin.slurp:
+        src: "{{ fleet_cli_checkout }}/package.json"
+      register: fleet_cli_manifest
+
+    - name: The pin must be one exact pnpm version
+      ansible.builtin.set_fact:
+        fleet_cli_pnpm_pin: "{{ (fleet_cli_manifest.content | b64decode | from_json).packageManager | default('', true) }}"
+
+    - name: Refuse a manifest that pins no exact pnpm, rather than install whichever is newest
+      ansible.builtin.assert:
+        that: fleet_cli_pnpm_pin is match('^pnpm@[0-9]+[.][0-9]+[.][0-9]+$')
+        fail_msg: "{{ fleet_cli_checkout }}/package.json has packageManager \"{{ fleet_cli_pnpm_pin }}\", which is not an exact pnpm version (`pnpm@X.Y.Z`). Nothing has been installed."
+
+    - name: Activate that pnpm through corepack
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", prepare, "{{ fleet_cli_pnpm_pin }}", --activate]
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      changed_when: false
+
+    # THE ONE INSTALL ADR 0012 allows as amended by ADR 0045 cut 9, the same as the service's own: the lockfile decides and no install script runs.
+    - name: Install the checkout's dependencies, from the lockfile alone
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", pnpm, install, --frozen-lockfile, --ignore-scripts]
+        chdir: "{{ fleet_cli_checkout }}"
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      register: fleet_cli_install
+      changed_when: "'Already up to date' not in fleet_cli_install.stdout"
+
+    - name: The directory for the command's settings exists
+      ansible.builtin.file:
+        path: /etc/a11ign
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: The key and the control plane's address the command reaches the service with
+      ansible.builtin.copy:
+        dest: /etc/a11ign/fleet.env
+        content: |
+          A11Y_PVE_KEY=/root/.ssh/a11y-fleet-jobs
+          A11Y_CONTROL_HOST={{ hostvars[groups['a11y_control'][0]].ansible_host }}
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: The fleet command
+      ansible.builtin.copy:
+        dest: /usr/local/bin/fleet
+        content: |
+          #!/bin/sh
+          set -a; . /etc/a11ign/fleet.env; set +a; exec /usr/bin/node /opt/a11y-fleet-cli/src/fleet-jobs/cli.ts "$@"
+        owner: root
+        group: root
+        mode: "0755"
+
+    # READ BACK FROM THE LAB, over the key and the gate: an answer that is JSON with the ledger's two lists is the service answering, not a banner or an error page.
+    - name: The lab can ask the service for its leases
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fleet, lease, list, --json]
+      register: lab_fleet_jobs_leases
+      changed_when: false
+
+    - name: The answer is the lease ledger
+      ansible.builtin.assert:
+        that:
+          - lab_fleet_jobs_leases.stdout | from_json is mapping
+          - "'leases' in (lab_fleet_jobs_leases.stdout | from_json)"
+          - "'queue' in (lab_fleet_jobs_leases.stdout | from_json)"
+        fail_msg: "`fleet lease list --json` on the lab answered {{ lab_fleet_jobs_leases.stdout | truncate(200) }}, which is not the lease ledger."
+        success_msg: "the lab reads the plane's leases: {{ (lab_fleet_jobs_leases.stdout | from_json).leases | length }} held"
+
+    # ANY OTHER COMMAND IS REFUSED BY THE GATE, and its exit 2 is how this tells the gate from ssh itself (255) or the key failing to authenticate.
+    - name: Any other command over that key is refused
+      ansible.builtin.command:
+        argv: [ssh, -i, /root/.ssh/a11y-fleet-jobs, -o, IdentitiesOnly=yes, -o, BatchMode=yes, -o, StrictHostKeyChecking=no, -o, ConnectTimeout=10, "root@{{ lab_control_host }}", id]
+      register: gate_probe
+      changed_when: false
+      failed_when: false
+
+    - name: The gate said no
+      ansible.builtin.assert:
+        that:
+          - gate_probe.rc == 2
+          - "'refused: this key runs only the fleet job service' in gate_probe.stderr"
+          - "'uid=' not in gate_probe.stdout"
+        fail_msg: >-
+          `id` over the lab's key was not refused by the gate (rc {{ gate_probe.rc }}, stdout {{ gate_probe.stdout | truncate(120) }}, stderr {{ gate_probe.stderr | truncate(200) }}).
+          The key must run the gate only: remove its line from /root/.ssh/authorized_keys on the control plane.
+        success_msg: "the gate refused `id`: {{ gate_probe.stderr | trim }}"

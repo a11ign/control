@@ -133,6 +133,36 @@ The service runs from its own checkout, `/root/fleet-jobs`, moved only by this p
 
 The service sends the workers' own `/capture` and changes nothing on any box. The fleet stays frozen (A11-205).
 
+## From the lab (A11-263)
+
+The lab's capture clients run on the lab (CT 121, under `lab:job`), beside the corpus and the page server they lease, and they submit to this service like any other client. The lab holds no fleet key (ADR 0012). It holds its own key to the control plane, made on the lab and never copied off it, which the control plane accepts only as `restrict,command="… src/fleet-jobs/gate.ts"`. [`docs/adr/0004`](adr/0004-the-lab-submits-fleet-jobs-through-a-forced-command-key.md) gives the reasons.
+
+```bash
+ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-lab-access.yml                          # the key, the gate's line, the lab's `fleet` command, and the read-back
+ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/fleet-jobs-lab-access.yml -e fleet_jobs_ref=<branch>  # the lab's CLI on another ref, to prove a branch before it merges
+```
+
+Run it from the agents host, which reaches both machines, after `fleet:jobs-install` has put the service on a ref that holds `gate.ts` (the play refuses otherwise). It:
+
+1. makes `/root/.ssh/a11y-fleet-jobs` (ed25519) on the lab if it is absent, and reads only the public half;
+2. puts that key in root's `authorized_keys` on the control plane as `restrict,command="/usr/bin/node --import <loader> /root/fleet-jobs/src/fleet-jobs/gate.ts" <key> a11y-lab-fleet-jobs`, replacing any earlier line with that comment (to rotate, remove the two key files on the lab and run it again);
+3. checks out control at the ref (default `main`) into `/opt/a11y-fleet-cli`, installs its lockfile alone (`--frozen-lockfile --ignore-scripts`), writes `/etc/a11ign/fleet.env` (`A11Y_PVE_KEY`, `A11Y_CONTROL_HOST`) and `/usr/local/bin/fleet`;
+4. reads back from the lab: `fleet lease list --json` answers the ledger's JSON, and `ssh -i /root/.ssh/a11y-fleet-jobs root@<control plane> id` is refused by the gate (exit 2).
+
+**The gate** (`src/fleet-jobs/gate.ts`) reads `SSH_ORIGINAL_COMMAND` and accepts exactly what `controlPlaneTransport` sends: `cd /root/fleet-jobs && /usr/bin/node --import <loader> src/fleet-jobs/remote.ts` followed by single-quoted arguments. It unquotes them and runs `remote.ts` with them as an argument list (no shell, stdin and stdout passed through, the exit code returned), so `submit`, `recapture`, `status`, `cancel`, `list`, `lease-list` and `tar` work and nothing else does. Any other request (a second command, another path or loader, an unquoted argument, an empty command) is refused on stderr with the command it was given, exit 2. The lab's key therefore submits, re-captures, follows, cancels, lists and fetches capture jobs, and provisions, deploys, sleeps and reconfigures nothing.
+
+**What a capture job needs from `lab:job`.** Every job that captures through the service (`capture`, `capture-only`, `capture-acceptance` and `-2`, `capture-real-pages`, `retrain`, `everything`, `evidence-check`, `stability`, `gate-stability`, `gate-probe-order`, `capture-check`) requires `-e label=<ticket key>` (shape `^[A-Za-z0-9._-]{1,64}$`; a launch without it is refused naming the parameter, before anything is dispatched) and gives the lab's client three environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `A11Y_FLEET_BOXES` | `-e workers=` (`capture-only`: names, a count or `ready`), or `-e worker=` (the stability gates and `capture-check`: one name; `evidence-check`: one name, optional), else `ready` |
+| `A11Y_FLEET_LABEL` | the `label` |
+| `A11Y_FLEET_WAIT` | the job's own `timeout` as `<seconds>s`, so the client's one bounded `fleet job wait` ends inside the unit's `RuntimeMaxSec` |
+
+`lab:pipeline` takes `--label=<ticket key>` and gives it to the stages that take one; a pipeline that captures is refused without it. A qualified `gate-stability` run (`--qualify-sha`) that names no label is booked as `qualify-<row>`.
+
+The old `A11Y_WORKERS`, `A11Y_WORKER`, `--worker=` and positional addresses stay on these jobs while the lab on the lab host is older than the clients that read the new variables; a later change removes them.
+
 ## Not here yet
 
-Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` and the freeze's own `patch`-running guard for now), the board waking an agent when a job ends, moving `capture_fleet.py` and `q3/fleet_capture.mjs` onto the service (A11-246) and lab's clients (A11-263 steps 3 and 4: the service side is above, the lab's side follows), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.
+Leases for the person-run plays (`fleet:deploy`, `fleet:provision`, `fleet:patch`, `fleet:recover`: they keep the whole-fleet `fleet-lock.ts` and the freeze's own `patch`-running guard for now), the board waking an agent when a job ends, moving `capture_fleet.py` and `q3/fleet_capture.mjs` onto the service (A11-246) and lab's clients (A11-263 steps 3 and 4: the service side and the lab's route to it are above; the clients themselves follow), the recipe in the house notes (A11-247), and retention for the store. `README.md`, `CLAUDE.md` and `ansible/README.md` do not point here yet, because A11-205 holds those files.
