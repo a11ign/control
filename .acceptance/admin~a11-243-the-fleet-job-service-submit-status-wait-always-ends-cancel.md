@@ -32,4 +32,4 @@ pnpm run --silent fleet -- job fetch "$ID" --to "${TMPDIR:-/tmp}/a11-243-results
 
 **After merge, run by the chairman session:** `pnpm run fleet:jobs-install` (the default ref, `main`) puts the service back on `main`; it passes when the play's read-back says `a11y-fleet-jobs.service is running at <main's commit>`. The ticket's After-merge line, that an agent's next fleet capture goes through the service, follows from A11-246 moving the callers.
 
-Refs A11-243
+Closes A11-243

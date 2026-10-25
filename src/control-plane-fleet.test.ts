@@ -218,8 +218,9 @@ test("A11-243: controlPlaneInvocation is the one route to the control plane: ssh
     assert.deepEqual(away.args.slice(0, 2), ["-i", "/keys/pve"]);
     assert.deepEqual(away.args.slice(-2), ["root@192.0.2.77", "echo hi"], "the command is the last argument, the host the one before it");
     assert.ok(away.args.includes("ConnectTimeout=10"));
-    const loopback = Object.values(networkInterfaces() as Record<string, { address: string }[]>).flat()[0]?.address;
-    process.env.A11Y_CONTROL_HOST = loopback;
+    const own = Object.values(networkInterfaces()).flat().find((iface) => iface?.address)?.address;
+    assert.ok(own, "positive control: this machine has an interface address to stand in for the plane's own");
+    process.env.A11Y_CONTROL_HOST = own;
     assert.deepEqual(controlPlaneInvocation("echo hi"), { file: "sh", args: ["-c", "cd /root && echo hi"] }, "this machine IS the plane: no ssh to yourself");
   } finally {
     for (const [name, value] of [["A11Y_CONTROL_HOST", was.host], ["A11Y_PVE_KEY", was.key]] as const) {
