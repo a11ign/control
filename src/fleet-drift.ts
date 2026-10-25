@@ -142,10 +142,8 @@ const sameExpectation = (a: ExpectedFleet | null, b: ExpectedFleet | null): bool
  * - `firstSeenAt` is the previous record's while both readings have a failure (a difference, or a manifest that cannot be read), and `now` when this one
  *   begins a run; `null` when there is no failure.
  */
-export function driftRecordOf({ drift, probes, previous, previousUnreadable = false, freeze, now, skipped = {} }: {
+export function driftRecordOf({ drift, probes, previous, previousUnreadable = false, freeze, now }: {
   drift: FleetDrift; probes: WorkerProbe[]; previous: DriftRecord | null; previousUnreadable?: boolean; freeze: FreezeRun | null; now: Date;
-  /** Boxes in `probes` that were not asked because a `maintain` lease held them: they read as unreachable, with their differences carried. */
-  skipped?: Record<string, string>;
 }): DriftRecord {
   const unreachable = probes.filter((probe) => !probe.reachable).map((probe) => inventoryName(probe.name))
     .sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
@@ -162,7 +160,7 @@ export function driftRecordOf({ drift, probes, previous, previousUnreadable = fa
     checkedAt,
     firstSeenAt: !failing ? null : (previousFailing && previous.firstSeenAt !== null ? previous.firstSeenAt : checkedAt),
     expected: drift.expected, unreadable: drift.unreadable,
-    reachable: probes.length - unreachable.length, total: probes.length, unreachable, differences, freeze, carryLost, skipped,
+    reachable: probes.length - unreachable.length, total: probes.length, unreachable, differences, freeze, carryLost, skipped: {},
   };
 }
 
@@ -192,6 +190,19 @@ function freezeLines(freeze: FreezeRun | null): string[] {
   return lines;
 }
 
+/** The boxes this reading did not get an answer from, and why: held by a lease, silent, or all of them. */
+function unreadLines(record: DriftRecord): string[] {
+  const lines: string[] = [];
+  const skipped = Object.entries(record.skipped).map(([box, why]) => `${box} (${why})`);
+  if (skipped.length > 0) lines.push(`not read this time (a lease held the box; its last differences are carried): ${skipped.join(", ")}`);
+  const silent = record.unreachable.filter((box) => !(box in record.skipped));
+  if (silent.length > 0) lines.push(`not read (unreachable, not a difference): ${silent.join(", ")}`);
+  if (record.reachable === 0) {
+    lines.push(record.total > 0 && skipped.length === record.total ? "every box was under a lease: nothing was compared" : "no box answered: nothing was compared");
+  }
+  return lines;
+}
+
 /** The lines a person reads, one per fact. A carried difference says so: the box did not answer this hour. */
 export function driftLines(record: DriftRecord): string[] {
   const lines: string[] = [];
@@ -206,13 +217,7 @@ export function driftLines(record: DriftRecord): string[] {
   if (record.differences.length === 0 && record.unreadable === null && record.carryLost.length === 0 && record.reachable > 0 && record.expected !== null) {
     lines.push(`fleet on the manifest — ${DRIFT_FIELDS.map((field) => `${field}: ${record.expected?.[field]}`).join("; ")}; all ${record.reachable} boxes that answered`);
   }
-  const skipped = Object.entries(record.skipped).map(([box, why]) => `${box} (${why})`);
-  if (skipped.length > 0) lines.push(`not read this time (a lease held the box; its last differences are carried): ${skipped.join(", ")}`);
-  const silent = record.unreachable.filter((box) => !(box in record.skipped));
-  if (silent.length > 0) lines.push(`not read (unreachable, not a difference): ${silent.join(", ")}`);
-  if (record.reachable === 0) {
-    lines.push(record.total > 0 && Object.keys(record.skipped).length === record.total ? "every box was under a lease: nothing was compared" : "no box answered: nothing was compared");
-  }
+  lines.push(...unreadLines(record));
   return [...lines, ...freezeLines(record.freeze)];
 }
 
@@ -316,7 +321,8 @@ export async function bookedReading({ workers, ledger, deps = {}, previous, free
     const held = workers.filter(({ name }) => inventoryName(name) in skipped);
     const { drift, probes } = await readFleetDrift({ ...deps, workers: () => workers.filter((worker) => !held.includes(worker)) });
     const unread = held.map((worker) => heldProbe(worker, skipped[inventoryName(worker.name)] ?? ""));
-    return { record: driftRecordOf({ drift, probes: [...probes, ...unread], ...previous, freeze, now, skipped }), unbooked: booking?.unbooked ?? null };
+    const record = driftRecordOf({ drift, probes: [...probes, ...unread], ...previous, freeze, now });
+    return { record: { ...record, skipped }, unbooked: booking?.unbooked ?? null };
   } finally {
     booking?.release();
   }

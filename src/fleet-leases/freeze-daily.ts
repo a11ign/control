@@ -169,57 +169,79 @@ class Booking {
   }
 }
 
+/** What the run needs once its defaults are filled in. */
+type Run = {
+  booking: Booking; runPlaybook: FreezeDeps["runPlaybook"]; now: () => number; sleep: (ms: number) => Promise<void>; pollMs: number; log: (line: string) => void;
+};
+
+/** Where the run stands: the boxes still to freeze, the ones on a batch now, and the ones a play gave no record for (box -> how the play ended). */
+type Progress = { pending: Set<string>; running: Set<string>; unrecorded: Map<string, number | null>; retryAt: Map<string, number>; batches: Batch[] };
+
+/**
+ * One round: queue the boxes that are due, take the free ones and freeze them as a batch, or wait one poll if none is free. A batch the play wrote a
+ * record for is kept. The play wrote NO record when it refused before it froze anything (its `patch`-running guard, say) or died: nothing is known about
+ * those boxes, so they are not frozen and not failed yet, and are tried again later until the deadline, where a box that never got a record is `failed`.
+ */
+async function freezeRound(run: Run, progress: Progress): Promise<void> {
+  const { booking, now } = run;
+  const eligible = [...progress.pending].filter((box) => (progress.retryAt.get(box) ?? 0) <= now());
+  booking.enqueue(eligible);
+  const taken = booking.takeFree(eligible, now());
+  if (taken.length === 0) { await run.sleep(run.pollMs); return; }
+  for (const box of taken) { progress.pending.delete(box); progress.running.add(box); }
+  run.log(`freeze: ${taken.join(", ")} leased, freezing`);
+  const batch = await runBatch(taken, run.runPlaybook).finally(() => {
+    booking.release(taken);
+    for (const box of taken) progress.running.delete(box);
+  });
+  settle(batch, taken, progress, run);
+}
+
+function settle(batch: Batch, taken: string[], progress: Progress, run: Run): void {
+  if (batch.record !== null) {
+    progress.batches.push(batch);
+    for (const box of taken) progress.unrecorded.delete(box);
+    return;
+  }
+  run.log(`freeze: the play wrote no record for ${taken.join(", ")} (exit ${batch.status}); trying again in ${RETRY_AFTER_MS / 60_000} minutes`);
+  for (const box of taken) {
+    progress.pending.add(box);
+    progress.unrecorded.set(box, batch.status);
+    progress.retryAt.set(box, run.now() + RETRY_AFTER_MS);
+  }
+}
+
+/** The day's outcome once the deadline has passed or every box is done: what never froze is `failed` (the play gave no record) or `leased` (it never got a lease). */
+function closeOut(run: Run, progress: Progress): FreezeOutcome {
+  const left = [...progress.pending];
+  const refused = left.filter((box) => progress.unrecorded.has(box));
+  const leased = run.booking.blockedBy(left.filter((box) => !progress.unrecorded.has(box)));
+  run.booking.release(left);
+  if (left.length > 0) run.log(`freeze: ${left.length} box(es) were not frozen today at the deadline: ${left.map((box) => `${box} (${leased[box] ?? "the play wrote no record"})`).join(", ")}`);
+  const unfrozen = refused.map((box): Batch => ({ boxes: [box], status: progress.unrecorded.get(box) ?? null, record: null }));
+  const record = mergeRecords({ batches: [...progress.batches, ...unfrozen], leased, checkedAt: new Date(run.now()).toISOString() });
+  const playFailed = progress.batches.some((batch) => batch.status !== 0);
+  return { record, batches: progress.batches, exitCode: playFailed || left.length > 0 ? 1 : 0 };
+}
+
 /**
  * The whole run. Every dependency is injected, so a test drives it with a fake `ansible-playbook`, a clock and a ledger in a temp directory.
  */
 export async function runDailyFreeze(deps: FreezeDeps): Promise<FreezeOutcome> {
-  const { ledger, boxes, runPlaybook } = deps;
   const now = deps.now ?? Date.now;
-  const sleep = deps.sleep ?? sleepFor;
-  const log = deps.log ?? (() => {});
   const startedAt = now();
+  const log = deps.log ?? (() => {});
+  const booking = new Booking(deps.ledger, `fleet-freeze:${new Date(startedAt).toISOString()}`, startedAt, log);
+  const run: Run = { booking, runPlaybook: deps.runPlaybook, now, sleep: deps.sleep ?? sleepFor, pollMs: deps.pollMs ?? POLL_MS, log };
+  const progress: Progress = { pending: new Set(deps.boxes), running: new Set(), unrecorded: new Map(), retryAt: new Map(), batches: [] };
   const deadline = startedAt + (deps.deadlineMs ?? DEADLINE_MS);
-  const booking = new Booking(ledger, `fleet-freeze:${new Date(startedAt).toISOString()}`, startedAt, log);
-  const pending = new Set(boxes);
-  const running = new Set<string>();
-  const unrecorded = new Map<string, number | null>();
-  const retryAt = new Map<string, number>();
-  const batches: Batch[] = [];
-  const stopRenewing = (deps.heartbeat ?? everyRenewal)(() => booking.renew([...pending, ...running]));
+  const stopRenewing = (deps.heartbeat ?? everyRenewal)(() => booking.renew([...progress.pending, ...progress.running]));
   try {
-    while (pending.size > 0 && now() < deadline) {
-      const eligible = [...pending].filter((box) => (retryAt.get(box) ?? 0) <= now());
-      booking.enqueue(eligible);
-      const taken = booking.takeFree(eligible, now());
-      if (taken.length === 0) { await sleep(deps.pollMs ?? POLL_MS); continue; }
-      for (const box of taken) { pending.delete(box); running.add(box); }
-      log(`freeze: ${taken.join(", ")} leased, freezing`);
-      const batch = await runBatch(taken, runPlaybook).finally(() => {
-        booking.release(taken);
-        for (const box of taken) running.delete(box);
-      });
-      if (batch.record !== null) {
-        batches.push(batch);
-        for (const box of taken) unrecorded.delete(box);
-        continue;
-      }
-      // The play wrote no record: it refused before it froze anything (its `patch`-running guard, say) or died. Nothing is known about these boxes, so they
-      // are not frozen and not failed yet: they go back and are tried again later, until the deadline, and a box that never got a record is `failed` then.
-      log(`freeze: the play wrote no record for ${taken.join(", ")} (exit ${batch.status}); trying again in ${RETRY_AFTER_MS / 60_000} minutes`);
-      for (const box of taken) { pending.add(box); unrecorded.set(box, batch.status); retryAt.set(box, now() + RETRY_AFTER_MS); }
-    }
+    while (progress.pending.size > 0 && now() < deadline) await freezeRound(run, progress);
   } finally {
     stopRenewing();
   }
-  const left = [...pending];
-  const refused = left.filter((box) => unrecorded.has(box));
-  const leased = booking.blockedBy(left.filter((box) => !unrecorded.has(box)));
-  booking.release(left);
-  if (left.length > 0) log(`freeze: ${left.length} box(es) were not frozen today at the deadline: ${left.map((box) => `${box} (${leased[box] ?? "the play wrote no record"})`).join(", ")}`);
-  const unfrozen = refused.map((box): Batch => ({ boxes: [box], status: unrecorded.get(box) ?? null, record: null }));
-  const record = mergeRecords({ batches: [...batches, ...unfrozen], leased, checkedAt: new Date(now()).toISOString() });
-  const playFailed = batches.some((batch) => batch.status !== 0);
-  return { record, batches, exitCode: playFailed || left.length > 0 ? 1 : 0 };
+  return closeOut(run, progress);
 }
 
 async function runBatch(boxes: string[], runPlaybook: FreezeDeps["runPlaybook"]): Promise<Batch> {

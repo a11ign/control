@@ -821,6 +821,18 @@ function askForFleetLock(read: typeof readFleetLock | undefined, now: number): F
 }
 
 /**
+ * The two booking signals `autoOffDecision` takes. With a `booking` (main() passes the real ledger) they are read once, here; without one they DEFAULT FALSE,
+ * so a test needs no ledger. A reader a test passes wins.
+ */
+function bookingReaders(deps: { booking?: Booking; batchQueued?: () => boolean; leasePending?: (box: string) => boolean }): { batchQueued: () => boolean; leasePending: (box: string) => boolean } {
+  const signals = deps.booking?.signals();
+  return {
+    batchQueued: deps.batchQueued ?? (() => signals?.batchQueued ?? false),
+    leasePending: deps.leasePending ?? ((box: string) => signals?.leasePending(box) ?? false),
+  };
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.ts`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
@@ -837,10 +849,7 @@ export async function tick(deps: {
   const probe = deps.probe ?? probeIdle;
   const now = (deps.now ?? Date.now)();
   const statePath = deps.statePath ?? DEFAULT_STATE_PATH;
-  // With a `booking` (main() passes the real ledger) the signals are read once, here; without one they DEFAULT FALSE, so a test needs no ledger.
-  const signals = deps.booking?.signals();
-  const batchQueued = deps.batchQueued ?? (() => signals?.batchQueued ?? false);
-  const leasePending = deps.leasePending ?? ((box: string) => signals?.leasePending(box) ?? false);
+  const { batchQueued, leasePending } = bookingReaders(deps);
   const apply = deps.apply ?? false;
   const dispatch = deps.dispatch ?? dispatchShutdown;
   const checkout = deps.checkout
