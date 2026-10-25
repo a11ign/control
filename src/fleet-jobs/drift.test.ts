@@ -65,3 +65,9 @@ test("the record is read again only when its mtime moves", () => {
   assert.deepEqual(read(), {});
   t.done();
 });
+
+test("a carried difference of a box the check SKIPPED under a lease still counts: it was reachable, so it is not offered to a job in the hour after", () => {
+  const record = { differences: RECORD.differences, skipped: { "a11y-worker-9": "under maintenance by fleet-freeze:run" } };
+  assert.deepEqual(Object.keys(driftFrom(JSON.stringify(record))).sort(), ["a11y-worker-5", "a11y-worker-9"]);
+  assert.deepEqual(Object.keys(driftFrom(JSON.stringify(RECORD))), ["a11y-worker-5"], "control: without `skipped` the same carried difference names nothing");
+});

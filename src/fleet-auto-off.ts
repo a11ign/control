@@ -116,12 +116,15 @@
  * `tick`'s default reads "no play", as `batchQueued`'s default reads `false`, so a test needs no systemd.
  * `main()` passes the real reader and `fleet-auto-off.test.ts` pins that it does.
  *
- * ## `batchQueued` and `leasePending` are an honest gap
+ * ## `batchQueued` and `leasePending` come from the lease ledger (A11-244)
  *
- * Done-when 1 names them as keep reasons a pure function must carry. Nothing in this codebase today
- * produces either signal for a bare-metal worker -- no lab-side queue record, no per-worker lease --
- * so `main()` always passes `false` for both. They are real parameters of `autoOffDecision` (tested
- * directly, positive and negative) so that the day a producer exists, only `main()` changes.
+ * Done-when 1 names them as keep reasons a pure function must carry. They were an honest gap until the fleet's lease ledger (`src/fleet-leases/`): `main()` now
+ * reads it once per tick. `leasePending` is per box: the box is under a live `capture` or `maintain` lease, or a queued waiter named it. `batchQueued` is true
+ * while a waiter asked for "any N" or every ready box, because such a job may wake and use any box. A ledger that cannot be read books every box.
+ *
+ * The decision above is a reading of a moment ago, and a job may be granted the box before the shutdown reaches it. So before `--apply` dispatches `sleep.yml`
+ * at a box, it takes a non-queueing exclusive `maintain` lease on it, and lets it go when the dispatch returns. A lease it cannot take keeps the box as
+ * `lease-pending`. `tick` without a `booking` reads neither signal, as before, so a test needs no ledger.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
@@ -137,6 +140,8 @@ import { inventoryPathFor } from "./control-plane-fleet.ts";
 import { magicPacket, readWakeProof, DEFAULT_PROOF_PATH, PROOF_WINDOW_MS } from "./fleet-wake.ts";
 import { recordCaptures, DEFAULT_CAPTURES_STATE_PATH } from "./fleet-watch.ts";
 import { readFleetLock } from "./fleet-lock.ts";
+import { bookShutdown, ledgerOnThisHost, signalsOf } from "./fleet-leases/booking.ts";
+import type { ShutdownLease, Signals } from "./fleet-leases/booking.ts";
 import type { FleetLockState } from "./fleet-lock.ts";
 export type ProofTransport = import("./fleet-wake.ts").ProofTransport;
 
@@ -711,7 +716,7 @@ function recordProbedCaptures(probes: (IdleProbe & { name: string; host: string;
  */
 function decisionInput(w: { name: string; mac: string | null; }, outcome: string, known: {
         idleSince: SinceState; shutdownRequestedAt: SinceState; wakeProof: Record<string, number>;
-        batchQueued: () => boolean; leasePending: () => boolean; play: PlayReading; fleetLock: FleetLockState;
+        batchQueued: () => boolean; leasePending: (box: string) => boolean; play: PlayReading; fleetLock: FleetLockState;
     }): DecisionInput {
   return {
     name: w.name,
@@ -721,29 +726,53 @@ function decisionInput(w: { name: string; mac: string | null; }, outcome: string
     shutdownRequestedAt: known.shutdownRequestedAt[w.name] ?? null,
     wakeProvenAt: known.wakeProof[w.name] ?? null,
     batchQueued: known.batchQueued(),
-    leasePending: known.leasePending(),
+    leasePending: known.leasePending(w.name),
     playInFlight: known.play,
     fleetLock: known.fleetLock,
   };
 }
 
-/** Dispatch `sleep.yml` at every worker decided `off`, stamping each success into `shutdownRequestedAt`. */
-function dispatchOff(decisions: { worker: { name: string; }; decision: Decision; }[], { dispatch, shutdownRequestedAt, now }: { dispatch: typeof dispatchShutdown; shutdownRequestedAt: SinceState; now: number; }) {
-  for (const { worker, decision } of decisions) {
-    if (decision.action !== "off") continue;
-    const dispatched = dispatch(worker.name);
-    // SURFACE A FAILED DISPATCH (done-when 2) -- before this, a `spawnSync` failure (ENOENT when
-    // `ansible-playbook` was not on PATH, #2725) was silently discarded here, so a broken dispatch
-    // environment read as an infinite, successful-looking retry instead of a visible error. A failed
-    // dispatch never actually reached `sleep.yml`, so it does not stamp `shutdownRequestedAt` either --
-    // that field means a shutdown was requested, and none was.
-    if (dispatched.status !== 0) {
-      process.stderr.write(`fleet-auto-off: dispatchShutdown failed for ${worker.name} `
-        + `(status=${dispatched.status}): ${dispatched.log}\n`);
-      continue;
+/** What auto-off needs of the lease ledger: the signals it decides from, and the lease it holds across a shutdown. */
+export type Booking = { signals: () => Signals; shutdown: (box: string) => ShutdownLease; };
+
+/** How long the shutdown lease lasts if the dispatch never returns: `sleep.yml` takes a few minutes, and a lease that is not let go frees the box after it. */
+export const SHUTDOWN_LEASE_MS = 15 * MS_PER_MINUTE;
+
+export const realBooking = (): Booking => {
+  const ledger = ledgerOnThisHost((line) => process.stderr.write(`fleet-auto-off: ${line}\n`));
+  const holder = `fleet-auto-off:${new Date().toISOString()}`;
+  return { signals: () => signalsOf(ledger), shutdown: (box) => bookShutdown(ledger, box, { holder, ttlMs: SHUTDOWN_LEASE_MS }) };
+};
+
+/**
+ * Dispatch `sleep.yml` at every worker decided `off`, stamping each success into `shutdownRequestedAt`. With a `booking`, each shutdown is made under a
+ * `maintain` lease on its box; a box whose lease cannot be taken is not dispatched and reads `keep lease-pending` in the report that is returned.
+ */
+function dispatchOff<T extends { worker: { name: string; }; decision: Decision; }>(decisions: T[], { dispatch, shutdownRequestedAt, now, booking }: {
+        dispatch: typeof dispatchShutdown; shutdownRequestedAt: SinceState; now: number; booking?: Booking; }): T[] {
+  return decisions.map((entry) => {
+    const { worker, decision } = entry;
+    if (decision.action !== "off") return entry;
+    const lease: ShutdownLease = booking?.shutdown(worker.name) ?? { held: true, release: () => {} };
+    if (!lease.held) return { ...entry, decision: { action: "keep", reason: "lease-pending" } as Decision };
+    try {
+      const dispatched = dispatch(worker.name);
+      // SURFACE A FAILED DISPATCH (done-when 2) -- before this, a `spawnSync` failure (ENOENT when
+      // `ansible-playbook` was not on PATH, #2725) was silently discarded here, so a broken dispatch
+      // environment read as an infinite, successful-looking retry instead of a visible error. A failed
+      // dispatch never actually reached `sleep.yml`, so it does not stamp `shutdownRequestedAt` either --
+      // that field means a shutdown was requested, and none was.
+      if (dispatched.status !== 0) {
+        process.stderr.write(`fleet-auto-off: dispatchShutdown failed for ${worker.name} `
+          + `(status=${dispatched.status}): ${dispatched.log}\n`);
+      } else {
+        shutdownRequestedAt[worker.name] = now;
+      }
+    } finally {
+      lease.release();
     }
-    shutdownRequestedAt[worker.name] = now;
-  }
+    return entry;
+  });
 }
 
 /**
@@ -792,6 +821,18 @@ function askForFleetLock(read: typeof readFleetLock | undefined, now: number): F
 }
 
 /**
+ * The two booking signals `autoOffDecision` takes. With a `booking` (main() passes the real ledger) they are read once, here; without one they DEFAULT FALSE,
+ * so a test needs no ledger. A reader a test passes wins.
+ */
+function bookingReaders(deps: { booking?: Booking; batchQueued?: () => boolean; leasePending?: (box: string) => boolean }): { batchQueued: () => boolean; leasePending: (box: string) => boolean } {
+  const signals = deps.booking?.signals();
+  return {
+    batchQueued: deps.batchQueued ?? (() => signals?.batchQueued ?? false),
+    leasePending: deps.leasePending ?? ((box: string) => signals?.leasePending(box) ?? false),
+  };
+}
+
+/**
  * ONE TICK: probe every worker, advance the state, decide, and (only under `--apply`) dispatch. Every
  * dependency is injectable with a real default, matching `fleet-watch.ts`'s `watch()` shape, so a test
  * drives this without a network, a clock, or a fleet.
@@ -800,7 +841,7 @@ export async function tick(deps: {
     workers?: { name: string; host: string; mac: string | null; }[];
     probe?: typeof probeIdle; now?: () => number; statePath?: string; capturesPath?: string; proofPath?: string;
     proofTransport?: ProofTransport; read?: typeof readFileSync; write?: typeof writeFileSync;
-    batchQueued?: () => boolean; leasePending?: () => boolean; playsInFlight?: typeof readPlaysInFlight; fleetLock?: typeof readFleetLock;
+    batchQueued?: () => boolean; leasePending?: (box: string) => boolean; booking?: Booking; playsInFlight?: typeof readPlaysInFlight; fleetLock?: typeof readFleetLock;
     apply?: boolean; dispatch?: typeof dispatchShutdown;
     checkout?: (where: { now: number; fetchedAt: number | null; }) => ReturnType<typeof checkAgainstMain>;
 } = {}) {
@@ -808,10 +849,7 @@ export async function tick(deps: {
   const probe = deps.probe ?? probeIdle;
   const now = (deps.now ?? Date.now)();
   const statePath = deps.statePath ?? DEFAULT_STATE_PATH;
-  // `batchQueued`/`leasePending` DEFAULT FALSE -- the honest gap this file's header names: nothing today
-  // produces either signal for a bare-metal worker.
-  const batchQueued = deps.batchQueued ?? (() => false);
-  const leasePending = deps.leasePending ?? (() => false);
+  const { batchQueued, leasePending } = bookingReaders(deps);
   const apply = deps.apply ?? false;
   const dispatch = deps.dispatch ?? dispatchShutdown;
   const checkout = deps.checkout
@@ -844,11 +882,11 @@ export async function tick(deps: {
       proof: { standing: proofStanding(provenAt, now), provenAt },
     };
   });
-  const { decisions, refusal, fetchedAt } = apply
+  const { decisions: held, refusal, fetchedAt } = apply
     ? holdBackIfStale(decided, { now, fetchedAt: previous.fetchedAt, previousRefusal: previous.refusal, checkout })
     : { decisions: decided, refusal: null, fetchedAt: previous.fetchedAt };
 
-  if (apply) dispatchOff(decisions, { dispatch, shutdownRequestedAt, now });
+  const decisions = apply ? dispatchOff(held, { dispatch, shutdownRequestedAt, now, booking: deps.booking }) : held;
 
   writeState(statePath, { idleSince, shutdownRequestedAt, fetchedAt, refusal }, deps.write);
   return { decisions, refusal, proofPath };
@@ -878,7 +916,7 @@ async function main() {
     return;
   }
 
-  const { out, failed } = renderReport(await tick({ workers: declared, apply, playsInFlight: readPlaysInFlight, fleetLock: readFleetLock }), apply);
+  const { out, failed } = renderReport(await tick({ workers: declared, apply, playsInFlight: readPlaysInFlight, fleetLock: readFleetLock, booking: realBooking() }), apply);
   process.stdout.write(out);
   if (failed) process.exitCode = 1;
 }
