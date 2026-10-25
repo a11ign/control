@@ -155,7 +155,12 @@ export class Runner {
    * cannot be had yet), or `fail` with the reason (nothing holds a box that would free one, so waiting would be for ever).
    */
   private async boxesFor(request: JobRequest, standing: Availability): Promise<{ boxes: Box[]; notes: string[] } | { wait: true } | { fail: string }> {
-    const drifting = this.d.drift();
+    let drifting: Record<string, string>;
+    try { drifting = this.d.drift(); } catch (error) {
+      // A record that cannot be read is not proof that no box differs, so a job that has not started does not start on it.
+      this.d.log(`${request.id}: the job stays queued: ${(error as Error).message}`);
+      return { wait: true };
+    }
     const held = Object.keys(standing.excluded);
     const named = request.boxes.kind === "named" ? request.boxes.names.filter((name) => drifting[name]) : [];
     if (named.length) return { fail: `${named.map((name) => `${name} is ${drifting[name]}`).join("; ")}: a box that differs from the manifest is out of capture` };
@@ -298,7 +303,12 @@ export class Runner {
 
   /** A box the drift record names leaves the job; its capture in flight, if any, ends and is kept. */
   private dropDrifting(run: Run): void {
-    const drifting = this.d.drift();
+    let drifting: Record<string, string>;
+    try { drifting = this.d.drift(); } catch (error) {
+      // Nothing is known, so nothing is dropped: a box leaves a running job on a difference that was read, never on one guessed.
+      this.d.log(`${run.id}: no box is dropped on a drift record that cannot be read: ${(error as Error).message}`);
+      return;
+    }
     for (const name of this.liveBoxes(run)) if (drifting[name] && !run.released.has(name)) this.leave(run, name, drifting[name]!);
   }
 

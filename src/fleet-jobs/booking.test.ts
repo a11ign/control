@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { staticResolver } from "./fake-fleet.ts";
 import { LedgerBusy } from "../fleet-leases/ledger.ts";
+import { DriftUnreadable } from "./drift.ts";
 import { holderOf, ledgerClaims } from "./claims.ts";
 import { meanCaptureMs, queueViewOf } from "./queue-view.ts";
 import { remote } from "./remote.ts";
@@ -424,6 +425,27 @@ test("a drift record that names a box the job has already finished with changes 
   await t.runner.settled();
   assert.deepEqual(t.state(id).dropped, [], "a box that left the job's work is not recorded as having left the fleet");
   assert.equal(t.state(id).state, "done");
+  t.done();
+});
+
+test("a drift record that cannot be read keeps a job that has not started queued, and takes no box from one that is running", async () => {
+  let readable = false;
+  const hold = gated();
+  const t = harness({ drift: () => { if (!readable) throw new DriftUnreadable("the fleet drift record is not JSON"); return {}; },
+    capture: async () => { await hold.gate; return { status: 200, json: {} }; } });
+  const queuedId = t.submit({ kind: "named", names: ["w2"] });
+  await t.drain();
+  assert.equal(t.store.readState(queuedId), null, "not started on a record nobody can read");
+  assert.ok(t.log.some((line) => /stays queued: the fleet drift record is not JSON/.test(line)));
+  readable = true;
+  await t.runner.tick();
+  assert.equal(t.state(queuedId).state, "running", "and started once it can be read");
+  readable = false;
+  await ticks(5);
+  hold.open();
+  await t.runner.settled();
+  assert.equal(t.state(queuedId).state, "done", "the running job went on");
+  assert.deepEqual(t.state(queuedId).dropped, [], "and no box was taken from it on a guess");
   t.done();
 });
 

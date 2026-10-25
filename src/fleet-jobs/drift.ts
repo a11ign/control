@@ -9,16 +9,25 @@ import { CONTROL_PLANE_CHECKOUT_PATH } from "../control-plane-checkout.ts";
  */
 export const FLEET_DRIFT_PATH = `${CONTROL_PLANE_CHECKOUT_PATH}/runs/fleet-drift.json`;
 
-/** Box -> what differs, in a sentence. An empty answer is also what a record that cannot be read gives: the check is not this service's to redo. */
+/**
+ * Box -> what differs, in a sentence. A reading that cannot be made THROWS (`DriftUnreadable`): a record nobody can read is not proof that no box differs,
+ * the rule the ledger and `fleet-lock.ts` hold to. The one exception is a record that does not exist, which is a control plane whose hourly check has
+ * not run yet, and reads as "no difference known".
+ */
 export type DriftReader = () => Record<string, string>;
+
+export class DriftUnreadable extends Error {}
 
 type Entry = { box?: unknown; field?: unknown; has?: unknown; wants?: unknown; carried?: unknown };
 
 export function driftFrom(text: string): Record<string, string> {
-  const parsed = JSON.parse(text) as { differences?: unknown };
+  let parsed: { differences?: unknown };
+  try { parsed = JSON.parse(text) as { differences?: unknown }; } catch (cause) { throw new DriftUnreadable(`the fleet drift record is not JSON: ${(cause as Error).message}`); }
+  if (typeof parsed !== "object" || parsed === null || !Array.isArray(parsed.differences)) throw new DriftUnreadable("the fleet drift record has no list of differences");
   const found: Record<string, string[]> = {};
-  for (const entry of Array.isArray(parsed.differences) ? parsed.differences as Entry[] : []) {
-    if (typeof entry?.box !== "string" || entry.carried === true) continue;
+  for (const entry of parsed.differences as Entry[]) {
+    if (typeof entry?.box !== "string") throw new DriftUnreadable("the fleet drift record has a difference that names no box");
+    if (entry.carried === true) continue;
     (found[entry.box] ??= []).push(`${String(entry.field)} is ${String(entry.has ?? "unread")}, the manifest wants ${String(entry.wants)}`);
   }
   return Object.fromEntries(Object.entries(found).map(([box, lines]) => [box, `off the manifest: ${lines.join("; ")}`]));
@@ -32,7 +41,12 @@ export function driftReader(path: string = FLEET_DRIFT_PATH): DriftReader {
     try {
       const { mtimeMs } = statSync(path);
       if (mtimeMs !== seen) { last = driftFrom(readFileSync(path, "utf8")); seen = mtimeMs; }
-    } catch { last = {}; seen = -1; }
+    } catch (error) {
+      seen = -1;
+      last = {};
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return last;
+      throw error instanceof DriftUnreadable ? error : new DriftUnreadable(`the fleet drift record cannot be read: ${(error as Error).message}`);
+    }
     return last;
   };
 }
