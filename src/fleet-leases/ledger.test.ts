@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LeaseLedger, LedgerBusy } from "./ledger.ts";
@@ -145,6 +145,34 @@ test("a lock held by a live process is waited for, and a lock still held after t
   t.done();
 });
 
+test("a lock held for longer than any critical section is broken even when its pid is alive, which a reused pid would be", () => {
+  const t = setup();
+  t.ledger.tryTake(spec("seed", ["w9"]));
+  writeFileSync(t.lock, String(process.ppid));
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(t.lock, old, old);
+  assert.equal(t.ledger.tryTake(spec("a", ["w1"])).taken, true);
+  t.done();
+});
+
+test("many processes finding the same dead lock break it once between them: a box is still granted once", async () => {
+  const t = setup();
+  t.ledger.tryTake(spec("seed", ["w9"]));
+  const fixture = new URL("./take.fixture.ts", import.meta.url).pathname;
+  const rounds = await Promise.all(Array.from({ length: 5 }, async (_, round) => {
+    writeFileSync(t.lock, "4194999");
+    const answers = await Promise.all(Array.from({ length: 8 }, (_, i) => new Promise<{ taken: boolean }>((resolve, reject) => {
+      const child = spawn(process.execPath, [fixture, t.path, `r${round}p${i}`, `box-${round}`], { stdio: ["ignore", "pipe", "inherit"] });
+      let out = "";
+      child.stdout.on("data", (chunk) => { out += chunk; });
+      child.on("close", (code) => code === 0 ? resolve(JSON.parse(out) as { taken: boolean }) : reject(new Error(`exit ${code}`)));
+    })));
+    return answers.filter((a) => a.taken).length;
+  }));
+  assert.deepEqual(rounds, [1, 1, 1, 1, 1]);
+  t.done();
+});
+
 test("concurrent takes from separate processes never grant one box twice", async () => {
   const t = setup();
   const fixture = new URL("./take.fixture.ts", import.meta.url).pathname;
@@ -152,7 +180,7 @@ test("concurrent takes from separate processes never grant one box twice", async
     const child = spawn(process.execPath, [fixture, t.path, `p${i}`, "w1", "w2"], { stdio: ["ignore", "pipe", "inherit"] });
     let out = "";
     child.stdout.on("data", (chunk) => { out += chunk; });
-    child.on("exit", (code) => code === 0 ? resolve(JSON.parse(out) as { id: string; taken: boolean }) : reject(new Error(`exit ${code}`)));
+    child.on("close", (code) => code === 0 ? resolve(JSON.parse(out) as { id: string; taken: boolean }) : reject(new Error(`exit ${code}`)));
   }));
   const answers = await Promise.all(runs);
   assert.equal(answers.filter((a) => a.taken).length, 1, JSON.stringify(answers));

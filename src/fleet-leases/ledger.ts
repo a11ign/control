@@ -9,7 +9,7 @@ import type { Lease, LeaseKind, Ledger, Waiter, Want } from "./types.ts";
  * THE LEASE LEDGER ON DISK (A11-244, ADR `A11-244-adr-0001`). One versioned JSON file; every change is ONE read-decide-write under `ledger.lock`.
  *
  * THE MUTEX. The lock file is created with `wx` and holds the pid. Every writer is on the one control-plane host, so a lock whose pid is dead
- * (`process.kill(pid, 0)` gives `ESRCH`) is broken and the take retried. A lock still held after `lockWaitMs` throws `LedgerBusy`, and every caller reads
+ * (`process.kill(pid, 0)` gives `ESRCH`), or that is older than any critical section, is broken and the take retried. A lock still held after `lockWaitMs` throws `LedgerBusy`, and every caller reads
  * that as "not now". The new file goes to a temp file and is renamed into place, so a reader sees the old ledger or the new one.
  *
  * A LEDGER NOBODY CAN READ IS NOT PROOF THAT NOBODY HOLDS A BOX (the rule `fleet-lock.ts` states). A file that is not JSON, or of a version this code
@@ -31,6 +31,9 @@ export type Spec = { id: string; holder: string; kind: LeaseKind; label: string 
 export type TakeSpec = Spec & { boxes: string[]; ttlMs?: number; expectedEnd?: number | null; respectQueue?: boolean };
 
 export type Took = { taken: true; lease: Lease } | { taken: false; heldBy: Record<string, string[]>; reason: string };
+
+/** No critical section takes anything like this long, so a lock this old is a holder that is gone, whatever its pid says (a pid can be reused). */
+const LOCK_MAX_AGE_MS = 30_000;
 
 const sleepSync = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
@@ -86,7 +89,7 @@ export class LeaseLedger {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      if (this.breakIfDead()) continue;
+      if (this.breakIfStale()) continue;
       if (Date.now() >= until) throw new LedgerBusy(`the lease ledger lock is held (${this.holderOfLock() ?? "unknown pid"}) and did not clear in ${this.lockWaitMs}ms`);
       sleepSync(5);
     }
@@ -99,14 +102,35 @@ export class LeaseLedger {
     } catch { return null; }
   }
 
-  /** A lock whose pid is dead is broken. A lock with no pid yet is a writer between `open` and `write`: left alone until it is old. */
-  private breakIfDead(): boolean {
+  /** Whether the lock file is one to break: its pid is dead, it has no pid and is old, or it is older than any critical section can be (a reused pid). */
+  private lockIsStale(): boolean {
     const pid = this.holderOfLock();
     let ageMs: number;
-    try { ageMs = Date.now() - statSync(this.lockPath).mtimeMs; } catch { return true; }
-    if (pid === null ? ageMs < this.lockWaitMs : isAlive(pid)) return false;
-    if (this.holderOfLock() !== pid) return false;
-    try { unlinkSync(this.lockPath); } catch { /* another process broke it first */ }
+    try { ageMs = Date.now() - statSync(this.lockPath).mtimeMs; } catch { return false; }
+    if (ageMs >= LOCK_MAX_AGE_MS) return true;
+    return pid === null ? ageMs >= this.lockWaitMs : !isAlive(pid);
+  }
+
+  /**
+   * Break a stale lock. Two waiters that both see a dead pid must not both unlink, or the second removes the lock the first has just taken; so the
+   * check and the unlink are done under `ledger.lock.break`, a lock of its own that is held for a few microseconds. Only a breaker removes a lock that
+   * its owner has not released, and a lock cannot be created while one exists, so within the break lock the stale lock is still the one that was checked.
+   */
+  private breakIfStale(): boolean {
+    if (!this.lockIsStale()) return false;
+    const breaking = `${this.lockPath}.break`;
+    try {
+      closeSync(openSync(breaking, "wx"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try { if (Date.now() - statSync(breaking).mtimeMs >= LOCK_MAX_AGE_MS) unlinkSync(breaking); } catch { /* gone already */ }
+      return false;
+    }
+    try {
+      if (this.lockIsStale()) unlinkSync(this.lockPath);
+    } catch { /* the lock went away by itself */ } finally {
+      try { unlinkSync(breaking); } catch { /* already gone */ }
+    }
     return true;
   }
 

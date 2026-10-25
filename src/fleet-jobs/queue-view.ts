@@ -25,7 +25,8 @@ export function meanCaptureMs(store: JobStore): number | null {
     const state = store.readState(id);
     if (!state?.ok) continue;
     for (const c of [...state.value.captures].reverse()) {
-      if (c.status === "done" && c.startedAt && c.finishedAt) durations.push(Date.parse(c.finishedAt) - Date.parse(c.startedAt));
+      const took = c.status === "done" && c.startedAt && c.finishedAt ? Date.parse(c.finishedAt) - Date.parse(c.startedAt) : NaN;
+      if (Number.isFinite(took) && took >= 0) durations.push(took);
     }
     if (durations.length >= MEAN_OVER) break;
   }

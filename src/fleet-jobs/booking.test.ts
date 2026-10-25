@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { staticResolver } from "./fake-fleet.ts";
+import { LedgerBusy } from "../fleet-leases/ledger.ts";
 import { holderOf, ledgerClaims } from "./claims.ts";
 import { meanCaptureMs, queueViewOf } from "./queue-view.ts";
 import { remote } from "./remote.ts";
@@ -353,6 +354,79 @@ test("a graceful stop keeps the lease for the next start, which takes the same h
   t.done();
 });
 
+test("a ledger that is busy for a moment fails neither a running job nor the tick: the lease is tried again, or lapses at its grace", async () => {
+  const g = gated();
+  let busy = true;
+  const t = harness({ renewEveryMs: 0, capture: async () => { await g.gate; return { status: 200, json: {} }; } });
+  const real = ledgerClaims(t.ledger);
+  const guard = <A extends unknown[], R>(call: (...args: A) => R) => (...args: A): R => { if (busy) throw new LedgerBusy("the lease ledger lock is held"); return call(...args); };
+  const claims = { ...real, renew: guard(real.renew), releaseBoxes: guard(real.releaseBoxes), release: guard(real.release) };
+  const runner = new Runner({ ...t.deps, claims });
+  const id = t.submit({ kind: "count", count: 2 });
+  await runner.tick();
+  await tick();
+  await runner.tick();
+  assert.ok(t.log.some((line) => /was not renewed, and will be tried again/.test(line)), "a renewal that could not be made was said, and the tick did not reject");
+  g.open();
+  await runner.settled();
+  assert.equal(t.state(id).state, "done", "the job ended done although its lease could not be released");
+  assert.ok(t.log.some((line) => /will lapse at its grace/.test(line)));
+  assert.ok(t.ledger.leaseOf(id), "the lease is still there, to lapse at its expiry");
+  busy = false;
+  t.done();
+});
+
+test("a restart resumes a job on the boxes it still has pages for, not on one it had already let go of to another job", async () => {
+  const t = harness();
+  const id = t.submit({ kind: "count", count: 2 });
+  const at = "2026-10-25T09:00:00.000Z";
+  t.store.writeState(id, { version: 1, state: "running", boxes: ["w2", "w3"], readings: {}, dropped: [], notes: [], startedAt: at,
+    captures: [
+      { page: PAGES[0]!, pass: 1, file: "a.p1.json", box: "w2", status: "done", startedAt: at, finishedAt: at },
+      { page: PAGES[1]!, pass: 1, file: "b.p1.json", box: "w3", status: "pending" },
+    ] });
+  t.ledger.tryTake({ id: "fj-next", holder: holderOf("fj-next"), kind: "capture", label: "the job that took w2", boxes: ["w2"] });
+  await t.drain();
+  assert.equal(t.state(id).state, "done", t.state(id).reason ?? "");
+  assert.deepEqual(t.asked.map((a) => a.box), ["w3"], "only w3's page was sent");
+  assert.deepEqual(t.ledger.held(), { w2: [holderOf("fj-next")] }, "the other job's lease on w2 was never touched");
+  t.done();
+});
+
+test("a lease that lapsed under a job still capturing is taken again at the next renewal, and the job behind it stays queued", async () => {
+  const clock = { at: Date.UTC(2026, 9, 25, 9, 30) };
+  const g = gated();
+  const t = harness({ now: () => clock.at, renewEveryMs: 30_000, capture: async () => { await g.gate; return { status: 200, json: {} }; } });
+  const running = t.submit({ kind: "named", names: ["w2"] });
+  const behind = t.submit({ kind: "named", names: ["w2"] });
+  await t.runner.tick();
+  await tick();
+  clock.at += 5 * MIN + 1;
+  assert.equal(t.ledger.leaseOf(running), null, "the lease lapsed: the tick was blocked past its grace");
+  await t.runner.tick();
+  assert.deepEqual(t.ledger.leaseOf(running)?.boxes, ["w2"], "taken again for the box with a capture on it");
+  assert.equal(t.store.readState(behind), null, "so the next job did not start on it");
+  g.open();
+  await t.runner.settled();
+  t.done();
+});
+
+test("a drift record that names a box the job has already finished with changes nothing about the job", async () => {
+  const drift: Record<string, string> = {};
+  const slow = gated();
+  const t = harness({ drift: () => drift, capture: async (box) => { if (box.name === "w3") await slow.gate; return { status: 200, json: {} }; } });
+  const id = t.submit({ kind: "count", count: 2 });
+  await t.runner.tick();
+  await ticks(10);
+  assert.deepEqual(t.ledger.leaseOf(id)?.boxes, ["w3"], "w2 is finished and let go");
+  drift.w2 = "off the manifest";
+  slow.open();
+  await t.runner.settled();
+  assert.deepEqual(t.state(id).dropped, [], "a box that left the job's work is not recorded as having left the fleet");
+  assert.equal(t.state(id).state, "done");
+  t.done();
+});
+
 // ---- the status a queued job shows
 
 function queued() {
@@ -422,5 +496,9 @@ test("the mean capture time is taken over the last 20 completed captures, newest
   t.store.writeState(id, { version: 1, state: "done", boxes: ["w2"], readings: {}, dropped: [], notes: [], startedAt: at(0), finishedAt: at(99),
     captures: Array.from({ length: 25 }, (_, i) => ({ page: `p${i}`, pass: 1, file: `${i}.json`, box: "w2", status: "done" as const, startedAt: at(0), finishedAt: new Date(Date.UTC(2026, 9, 25, 9, 0, 0) + (i < 5 ? 100_000 : 10_000)).toISOString() })) });
   assert.equal(meanCaptureMs(t.store), 10_000, "the 5 oldest, slow captures are outside the last 20");
+  const bad = t.submit({ kind: "count", count: 1 });
+  t.store.writeState(bad, { version: 1, state: "done", boxes: ["w2"], readings: {}, dropped: [], notes: [], startedAt: at(0), finishedAt: at(99),
+    captures: [{ page: "p", pass: 1, file: "x.json", box: "w2", status: "done", startedAt: "not a time", finishedAt: at(5) }] });
+  assert.equal(meanCaptureMs(t.store), 10_000, "a capture with a timestamp that is not a time is left out, not turned into NaN");
   t.done();
 });

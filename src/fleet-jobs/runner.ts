@@ -45,7 +45,6 @@ const isBoxFault = (status: number): boolean => status === 0 || status === 429 |
 type Run = { id: string; request: JobRequest; state: JobStateFile; boxes: Map<string, Box>; streak: Map<string, number>; released: Set<string> };
 
 const leftTheFleet = (box: string, why: string): string => `${box} left the fleet: ${why}`;
-const LEFT = " left the fleet: ";
 
 const errorOf = (capture: unknown, status: number): string => {
   const error = (capture as { error?: unknown } | null)?.error;
@@ -187,9 +186,9 @@ export class Runner {
       version: STORE_VERSION, state, reason, boxes: [], readings: {}, dropped: [], captures: [], notes: [],
       startedAt: null, finishedAt: this.iso(),
     };
-    this.d.claims.release(request.id);
     this.d.store.writeState(request.id, ended);
     this.d.store.writeManifest(request.id, buildManifest({ request, state: ended, pins: this.d.pins() }));
+    this.letGo(request.id);
     this.d.log(`${request.id}: ${state}, ${reason}`);
   }
 
@@ -208,15 +207,23 @@ export class Runner {
     }
     for (const box of missing) reassign(state.captures, box, stillLive);
     state.notes.push(`resumed after a service restart at ${this.iso()}`);
-    const claim = this.d.claims.retake(request, stillLive);
+    // Only the boxes with pages left are taken again: a box the dead service had already let go of may be another job's by now, and is not this job's to resume.
+    const released = new Set(stillLive.filter((name) => !this.hasWork(state, name)));
+    const needed = stillLive.filter((name) => !released.has(name));
+    const claim = needed.length ? this.d.claims.retake(request, needed) : { claimed: true as const };
     if (!claim.claimed) {
-      this.failRun({ id, request, state, boxes: new Map(), streak: new Map(), released: new Set() },
+      this.failRun({ id, request, state, boxes: new Map(), streak: new Map(), released },
         `could not resume: ${Object.entries(claim.heldBy).map(([box, holders]) => `${box} is held by ${holders.join(", ")}`).join(", ")}`);
-      this.d.claims.release(id);
+      this.letGo(id);
       return;
     }
     this.d.store.writeState(id, state);
-    this.launch({ id, request, state, boxes: new Map(found.map((b) => [b.name, b])), streak: new Map(), released: new Set() });
+    this.launch({ id, request, state, boxes: new Map(found.map((b) => [b.name, b])), streak: new Map(), released });
+  }
+
+  /** Whether the job still has a page to send, or one in flight, on the box. */
+  private hasWork(state: JobStateFile, name: string): boolean {
+    return state.captures.some((c) => c.box === name && (c.status === "pending" || c.status === "dispatched"));
   }
 
   private launch(run: Run): void {
@@ -227,7 +234,7 @@ export class Runner {
       .catch((error) => this.failRun(run, `internal error: ${(error as Error).stack ?? error}`))
       .finally(() => {
         // A job that ends lets go of its lease. A job the service stopped under is still running: its lease is renewed by the next start, and lapses at its grace if none comes.
-        if (isTerminal(run.state.state)) this.d.claims.release(run.id);
+        if (isTerminal(run.state.state)) this.letGo(run.id);
         this.runs.delete(run.id);
         this.running.delete(run.id);
       });
@@ -237,9 +244,31 @@ export class Runner {
   /** Every running job pushes its lease out, and says when it expects to end. A lease that is gone is said: the boxes may have been given to another job. */
   private renewRunning(): void {
     for (const run of this.running.values()) {
-      if (!this.d.claims.holds(run.id)) this.d.log(`${run.id}: its lease lapsed; the boxes may be held by another job`);
-      this.d.claims.renew(run.id, estimateFinish(run.state.captures, this.d.now()));
+      try {
+        this.retakeIfLapsed(run);
+        this.d.claims.renew(run.id, estimateFinish(run.state.captures, this.d.now()));
+      } catch (error) { this.d.log(`${run.id}: the lease was not renewed, and will be tried again: ${(error as Error).message}`); }
     }
+  }
+
+  /**
+   * A lease that has lapsed under a job still capturing (a tick blocked past the grace, or a ledger that could not be read) is taken again for the boxes
+   * the job still needs, so the next job is not given a box with a capture on it. If another holder has the box by now, that is said: the worker's own
+   * `429` is then the only thing between two captures, and it is not this job's to hide.
+   */
+  private retakeIfLapsed(run: Run): void {
+    const needed = run.state.boxes.filter((name) => !run.released.has(name) && this.hasWork(run.state, name));
+    if (!needed.length || this.d.claims.holds(run.id)) return;
+    const claim = this.d.claims.retake(run.request, needed);
+    this.d.log(claim.claimed ? `${run.id}: its lease had lapsed and was taken again` : `${run.id}: its lease lapsed and ${Object.entries(claim.heldBy).map(([box, holders]) => `${box} is now held by ${holders.join(", ")}`).join(", ")}`);
+  }
+
+  /**
+   * Let go of a finished job's lease. A ledger that is busy or unreadable at this moment must not fail a job that has already ended, nor leave the
+   * service with a rejection nobody handles: the lease then lapses at its grace, which is what a lease is for.
+   */
+  private letGo(id: string): void {
+    try { this.d.claims.release(id); } catch (error) { this.d.log(`${id}: its lease was not released and will lapse at its grace: ${(error as Error).message}`); }
   }
 
   private persist(run: Run): void { this.d.store.writeState(run.id, run.state); }
@@ -252,6 +281,8 @@ export class Runner {
     const inflight = new Map<string, Promise<void>>();
     try {
       while (!this.stopping && !this.d.store.isCancelled(run.id)) {
+        this.releaseFinished(run, inflight);
+        // A finished box is let go first, so a drift record cannot take it out of a job it has no more work in; a box that leaves now is let go at once.
         this.dropDrifting(run);
         this.releaseFinished(run, inflight);
         this.dispatchIdleBoxes(run, inflight);
@@ -268,15 +299,18 @@ export class Runner {
   /** A box the drift record names leaves the job; its capture in flight, if any, ends and is kept. */
   private dropDrifting(run: Run): void {
     const drifting = this.d.drift();
-    for (const name of this.liveBoxes(run)) if (drifting[name]) this.leave(run, name, drifting[name]!);
+    for (const name of this.liveBoxes(run)) if (drifting[name] && !run.released.has(name)) this.leave(run, name, drifting[name]!);
   }
 
   /** A box with no capture left to send or to wait for is let go at once, so the next job in the queue can start on it. */
   private releaseFinished(run: Run, inflight: Map<string, Promise<void>>): void {
-    const finished = run.state.boxes.filter((name) => !run.released.has(name) && !inflight.has(name)
-      && !run.state.captures.some((c) => c.box === name && (c.status === "pending" || c.status === "dispatched")));
+    const finished = run.state.boxes.filter((name) => !run.released.has(name) && !inflight.has(name) && !this.hasWork(run.state, name));
     if (!finished.length) return;
-    this.d.claims.releaseBoxes(run.id, finished);
+    try { this.d.claims.releaseBoxes(run.id, finished); } catch (error) {
+      // Not marked as released, so the next pass asks again; a job does not fail because the ledger was busy for a moment.
+      this.d.log(`${run.id}: boxes not released yet, will try again: ${(error as Error).message}`);
+      return;
+    }
     for (const name of finished) run.released.add(name);
   }
 
@@ -358,7 +392,8 @@ export class Runner {
   private conclude(run: Run): void {
     if (this.d.store.isCancelled(run.id)) return this.finish(run, "cancelled", "cancelled by request");
     if (this.stopping) return;
-    const unserved = run.state.captures.filter((c) => c.status === "pending" || (c.status === "failed" && c.error?.includes(LEFT)));
+    // pending, or failed without ever being sent: the pages of a box that left
+    const unserved = run.state.captures.filter((c) => c.status === "pending" || (c.status === "failed" && !c.startedAt));
     if (unserved.length && !this.liveBoxes(run).length) {
       const why = run.state.dropped.map((d) => `${d.box}: ${d.reason}`).join("; ");
       return this.finish(run, "failed", `no box was left to capture ${unserved.length} pages${why ? ` (${why})` : ""}`);
