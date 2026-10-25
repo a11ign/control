@@ -4,7 +4,8 @@
  *     node --import <tsx> src/fleet-jobs/service.ts
  *
  * It owns the job store, runs each job's captures against the fleet over the workers' own HTTP `/capture` (`captureTolerantly`, the one capture
- * client), and writes a heartbeat the CLI reads to know the service is there. It changes nothing on any box. On SIGTERM it stops dispatching,
+ * client), and writes a heartbeat the CLI reads to know the service is there. It changes nothing on any box: the one play it runs, `ansible/facts.yml`
+ * (A11-283, ADR 0005), only reads. On SIGTERM it stops dispatching,
  * lets the captures in flight end and be recorded, and exits; on start it resumes every job it finds running.
  */
 import { execFileSync } from "node:child_process";
@@ -18,6 +19,7 @@ import { sandboxGitEnv } from "../git-safe-env.ts";
 import { inventoryResolver } from "./boxes.ts";
 import { ledgerClaims } from "./claims.ts";
 import { driftReader } from "./drift.ts";
+import { factsReader } from "../fleet-facts/read.ts";
 import { LeaseLedger } from "../fleet-leases/ledger.ts";
 import { ledgerDirFromEnv, ledgerPathIn } from "../fleet-leases/paths.ts";
 import { storeDirFromEnv } from "./paths.ts";
@@ -59,6 +61,7 @@ export function realDeps(store: JobStore, log: (line: string) => void): RunnerDe
     capture: (box, body) => captureTolerantly({ worker: box.url, body }),
     health: async (box) => (await requestJson(`${box.url}/health`, { timeoutMs: 12_000 })).json ?? null,
     pins: readPins,
+    readFacts: factsReader({ log }),
   };
 }
 

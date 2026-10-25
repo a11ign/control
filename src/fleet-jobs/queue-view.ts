@@ -5,7 +5,7 @@ import type { LeaseLedger } from "../fleet-leases/ledger.ts";
 import type { Waiter } from "../fleet-leases/types.ts";
 import { holderOf } from "./claims.ts";
 import type { JobStore } from "./store.ts";
-import { captureCount } from "./types.ts";
+import { FACTS_PAGE, captureCount, isFactsJob } from "./types.ts";
 import type { QueueView } from "./view.ts";
 
 /**
@@ -19,14 +19,14 @@ export const MEAN_OVER = 20;
 /** A scheduled unit that waits for a box (the freeze, a shutdown) is assumed to hold it this long: it has no history of its own. */
 export const MAINTAIN_ASSUMED_MS = 10 * 60_000;
 
-/** The mean duration of the service's last `MEAN_OVER` completed captures, or null when it has completed none. */
+/** The mean duration of the service's last `MEAN_OVER` completed captures, or null when it has completed none. A facts read is not a capture and is left out. */
 export function meanCaptureMs(store: JobStore): number | null {
   const durations: number[] = [];
   for (const id of store.list().reverse()) {
     const state = store.readState(id);
     if (!state?.ok) continue;
     for (const c of [...state.value.captures].reverse()) {
-      const took = c.status === "done" && c.startedAt && c.finishedAt ? Date.parse(c.finishedAt) - Date.parse(c.startedAt) : NaN;
+      const took = c.status === "done" && c.page !== FACTS_PAGE && c.startedAt && c.finishedAt ? Date.parse(c.finishedAt) - Date.parse(c.startedAt) : NaN;
       if (Number.isFinite(took) && took >= 0) durations.push(took);
     }
     if (durations.length >= MEAN_OVER) break;
@@ -41,6 +41,8 @@ export function durationOf(store: JobStore, mean: number | null): (waiter: Waite
     if (waiter.kind === "maintain") return MAINTAIN_ASSUMED_MS;
     const request = store.readRequest(waiter.id);
     if (!request?.ok || waiter.holder !== holderOf(waiter.id)) return `${waiter.holder}'s length is not known`;
+    // A facts read is a wake and a play, not a capture: the capture mean says nothing about it, and a guess from it would read as a promise.
+    if (isFactsJob(request.value)) return `${waiter.holder} is a facts job, whose length is not estimated`;
     if (mean === null) return "no capture has completed yet, so how long a job holds its boxes is not known";
     const count = captureCount(request.value);
     const boxes = "named" in waiter.want ? waiter.want.named.length : "count" in waiter.want ? waiter.want.count : null;

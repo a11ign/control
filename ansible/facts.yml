@@ -1,0 +1,95 @@
+---
+# Read a box's hardware and firmware -- and change NOTHING (A11-283, ADR 0005).
+#
+#     ansible-playbook ansible/facts.yml --limit a11y-worker-2
+#
+# THIS IS NOT A COMMAND TO RUN BY HAND. It is the one play the fleet job service runs (`fleet facts submit`), under the box's `capture` lease, so it cannot land in
+# the middle of a capture. `src/fleet-facts/read.ts` runs it per box with the JSON stdout callback, and the service writes `fleet-facts.json` from what it prints.
+#
+# ## Read-only, three ways
+#
+# 1. `src/fleet-facts/facts-play.test.ts` holds this file to an allowlist of modules, `changed_when: false` on every task, no `become`, and a script that uses only
+#    read cmdlets.
+# 2. The runner asserts that the callback's `changed` for the box is 0, and fails the box's entry when it is not.
+# 3. The script sets `$Ansible.Changed = $false` itself.
+#
+# ## What it reads, and from where
+#
+# CIM (`Win32_ComputerSystem`, `Win32_ComputerSystemProduct`, `Win32_BIOS`, `Win32_Processor`, `Win32_PhysicalMemory`, `Win32_LogicalDisk`, `Win32_Tpm`), `Get-PhysicalDisk`,
+# the registry's `CurrentVersion` key, `Get-Tpm` and `Confirm-SecureBootUEFI`. TPM and Secure Boot are each in a `try` of their own: a read that throws is `unknown`
+# with the message, never a failed box, because a box whose TPM cannot be read still has a model and a CPU worth recording. `Confirm-SecureBootUEFI` on a legacy BIOS
+# is `unsupported`.
+#
+# A number is passed on as the CIM or the registry gave it, never cast: `[int64]$null` is 0, and a drive or a UBR that could not be read would be recorded as a zero instead of refused
+# by the parser. (`ConfiguredClockSpeed` and `Speed` are cast: a 0 there is "not reported", and the parser takes the other.)
+#
+# The result is `$Ansible.Result`, not text on stdout, so the callback carries it as structure. Lenovo's model is in `Win32_ComputerSystemProduct.Version` and its machine
+# type in the first four characters of `Win32_ComputerSystem.Model`; the parser (`src/fleet-facts/parse.ts`) takes it from there.
+- name: The workers must be in the inventory
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The workers must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_workers
+        inventory_group_noun: worker
+
+- name: Read the workers' hardware
+  hosts: a11y_workers
+  gather_facts: false
+  tasks:
+    - name: Read the box's hardware
+      ansible.windows.win_powershell:
+        depth: 6
+        script: |
+          $Ansible.Changed = $false
+          $ErrorActionPreference = 'Stop'
+
+          function Attempt([scriptblock]$Read) {
+            try { & $Read } catch { [ordered]@{ state = 'unknown'; error = $_.Exception.Message } }
+          }
+
+          $system = Get-CimInstance -ClassName Win32_ComputerSystem
+          $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct
+          $bios = Get-CimInstance -ClassName Win32_BIOS
+          $drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
+          $windows = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+
+          $tpm = Attempt {
+            $read = Get-Tpm
+            $spec = (Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm).SpecVersion
+            [ordered]@{ state = $(if ($read.TpmPresent) { 'present' } else { 'absent' }); ready = [bool]$read.TpmReady; specVersion = $spec }
+          }
+
+          $secureBoot = Attempt {
+            try { [ordered]@{ state = $(if (Confirm-SecureBootUEFI) { 'enabled' } else { 'disabled' }) } }
+            catch [System.PlatformNotSupportedException] { [ordered]@{ state = 'unsupported' } }
+          }
+
+          $Ansible.Result = [ordered]@{
+            computerSystem = [ordered]@{
+              Manufacturer = $system.Manufacturer; Model = $system.Model; SystemSKUNumber = $system.SystemSKUNumber; TotalPhysicalMemory = $system.TotalPhysicalMemory
+            }
+            product = [ordered]@{ Version = $product.Version }
+            bios = [ordered]@{
+              SerialNumber = $bios.SerialNumber; SMBIOSBIOSVersion = $bios.SMBIOSBIOSVersion
+              ReleaseDate = $(if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString('yyyy-MM-dd') } else { $null })
+            }
+            processors = @(Get-CimInstance -ClassName Win32_Processor | ForEach-Object {
+              [ordered]@{ Name = $_.Name; NumberOfCores = $_.NumberOfCores; NumberOfLogicalProcessors = $_.NumberOfLogicalProcessors }
+            })
+            memory = @(Get-CimInstance -ClassName Win32_PhysicalMemory | ForEach-Object {
+              [ordered]@{ Capacity = $_.Capacity; ConfiguredClockSpeed = [int]$_.ConfiguredClockSpeed; Speed = [int]$_.Speed; PartNumber = "$($_.PartNumber)".Trim() }
+            })
+            disks = @(Get-PhysicalDisk | ForEach-Object {
+              [ordered]@{ FriendlyName = $_.FriendlyName; MediaType = [string]$_.MediaType; BusType = [string]$_.BusType; Size = $_.Size }
+            })
+            systemDrive = [ordered]@{ DeviceID = $drive.DeviceID; FreeSpace = $drive.FreeSpace; Size = $drive.Size }
+            windows = [ordered]@{
+              CurrentBuild = [string]$windows.CurrentBuild; UBR = $windows.UBR; DisplayVersion = [string]$windows.DisplayVersion; EditionID = [string]$windows.EditionID
+            }
+            tpm = $tpm
+            secureBoot = $secureBoot
+          }
+      changed_when: false

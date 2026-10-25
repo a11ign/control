@@ -1,4 +1,5 @@
 import { fleetConsistency, describeMismatches, describeReportedOnly } from "@a11ign/screenreader-fleet/fleet-consistency";
+import { FACTS_STORE_VERSION, isFactsJob } from "./types.ts";
 import type { JobRequest, JobStateFile } from "./types.ts";
 
 /** What `deploy-pins.json` says the fleet should be, as far as it could be read. A pin that cannot be read is stated, not defaulted. */
@@ -17,8 +18,10 @@ export function buildManifest({ request, state, pins }: { request: JobRequest; s
   }));
   const agreement = fleetConsistency(guests);
   const cases = request.cases !== undefined;
+  const facts = isFactsJob(request);
   return {
-    version: cases ? 2 : 1,
+    version: facts ? FACTS_STORE_VERSION : cases ? 2 : 1,
+    ...(facts ? { kind: "facts" } : {}),
     job: request.id,
     label: request.label,
     state: state.state,

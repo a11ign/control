@@ -11,6 +11,8 @@
  *     fleet job list [--label <key>] [--state <s>] [--json]
  *     fleet job fetch <id> --to <dir>
  *     fleet lease list [--json]
+ *     fleet facts submit --boxes <N>|all|<name,name> --label <ticket key>
+ *     fleet facts show [--json] [--boxes <name,name>]
  *
  * This is the thin local side. Every call runs `remote.ts` on the control plane, from the service's own checkout, over the SSH route every control
  * command already uses. What stays here is argument parsing, the wait loop and `fetch`.
@@ -30,11 +32,12 @@ import type { Invocation } from "../control-plane-fleet.ts";
 import { MAX_WAIT_MS, formatDuration, parseDuration } from "./duration.ts";
 import { parseCasesFile } from "./cases.ts";
 import { parsePages } from "./pages.ts";
+import { factsCommand } from "../fleet-facts/commands.ts";
 import { CONTROL_TSX_LOADER, SERVICE_CHECKOUT } from "./paths.ts";
 import { REMOTE_EXIT } from "./remote.ts";
 import type { RecapturePayload, SubmitPayload } from "./remote.ts";
 import { JOB_ID } from "./store.ts";
-import { leftLines, renderView } from "./view.ts";
+import { entryNoun, leftLines, renderView } from "./view.ts";
 import type { JobView } from "./view.ts";
 import type { BoxRequest, Freeze } from "./types.ts";
 
@@ -45,8 +48,12 @@ export type Transport = (remoteArgs: string[]) => Invocation;
 
 const shellQuote = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
 
-export const controlPlaneTransport: Transport = (args) => controlPlaneInvocation(
-  `cd ${SERVICE_CHECKOUT} && /usr/bin/node --import ${CONTROL_TSX_LOADER} src/fleet-jobs/remote.ts ${args.map(shellQuote).join(" ")}`);
+/** A remote half on the control plane, run from the service's own checkout: `src/fleet-jobs/remote.ts` for jobs, `src/fleet-facts/remote.ts` for facts. */
+const controlPlaneTransportFor = (remote: string): Transport => (args) => controlPlaneInvocation(
+  `cd ${SERVICE_CHECKOUT} && /usr/bin/node --import ${CONTROL_TSX_LOADER} ${remote} ${args.map(shellQuote).join(" ")}`);
+
+export const controlPlaneTransport: Transport = controlPlaneTransportFor("src/fleet-jobs/remote.ts");
+export const factsControlPlaneTransport: Transport = controlPlaneTransportFor("src/fleet-facts/remote.ts");
 
 /** Each ssh round trip has its own limit; a call that exceeds it is a failed poll, not a hung command. */
 const CALL_TIMEOUT_MS = 60_000;
@@ -66,6 +73,8 @@ export function call(transport: Transport, args: string[], { input, timeoutMs = 
 export type Io = { out: (text: string) => void; err: (text: string) => void };
 export type Deps = Io & {
   transport: Transport;
+  /** How `fleet facts` reaches the control plane; the facts route when absent. */
+  factsTransport?: Transport;
   /** How often `wait` asks the service: one ssh round trip each. */
   pollMs: number;
   now: () => number;
@@ -126,7 +135,7 @@ export async function waitForJob(deps: Deps, id: string, timeoutMs: number): Pro
 /** The exit code of a job that has ended, with what it says; null while it has not. */
 function endOf(deps: Deps, view: JobView): number | null {
   if (view.state === "done") {
-    deps.out(`${view.id} done: ${view.done - view.failed - view.skipped} captures, ${view.failed} failed${view.skipped ? `, ${view.skipped} skipped` : ""}\nresults: ${view.results.location}  (${view.results.fetch})\n`);
+    deps.out(`${view.id} done: ${view.done - view.failed - view.skipped} ${entryNoun(view)}, ${view.failed} failed${view.skipped ? `, ${view.skipped} skipped` : ""}\nresults: ${view.results.location}  (${view.results.fetch})\n`);
     return EXIT.OK;
   }
   if (view.state === "failed") {
@@ -135,7 +144,7 @@ function endOf(deps: Deps, view: JobView): number | null {
     return EXIT.FAILED;
   }
   if (view.state === "cancelled") {
-    deps.err(`${view.id} was cancelled${view.reason ? `: ${view.reason}` : ""}; ${view.done} of ${view.total} captures had ended\n`);
+    deps.err(`${view.id} was cancelled${view.reason ? `: ${view.reason}` : ""}; ${view.done} of ${view.total} ${entryNoun(view)} had ended\n`);
     return EXIT.CANCELLED;
   }
   return null;
@@ -363,11 +372,15 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
     if (group === "capture" && sub === "submit") return submitJob(rest, deps);
     if (group === "job") return await job(sub, rest, deps);
     if (group === "lease" && sub === "list") return listLeases(rest, deps);
+    if (group === "facts") {
+      const transport = deps.factsTransport ?? factsControlPlaneTransport;
+      return factsCommand(sub, rest, { call: (args, options) => call(transport, args, options), out: deps.out, err: deps.err, submitter: deps.submitter });
+    }
   } catch (error) {
     deps.err(`${(error as Error).message}\n`);
     return EXIT.USAGE;
   }
-  deps.err("usage: fleet capture submit ... | fleet job status|wait|cancel|recapture|list|fetch ... | fleet lease list  (see the header of src/fleet-jobs/cli.ts)\n");
+  deps.err("usage: fleet capture submit ... | fleet job status|wait|cancel|recapture|list|fetch ... | fleet lease list | fleet facts submit|show ...  (see the header of src/fleet-jobs/cli.ts)\n");
   return EXIT.USAGE;
 }
 
@@ -408,6 +421,7 @@ export const realDeps = (): Deps => ({
   out: (text) => { process.stdout.write(text); },
   err: (text) => { process.stderr.write(text); },
   transport: controlPlaneTransport,
+  factsTransport: factsControlPlaneTransport,
   pollMs: POLL_MS,
   now: Date.now,
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),

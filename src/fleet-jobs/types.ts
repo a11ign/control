@@ -2,8 +2,13 @@
 export const STORE_VERSION = 1;
 /** A job of cases, or a re-capture, is written as version 2: a service that reads only version 1 fails it by name and never captures its URLs as plain pages. */
 export const CASE_STORE_VERSION = 2;
-export type StoreVersion = typeof STORE_VERSION | typeof CASE_STORE_VERSION;
-export const READABLE_VERSIONS: readonly number[] = [STORE_VERSION, CASE_STORE_VERSION];
+/** A facts job is written as version 3 (A11-283): a service that reads only versions 1 and 2 fails it by name and never runs it as a page job. */
+export const FACTS_STORE_VERSION = 3;
+export type StoreVersion = typeof STORE_VERSION | typeof CASE_STORE_VERSION | typeof FACTS_STORE_VERSION;
+export const READABLE_VERSIONS: readonly number[] = [STORE_VERSION, CASE_STORE_VERSION, FACTS_STORE_VERSION];
+
+/** The `page` of a facts job's entries: one read of one box, which is not a page and is left out of the capture estimate. */
+export const FACTS_PAGE = "facts";
 
 export type JobState = "queued" | "running" | "done" | "failed" | "cancelled";
 export const TERMINAL_STATES: readonly JobState[] = ["done", "failed", "cancelled"];
@@ -45,11 +50,17 @@ export type JobRequest = {
   groups?: Record<string, GroupSpec>;
   /** The job whose cases this one captures again. */
   recaptureOf?: string;
+  /** `"facts"`: the job reads each box's hardware instead of capturing pages. It has named boxes or a count, no pages, one pass and an empty body. */
+  kind?: "facts";
 };
 
-/** How many captures a job asks for: its cases, or its pages on every pass. */
-export const captureCount = (request: Pick<JobRequest, "pages" | "passes" | "cases">): number =>
-  request.cases ? request.cases.length : request.pages.length * request.passes;
+export const isFactsJob = (request: Pick<JobRequest, "kind">): boolean => request.kind === "facts";
+
+/** How many captures a job asks for: its cases, its pages on every pass, or one read per box of a facts job. */
+export const captureCount = (request: Pick<JobRequest, "pages" | "passes" | "cases"> & Partial<Pick<JobRequest, "kind" | "boxes">>): number => {
+  if (isFactsJob(request)) return request.boxes?.kind === "named" ? request.boxes.names.length : request.boxes?.kind === "count" ? request.boxes.count : 0;
+  return request.cases ? request.cases.length : request.pages.length * request.passes;
+};
 
 export type CaptureStatus = "pending" | "dispatched" | "done" | "failed" | "skipped";
 

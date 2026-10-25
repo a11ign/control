@@ -43,6 +43,9 @@ const EXEMPT: Record<string, string> = {
   "freeze.yml":
     "The daily freeze (A11-205) restarts nothing, installs nothing and never touches `msedge.exe`: it writes registry values, disables services and tasks, "
     + "and renames the Edge updater's files. It is MEANT to run on a box that is capturing, because a box that is always busy must still be frozen.",
+  "facts.yml":
+    "The fleet facts read (A11-283) restarts nothing and changes nothing (`changed_when: false`, asserted by `facts-play.test.ts`): it only reads CIM, the TPM and Secure Boot. "
+    + "The job service runs it under a `capture` lease it holds on the box, so no capture or deploy can start there while it reads.",
 };
 
 function playbooksTargetingWorkers(): string[] {

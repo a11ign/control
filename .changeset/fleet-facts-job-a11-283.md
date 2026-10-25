@@ -1,0 +1,5 @@
+---
+"@a11ign/control": minor
+---
+
+The fleet facts job (A11-283): `fleet facts submit --boxes <n|all|names> --label <key>` is a new kind of job in the fleet job service. It books its boxes like a capture's, wakes each one, runs the read-only play `ansible/facts.yml` on it (the first play the service runs, [ADR 0005](docs/adr/0005-the-job-service-runs-one-read-only-play-the-facts-read.md)) and records the box's make, model and machine type, serial, BIOS version and date, CPU, RAM, each disk, free space on the system drive, Windows build, TPM and Secure Boot state. The play changes nothing, and that is held three ways: a static test of its modules, the runner's check that the callback's `changed` is 0, and the script's own `$Ansible.Changed = $false`. The facts are kept in `/etc/a11ign/fleet-facts.json` beside the inventory, one entry per box with `readAt`; a box that did not answer keeps its last facts, marked stale. `fleet facts show` prints them as a table. A facts job is written at store version 3, so an older service fails it by name. Nothing on any box changes; the fleet stays frozen.
