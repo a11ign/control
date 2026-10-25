@@ -97,6 +97,9 @@ test("a healthy deploy is NOT refused", () => {
  * the design.
  */
 const DISPATCHED_ELSEWHERE: Record<string, string> = {
+  "facts.yml":
+    "the fleet job service runs it (`src/fleet-facts/read.ts`, one `--limit <box>` play per box, A11-283), not the deploy wrapper. A run that resolves no box cannot exit 0 having "
+    + "done nothing: its first play includes `require-inventory-group.yml` on localhost, and the job reads a box that is missing from the play's `stats` as a failed read.",
   "wake.yml": "`fleet:wake` runs it through `fleet-wake.ts`, its own dispatcher.",
   "ssh-key.yml": "bootstrap, run once by hand when a box is first built; there is no fleet to be stale.",
   "restart.yml":
