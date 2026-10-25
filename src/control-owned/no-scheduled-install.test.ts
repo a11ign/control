@@ -146,7 +146,8 @@ test("the daily freeze's wrapper (A11-244) can start only `ansible-playbook free
   const program = wrapperProgram();
   const spawns = [...program.matchAll(/\bspawn(?:Sync)?\(([^\n]*)/g)].map((m) => m[1]);
   assert.equal(spawns.length, 1, "the wrapper starts exactly one process");
-  assert.match(spawns[0], /^"ansible-playbook", \["freeze\.yml", "--limit", boxes\.join\(","\), "-e", `freeze_record_path=\$\{recordPath\}`\]/);
+  assert.match(program, /program = "ansible-playbook"/, "and the program it starts by default is ansible-playbook, which is what main() uses");
+  assert.match(spawns[0], /^program, \["freeze\.yml", "--limit", boxes\.join\(","\), "-e", `freeze_record_path=\$\{recordPath\}`\]/);
   assert.deepEqual([...program.matchAll(/["'`]([\w./-]+\.yml)["'`]/g)].map((m) => m[1]), ["freeze.yml"], "no other playbook is named");
   assert.doesNotMatch(program, /\b(exec|execSync|execFile|execFileSync|fork)\(|\bsystemctl\b|\bssh\b|fleet-playbook/, "and it reaches no other way of running a command");
   assert.doesNotMatch(program, INSTALLERS, "and names no install module");

@@ -262,11 +262,15 @@ function readOrNull(path: string): string | null {
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const RECORD_PATH = join(ROOT, "runs", "fleet-freeze-last-run.json");
 
-/** `freeze.yml` on `boxes`, from `ansible/` (the unit's `ANSIBLE_CONFIG=ansible.cfg` is relative to it). Its output is the journal's. */
-function playbookOn(boxes: string[], recordPath: string): Promise<number | null> {
-  return new Promise((resolve) => {
-    const child = spawn("ansible-playbook", ["freeze.yml", "--limit", boxes.join(","), "-e", `freeze_record_path=${recordPath}`], { cwd: join(ROOT, "ansible"), stdio: "inherit" });
-    const hung = setTimeout(() => child.kill("SIGTERM"), BATCH_TIMEOUT_MS);
+/**
+ * The real `runPlaybook`: `freeze.yml` on `boxes`, from `ansible/` (the unit's `ANSIBLE_CONFIG=ansible.cfg` is relative to it), its output going to the journal.
+ * It resolves with the play's exit status, or `null` when the play could not start or was killed (a signal, or `timeoutMs` passing). The program, the
+ * directory and the timeout are arguments only so a test can run a stand-in; `main` uses the defaults.
+ */
+export function playbookRunner({ program = "ansible-playbook", cwd = join(ROOT, "ansible"), timeoutMs = BATCH_TIMEOUT_MS }: { program?: string; cwd?: string; timeoutMs?: number } = {}): FreezeDeps["runPlaybook"] {
+  return (boxes, recordPath) => new Promise((resolve) => {
+    const child = spawn(program, ["freeze.yml", "--limit", boxes.join(","), "-e", `freeze_record_path=${recordPath}`], { cwd, stdio: "inherit" });
+    const hung = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
     child.on("error", () => { clearTimeout(hung); resolve(null); });
     child.on("close", (status) => { clearTimeout(hung); resolve(status); });
   });
@@ -288,7 +292,7 @@ async function main(): Promise<void> {
     return;
   }
   const log = (line: string): void => { process.stdout.write(`${line}\n`); };
-  const { record, exitCode } = await runDailyFreeze({ ledger: ledgerOnThisHost(log), boxes, runPlaybook: playbookOn, log });
+  const { record, exitCode } = await runDailyFreeze({ ledger: ledgerOnThisHost(log), boxes, runPlaybook: playbookRunner(), log });
   writeRecord(RECORD_PATH, record);
   process.exitCode = exitCode;
 }

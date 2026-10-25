@@ -4,11 +4,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LeaseLedger } from "./ledger.ts";
-import { batchRecordOf, mergeRecords, runDailyFreeze } from "./freeze-daily.ts";
+import { batchRecordOf, mergeRecords, playbookRunner, runDailyFreeze } from "./freeze-daily.ts";
 import type { FreezeOutcome } from "./freeze-daily.ts";
 
 const HOUR = 3_600_000;
@@ -212,4 +212,58 @@ test("a play that throws still lets its boxes go", async () => {
     heartbeat: () => () => {}, sleep: async (ms) => { t.clock.at += ms; } }), /spawn failed/);
   assert.deepEqual(t.ledger.held(), {});
   t.done();
+});
+
+// ---- the real spawn (playbookRunner), run against a stand-in `ansible-playbook` -----------------------------------------------------------------
+
+/** A stand-in program that records its argv and working directory, then behaves as `body` says. */
+function standIn(body: string) {
+  const dir = mkdtempSync(join(tmpdir(), "stand-in-"));
+  const program = join(dir, "ansible-playbook");
+  writeFileSync(program, `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv"\npwd > "${dir}/cwd"\n${body}\n`);
+  chmodSync(program, 0o755);
+  return { dir, program, argv: () => readFileSync(join(dir, "argv"), "utf8").trim().split("\n"), cwd: () => readFileSync(join(dir, "cwd"), "utf8").trim(), done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("the real spawn runs `freeze.yml` with --limit and the batch's record path, from the ansible directory, and returns the play's exit status", async () => {
+  const play = standIn("exit 0");
+  const work = mkdtempSync(join(tmpdir(), "ansible-dir-"));
+  try {
+    const status = await playbookRunner({ program: play.program, cwd: work })(["w1", "w3"], "/tmp/x/record.json");
+    assert.equal(status, 0);
+    assert.deepEqual(play.argv(), ["freeze.yml", "--limit", "w1,w3", "-e", "freeze_record_path=/tmp/x/record.json"]);
+    assert.equal(play.cwd(), work.replace(/\/$/, ""));
+    // a play that exits non-zero (a lever put back, a box not reached) comes back as that status, so the run fails on it
+    const failing = standIn("exit 2");
+    assert.equal(await playbookRunner({ program: failing.program, cwd: work })(["w1"], "/tmp/x/r.json"), 2);
+    failing.done();
+  } finally { play.done(); rmSync(work, { recursive: true, force: true }); }
+});
+
+test("the real spawn's default is the repository's own ansible/ directory and the real `freeze.yml` is there", () => {
+  const dir = new URL("../../ansible/", import.meta.url);
+  assert.ok(readFileSync(new URL("freeze.yml", dir), "utf8").includes("freeze_record_path"), "the play the wrapper starts, and the var it overrides, exist where the default cwd points");
+});
+
+test("the real spawn kills a hung play at its timeout and reports `null`, and reports `null` for a program that cannot start", async () => {
+  const hung = standIn("sleep 30");
+  const work = mkdtempSync(join(tmpdir(), "ansible-dir-"));
+  try {
+    const began = Date.now();
+    assert.equal(await playbookRunner({ program: hung.program, cwd: work, timeoutMs: 300 })(["w1"], "/tmp/x/r.json"), null, "killed by the timeout: no status");
+    assert.ok(Date.now() - began < 10_000, "and it did not wait for the 30 s sleep");
+    assert.equal(await playbookRunner({ program: join(work, "no-such-program"), cwd: work })(["w1"], "/tmp/x/r.json"), null, "a program that cannot start");
+  } finally { hung.done(); rmSync(work, { recursive: true, force: true }); }
+});
+
+test("a killed or unstartable play leaves its boxes to be tried again, then `failed`, never frozen (the real spawn through the whole run)", async () => {
+  const t = setup();
+  const work = mkdtempSync(join(tmpdir(), "ansible-dir-"));
+  try {
+    const outcome = await runDailyFreeze({ ledger: t.ledger, boxes: ["w1"], runPlaybook: playbookRunner({ program: join(work, "missing"), cwd: work }), now: () => t.clock.at,
+      heartbeat: () => () => {}, deadlineMs: HOUR, sleep: async (ms) => { t.clock.at += ms; } });
+    assert.deepEqual(outcome.record.frozen, []);
+    assert.deepEqual(outcome.record.failed, ["w1"]);
+    assert.equal(outcome.exitCode, 1);
+  } finally { rmSync(work, { recursive: true, force: true }); t.done(); }
 });
