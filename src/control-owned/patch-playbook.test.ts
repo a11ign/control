@@ -347,8 +347,9 @@ function readbackParameters(withVarsFiles: boolean): { status: number | null; ou
     tasks: [{ "ansible.builtin.set_fact": { readback: task?.["ansible.windows.win_powershell"].parameters } },
       { "ansible.builtin.copy": { dest: out, content: "{{ readback | to_json }}" } }] }]));
   const run = runLocal({ playbook, hosts: { localhost: {} } });
-  let parameters: Record<string, string> | null = null;
-  try { parameters = JSON.parse(readFileSync(out, "utf8")); } catch { parameters = null; }
+  const parameters = (() => {
+    try { return JSON.parse(readFileSync(out, "utf8")) as Record<string, string>; } catch { return null; }
+  })();
   return { status: run.status, out: run.out, parameters };
 }
 

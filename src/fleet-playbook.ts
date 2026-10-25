@@ -580,6 +580,30 @@ function localBranch() {
 const argOf = (name: string) => flagValue(process.argv, name);
 
 /**
+ * The first flag that was asked for on a playbook that cannot honour it, in the order the flags were added.
+ * Each is the same refusal for the same reason: the operator asked for something, watched a different thing
+ * happen, and nothing said so. Only the named playbook can act on the flag.
+ */
+function flagCombinationRefusal({ chosen, serialFlag, allowEdgeDowngrade, apply, preflight }: {
+    chosen: string; serialFlag: string | undefined; allowEdgeDowngrade: boolean; apply: boolean; preflight: boolean;
+}): string | null {
+  // `--allow-edge-downgrade` lifts `edge-version.yml`'s refusal for a box that has drifted PAST the pin, installing
+  // the pinned MSI with Microsoft's supported ALLOWDOWNGRADE=1. Opt-in because it moves a working box to an older browser.
+  if (allowEdgeDowngrade && chosen !== "provision-role.yml") {
+    return "refusing --allow-edge-downgrade: only provision-role.yml installs Edge. "
+      + "Use `npm run fleet:provision -- --allow-edge-downgrade`.";
+  }
+  if (serialFlag !== undefined && chosen !== "provision-role.yml") {
+    return `refusing --serial with --playbook=${chosen}: only provision-role.yml batches.`;
+  }
+  // `fleet:patch -- --apply` asks the upgrade's gates BEFORE `deploy.yml` puts new code on every box (`fleet-upgrade.ts`): `--preflight` is that question, and nothing else.
+  if (preflight && !(chosen === "patch.yml" && apply)) {
+    return "refusing --preflight: it asks patch.yml's gates for an --apply run, and nothing else.";
+  }
+  return null;
+}
+
+/**
  * Every argument, validated, or a refusal that names which one and what shape it wanted.
  *
  * Extracted from `main` because it grew past the complexity gate as flags were added — and the gate was
@@ -609,25 +633,11 @@ function parseArgs(): {
     refuse(`refusing --serial=${serialFlag}: 0 (all at once) or 1-99.`);
   }
 
-  // Lifts `edge-version.yml`'s refusal for a box that has drifted PAST the pin, installing the pinned MSI
-  // with Microsoft's supported ALLOWDOWNGRADE=1. Opt-in because it moves a working box to an older browser.
   const allowEdgeDowngrade = process.argv.includes("--allow-edge-downgrade");
-  // The same refusal `--serial=` makes, for the same reason: the operator asked for something, watched a
-  // different thing happen, and nothing said so. Only the role can act on this.
-  if (allowEdgeDowngrade && chosen !== "provision-role.yml") {
-    refuse("refusing --allow-edge-downgrade: only provision-role.yml installs Edge. "
-      + "Use `npm run fleet:provision -- --allow-edge-downgrade`.");
-  }
-  // Silently ignoring it would be worse than refusing: the operator asked for a batch size, watched
-  // something else happen, and nothing said so.
-  if (serialFlag !== undefined && chosen !== "provision-role.yml") {
-    refuse(`refusing --serial with --playbook=${chosen}: only provision-role.yml batches.`);
-  }
-
   const apply = process.argv.includes("--apply");
-  // `fleet:patch -- --apply` asks the upgrade's gates BEFORE `deploy.yml` puts new code on every box (`fleet-upgrade.ts`): this is that question, and nothing else.
   const preflight = process.argv.includes("--preflight");
-  if (preflight && !(chosen === "patch.yml" && apply)) refuse("refusing --preflight: it asks patch.yml's gates for an --apply run, and nothing else.");
+  const combination = flagCombinationRefusal({ chosen, serialFlag, allowEdgeDowngrade, apply, preflight });
+  if (combination) refuse(combination);
   const osRefusal = osRollbackRefusal({ chosen, limitFlag, apply });
   if (osRefusal) refuse(osRefusal);
   // Every refusal this flag needs lives in one place, so the shape check, the playbook check and the
