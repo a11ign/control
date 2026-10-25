@@ -4,7 +4,7 @@
 #
 # THE UNIT NAME IS NOT `a11y-fleet-freeze`: `fleet:freeze` dispatches `freeze.yml` as a transient unit of that name and stops and resets it before every run, so
 # a unit of the same name here would be stopped by the very command it fires (the patch window's unit had the same trap).
-Description=a11y: re-apply the freeze to every reachable box, and name the ones that were not reached
+Description=a11y: re-apply the freeze to every reachable box, once its capture lease is free, and name the ones that were not reached
 
 [Service]
 Type=oneshot
@@ -24,5 +24,9 @@ ExecCondition=/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --
 # Follow `main` first, or a stale checkout freezes with yesterday's levers. The `-` is the point: a failed step leaves the tree as it was, and the freeze still
 # runs the levers it has. `--ff-only`, never a checkout (a checkout a deploy put on another ref is left standing).
 ExecStartPre=-/bin/sh -c 'git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main && git merge --ff-only --quiet origin/main'
-# `env` resolves `ansible-playbook` through the PATH above: systemd looks up an ExecStart command in its own search path, not the unit's.
-ExecStart=/usr/bin/env ansible-playbook freeze.yml
+# BOOKED, NOT BLIND (A11-244). The wrapper takes an exclusive `maintain` lease on each box from the fleet lease ledger before it runs `ansible-playbook freeze.yml --limit <those boxes>`,
+# so the freeze never lands in the middle of a capture; a box a capture holds is frozen in a later batch, when its lease is let go. It stops waiting after 6 hours, names the boxes it
+# never got as `leased` in `runs/fleet-freeze-last-run.json`, and exits non-zero so `systemctl --failed` shows them. It starts nothing but that playbook (`no-scheduled-install.test.ts`).
+# The loader is a host fact, named by absolute path, as the other units do. `ansible-playbook` is found through the PATH above. The bound is a little over the wrapper's 6-hour wait.
+TimeoutStartSec=7h
+ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-leases/freeze-daily.ts

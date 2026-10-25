@@ -32,6 +32,9 @@ import {
   LAPSE_WARNING_MS, proofStanding, renewalFooter, renderReport, readPlaysInFlight, LAUNCHABLE_PLAYBOOK_NAMES,
 } from "./fleet-auto-off.ts";
 import { readFleetLock, FLEET_LOCK_PATH } from "./fleet-lock.ts";
+import { LeaseLedger } from "./fleet-leases/ledger.ts";
+import { bookShutdown, signalsOf } from "./fleet-leases/booking.ts";
+import { realBooking, SHUTDOWN_LEASE_MS } from "./fleet-auto-off.ts";
 
 // ---------------------------------------------------------------------------------------------------------
 // hasWakeableMac -- "has a MAC" means magicPacket() accepts it, not merely a non-empty field.
@@ -1562,7 +1565,7 @@ test("#3543 4 the play ending releases the box, and the idle clock is NOT restar
 
 test("#3543 main passes the real reader: tick's default is `no play`, so only this wiring makes the signal live", () => {
   const source = readFileSync(fileURLToPath(new URL("./fleet-auto-off.ts", import.meta.url)), "utf8");
-  assert.match(source, /await tick\(\{ workers: declared, apply, playsInFlight: readPlaysInFlight, fleetLock: readFleetLock \}\)/);
+  assert.match(source, /await tick\(\{ workers: declared, apply, playsInFlight: readPlaysInFlight, fleetLock: readFleetLock, booking: realBooking\(\) \}\)/);
 });
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1664,5 +1667,125 @@ test("the real layer declarations resolve inside the checkout this program runs 
     const { dir, path } = layerDeclaration(name);
     assert.equal(dir, join(base, path), `layer ${name} resolves to ${dir}`);
     assert.ok(dir === base || dir.startsWith(`${base}/`), `layer ${name} resolves outside ${base}: ${dir}`);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// A11-244: `leasePending` and `batchQueued` come from the lease ledger, and a shutdown is made under a lease of its own.
+// ---------------------------------------------------------------------------------------------------------
+
+function ledgerAtNow() {
+  const dir = mkdtempSync(join(tmpdir(), "auto-off-leases-"));
+  const ledger = new LeaseLedger(join(dir, "ledger.json"), { now: () => IDLE_THRESHOLD_MS });
+  const booking = { signals: () => signalsOf(ledger), shutdown: (box: string) => bookShutdown(ledger, box, { holder: "fleet-auto-off:test", ttlMs: SHUTDOWN_LEASE_MS }) };
+  return { ledger, booking, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+const take = (ledger: LeaseLedger, id: string, kind: "capture" | "maintain" | "read", box = "a11y-worker-2") =>
+  ledger.tryTake({ id, holder: `h:${id}`, kind, label: id, boxes: [box], ttlMs: 3_600_000 });
+const waitFor = (ledger: LeaseLedger, id: string, want: { named: string[] } | { count: number }) =>
+  ledger.enqueue({ id, holder: `h:${id}`, kind: "capture", label: id, want, enqueuedAt: 1, ttlMs: 3_600_000 });
+
+test("A11-244 1 a box under a live `capture` or `maintain` lease is kept `lease-pending`; the same box with none is put off", async () => {
+  for (const kind of ["capture", "maintain"] as const) {
+    const t = ledgerAtNow();
+    take(t.ledger, "held", kind);
+    const kept = await idleBoxTick(playIs("none"), { booking: t.booking });
+    assert.deepEqual(kept.decisions[0].decision, { action: "keep", reason: "lease-pending" }, kind);
+    t.done();
+  }
+  const free = ledgerAtNow();
+  assert.deepEqual((await idleBoxTick(playIs("none"), { booking: free.booking })).decisions[0].decision, { action: "off", reason: "idle-five-minutes" },
+    "the control: with no lease the box is decided off, so the keeps above are the lease's doing");
+  free.done();
+});
+
+test("A11-244 2 a `read` lease (the drift check) does not keep a box, but it stops the shutdown taking its own lease", async () => {
+  const t = ledgerAtNow();
+  take(t.ledger, "drift", "read");
+  let dispatched = 0;
+  const result = await idleBoxTick(playIs("none"), { booking: t.booking, apply: true, checkout: PROCEED, dispatch: () => { dispatched += 1; return { status: 0, log: "" }; } });
+  assert.equal(dispatched, 0, "the box is not powered off under a reading");
+  assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "lease-pending" }, "and the report says it was kept, not that it was put off");
+  t.done();
+});
+
+test("A11-244 3 a box a queued waiter NAMED is kept; a box nobody named is not", async () => {
+  const t = ledgerAtNow();
+  waitFor(t.ledger, "job-b", { named: ["a11y-worker-2"] });
+  assert.deepEqual((await idleBoxTick(playIs("none"), { booking: t.booking })).decisions[0].decision, { action: "keep", reason: "lease-pending" });
+  const other = ledgerAtNow();
+  waitFor(other.ledger, "job-b", { named: ["a11y-worker-9"] });
+  assert.deepEqual((await idleBoxTick(playIs("none"), { booking: other.booking })).decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
+  t.done(); other.done();
+});
+
+test("A11-244 4 while a waiter asked for ANY N boxes, every box is kept `batch-queued`: that job may wake and use any of them", async () => {
+  const t = ledgerAtNow();
+  waitFor(t.ledger, "job-c", { count: 2 });
+  assert.deepEqual((await idleBoxTick(playIs("none"), { booking: t.booking })).decisions[0].decision, { action: "keep", reason: "batch-queued" });
+  t.ledger.releaseAll("job-c");
+  assert.deepEqual((await idleBoxTick(playIs("none"), { booking: t.booking })).decisions[0].decision, { action: "off", reason: "idle-five-minutes" }, "control: once it has left the queue the box goes");
+  t.done();
+});
+
+test("A11-244 5 a dispatch takes a `maintain` lease on the box and lets it go when the dispatch returns", async () => {
+  const t = ledgerAtNow();
+  const seen: { kind: string; boxes: string[] }[] = [];
+  const result = await idleBoxTick(playIs("none"), { booking: t.booking, apply: true, checkout: PROCEED, dispatch: (name: string) => {
+    seen.push(...(t.ledger.live() as { ledger: { leases: { kind: string; boxes: string[] }[] } }).ledger.leases);
+    assert.equal(name, "a11y-worker-2");
+    return { status: 0, log: "" };
+  } });
+  assert.equal(seen.length, 1, "one lease while the dispatch ran");
+  assert.equal(seen[0]?.kind, "maintain");
+  assert.deepEqual(seen[0]?.boxes, ["a11y-worker-2"]);
+  assert.deepEqual(result.decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
+  assert.deepEqual(t.ledger.held(), {}, "the lease is let go afterwards");
+  t.done();
+});
+
+test("A11-244 6 a lease that cannot be taken keeps the box and sends nothing; a dispatch that fails still lets the lease go", async () => {
+  const t = ledgerAtNow();
+  let dispatched = 0;
+  // A capture arrives between the decision and the shutdown: the signals are read first, so the lease is what catches it.
+  const racing = { signals: t.booking.signals, shutdown: (box: string) => { take(t.ledger, "late-job", "capture", box); return t.booking.shutdown(box); } };
+  const kept = await idleBoxTick(playIs("none"), { booking: racing, apply: true, checkout: PROCEED, dispatch: () => { dispatched += 1; return { status: 0, log: "" }; } });
+  assert.equal(dispatched, 0);
+  assert.deepEqual(kept.decisions[0].decision, { action: "keep", reason: "lease-pending" });
+  t.done();
+
+  const failing = ledgerAtNow();
+  const realWrite = process.stderr.write;
+  process.stderr.write = (() => true) as never;
+  try {
+    await idleBoxTick(playIs("none"), { booking: failing.booking, apply: true, checkout: PROCEED, dispatch: () => ({ status: 2, log: "boom" }) });
+  } finally { process.stderr.write = realWrite; }
+  assert.deepEqual(failing.ledger.held(), {}, "a failed dispatch does not keep the box leased");
+  failing.done();
+});
+
+test("A11-244 7 a ledger that cannot be read books every box: nothing is powered off", async () => {
+  const t = ledgerAtNow();
+  writeFileSync(t.ledger.path, "{ not json");
+  const result = await idleBoxTick(playIs("none"), { booking: t.booking });
+  assert.deepEqual(result.decisions[0].decision, { action: "keep", reason: "batch-queued" });
+  t.done();
+});
+
+test("A11-244 8 report-only mode takes no lease, and `realBooking` reads the ledger the other takers write", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "auto-off-real-"));
+  const saved = process.env.A11Y_FLEET_LEASES_DIR;
+  process.env.A11Y_FLEET_LEASES_DIR = dir;
+  try {
+    const booking = realBooking();
+    const ledger = new LeaseLedger(join(dir, "ledger.json"));
+    const report = await idleBoxTick(playIs("none"), { booking });
+    assert.deepEqual(report.decisions[0].decision, { action: "off", reason: "idle-five-minutes" });
+    assert.deepEqual(ledger.held(), {}, "no --apply, so no lease");
+    ledger.tryTake({ id: "j", holder: "fleet-jobs:j", kind: "capture", label: "j", boxes: ["a11y-worker-2"], ttlMs: 3_600_000 });
+    assert.deepEqual((await idleBoxTick(playIs("none"), { booking })).decisions[0].decision, { action: "keep", reason: "lease-pending" });
+  } finally {
+    if (saved === undefined) delete process.env.A11Y_FLEET_LEASES_DIR; else process.env.A11Y_FLEET_LEASES_DIR = saved;
+    rmSync(dir, { recursive: true, force: true });
   }
 });

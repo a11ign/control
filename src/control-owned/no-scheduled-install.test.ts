@@ -29,6 +29,8 @@ const read = (relative: string) => readFileSync(`${ROOT}${relative}`, "utf8");
 const ALLOWED: Array<{ command: RegExp; why: string }> = [
   { command: /^\/usr\/bin\/env ansible-playbook freeze\.yml$/,
     why: "The daily freeze: the role's freeze.yml only, which sets policy values, disables services and tasks, and renames and firewalls the Edge updater. No install module is reachable from it (reading 2)." },
+  { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/fleet-leases\/freeze-daily\.ts$/,
+    why: "The daily freeze, booked (A11-244): it takes a lease on each box, then runs `ansible-playbook freeze.yml --limit <boxes>` and nothing else. The test below reads its source and refuses any other program or playbook (reading 2 covers freeze.yml itself)." },
   { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/fleet-drift\.ts --record$/,
     why: "The hourly drift check: it asks each box's /health what it runs, compares that with deploy-pins.json and writes runs/fleet-drift.json. It reads; `fleet-drift.ts` starts no process and runs no play (the test below reads it)." },
   { command: /^\/usr\/bin\/node --import \/opt\/a11y-tsx\/node_modules\/tsx\/dist\/esm\/index\.mjs \/root\/control\/src\/fleet-auto-off\.ts --apply$/,
@@ -135,6 +137,30 @@ test("the hourly drift check READS: its program starts no process and runs no pl
   assert.match(read("ansible/files/a11y-fleet-drift.timer"), /^OnCalendar=\*-\*-\* \*:\d\d:00$/m, "hourly");
   // negative control: the predicate sees a program that does run something
   assert.match("import { spawnSync } from 'node:child_process';", /child_process|spawn/);
+});
+
+/** The wrapper's code with its comments taken out, so a sentence about a playbook is not read as starting one. */
+const wrapperProgram = (): string => read("src/fleet-leases/freeze-daily.ts").replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((line) => !line.trimStart().startsWith("//")).join("\n");
+
+test("the daily freeze's wrapper (A11-244) can start only `ansible-playbook freeze.yml`: one spawn, one program, one playbook", () => {
+  const program = wrapperProgram();
+  const spawns = [...program.matchAll(/\bspawn(?:Sync)?\(([^\n]*)/g)].map((m) => m[1]);
+  assert.equal(spawns.length, 1, "the wrapper starts exactly one process");
+  assert.match(spawns[0], /^"ansible-playbook", \["freeze\.yml", "--limit", boxes\.join\(","\), "-e", `freeze_record_path=\$\{recordPath\}`\]/);
+  assert.deepEqual([...program.matchAll(/["'`]([\w./-]+\.yml)["'`]/g)].map((m) => m[1]), ["freeze.yml"], "no other playbook is named");
+  assert.doesNotMatch(program, /\b(exec|execSync|execFile|execFileSync|fork)\(|\bsystemctl\b|\bssh\b|fleet-playbook/, "and it reaches no other way of running a command");
+  assert.doesNotMatch(program, INSTALLERS, "and names no install module");
+  // negative control: the playbook reading sees a second playbook
+  assert.deepEqual([..."run('patch.yml'); run('freeze.yml')".matchAll(/["'`]([\w./-]+\.yml)["'`]/g)].map((m) => m[1]), ["patch.yml", "freeze.yml"]);
+});
+
+test("the freeze unit runs the wrapper, from the same working directory and under the same skip condition as before", () => {
+  const unit = read("ansible/files/a11y-fleet-freeze-daily.service");
+  assert.deepEqual(execsOf(unit).filter(({ key }) => key === "ExecStart").map(({ command }) => command),
+    ["/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-leases/freeze-daily.ts"]);
+  assert.match(unit, /^WorkingDirectory=\/root\/control\/ansible$/m);
+  assert.match(unit.replace(/\s*\\\n\s*/g, " "), /^ExecCondition=.*a11y-fleet-patch\.service/m);
+  assert.match(unit, /^TimeoutStartSec=7h$/m, "the unit is bounded a little over the wrapper's 6-hour wait");
 });
 
 test("control-unit-drift derives the freeze and drift pairs as shipped, and the patch window's names as NOT shipped", () => {
