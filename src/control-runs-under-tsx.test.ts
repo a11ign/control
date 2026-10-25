@@ -22,8 +22,9 @@ test("the loader control-host-install.yml asserts is the /opt/a11y-tsx install (
   assert.equal(LOADER, "/opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs");
 });
 
-test("the two control-plane units run their module through that loader, by absolute path", () => {
-  for (const [unit, module] of [["a11y-fleet-auto-off", "fleet-auto-off"], ["a11y-gate-heartbeat", "gate-heartbeat"]]) {
+test("the control-plane units run their module through that loader, by absolute path", () => {
+  // `a11y-fleet-jobs` (A11-243) is a long-lived service and runs `src/fleet-jobs/service.ts` from its own checkout, `/root/fleet-jobs`.
+  for (const [unit, module] of [["a11y-fleet-auto-off", "fleet-auto-off"], ["a11y-gate-heartbeat", "gate-heartbeat"], ["a11y-fleet-jobs", "fleet-jobs/service"]]) {
     const execStart = ansible(`files/${unit}.service`).split("\n").filter((l) => l.startsWith("ExecStart="));
     assert.equal(execStart.length, 1, `${unit}: one ExecStart`);
     assert.match(execStart[0], new RegExp(`^ExecStart=/usr/bin/node --import ${LOADER.replaceAll(".", "\\.")} \\S*/(?:packages/control/)?src/${module}\\.ts( --apply)?$`));

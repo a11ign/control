@@ -1,0 +1,186 @@
+---
+# Install the fleet job service on the control plane -- LIVE. A11-243.
+#
+#     pnpm run fleet:jobs-install                                    # the service on `main`
+#     pnpm run fleet:jobs-install -- -e fleet_jobs_ref=<branch|tag>  # the service on another ref, to prove a branch before it merges
+#
+# ## What this ships
+#
+# `a11y-fleet-jobs.service`: a long-lived process that owns the job store (`/var/lib/a11y-fleet-jobs`) and runs submitted capture jobs against the fleet. It changes nothing
+# on any box -- it sends the workers' own `/capture` -- so the fleet stays frozen (A11-205). The CLI reaches it over this play's host, the control plane, by the ssh every
+# control command already uses: there is no port (ADR `A11-243-adr-0001`).
+#
+# ## Its own checkout, and why
+#
+# The service runs from `/root/fleet-jobs`, NOT `/root/control`. `a11y-fleet-auto-off.service` moves `/root/control` to `main` before every tick, and a long-lived process must
+# not have its tree moved under it. A separate checkout also lets a BRANCH be proven on the plane before it merges (`-e fleet_jobs_ref=<branch>`) without putting `/root/control` off
+# `main`, which the auto-off guard refuses as `stale-checkout`. The checkout moves here and nowhere else, and the service is restarted only when the ref or the unit text moved.
+# After a merge, `pnpm run fleet:jobs-install` with the default ref puts the service back on `main`.
+#
+# ## Read back
+#
+# The play does not stop at "started": it reads the unit's SubState, then the service's own heartbeat (`service.json`), and requires the heartbeat to be fresh and to name the commit
+# of the checkout this play just put in place. A unit that is running the OLD tree, or running and not looping, fails here and not at the first job.
+#
+# Modelled on `auto-off-schedule.yml` (the require-inventory precondition on localhost, "install, reload only if changed, enable and start, read back") and
+# `control-host-install.yml` (the checkout, the pnpm the manifest pins, the lockfile install).
+- name: The control plane must be in the inventory before anything claims to have run
+  # `ansible-playbook` prints `skipping: no hosts matched` and exits 0 on zero hosts (#1980), so this precondition runs on localhost first.
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: The control plane must be in the inventory
+      ansible.builtin.include_tasks: tasks/require-inventory-group.yml
+      vars:
+        inventory_group: a11y_control
+        inventory_group_noun: control plane
+
+    - name: The control-plane key must be supplied
+      ansible.builtin.include_tasks: tasks/require-control-plane-key.yml
+
+- name: Install and start the fleet job service on the control plane (A11-243)
+  hosts: a11y_control
+  gather_facts: false
+  vars:
+    fleet_jobs_ref: main
+    fleet_jobs_repo_url: https://github.com/a11ign/control.git
+    fleet_jobs_checkout: /root/fleet-jobs
+    fleet_jobs_store: /var/lib/a11y-fleet-jobs
+    # The `tsx` the control plane's TypeScript runs under (#4292, #4341), the same install `control-host-install.yml` asserts and the unit names.
+    control_tsx_loader: /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs
+    control_corepack: /usr/bin/corepack
+    fleet_jobs_units:
+      - a11y-fleet-jobs.service
+
+  tasks:
+    - name: The service's own checkout is on the plane, at the ref asked for
+      ansible.builtin.git:
+        repo: "{{ fleet_jobs_repo_url }}"
+        dest: "{{ fleet_jobs_checkout }}"
+        version: "{{ fleet_jobs_ref }}"
+        update: true
+      register: fleet_jobs_checkout_state
+
+    - name: Read the pnpm version that checkout's package.json pins
+      ansible.builtin.slurp:
+        path: "{{ fleet_jobs_checkout }}/package.json"
+      register: fleet_jobs_manifest
+
+    - name: The pin must be one exact pnpm version
+      ansible.builtin.set_fact:
+        fleet_jobs_pnpm_pin: "{{ (fleet_jobs_manifest.content | b64decode | from_json).packageManager | default('', true) }}"
+
+    - name: Refuse a manifest that pins no exact pnpm, rather than install whichever is newest
+      ansible.builtin.assert:
+        that: fleet_jobs_pnpm_pin is match('^pnpm@[0-9]+[.][0-9]+[.][0-9]+$')
+        fail_msg: >-
+          {{ fleet_jobs_checkout }}/package.json has packageManager "{{ fleet_jobs_pnpm_pin }}", which is not an exact pnpm version (`pnpm@X.Y.Z`). Nothing has been installed.
+        success_msg: "the checkout pins {{ fleet_jobs_pnpm_pin }}"
+
+    - name: Enable corepack, then activate the pnpm the checkout pins
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", enable]
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      changed_when: false
+
+    - name: Activate that pnpm through corepack
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", prepare, "{{ fleet_jobs_pnpm_pin }}", --activate]
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      changed_when: false
+
+    # THE ONE INSTALL ADR 0012 ALLOWS as amended by ADR 0045 cut 9: the lockfile decides, no install script runs, production dependencies only (the two published layers).
+    - name: Install the checkout's production dependencies, from the lockfile alone
+      ansible.builtin.command:
+        argv: ["{{ control_corepack }}", pnpm, install, --frozen-lockfile, --ignore-scripts, --prod]
+        chdir: "{{ fleet_jobs_checkout }}"
+      environment:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      register: fleet_jobs_install
+      changed_when: "'Already up to date' not in fleet_jobs_install.stdout"
+
+    # ASSERTED, NOT INSTALLED: the loader is a host fact outside this repository. This runs it rather than `stat`ting it, because "the file exists" is not "`node --import` resolves it".
+    - name: The loader the service runs under must resolve
+      ansible.builtin.command:
+        argv: [/usr/bin/node, --import, "{{ control_tsx_loader }}", -e, "console.log('tsx ok')"]
+      register: fleet_jobs_tsx_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Say which loader resolved, or the command that installs it
+      ansible.builtin.assert:
+        that: fleet_jobs_tsx_probe.rc == 0 and 'tsx ok' in fleet_jobs_tsx_probe.stdout
+        fail_msg: >-
+          {{ control_tsx_loader }} does not resolve under /usr/bin/node (rc {{ fleet_jobs_tsx_probe.rc }}: {{ fleet_jobs_tsx_probe.stderr | default('', true) | trim }}). The service
+          would die at start. Install it beside the layer: `mkdir -p /opt/a11y-tsx && cd /opt/a11y-tsx && npm install --ignore-scripts --save-exact tsx@4.23.15` (a11ign/a11ign#4292).
+        success_msg: "{{ control_tsx_loader }} resolves under /usr/bin/node"
+
+    - name: Install the unit file
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ fleet_jobs_units }}"
+      register: fleet_jobs_units_installed
+
+    - name: Pick up the unit if it changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: fleet_jobs_units_installed.results | selectattr('changed') | list | length > 0
+
+    # RESTARTED ONLY WHEN THE TREE OR THE UNIT MOVED, and otherwise just kept running: a restart drains the captures in flight (up to the unit's TimeoutStopSec) and the next start
+    # resumes the jobs, so it costs a wait and loses nothing, but there is no reason to pay it when nothing changed. Also moved by a changed install, since new dependencies are new code.
+    - name: Enable the service, and start it, restarting it if what it runs changed
+      ansible.builtin.systemd:
+        name: a11y-fleet-jobs.service
+        enabled: true
+        state: "{{ 'restarted' if (fleet_jobs_checkout_state.changed or fleet_jobs_install.changed or (fleet_jobs_units_installed.results | selectattr('changed') | list | length > 0)) else 'started' }}"
+
+    - name: The commit the checkout is on
+      ansible.builtin.command:
+        argv: [git, -C, "{{ fleet_jobs_checkout }}", rev-parse, HEAD]
+      register: fleet_jobs_head
+      changed_when: false
+
+    - name: The service must reach SubState running
+      ansible.builtin.command:
+        argv: [systemctl, show, a11y-fleet-jobs.service, --property=SubState, --value]
+      register: fleet_jobs_substate
+      until: fleet_jobs_substate.stdout | trim == 'running'
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    # The heartbeat is the service's own word that its loop is running, and the commit in it is the tree it loaded. It must name the commit this play just checked out (a unit still
+    # running the OLD tree reads as failed here) and it must be fresh (written in the last 30 s).
+    - name: Read the heartbeat on the plane
+      ansible.builtin.command:
+        argv: [cat, "{{ fleet_jobs_store }}/service.json"]
+      register: fleet_jobs_beat_text
+      until: >-
+        fleet_jobs_beat_text.rc == 0
+        and (fleet_jobs_beat_text.stdout | from_json).commit == (fleet_jobs_head.stdout | trim)
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: The plane's clock now
+      ansible.builtin.command:
+        argv: [date, -u, +%s]
+      register: fleet_jobs_now
+      changed_when: false
+
+    - name: The heartbeat must be fresh, so the loop is running and not just loaded once
+      ansible.builtin.assert:
+        that:
+          - (fleet_jobs_now.stdout | int) - ((fleet_jobs_beat_text.stdout | from_json).heartbeatAt | regex_replace('\.[0-9]+Z$', 'Z') | to_datetime('%Y-%m-%dT%H:%M:%SZ')).strftime('%s') | int < 30
+        fail_msg: >-
+          The service's heartbeat in {{ fleet_jobs_store }}/service.json is older than 30 s ({{ fleet_jobs_beat_text.stdout }}), so the unit is running and its loop is not.
+          `journalctl -u a11y-fleet-jobs.service` on the plane says why.
+        success_msg: >-
+          a11y-fleet-jobs.service is running at {{ (fleet_jobs_beat_text.stdout | from_json).commit }} ({{ fleet_jobs_ref }}) with a fresh heartbeat,
+          store {{ fleet_jobs_store }}

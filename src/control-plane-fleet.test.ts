@@ -8,8 +8,11 @@
  * injected so this never needs a real control plane.
  */
 import { test } from "node:test";
+import { networkInterfaces, tmpdir } from "node:os";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import assert from "node:assert/strict";
-import { readControlPlaneFleet, inventoryPathFor, macsByHost } from "./control-plane-fleet.ts";
+import { readControlPlaneFleet, inventoryPathFor, macsByHost, controlPlaneInvocation, sshToControlPlane } from "./control-plane-fleet.ts";
 import { inventoryHosts } from "./fleet-discover.ts";
 import { CONTROL_PLANE_CHECKOUT_PATH } from "./control-plane-checkout.ts";
 
@@ -203,4 +206,44 @@ test("#3239: the install play derives the copy through inventoryDrift and refuse
   assert.match(play, /inventoryDrift/);
   assert.match(play, /ansible\.builtin\.fetch:/);
   assert.match(play, /\.extra \| length == 0/);
+});
+
+test("A11-243: controlPlaneInvocation is the one route to the control plane: ssh with the key and host from the environment, and a local shell on the plane itself", () => {
+  const was = { host: process.env.A11Y_CONTROL_HOST, key: process.env.A11Y_PVE_KEY };
+  try {
+    process.env.A11Y_CONTROL_HOST = "192.0.2.77";
+    process.env.A11Y_PVE_KEY = "/keys/pve";
+    const away = controlPlaneInvocation("echo hi");
+    assert.equal(away.file, "ssh");
+    assert.deepEqual(away.args.slice(0, 2), ["-i", "/keys/pve"]);
+    assert.deepEqual(away.args.slice(-2), ["root@192.0.2.77", "echo hi"], "the command is the last argument, the host the one before it");
+    assert.ok(away.args.includes("ConnectTimeout=10"));
+    const own = Object.values(networkInterfaces()).flat().find((iface) => iface?.address)?.address;
+    assert.ok(own, "positive control: this machine has an interface address to stand in for the plane's own");
+    process.env.A11Y_CONTROL_HOST = own;
+    assert.deepEqual(controlPlaneInvocation("echo hi"), { file: "sh", args: ["-c", "cd /root && echo hi"] }, "this machine IS the plane: no ssh to yourself");
+  } finally {
+    for (const [name, value] of [["A11Y_CONTROL_HOST", was.host], ["A11Y_PVE_KEY", was.key]] as const) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+});
+
+test("A11-243: sshToControlPlane still runs the command over ssh with the same options in the same order, and returns what ssh printed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fake-ssh-"));
+  const was = { host: process.env.A11Y_CONTROL_HOST, key: process.env.A11Y_PVE_KEY, path: process.env.PATH };
+  try {
+    writeFileSync(join(dir, "ssh"), "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+    chmodSync(join(dir, "ssh"), 0o755);
+    process.env.A11Y_CONTROL_HOST = "192.0.2.77";
+    process.env.A11Y_PVE_KEY = "/keys/pve";
+    process.env.PATH = `${dir}:${process.env.PATH}`;
+    assert.deepEqual(sshToControlPlane("echo hi", { capture: true }).trim().split("\n"), ["-i", "/keys/pve", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+      "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=20", "root@192.0.2.77", "echo hi"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    for (const [name, value] of [["A11Y_CONTROL_HOST", was.host], ["A11Y_PVE_KEY", was.key], ["PATH", was.path]] as const) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
 });
