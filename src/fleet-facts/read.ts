@@ -24,8 +24,8 @@ export function playEnv(checkout: string, env: NodeJS.ProcessEnv = process.env):
     ...env,
     ANSIBLE_CONFIG: join(checkout, "ansible/ansible.cfg"),
     ANSIBLE_STDOUT_CALLBACK: "json",
-    // `ansible.cfg` enables `profile_tasks`, which prints its timings to stdout after the JSON document.
-    ANSIBLE_CALLBACKS_ENABLED: "",
+    // `ansible.cfg` enables `profile_tasks`, which prints its timings after the JSON document; `jsonOf` reads past them. An empty
+    // ANSIBLE_CALLBACKS_ENABLED does not turn it off: it names a plugin "" and ansible-playbook dies with "A non-empty plugin name is required".
     ANSIBLE_NOCOLOR: "1",
     // The unit sets no `User=`, so systemd sets no HOME, and `~/.ansible/collections` has to resolve.
     HOME: env.HOME || "/root",

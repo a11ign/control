@@ -13,13 +13,17 @@ export type PlayOutcome = { ok: true; read: PlayRead } | { ok: false; error: str
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj => typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** The JSON document in the play's stdout: the whole of it, else from its first line of `{` to its last `}`, so a line a callback printed around it does not hide it. */
+/**
+ * The JSON document in the play's stdout: the whole of it, else from its first line of `{` to the first line that is only `}` (the callback indents everything
+ * inside, so that line closes the document), so the timings `profile_tasks` prints after it, or a line before it, do not hide it.
+ */
 export function jsonOf(stdout: string): unknown {
   try { return JSON.parse(stdout); } catch {
     const start = stdout.search(/^\{\s*$/m);
-    const end = stdout.lastIndexOf("}");
-    if (start < 0 || end < start) return undefined;
-    try { return JSON.parse(stdout.slice(start, end + 1)); } catch { return undefined; }
+    if (start < 0) return undefined;
+    const close = /^\}\s*$/m.exec(stdout.slice(start));
+    if (!close) return undefined;
+    try { return JSON.parse(stdout.slice(start, start + close.index + 1)); } catch { return undefined; }
   }
 }
 

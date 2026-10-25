@@ -66,14 +66,19 @@ test("a play that printed nothing says what ansible-playbook wrote to stderr", (
   assert.deepEqual(playOutcome("", BOX, "  \n"), { ok: false, error: `the play printed no result for ${BOX}: nothing on stdout` });
 });
 
+test("profile_tasks timings printed after the document, braces and all, do not hide it", () => {
+  const timings = `\nPlaybook run took 0 days, 0 hours, 0 minutes, 4 seconds\n===== TASK TIMINGS =====\nRead {the} box's hardware ---- 1.20s\n}\n`;
+  assert.deepEqual(jsonOf(`{\n "stats": {\n  "a": {}\n }\n}${timings}`), { stats: { a: {} } });
+});
+
 test("a line printed after the document does not hide it", () => {
   assert.deepEqual(jsonOf(`{\n "stats": {}\n}\nPLAYBOOK RECAP took 3s\n`), { stats: {} });
 });
 
-test("the play runs with the JSON callback, the profile callback off, the checkout's config, and a HOME when the unit has none", () => {
+test("the play runs with the JSON callback, no empty callbacks list, the checkout's config, and a HOME when the unit has none", () => {
   const env = playEnv("/root/fleet-jobs", { PATH: "/usr/bin" });
   assert.equal(env.ANSIBLE_STDOUT_CALLBACK, "json");
-  assert.equal(env.ANSIBLE_CALLBACKS_ENABLED, "");
+  assert.equal(env.ANSIBLE_CALLBACKS_ENABLED, undefined);
   assert.equal(env.ANSIBLE_CONFIG, "/root/fleet-jobs/ansible/ansible.cfg");
   assert.equal(env.HOME, "/root");
   assert.equal(playEnv("/x", { HOME: "/home/svc" }).HOME, "/home/svc");
