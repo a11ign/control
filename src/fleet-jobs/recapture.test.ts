@@ -317,7 +317,7 @@ test("a box whose health was not read never skips", async () => {
 });
 
 test("a box that leaves mid-job fails its unsent cases and the others carry on; nothing moves onto them", async () => {
-  const t = harness({ evictAfter: 1, capture: async (box, body) => box.name === "w2" ? { status: 500, json: { error: "wedged" } } : { status: 200, json: {} } });
+  const t = harness({ evictAfter: 1, capture: async (box) => box.name === "w2" ? { status: 500, json: { error: "wedged" } } : { status: 200, json: {} } });
   const id = caseJob(t, [...pair("a"), ...pair("b")], {}, { kind: "count", count: 2 });
   await t.drain();
   const state = t.state(id);
@@ -443,7 +443,7 @@ test("a case job's status says N cases, counts skipped as done, and a failed cas
   const code = await main(["job", "status", id], { ...realDeps(), transport: localRoute(t.dir), out: (x) => out.push(x), err: (x) => out.push(x) });
   assert.equal(code, 0, out.join(""));
   const text = out.join("");
-  assert.match(text, /captures: 4 of 4 done, 1 failed, 2 skipped, 0 left  \(4 cases\)/);
+  assert.match(text, /captures: 4 of 4 done, 1 failed, 2 skipped, 0 left {2}\(4 cases\)/);
   assert.match(text, /case a\.bad \(https:\/\/pages\.test\/a\/bad\.html\) on w\d: refused/);
   t.done();
 });

@@ -49,7 +49,9 @@ export async function fakeWorker(name: string, { durationMs = 0, statusOf, envir
         running += 1;
         worker.peak = Math.max(worker.peak, running);
         worker.asked.push(body.url);
-        const { captureId: _id, async: _async, ...asked } = body as Record<string, unknown>;
+        const asked: Record<string, unknown> = { ...body };
+        delete asked.captureId;
+        delete asked.async;
         worker.bodies.push(asked);
         results.set(body.captureId, { status: 0, body: null });
         setTimeout(() => {
