@@ -17,9 +17,12 @@ SuccessExitStatus=4
 # The loader is a host fact, named by absolute path, as `a11y-fleet-auto-off.service` does: the file is TypeScript and `/usr/bin/node` strips types only from 24.
 # `--record` writes the record; without it the command only prints, which is what a person running `fleet:drift` by hand wants.
 ExecStart=/usr/bin/node --import /opt/a11y-tsx/node_modules/tsx/dist/esm/index.mjs /root/control/src/fleet-drift.ts --record
-# The checkout follows `main` first, or a stale one compares boxes with an old manifest. The `-` is the point: a failed step leaves the tree as it was and the check still
-# runs against it. Not while a play that moves control's checkout is running (Ansible loads task files lazily). `--ff-only`, never a checkout.
-ExecStartPre=-/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
+# The checkout follows `main` first, or a stale one compares boxes with an old manifest. There is NO `-` on this line, unlike `a11y-fleet-auto-off.service`'s: a
+# refresh that failed (GitHub unreachable, a checkout that cannot fast-forward) must not let the check run against the manifest the fleet may have just left, because
+# a record made from the wrong contract is worse than no record. The unit FAILS instead (`systemctl --failed` shows it), writes nothing, and the mirror ages: two
+# hours later `incident:fleet-drift` reads `cannot-ask`. Not while a play that moves control's checkout is running (Ansible loads task files lazily): that
+# branch exits 0 and leaves the checkout alone, and the play is what moves it. `--ff-only`, never a checkout.
+ExecStartPre=/bin/sh -c 'playing=$$(systemctl list-units --no-legend --plain --state=running,activating,deactivating,reloading \
     a11y-fleet-deploy.service a11y-fleet-provision-role.service a11y-fleet-patch.service a11y-fleet-freeze.service a11y-fleet-freeze-proof.service \
     a11y-fleet-recover.service a11y-fleet-os-rollback.service) && \
   { test -z "$$playing" || { echo "follow main: a play is running ($$playing), checkout left alone"; exit 0; }; } && \

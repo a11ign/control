@@ -65,6 +65,12 @@ export type DriftRecord = {
   differences: RecordedDifference[];
   /** The daily freeze's last record, so one record says everything about the freeze. `null` when it has not run on this host. */
   freeze: FreezeRun | null;
+  /**
+   * The unreachable boxes whose last known state was lost because the previous record EXISTED and could not be read (a missing one is a first run, not a loss).
+   * A box that did not answer cannot be vouched for without it, so a non-empty list fails the check as a difference does. The loss lasts until the box answers
+   * (a box that is still silent stays listed in the next record), and ends there. Empty when nothing was lost.
+   */
+  carryLost: string[];
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -109,7 +115,7 @@ export function parseDriftRecord(text: string | null): DriftRecord | null {
   return { checkedAt: parsed.checkedAt, firstSeenAt: typeof parsed.firstSeenAt === "string" ? parsed.firstSeenAt : null, expected,
     unreadable: typeof parsed.unreadable === "string" ? parsed.unreadable : null,
     reachable: Number(parsed.reachable) || 0, total: Number(parsed.total) || 0, unreachable: stringList(parsed.unreachable), differences,
-    freeze: freezeRunFrom(parsed.freeze) };
+    freeze: freezeRunFrom(parsed.freeze), carryLost: stringList(parsed.carryLost) };
 }
 
 const sameExpectation = (a: ExpectedFleet | null, b: ExpectedFleet | null): boolean =>
@@ -123,8 +129,8 @@ const sameExpectation = (a: ExpectedFleet | null, b: ExpectedFleet | null): bool
  * - `firstSeenAt` is the previous record's while both readings have a failure (a difference, or a manifest that cannot be read), and `now` when this one
  *   begins a run; `null` when there is no failure.
  */
-export function driftRecordOf({ drift, probes, previous, freeze, now }: {
-  drift: FleetDrift; probes: WorkerProbe[]; previous: DriftRecord | null; freeze: FreezeRun | null; now: Date;
+export function driftRecordOf({ drift, probes, previous, previousUnreadable = false, freeze, now }: {
+  drift: FleetDrift; probes: WorkerProbe[]; previous: DriftRecord | null; previousUnreadable?: boolean; freeze: FreezeRun | null; now: Date;
 }): DriftRecord {
   const unreachable = probes.filter((probe) => !probe.reachable).map((probe) => inventoryName(probe.name))
     .sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
@@ -133,14 +139,15 @@ export function driftRecordOf({ drift, probes, previous, freeze, now }: {
     ? previous.differences.filter(({ box }) => unreachable.includes(box)).map((difference) => ({ ...difference, carried: true }))
     : [];
   const differences = [...current, ...carried];
-  const failing = differences.length > 0 || drift.unreadable !== null;
+  const carryLost = previousUnreadable ? unreachable : (previous?.carryLost ?? []).filter((box) => unreachable.includes(box));
+  const failing = differences.length > 0 || drift.unreadable !== null || carryLost.length > 0;
   const checkedAt = now.toISOString();
-  const previousFailing = previous !== null && (previous.differences.length > 0 || previous.unreadable !== null);
+  const previousFailing = previous !== null && (previous.differences.length > 0 || previous.unreadable !== null || previous.carryLost.length > 0);
   return {
     checkedAt,
     firstSeenAt: !failing ? null : (previousFailing && previous.firstSeenAt !== null ? previous.firstSeenAt : checkedAt),
     expected: drift.expected, unreadable: drift.unreadable,
-    reachable: probes.length - unreachable.length, total: probes.length, unreachable, differences, freeze,
+    reachable: probes.length - unreachable.length, total: probes.length, unreachable, differences, freeze, carryLost,
   };
 }
 
@@ -153,7 +160,7 @@ export const DRIFT_EXIT = Object.freeze({ ON_MANIFEST: 0, DIFFERS: 3, NOTHING_AN
 
 export function driftExitCode(record: DriftRecord): number {
   // A manifest that cannot be read is a failure however many boxes answered: with every box asleep it must not read as a quiet night.
-  if (record.unreadable !== null || record.differences.length > 0) return DRIFT_EXIT.DIFFERS;
+  if (record.unreadable !== null || record.differences.length > 0 || record.carryLost.length > 0) return DRIFT_EXIT.DIFFERS;
   return record.reachable === 0 ? DRIFT_EXIT.NOTHING_ANSWERED : DRIFT_EXIT.ON_MANIFEST;
 }
 
@@ -165,7 +172,10 @@ export function driftLines(record: DriftRecord): string[] {
     lines.push(`fleet OFF THE MANIFEST — ${box} ${field} ${has === null ? "unreported" : `has ${has}`}, the manifest wants ${wants}`
       + (carried ? " (last read; the box did not answer this time)" : ""));
   }
-  if (record.differences.length === 0 && record.unreadable === null && record.reachable > 0 && record.expected !== null) {
+  if (record.carryLost.length > 0) {
+    lines.push(`fleet CANNOT VOUCH — the previous record could not be read, so what ${record.carryLost.join(", ")} last read as is lost: they did not answer and are not known to be on the manifest`);
+  }
+  if (record.differences.length === 0 && record.unreadable === null && record.carryLost.length === 0 && record.reachable > 0 && record.expected !== null) {
     lines.push(`fleet on the manifest — ${DRIFT_FIELDS.map((field) => `${field}: ${record.expected?.[field]}`).join("; ")}; all ${record.reachable} boxes that answered`);
   }
   if (record.unreachable.length > 0) lines.push(`not read (unreachable, not a difference): ${record.unreachable.join(", ")}`);
@@ -244,8 +254,23 @@ export function writeDriftRecord(path: string, record: DriftRecord): void {
   renameSync(partial, path);
 }
 
+/** The previous record, and whether one existed that could not be read: a missing file is a first run, a present one that does not parse is a loss. */
+export function previousRecordOf(text: string | null): { previous: DriftRecord | null; previousUnreadable: boolean; } {
+  const previous = parseDriftRecord(text);
+  return { previous, previousUnreadable: text !== null && previous === null };
+}
+
+/** The previous record from disk: no file is a first run; a file that cannot be read for any other reason (permissions, a directory) is a loss, as one that does not parse is. */
+export function readPreviousRecord(path: string, read: (path: string, encoding: "utf8") => string = readFileSync): ReturnType<typeof previousRecordOf> {
+  try {
+    return previousRecordOf(read(path, "utf8"));
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException)?.code === "ENOENT" ? previousRecordOf(null) : { previous: null, previousUnreadable: true };
+  }
+}
+
 async function main() {
-  const record = driftRecordOf({ ...await readFleetDrift(), previous: parseDriftRecord(readOrNull(FLEET_DRIFT_PATH)),
+  const record = driftRecordOf({ ...await readFleetDrift(), ...readPreviousRecord(FLEET_DRIFT_PATH),
     freeze: parseFreezeRun(readOrNull(FREEZE_RUN_PATH)), now: new Date() });
   if (process.argv.includes("--record")) writeDriftRecord(FLEET_DRIFT_PATH, record);
   if (process.argv.includes("--json")) process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);

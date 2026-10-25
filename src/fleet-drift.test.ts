@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readFleetDrift, driftRecordOf, driftExitCode, DRIFT_EXIT, driftLines, driftingBoxes, parseDriftRecord, parseFreezeRun, writeDriftRecord,
+import { readFleetDrift, driftRecordOf, driftExitCode, DRIFT_EXIT, driftLines, driftingBoxes, parseDriftRecord, parseFreezeRun, previousRecordOf, readPreviousRecord, writeDriftRecord,
   FLEET_DRIFT_PATH, FREEZE_RUN_PATH } from "./fleet-drift.ts";
 import type { DriftRecord, FreezeRun } from "./fleet-drift.ts";
 import type { WorkerProbe } from "./fleet-status.ts";
@@ -40,8 +40,8 @@ async function read(probes: WorkerProbe[], expected: () => typeof EXPECTED = () 
   return readFleetDrift({ workers: () => probes.map(({ name, url }) => ({ name, url })),
     probe: async (worker) => probes.find((probe) => probe.name === worker.name) as WorkerProbe, expected });
 }
-async function recordOf(probes: WorkerProbe[], { previous = null, freeze = null, now = NOW }: { previous?: DriftRecord | null; freeze?: FreezeRun | null; now?: Date } = {}) {
-  return driftRecordOf({ ...await read(probes), previous, freeze, now });
+async function recordOf(probes: WorkerProbe[], { previous = null, previousUnreadable = false, freeze = null, now = NOW }: { previous?: DriftRecord | null; previousUnreadable?: boolean; freeze?: FreezeRun | null; now?: Date } = {}) {
+  return driftRecordOf({ ...await read(probes), previous, previousUnreadable, freeze, now });
 }
 
 test("a fleet on the manifest has no difference, is exit 0, and says so (the negative control for every case below)", async () => {
@@ -126,7 +126,7 @@ test("a manifest that cannot be read FAILS the reading with its reason, because 
 
 test("the record's shape: names and versions only, the fields the announcement reads, and no address", async () => {
   const record = await recordOf([answering(2), answering(5, { edge: "157.0.1.1" }), silent(9)]);
-  assert.deepEqual(Object.keys(record).sort(), ["checkedAt", "differences", "expected", "firstSeenAt", "freeze", "reachable", "total", "unreachable", "unreadable"]);
+  assert.deepEqual(Object.keys(record).sort(), ["carryLost", "checkedAt", "differences", "expected", "firstSeenAt", "freeze", "reachable", "total", "unreachable", "unreadable"]);
   assert.deepEqual(record.expected, EXPECTED);
   assert.equal(record.checkedAt, NOW.toISOString());
   assert.deepEqual(Object.keys(record.differences[0]).sort(), ["box", "carried", "field", "has", "wants"]);
@@ -214,4 +214,52 @@ test("driftingBoxes cannot ask when the manifest cannot be read: it must not ans
   const answer = await driftingBoxes(probes.map(({ name, url }) => ({ name, url })),
     { probe: async () => probes[0], expected: () => { throw new Error("pnpm install --frozen-lockfile"); } });
   assert.deepEqual(answer, { cannotAsk: "pnpm install --frozen-lockfile" });
+});
+
+// --- a previous record that cannot be read (A11-205 review of #140) --------------------------------------------------------------------------
+
+test("a previous record that EXISTS and cannot be read loses what the unreachable boxes last read as: the check fails and names them, rather than reading them as clean", async () => {
+  const lost = await recordOf([answering(2), silent(9), silent(4)], { previousUnreadable: true });
+  assert.deepEqual(lost.carryLost, [boxName(4), boxName(9)]);
+  assert.equal(lost.firstSeenAt, NOW.toISOString(), "a failure begins here");
+  assert.equal(driftExitCode(lost), 3);
+  assert.match(driftLines(lost).join("\n"), /fleet CANNOT VOUCH — the previous record could not be read, so what a11y-worker-4, a11y-worker-9 last read as is lost/);
+  assert.doesNotMatch(driftLines(lost).join("\n"), /fleet on the manifest/, "it does not also say the fleet is on the manifest");
+  // NEGATIVE CONTROLS: the same fleet with a readable previous record (or none at all, a first run) loses nothing and passes.
+  const first = await recordOf([answering(2), silent(9), silent(4)], { previousUnreadable: false });
+  assert.deepEqual(first.carryLost, []);
+  assert.equal(driftExitCode(first), 0);
+  // With every box answering there is nothing to vouch for, so an unreadable record costs nothing.
+  assert.deepEqual((await recordOf([answering(2), answering(3)], { previousUnreadable: true })).carryLost, []);
+});
+
+test("the loss lasts while the box stays silent (the next hour does not read it as clean), and ends when it answers", async () => {
+  const lost = await recordOf([answering(2), silent(9)], { previousUnreadable: true });
+  const stillSilent = await recordOf([answering(2), silent(9)], { previous: parseDriftRecord(JSON.stringify(lost)), now: LATER });
+  assert.deepEqual(stillSilent.carryLost, [boxName(9)], "a box nobody has read since the loss is still unvouched");
+  assert.equal(stillSilent.firstSeenAt, lost.firstSeenAt, "and the run of failure began when the loss did");
+  assert.equal(driftExitCode(stillSilent), 3);
+  const answered = await recordOf([answering(2), answering(9)], { previous: parseDriftRecord(JSON.stringify(stillSilent)), now: new Date("2026-10-25T12:00:00.000Z") });
+  assert.deepEqual(answered.carryLost, []);
+  assert.equal(answered.firstSeenAt, null);
+  assert.equal(driftExitCode(answered), 0);
+});
+
+test("a missing previous record is a first run; one that is present and does not parse, or cannot be read, is a loss", () => {
+  assert.deepEqual(previousRecordOf(null), { previous: null, previousUnreadable: false });
+  assert.deepEqual(previousRecordOf("{\"checkedAt\": "), { previous: null, previousUnreadable: true });
+  assert.deepEqual(previousRecordOf(JSON.stringify({ hello: "world" })), { previous: null, previousUnreadable: true });
+  const missing = Object.assign(new Error("no such file"), { code: "ENOENT" });
+  const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+  assert.deepEqual(readPreviousRecord("runs/fleet-drift.json", () => { throw missing; }), { previous: null, previousUnreadable: false });
+  assert.deepEqual(readPreviousRecord("runs/fleet-drift.json", () => { throw denied; }), { previous: null, previousUnreadable: true });
+  assert.equal(readPreviousRecord("runs/fleet-drift.json", () => "{\"checkedAt\": \"2026-10-25T10:00:00.000Z\", \"differences\": []}").previousUnreadable, false);
+});
+
+test("the hourly unit does not run when its refresh of the checkout failed: no `-` on the ExecStartPre", () => {
+  const unit = readFileSync(new URL("../ansible/files/a11y-fleet-drift.service", import.meta.url), "utf8");
+  const active = unit.split("\n").filter((line) => !line.startsWith("#"));
+  assert.ok(active.some((line) => line.startsWith("ExecStartPre=/bin/sh -c ")), "premise: the unit refreshes the checkout before it reads");
+  assert.ok(!active.some((line) => line.startsWith("ExecStartPre=-")),
+    "a refresh that failed would let the check compare boxes with the manifest the fleet may have just left, and write that as the record");
 });
