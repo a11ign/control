@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EXIT, loadFleetEnv, parseFleetEnv, waitForJob } from "./cli.ts";
+import { EXIT, loadFleetEnv, main, parseFleetEnv, waitForJob } from "./cli.ts";
 import type { Deps, Transport } from "./cli.ts";
 import { viewJob } from "./view.ts";
 import { STORE_VERSION } from "./types.ts";
@@ -134,4 +134,13 @@ test("a poll that hangs is cut at the deadline: the wait ends within a second or
   const took = Date.now() - started;
   assert.ok(took < 2_000 + 2_500, `a wait of 2 s with a hung poll ended after ${took} ms`);
   assert.match(out.join(""), /TIMED OUT/);
+});
+
+test("the `--` that `pnpm run fleet -- ...` hands the script is not a command", async () => {
+  const t = harness([{ unknown: true }]);
+  assert.equal(await main(["--", "job", "status", ID], t.deps), EXIT.USAGE);
+  assert.match(t.err(), /no job/, "it reached the status call, so the command was read");
+  const usage = harness([{ unknown: true }]);
+  assert.equal(await main(["--", "nonsense"], usage.deps), EXIT.USAGE);
+  assert.match(usage.err(), /^usage: fleet capture submit/);
 });

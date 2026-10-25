@@ -256,7 +256,8 @@ async function job(sub: string | undefined, args: string[], deps: Deps): Promise
 
 export async function main(argv: string[], deps: Deps): Promise<number> {
   try {
-    const [group, sub, ...rest] = argv;
+    // `pnpm run fleet -- job wait ...` hands the script its `--` as well; no command begins with one.
+    const [group, sub, ...rest] = argv[0] === "--" ? argv.slice(1) : argv;
     if (group === "capture" && sub === "submit") return submitJob(rest, deps);
     if (group === "job") return await job(sub, rest, deps);
   } catch (error) {
