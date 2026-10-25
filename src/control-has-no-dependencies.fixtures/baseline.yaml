@@ -1,0 +1,66 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@a11ign/screenreader-fleet':
+        specifier: 0.11.0
+        version: 0.11.0(@rstest/core@0.12.3)
+      '@a11ign/screenreader-worker':
+        specifier: 0.13.13
+        version: 0.13.13
+    devDependencies:
+      '@a11ign/toolchain':
+        specifier: ^0.1.7
+        version: 0.1.7(@rstest/core@0.12.3)
+      '@rstest/core':
+        specifier: ^0.12.3
+        version: 0.12.3
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
+
+snapshots:
+
+  '@a11ign/screenreader-fleet@0.11.0(@rstest/core@0.12.3)':
+    dependencies:
+      '@a11ign/screenreader-worker': 0.9.0
+      '@a11ign/toolchain': 0.5.0(@rstest/core@0.12.3)
+
+  '@a11ign/screenreader-worker@0.13.13':
+    dependencies:
+      '@guidepup/guidepup': 0.31.0
+
+  '@a11ign/screenreader-worker@0.9.0':
+    dependencies:
+      '@guidepup/guidepup': 0.31.0
+
+  '@a11ign/toolchain@0.5.0(@rstest/core@0.12.3)':
+    dependencies:
+      '@rstest/core': 0.12.3
+
+  '@guidepup/guidepup@0.31.0':
+    dependencies:
+      plist: 4.0.0
+
+  '@rspack/core@2.2.8': {}
+
+  '@rstest/core@0.12.3':
+    dependencies:
+      '@rspack/core': 2.2.8
+
+  '@xmldom/xmldom@0.9.12': {}
+
+  plist@4.0.0:
+    dependencies:
+      '@xmldom/xmldom': 0.9.12
+      xmlbuilder: 15.1.1
+
+  tsx@4.23.15: {}
+
+  xmlbuilder@15.1.1: {}
