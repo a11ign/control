@@ -104,26 +104,26 @@ test("neededWorkers: a count wakes the FIRST N in inventory order, names wake th
 });
 
 test("a job needing THREE workers wakes three, BEFORE the staleness check, and checks that same pool", async () => {
-  const seen = await drive(["-e", "job=capture-only", "-e", "workers=3", "-e", "only=x"], allUp);
+  const seen = await drive(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "workers=3", "-e", "only=x"], allUp);
   assert.deepEqual(seen.events, ["wake", "check", "dispatch"], "wake first, then check, then dispatch");
   assert.deepEqual(seen.woken, FLEET.slice(0, 3).map((w) => w.name), "three woken, not the fleet");
   assert.deepEqual(seen.checkedPool, FLEET.slice(0, 3).map((w) => w.url), "the check reads the pool the job will use");
 });
 
 test("a whole-fleet job wakes the whole fleet", async () => {
-  const seen = await drive(["-e", "job=capture", "-e", "only=x"], allUp);
+  const seen = await drive(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], allUp);
   assert.equal(seen.woken.length, FLEET.length);
 });
 
 test("a diagnostic still wakes its worker, but is not STALENESS-checked (a stale one must not stop it)", async () => {
-  const seen = await drive(["-e", "job=capture-check", "-e", "worker=a11y-worker-4"], allUp);
+  const seen = await drive(["-e", "job=capture-check", "-e", "label=A11-263", "-e", "worker=a11y-worker-4"], allUp);
   assert.deepEqual(seen.events, ["wake", "dispatch"]);
   assert.deepEqual(seen.woken, ["a11y-worker-4"]);
 });
 
 test("a REQUIRED `worker=` that is missing wakes NOTHING: the playbook refuses it, and its header comment naming the fleet is not demand", async () => {
   for (const job of ["capture-check", "stability", "gate-stability"]) {
-    const seen = await drive(["-e", `job=${job}`], allUp);
+    const seen = await drive(["-e", `job=${job}`, "-e", "label=A11-263"], allUp);
     assert.deepEqual(seen.woken, [], `${job} with no worker= must not wake the fleet`);
   }
 });
@@ -134,18 +134,18 @@ test("a job that touches no worker wakes none and reads no fleet; describe-only 
 });
 
 test("a job that NAMED its pool is refused when one of them did not come up, and never dispatches", async () => {
-  const seen = await drive(["-e", "job=capture-only", "-e", "workers=3", "-e", "only=x"],
+  const seen = await drive(["-e", "job=capture-only", "-e", "label=A11-263", "-e", "workers=3", "-e", "only=x"],
     (needed) => needed.map((w, i) => state(w.name, i === 1 ? "no-answer" : "woken")));
   assert.equal(seen.exited, 3);
   assert.deepEqual(seen.events, ["wake"], "neither the check nor the dispatch may run after the refusal");
 });
 
 test("a whole-fleet job PROCEEDS with the workers that came up, and refuses only when none did", async () => {
-  const some = await drive(["-e", "job=capture", "-e", "only=x"],
+  const some = await drive(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"],
     (needed) => needed.map((w, i) => state(w.name, i === 0 ? "no-mac" : "already-up")));
   assert.equal(some.exited, undefined);
   assert.deepEqual(some.events, ["wake", "check", "dispatch"]);
-  const none = await drive(["-e", "job=capture", "-e", "only=x"], (needed) => needed.map((w) => state(w.name, "no-answer")));
+  const none = await drive(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], (needed) => needed.map((w) => state(w.name, "no-answer")));
   assert.equal(none.exited, 3);
   assert.deepEqual(none.events, ["wake"]);
 });
@@ -159,7 +159,7 @@ test("wakeRefusal: a busy worker is fine, and the refusal names each worker that
 
 test("with no `wake` handed to run() nothing is woken -- only the command-line entry wires the real one", async () => {
   const events: string[] = [];
-  await run(["-e", "job=capture", "-e", "only=x"], {
+  await run(["-e", "job=capture", "-e", "label=A11-263", "-e", "only=x"], {
     catalogueText: CATALOGUE, expected: "deadbeefdeadbeef", sourceDir: LAYER_SRC, openIncident: NO_OPEN_INCIDENT,
     readFleet: () => ({ refusal: null, workers: FLEET }),
     checkFleet: async () => { events.push("check"); }, dispatch: () => { events.push("dispatch"); },
